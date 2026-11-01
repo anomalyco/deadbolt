@@ -241,7 +241,7 @@ One program is built once and copied twice, so each copy carries its own signatu
 | older | stops it cleanly, then starts its own binary |
 | newer | fails without stopping it, naming the agent's program, version and pid, and suggests updating this copy or running `deadbolt agent stop` |
 
-A bundled app always starts its own helper; if that's missing the app says it's damaged and should be reinstalled, rather than falling back to another install. The app's watch reconnection never starts an agent. `deadbolt agent status` shows which build is running.
+A bundled app always starts its own helper; if that's missing the app says it's damaged and should be reinstalled, rather than falling back to another install. The app's watch reconnection never starts an agent. `deadbolt agent status` shows which build is running, and whether it is locked.
 
 In development, a rebuilt agent of the same protocol isn't picked up while the old one runs. `deadbolt agent stop` hands over to whichever build runs next; there's no override that replaces a compatible agent. Tests use `DEADBOLT_TEST_VERSION` for another build and `DEADBOLT_TEST_PROTOCOL` for an older or newer agent (`crates/cli/tests/cli.rs`, and fake agents in `crates/client`); only debug builds read them.
 

@@ -147,7 +147,7 @@ impl Manager {
         }
     }
 
-    /// The install method's name in `status` and the agent's check
+    /// The install method's name in the agent's check
     /// ([`UpdateInfo`](crate::protocol::UpdateInfo)).
     fn key(self) -> &'static str {
         match self {
@@ -249,7 +249,7 @@ fn upgrade_command(manager: Manager, version: &str) -> Option<Upgrade> {
     })
 }
 
-/// The install method's name for `status` and the agent's check: the
+/// The install method's name for the agent's check: the
 /// install script's directory (`$DEADBOLT_INSTALL`, else `~/.local/bin`)
 /// is `curl`, any other standalone `deadbolt` `standalone`.
 pub fn method_key(install: &Install) -> &'static str {
@@ -272,7 +272,7 @@ pub fn method_key(install: &Install) -> &'static str {
     }
 }
 
-/// How `status` and the notice name an install method ([`method_key`]).
+/// How `update` and the notice name an install method ([`method_key`]).
 pub fn installed_with(key: &str) -> String {
     match key {
         "app" => "Deadbolt.app".into(),

@@ -266,6 +266,12 @@ echo $? >"$status.tmp" && mv "$status.tmp" "$status"
             .map(|rest| rest.split_whitespace().next().unwrap().to_string())
     }
 
+    /// The lock state `agent status` shows under its first line.
+    fn state(&self) -> String {
+        let out = self.run(&["agent", "status"]);
+        out.lines().nth(1).unwrap_or_default().to_string()
+    }
+
     fn log(&self) -> String {
         let mut log = String::new();
         if let Ok(dirs) = std::fs::read_dir(self.path("state")) {
@@ -432,37 +438,32 @@ fn init_vaults_and_locking() {
             .contains("this device")
     );
 
-    let status = a.run(&["status"]);
-    assert!(status.contains("state\tunlocked\n"), "{status}");
-    assert!(status.contains("device\talpha "), "{status}");
-    assert!(status.contains("vaults\tpersonal job*\n"), "{status}");
+    assert_eq!(a.state(), "unlocked");
 
     // Locked: without a terminal, commands fail with exit code 3 instead of
     // unlocking inline, even with DEADBOLT_PASSPHRASE set.
     assert_eq!(a.run(&["lock"]), "locked\n");
-    assert!(a.run(&["status"]).contains("state\tlocked\n"));
+    assert_eq!(a.state(), "locked");
     let out = a.try_run(&["vault", "ls"]);
     assert_eq!(out.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&out.stderr).contains("locked: run `deadbolt unlock`"));
     assert_eq!(a.try_run(&["ls"]).status.code(), Some(3));
-    assert!(a.run(&["status"]).contains("state\tlocked\n"));
+    assert_eq!(a.state(), "locked");
     a.run(&["unlock"]);
     assert!(a.run(&["vault", "ls"]).contains("personal"));
-    assert!(a.run(&["status"]).contains("state\tunlocked\n"));
+    assert_eq!(a.state(), "unlocked");
 
     // Wrong passphrase.
     a.run(&["lock"]);
     let out = a.output(a.cmd(&["unlock"]).env("DEADBOLT_PASSPHRASE", "wrong"));
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("wrong passphrase"));
-    assert!(a.run(&["status"]).contains("state\tlocked\n"));
+    assert_eq!(a.state(), "locked");
 
     // Idle timeout.
     a.run(&["unlock", "--timeout", "2s"]);
-    assert!(a.run(&["status"]).contains("locks in"));
-    eventually("idle lock", || {
-        a.run(&["status"]).contains("state\tlocked\n")
-    });
+    assert!(a.state().contains("locks in"));
+    eventually("idle lock", || a.state() == "locked");
 
     // Config file default.
     std::fs::create_dir_all(a.path("config/deadbolt")).unwrap();
@@ -472,7 +473,7 @@ fn init_vaults_and_locking() {
     )
     .unwrap();
     a.run(&["unlock"]);
-    assert!(a.run(&["status"]).contains("locks in 3"));
+    assert!(a.state().contains("locks in 3"));
 }
 
 #[test]
@@ -623,7 +624,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
     a.run(&["init", "--device-name", "alpha"]);
     for answer in [false, true] {
         let b = Device::new();
-        b.run(&["status"]);
+        b.run(&["debug", "whoami"]);
         let paths = deadbolt_client::Paths::from_vars(|name| match name {
             "DEADBOLT_HOME" => Some(b.path("home").into()),
             "XDG_RUNTIME_DIR" => Some(b.path("run").into()),
@@ -664,7 +665,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
         assert_eq!(joined["event"]["vault"], "personal");
         assert_eq!(joined["event"]["inviter"]["name"], "alpha");
         assert_eq!(joined["event"]["passphrase"], true);
-        assert!(b.run(&["status"]).contains("state\tnot set up\n"));
+        assert_eq!(b.state(), "not set up");
         assert!(!b.path("home").join("store.redb").exists());
         if answer {
             socket
@@ -690,7 +691,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
             // It may die writing to the reader dropped above: only gone.
             wait(&mut bridge, Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(500));
-            assert!(b.run(&["status"]).contains("state\tnot set up\n"));
+            assert_eq!(b.state(), "not set up");
             assert!(!b.path("home").join("store.redb").exists());
             let devices = a.run(&["devices"]);
             assert!(
@@ -810,7 +811,7 @@ fn app_comes_forward_through_the_agent_instead_of_starting_again() {
     std::fs::write(&entry, "[Desktop Entry]\nExec=/elsewhere app\n").unwrap();
 
     // An agent, but no app watching: it starts.
-    a.run(&["status"]);
+    a.run(&["debug", "whoami"]);
     app(&[("XDG_ACTIVATION_TOKEN", "two")]);
     eventually("the second start", || started() == ["ui one", "ui two"]);
     assert_eq!(
@@ -1712,50 +1713,50 @@ fn ai_agents_cant_send_the_browsers_fills_and_saves() {
 #[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();
-    let old = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_VERSION", "0.0.0-old"));
+    let old = a.output(a.cmd(&["debug", "whoami"]).env("DEADBOLT_TEST_VERSION", "0.0.0-old"));
     assert!(old.status.success());
     let pid = a.agent_pid().unwrap();
     // Two builds of one protocol, in turns: neither replaces the other's agent.
     for _ in 0..2 {
-        let status = a.run(&["status"]);
-        assert!(status.contains("state\tnot set up"), "{status}");
+        a.run(&["debug", "whoami"]);
+        assert_eq!(a.state(), "not set up");
         let out = a.output(
-            a.cmd(&["status"])
+            a.cmd(&["debug", "whoami"])
                 .env("DEADBOLT_TEST_VERSION", "0.0.0-other"),
         );
         assert!(out.status.success());
     }
     assert_eq!(a.agent_pid().unwrap(), pid);
     let out = a.run(&["agent", "status"]);
-    assert!(out.ends_with("version 0.0.0-old\n"), "{out}");
+    assert!(out.ends_with("version 0.0.0-old\nnot set up\n"), "{out}");
 }
 
 #[test]
 fn replaces_an_agent_of_an_older_protocol() {
     let a = Device::new();
-    let old = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "1"));
+    let old = a.output(a.cmd(&["debug", "whoami"]).env("DEADBOLT_TEST_PROTOCOL", "1"));
     assert!(old.status.success());
     let old_pid = a.agent_pid().unwrap();
 
-    let status = a.run(&["status"]);
-    assert!(status.contains("state\tnot set up"), "{status}");
+    a.run(&["debug", "whoami"]);
+    assert_eq!(a.state(), "not set up");
     let pid = a.agent_pid().unwrap();
     assert_ne!(pid, old_pid);
-    a.run(&["status"]);
+    a.run(&["debug", "whoami"]);
     assert_eq!(a.agent_pid().unwrap(), pid);
 }
 
 #[test]
 fn leaves_an_agent_of_a_newer_protocol_running() {
     let a = Device::new();
-    let newer = a.output(a.cmd(&["status"]).env(
+    let newer = a.output(a.cmd(&["debug", "whoami"]).env(
         "DEADBOLT_TEST_PROTOCOL",
         (deadbolt_client::protocol::PROTOCOL_VERSION + 1).to_string(),
     ));
     assert!(newer.status.success());
     let pid = a.agent_pid().unwrap();
 
-    let error = a.fail(&["status"]);
+    let error = a.fail(&["debug", "whoami"]);
     for part in [
         "a newer Deadbolt agent is running",
         BIN,
@@ -1767,7 +1768,7 @@ fn leaves_an_agent_of_a_newer_protocol_running() {
     assert_eq!(a.agent_pid().unwrap(), pid);
     // The way out it names works.
     assert_eq!(a.run(&["agent", "stop"]), "stopped\n");
-    a.run(&["status"]);
+    a.run(&["debug", "whoami"]);
     assert_ne!(a.agent_pid().unwrap(), pid);
 }
 
@@ -1796,7 +1797,7 @@ fn passphrase_from_stdin_or_env_only() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("wrong passphrase"));
     let out = init(&["unlock", "--passphrase-stdin"], "from stdin\n");
     assert!(out.status.success(), "unlock failed");
-    assert!(a.run(&["status"]).contains("state\tunlocked\n"));
+    assert_eq!(a.state(), "unlocked");
 }
 
 /// The short id `new` prints.
@@ -2118,7 +2119,7 @@ fn codes_do_not_hold_off_the_idle_lock() {
     );
     a.run(&["unlock", "--timeout", "2s"]);
     let start = Instant::now();
-    while !a.run(&["status"]).contains("state\tlocked\n") {
+    while a.state() != "locked" {
         assert!(
             start.elapsed() < Duration::from_secs(8),
             "still unlocked while codes are asked for"

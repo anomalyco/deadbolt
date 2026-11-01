@@ -164,9 +164,8 @@ jobs:
             export HOME=$(mktemp -d) XDG_RUNTIME_DIR=$(mktemp -d)
             /check/deadbolt --version | grep -qF "deadbolt $DEADBOLT_VERSION"
             /check/deadbolt --help > /dev/null
-            /check/deadbolt status
-            /check/deadbolt agent status
             DEADBOLT_PASSPHRASE="release check" /check/deadbolt init --device-name release < /dev/null
+            /check/deadbolt agent status | grep -qx unlocked
             /check/deadbolt new login --name Example username=release password=release-check-password < /dev/null
             /check/deadbolt ls < /dev/null | grep -q Example
             if /check/deadbolt app 2> "$HOME/app.err"; then echo "app opened without a display" >&2; exit 1; fi
