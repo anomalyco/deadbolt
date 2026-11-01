@@ -1337,8 +1337,6 @@ async function itemTypes(device: Page, worker: Worker) {
     const input = form.getByLabel("Passphrase", { exact: true })
     check(await form.count() === 1 && await input.inputValue() === passphrase && await input.evaluate((e) => e === document.activeElement), `a repaint keeps the ${how} passphrase form, its value and its focus`)
   }
-  // An item's Show first offers clipboard clearing, a permission prompt headless Chromium never answers.
-  await device.evaluate(() => chrome.storage.local.set({ "deadbolt.clipboardAsked": true }))
   await request(device, { type: "device-preset", preset: "strict" })
   try {
     await device.getByRole("button", { name: "Delete From browser", exact: true }).click()

@@ -193,7 +193,7 @@ export function itemDetailView(app: App, ref: string): View {
       paint()
       return null
     }
-    if (action !== "download") await app.offerClearing()
+    if (action === "copy") await app.offerClearing()
     const s = shown.has(field) && action === "copy" ? { value: shown.get(field) } : await secretOf(app, ref, field, passphrase)
     if (s.value === undefined) {
       if (s.reauth && !passphrase) {
