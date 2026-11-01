@@ -191,7 +191,6 @@ impl App {
         changed |= self.tick_copy(now, tx);
         self.tick_code(now, tx);
         changed |= self.tick_import(now);
-        changed |= self.poll_ssh(now, tx);
         if let Some(installer) = &mut self.installer {
             installer.stamp_copy(now, tx);
             changed |= installer.poll(now);
@@ -227,7 +226,6 @@ impl App {
             Done::Unlocked(result) => self.on_unlocked(result, tx),
             Done::UnlockedBiometric(result) => self.on_unlocked_biometric(result, tx),
             Done::TouchIdSet { enabled, result } => self.on_touch_id_set(enabled, result, tx),
-            Done::SshAgentSet { enabled, result } => self.on_ssh_agent_set(enabled, result, tx),
             Done::Locked(result) => match result {
                 Ok(()) => {
                     self.on_locked(tx);
@@ -431,13 +429,10 @@ impl App {
     }
 
     pub(crate) fn on_status(&mut self, mut status: Status, tx: &mut Tx) {
-        if let Some(prev) = &self.status {
-            if self.touch_id_busy {
-                status.touch_id_enabled = prev.touch_id_enabled;
-            }
-            if self.ssh.busy {
-                status.ssh_agent = prev.ssh_agent;
-            }
+        if self.touch_id_busy
+            && let Some(prev) = &self.status
+        {
+            status.touch_id_enabled = prev.touch_id_enabled;
         }
         let ready = status.initialized;
         let screen = if !status.initialized {

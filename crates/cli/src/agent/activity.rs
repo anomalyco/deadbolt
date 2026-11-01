@@ -4,7 +4,7 @@
 //! on this device; those made while locked wait in memory until an unlock.
 //! [`ledger`] keeps all of it in budget.
 
-pub(super) mod ledger;
+mod ledger;
 
 use std::sync::Arc;
 
@@ -119,10 +119,8 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::Health { .. } => (T::Look, "health"),
         C::HealthIgnore { .. } => (T::Write, "health-ignore"),
         C::BreachChecksSet { .. } => (T::Never, "breach-checks-set"),
-        C::SshAgentSet { .. } => (T::Never, "ssh-agent-set"),
         C::SshGenerate { .. } => (T::Always, "ssh-generate"),
         C::SshInspect { .. } => (T::Always, "ssh-inspect"),
-        C::SshSign { .. } => (T::Use, "ssh-sign"),
     }
 }
 
@@ -195,7 +193,6 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             | Command::AgentPasskeyGet { .. }
             | Command::Resolve { .. }
             | Command::SecretGrantSet { .. }
-            | Command::SshSign { .. }
     );
     let always = matches!(
         command,
@@ -428,7 +425,6 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             named(&None, std::slice::from_ref(origin)),
             vec!["password".into()],
         ),
-        Command::SshSign { namespace, .. } => (Vec::new(), vec![format!("sshsig:{namespace}")]),
         _ => (Vec::new(), Vec::new()),
     };
     let client = match command {
@@ -649,20 +645,6 @@ impl Agent {
                     | Command::BreachChecksSet { .. }) => {
                         self.health_command(&caller, command).await
                     }
-                    Command::SshSign {
-                        public_key,
-                        namespace,
-                        data,
-                    } => {
-                        self.ssh_sign_command(
-                            &caller,
-                            &public_key,
-                            &namespace,
-                            &data,
-                            conv.closed.clone(),
-                        )
-                        .await
-                    }
                     Command::ItemGet {
                         vault,
                         query,
@@ -850,7 +832,7 @@ impl Agent {
         if self.can_verify() {
             let reason = format!(
                 "export the SSH private key of {title} ({})",
-                super::ssh::wire::clean_label(&caller.label)
+                clean_label(&caller.label)
             );
             let _busy = self.busy();
             self.verify_user(conv, crate::protocol::Verify::Required, &reason)
@@ -858,6 +840,16 @@ impl Agent {
         }
         Ok(())
     }
+}
+
+/// A caller's label as a Touch ID prompt can show it: one line, no quotes.
+fn clean_label(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control())
+        .take(128)
+        .collect::<String>()
+        .trim()
+        .replace(['"', '\u{201c}', '\u{201d}'], "'")
 }
 
 #[cfg(test)]

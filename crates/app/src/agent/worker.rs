@@ -223,10 +223,6 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             enabled,
             result: status_after(paths, None, Command::TouchIdSet { enabled }, true).await,
         },
-        Job::SshAgentSet(enabled) => Done::SshAgentSet {
-            enabled,
-            result: status_after(paths, None, Command::SshAgentSet { enabled }, true).await,
-        },
         Job::Lock => Done::Locked(
             deadbolt_client::simple(paths, Command::Lock)
                 .await

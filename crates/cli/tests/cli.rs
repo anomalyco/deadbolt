@@ -5194,9 +5194,41 @@ fn favorites_and_tags() {
         names == ["Alpha", "Zeta"] && b.run(&["tags"]) == "personal\t1\nprod\t1\nTax 2026\t1\n"
     });
 }
+
+#[test]
+fn ssh_key_items() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+
+    // `new ssh` without a private key generates an Ed25519 one.
+    new(&a, &["ssh", "--name", "GitHub", "comment=alice@github"]);
+    let public = a.run(&["get", "github"]);
+    assert!(
+        public.starts_with("ssh-ed25519 ") && public.ends_with(" alice@github\n"),
+        "{public}"
+    );
+    let private = a.run(&["get", "github", "-f", "private-key"]);
+    assert!(
+        private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"),
+        "{private}"
+    );
+    let fingerprint = a.run(&["get", "github", "-f", "fingerprint"]);
+    assert!(fingerprint.starts_with("SHA256:"), "{fingerprint}");
+
+    // A pasted private key gets its public key and fingerprint derived.
+    new(
+        &a,
+        &[
+            "ssh",
+            "--name",
+            "Copy",
+            &format!("private-key={}", private.trim_end()),
+        ],
+    );
+    assert_eq!(a.run(&["get", "copy"]), public);
+    assert_eq!(a.run(&["get", "copy", "-f", "fingerprint"]), fingerprint);
+}
 #[path = "cli/health.rs"]
 mod health;
-#[path = "cli/ssh.rs"]
-mod ssh;
 #[path = "cli/updates.rs"]
 mod updates;

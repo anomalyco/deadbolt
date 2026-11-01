@@ -42,7 +42,6 @@ pub enum Job {
     Unlock(Zeroizing<String>),
     UnlockBiometric,
     TouchIdSet(bool),
-    SshAgentSet(bool),
     Lock,
     /// The list; `generation` tells a reply from before a lock from a current one.
     List {
@@ -199,10 +198,6 @@ pub enum Done {
     /// failed so the lock screen sees if the biometric slot was reset.
     UnlockedBiometric(Result<Status, (Failure, Option<Box<Status>>)>),
     TouchIdSet {
-        enabled: bool,
-        result: Result<Status, (Failure, Option<Box<Status>>)>,
-    },
-    SshAgentSet {
         enabled: bool,
         result: Result<Status, (Failure, Option<Box<Status>>)>,
     },

@@ -1,18 +1,14 @@
-//! SSH agent setting (`Settings › Getting to it`) and SSH key generation / file
-//! import in the item form (`docs/ssh-agent.md`).
+//! SSH key generation and file import in the item form.
 
-use std::path::Path;
-
-use deadbolt_client::protocol::{SshKeyKind, Status};
-use rune::{El, Transition, Tx, row, spacer, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Switch};
+use deadbolt_client::protocol::SshKeyKind;
+use rune::{El, Tx, row, spacer};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl};
 use zeroize::Zeroizing;
 
 use crate::agent::{Failure, Job};
 use crate::edit::Problem;
-use crate::model::{App, Screen};
-use crate::onboarding::{COPIED_FOR, sentence};
-use crate::view::theme::FACT;
+use crate::model::App;
+use crate::onboarding::sentence;
 
 pub struct SshGeneratedKey {
     pub private_key: Zeroizing<String>,
@@ -22,112 +18,18 @@ pub struct SshGeneratedKey {
 }
 
 pub struct Ssh {
-    pub busy: bool,
-    pub error: Option<String>,
     pub kind: SshKeyKind,
-    copied_at: Option<f64>,
-    pending_copy: bool,
 }
 
 impl Default for Ssh {
     fn default() -> Self {
         Self {
-            busy: false,
-            error: None,
             kind: SshKeyKind::Ed25519,
-            copied_at: None,
-            pending_copy: false,
         }
     }
 }
 
 impl App {
-    pub fn ssh_agent_enabled(&self) -> bool {
-        self.status.as_ref().is_some_and(|s| s.ssh_agent)
-    }
-
-    pub fn ssh_agent_socket(&self) -> String {
-        let raw = self
-            .status
-            .as_ref()
-            .and_then(|s| s.ssh_socket.as_deref())
-            .unwrap_or("~/.deadbolt/ssh.sock");
-        shorten_home(raw)
-    }
-
-    pub fn toggle_ssh_agent(&mut self) {
-        if self.ssh.busy {
-            return;
-        }
-        let next = !self.ssh_agent_enabled();
-        self.ssh.error = None;
-        if let Some(status) = &mut self.status {
-            status.ssh_agent = next;
-        }
-        if self.agent.is_live() {
-            self.ssh.busy = true;
-            self.agent.send(Job::SshAgentSet(next));
-        }
-    }
-
-    pub fn copy_ssh_config(&mut self, tx: &mut Tx) {
-        let sock = self.ssh_agent_socket();
-        let quoted = if sock.contains(' ') {
-            format!("\"{sock}\"")
-        } else {
-            sock
-        };
-        let snippet =
-            format!("Match host * exec \"test -z $SSH_CONNECTION\"\n    IdentityAgent {quoted}");
-        tx.copy(snippet);
-        self.ssh.pending_copy = true;
-    }
-
-    pub(crate) fn poll_ssh(&mut self, now: f64, tx: &mut Tx) -> bool {
-        if self.ssh.pending_copy {
-            self.ssh.pending_copy = false;
-            self.ssh.copied_at = Some(now);
-            tx.wake_after(std::time::Duration::from_secs_f64(COPIED_FOR));
-            return true;
-        }
-        if let Some(at) = self.ssh.copied_at
-            && now - at >= COPIED_FOR
-        {
-            self.ssh.copied_at = None;
-            return true;
-        }
-        false
-    }
-
-    pub(crate) fn on_ssh_agent_set(
-        &mut self,
-        enabled: bool,
-        result: Result<Status, (Failure, Option<Box<Status>>)>,
-        tx: &mut Tx,
-    ) {
-        self.ssh.busy = false;
-        match result {
-            Ok(status) => {
-                self.ssh.error = None;
-                self.on_status(status, tx);
-            }
-            Err((failure, status)) => {
-                if let Some(st) = status {
-                    self.on_status(*st, tx);
-                } else if let Some(st) = &mut self.status {
-                    st.ssh_agent = !enabled;
-                }
-                if failure.locked() {
-                    if self.screen != Screen::Locked {
-                        self.on_locked(tx);
-                    }
-                } else {
-                    self.ssh.error = Some(failure.message);
-                }
-            }
-        }
-    }
-
     pub fn set_ssh_kind(&mut self, kind: SshKeyKind) {
         if self.saving() || self.ssh.kind == kind {
             return;
@@ -250,55 +152,6 @@ impl App {
     }
 }
 
-pub fn setting_about(s: &App, k: &Kit) -> El {
-    if let Some(err) = &s.ssh.error {
-        return text(err.clone())
-            .key("ssh-agent-error")
-            .font(k.ty.small_medium)
-            .color(k.c.danger.fg)
-            .wrap()
-            .w_full()
-            .transition(Transition::opacity());
-    }
-    let words = if s.ssh_agent_enabled() {
-        format!(
-            "Listening at {} · approve each use with Touch ID",
-            s.ssh_agent_socket()
-        )
-    } else {
-        "Use SSH keys in your vault for ssh and Git without ~/.ssh key files".to_owned()
-    };
-    text(words)
-        .key("about")
-        .font(FACT.lh(16.0))
-        .color(k.c.text_faint)
-        .wrap()
-        .w_full()
-}
-
-pub fn setting_controls(s: &App, k: &Kit) -> El {
-    let mut r = row().key("ssh-controls").gap(10.0).center_y();
-    if s.ssh_agent_enabled() {
-        let copied = s.ssh.copied_at.is_some();
-        r = r.child(
-            crate::settings::button(if copied { "Copied" } else { "Copy config" })
-                .disabled(s.ssh.busy)
-                .on_press_tx(|s: &mut App, tx| s.copy_ssh_config(tx))
-                .build(k)
-                .key("ssh-copy-config"),
-        );
-    }
-    r.child(
-        Switch::new(s.ssh_agent_enabled())
-            .label("SSH agent")
-            .hide_label()
-            .disabled(s.ssh.busy)
-            .on_toggle(|s: &mut App| s.toggle_ssh_agent())
-            .build(k)
-            .key("ssh-agent-switch"),
-    )
-}
-
 /// Controls under `private-key` on an SSH item form: key type (`Ed25519`,
 /// `ECDSA P-256`), **Generate key** and **Import file…**.
 pub fn generator_row(s: &App, k: &Kit, saving: bool) -> El {
@@ -347,14 +200,4 @@ pub fn generator_row(s: &App, k: &Kit, saving: bool) -> El {
                 .build(k)
                 .key("ssh-import-file"),
         )
-}
-
-fn shorten_home(path: &str) -> String {
-    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-        return path.to_owned();
-    };
-    match Path::new(path).strip_prefix(Path::new(&home)) {
-        Ok(rel) => format!("~/{}", rel.display()),
-        Err(_) => path.to_owned(),
-    }
 }

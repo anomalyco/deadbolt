@@ -479,49 +479,18 @@ fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
 }
 
 #[test]
-fn settings_ssh_agent_toggle_and_ssh_key_generator_update_state() {
-    use crate::agent::{Agent, Failure, Job};
+fn ssh_key_generator_fills_the_new_item() {
+    use crate::agent::{Agent, Job};
     use crate::ssh::SshGeneratedKey;
     use deadbolt_client::protocol::SshKeyKind;
     use zeroize::Zeroizing;
 
-    let mut rt = main("settings-touch-id");
+    let mut rt = main("vault");
     let (agent, jobs, _replies) = Agent::scripted();
     rt.state.agent = agent;
-    assert!(!rt.state.ssh_agent_enabled());
-    let initial_status = rt.state.status.clone().unwrap();
-
-    rt.update(|s, _| s.toggle_ssh_agent());
-    assert!(rt.state.ssh_agent_enabled());
-    assert!(rt.state.ssh.busy);
-    assert!(jobs.try_iter().any(|j| matches!(j, Job::SshAgentSet(true))));
-
-    // Intermediate Status replies preserve the pending switch state.
-    rt.update(|s, tx| s.apply(Done::Status(Some(initial_status.clone())), tx));
-    assert!(rt.state.ssh_agent_enabled());
-
-    // Failure restores the prior switch state and shows the error.
-    rt.update(|s, tx| {
-        s.apply(
-            Done::SshAgentSet {
-                enabled: true,
-                result: Err((
-                    Failure {
-                        code: None,
-                        message: "bind failed".into(),
-                    },
-                    Some(Box::new(initial_status)),
-                )),
-            },
-            tx,
-        );
-    });
-    assert!(!rt.state.ssh_agent_enabled());
-    assert_eq!(rt.state.ssh.error.as_deref(), Some("bind failed"));
 
     // Generating an SSH key on a new SSH item fills private-key, public-key, and fingerprint.
     rt.update(|s, _| {
-        s.close_settings();
         s.new_item();
         s.choose_type("ssh");
         s.set_ssh_kind(SshKeyKind::EcdsaP256);

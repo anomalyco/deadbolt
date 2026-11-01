@@ -64,7 +64,7 @@ pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -646,11 +646,6 @@ pub enum Command {
     BreachChecksSet {
         enabled: bool,
     },
-    /// Turns the SSH agent listener (`ssh.sock`) on or off in `config.toml`
-    /// and binds or drops the socket immediately. Replies `done`.
-    SshAgentSet {
-        enabled: bool,
-    },
     /// Generates a new SSH key pair (`ed25519` or `ecdsa-p256`) inside the
     /// agent without writing to a vault yet; needs no unlock. Replies
     /// `ssh-generated`.
@@ -666,15 +661,6 @@ pub enum Command {
         private_key: Secret,
         passphrase: Option<Secret>,
         comment: Option<String>,
-    },
-    /// Signs `data` (standard base64 of raw bytes) in the OpenSSH `SSHSIG`
-    /// format (`ssh-keygen -Y sign`) using the vault's SSH key matching
-    /// `public_key`, approving with Touch ID (and unlocking with the same tap
-    /// when `touch_id_ready` is true). Replies `ssh-signature`.
-    SshSign {
-        public_key: String,
-        namespace: String,
-        data: String,
     },
 }
 
@@ -1473,10 +1459,6 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         comment: Option<String>,
     },
-    SshSignature {
-        /// PEM-armored `-----BEGIN SSH SIGNATURE-----` block.
-        signature: String,
-    },
 }
 
 /// A Deadbolt Send share, as its sender sees it. Never its secrets.
@@ -1616,12 +1598,6 @@ pub struct Status {
     /// Whether Touch ID is enabled on this store, but its enrolled slot was
     /// reset (expired after 14 days, fingerprint set changed, or passphrase changed).
     pub touch_id_reset: bool,
-    /// Whether the SSH agent (`ssh.sock`) is turned on in config.toml.
-    #[serde(default)]
-    pub ssh_agent: bool,
-    /// Where SSH clients reach this agent's SSH socket when `ssh_agent` is on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_socket: Option<String>,
     /// How the agent sees the client asking (`deadbolt debug whoami`).
     pub caller: CallerInfo,
     /// A newer Deadbolt for this install, from the agent's background

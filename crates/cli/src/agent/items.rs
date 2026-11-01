@@ -523,7 +523,7 @@ fn derive_ssh_create(fields: &mut Vec<(String, Field)>) {
         return;
     };
     let Some((public_key, fingerprint, file_comment)) =
-        super::ssh::keys::derive_fields(private_key, get("passphrase"), get("comment"))
+        super::ssh_keys::derive_fields(private_key, get("passphrase"), get("comment"))
     else {
         return;
     };
@@ -898,11 +898,8 @@ pub fn set_with(
                 .or_else(|| item.fields.get(name).map(|f| f.value.as_str()))
         };
         if let Some(private_key) = merged("private-key")
-            && let Some((public_key, fingerprint, _)) = super::ssh::keys::derive_fields(
-                private_key,
-                merged("passphrase"),
-                merged("comment"),
-            )
+            && let Some((public_key, fingerprint, _)) =
+                super::ssh_keys::derive_fields(private_key, merged("passphrase"), merged("comment"))
         {
             if !seen.contains("public-key") {
                 ops.push(DataOp::set(

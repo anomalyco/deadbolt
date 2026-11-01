@@ -20,7 +20,8 @@ mod send;
 mod session;
 #[cfg(test)]
 mod sim;
-pub(crate) mod ssh;
+mod ssh_cleanup;
+pub(crate) mod ssh_keys;
 mod sync;
 mod system;
 mod updates;
@@ -151,8 +152,6 @@ pub struct Agent {
     send_server: tokio::sync::Mutex<Option<deadbolt_send::Server>>,
     /// Set as the agent stops, ending sends and anyone waiting on one.
     stopping: watch::Sender<bool>,
-    /// SSH agent (`ssh.sock`) listener, Touch ID queue and TTY grants.
-    ssh: ssh::SshState,
     /// What the background update check last found (`updates`).
     update: Mutex<Option<crate::protocol::UpdateInfo>>,
 }
@@ -197,7 +196,6 @@ impl Agent {
             guesses: guesses::Guesses::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
-            ssh: ssh::SshState::default(),
             update: Mutex::default(),
         })
     }
@@ -243,7 +241,6 @@ impl Agent {
         {
             prompt.cancel();
         }
-        self.ssh.policy.cancel_prompt();
     }
 }
 
@@ -281,7 +278,6 @@ mod tests {
             socket: dir.join("socket"),
             lock: dir.join("lock"),
             log: dir.join("log"),
-            ssh_link: None,
         }
     }
 
@@ -1365,9 +1361,9 @@ pub async fn serve(paths: Paths) -> Result<()> {
         )
         .await,
     );
+    ssh_cleanup::run(&paths);
     let agent = Agent::new(paths, local_net, env.kdf);
     let mut autofill = macos_autofill::bind_default().await;
-    agent.start_ssh_if_enabled();
     info!(
         pid = std::process::id(),
         version = %version(),
@@ -1422,7 +1418,6 @@ pub async fn serve(paths: Paths) -> Result<()> {
         drop(autofill_listener);
         path
     });
-    agent.ssh.shutdown();
     agent.cancel_biometric_prompt();
     agent.interrupt_op();
     agent.watchers.stopping();
@@ -1700,7 +1695,7 @@ impl Agent {
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.
-        // Nor are sends, which never touch the vault, nor SSH keygen/inspect.
+        // Nor are sends, which never touch the vault, nor SSH key generation.
         // Nor is bringing the app forward.
         let send = matches!(
             command,
@@ -1731,7 +1726,6 @@ impl Agent {
                     | Command::AutofillStatus
                     | Command::AutofillIdentities
                     | Command::AutofillList { .. }
-                    | Command::SshSign { .. }
             );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
         // and a lock stops it before it writes anything. Nor does waiting
@@ -2190,17 +2184,12 @@ impl Agent {
             Command::SecretGrantList => Ok(Reply::SecretGrants {
                 grants: self.with(|s| secrets::list_grants(s, session::now()))?,
             }),
-            Command::SshAgentSet { enabled } => {
-                self.set_ssh_agent(enabled)?;
-                Ok(Reply::Done)
-            }
             Command::SshGenerate { kind, comment } => self.ssh_generate(kind, comment.as_deref()),
             Command::SshInspect {
                 private_key,
                 passphrase,
                 comment,
             } => self.ssh_inspect(&private_key, passphrase.as_ref(), comment.as_deref()),
-            Command::SshSign { .. } => bail!("ssh-sign is answered with the caller"),
             command @ (Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }) => self.agent_client(command),
@@ -2277,7 +2266,6 @@ impl Agent {
             self.ready.send_replace(false);
             session.sync_task.take();
             session.health_task.take();
-            self.ssh.clear_on_lock();
             self.cancel_biometric_prompt();
             self.interrupt_op();
             self.watchers.locked();
@@ -2395,10 +2383,9 @@ impl Agent {
     fn status(&self) -> Status {
         let initialized = deadbolt_store::is_initialized(&self.paths.data);
         let touch_id_available = self.is_touch_id_available();
-        let cfg = Config::load(&self.paths.config).unwrap_or_default();
-        let touch_id_cfg = cfg.touch_id();
-        let ssh_agent = cfg.ssh_agent() && self.ssh.is_listening();
-        let ssh_socket = ssh_agent.then(|| self.paths.ssh_client_socket().display().to_string());
+        let touch_id_cfg = Config::load(&self.paths.config)
+            .map(|c| c.touch_id())
+            .unwrap_or(false);
         let touch_id_enabled = touch_id_available && touch_id_cfg;
         let now = session::now();
         let slot = *self
@@ -2442,8 +2429,6 @@ impl Agent {
             touch_id_enabled,
             touch_id_ready,
             touch_id_reset,
-            ssh_agent,
-            ssh_socket,
             // Filled in for the connection that asked (`handle`).
             caller: caller::nobody(),
             update: self
@@ -3143,7 +3128,6 @@ impl Agent {
     }
 
     async fn lock(&self) {
-        self.ssh.clear_on_lock();
         self.cancel_biometric_prompt();
         self.interrupt_op();
         let transition = self.transition.lock().await;

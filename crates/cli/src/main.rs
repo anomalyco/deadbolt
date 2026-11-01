@@ -15,7 +15,6 @@ mod items;
 mod prompt;
 mod secrets;
 mod send;
-mod ssh;
 use deadbolt_core::site;
 mod update;
 use deadbolt_core::webauthn;
@@ -142,15 +141,6 @@ enum Commands {
     TouchId {
         #[command(subcommand)]
         command: Option<TouchIdCommand>,
-    },
-    /// Manage Deadbolt's SSH agent (`ssh.sock`), generate or import SSH keys,
-    /// and configure Git commit signing.
-    Ssh(ssh::SshArgs),
-    /// Sign or verify SSH signatures (`gpg.ssh.program` for Git).
-    #[command(hide = true)]
-    SshSign {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<std::ffi::OsString>,
     },
     #[command(flatten)]
     Item(items::ItemCommand),
@@ -438,12 +428,6 @@ fn main() -> ExitCode {
             .is_some_and(|a| a.starts_with("chrome-extension://"))
     {
         args.insert(1, "browser-host".into());
-    } else if args
-        .get(1)
-        .and_then(|a| a.to_str())
-        .is_some_and(|a| a.starts_with("-Y") || a == "-U")
-    {
-        args.insert(1, "ssh-sign".into());
     }
     // Bare `deadbolt` from an app launcher opens the app; from a terminal,
     // or when the app can't be opened, it prints usage as before.
@@ -510,7 +494,6 @@ fn notices_updates(command: &Commands) -> bool {
         command,
         Commands::Agent { .. }
             | Commands::BrowserHost { .. }
-            | Commands::SshSign { .. }
             | Commands::Update(_)
             | Commands::Debug(DebugCommand::Watch)
             | Commands::App
@@ -550,7 +533,6 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Activity { .. }
                 | Commands::Agent { .. }
                 | Commands::TouchId { .. }
-                | Commands::SshSign { .. }
                 | Commands::Run(_)
                 | Commands::Inject(_)
                 | Commands::Read(_)
@@ -661,8 +643,6 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         },
-        Commands::Ssh(args) => ssh::run(&paths, args, vault, from_stdin).await?,
-        Commands::SshSign { args } => return ssh::ssh_sign(&paths, args, from_stdin).await,
         Commands::TouchId { command } => {
             let status = client::ensure_running(&paths).await?;
             match command.unwrap_or(TouchIdCommand::Status) {

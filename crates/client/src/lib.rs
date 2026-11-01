@@ -702,7 +702,6 @@ mod tests {
             socket: dir.join("agent.sock"),
             lock: dir.join("agent.lock"),
             log: dir.join("agent.log"),
-            ssh_link: None,
         }
     }
 
@@ -777,8 +776,6 @@ mod tests {
             touch_id_enabled: false,
             touch_id_ready: false,
             touch_id_reset: false,
-            ssh_agent: false,
-            ssh_socket: None,
             caller: protocol::CallerInfo::unverified("test"),
             update: None,
         }
