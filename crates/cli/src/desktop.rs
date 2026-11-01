@@ -114,6 +114,29 @@ fn exec_arg(arg: &str) -> String {
     quoted.replace('%', "%%").replace('\\', "\\\\")
 }
 
+/// The command a launcher entry runs for `exe` (symlinks resolved): npm's
+/// own link to it when npm installed it (`<prefix>/bin/deadbolt`, or
+/// `node_modules/.bin/deadbolt`), which stays put when an update or a
+/// fallback moves the platform package; else `exe`.
+pub fn launcher_program(exe: &Path) -> PathBuf {
+    // npm nests the platform package under the wrapper's own node_modules,
+    // so every node_modules up the path is a candidate; a global prefix's
+    // bin first.
+    let modules: Vec<&Path> = exe
+        .ancestors()
+        .filter(|dir| dir.file_name().is_some_and(|n| n == "node_modules"))
+        .collect();
+    let global = modules.iter().filter_map(|m| {
+        let lib = m.parent()?;
+        (lib.file_name()? == "lib").then(|| lib.parent().map(|p| p.join("bin/deadbolt")))?
+    });
+    let local = modules.iter().map(|m| m.join(".bin/deadbolt"));
+    global
+        .chain(local)
+        .find(|link| link.canonicalize().is_ok_and(|real| real == exe))
+        .unwrap_or_else(|| exe.to_path_buf())
+}
+
 /// Writes the entry and its icon for this binary; run again to update them.
 pub fn install() -> Result<()> {
     if cfg!(target_os = "macos") {
@@ -121,7 +144,7 @@ pub fn install() -> Result<()> {
         return Ok(());
     }
     let files = Files::get()?;
-    let program = crate::app::this_binary()?;
+    let program = launcher_program(&crate::app::this_binary()?);
     files.write(&program)?;
     println!("Wrote {}", files.entry.display());
     println!("Wrote {}", files.icon.display());
@@ -263,6 +286,33 @@ mod tests {
         assert!(files.missing());
         files.write(Path::new("/opt/other/deadbolt")).unwrap();
         assert!(!files.missing());
+    }
+
+    #[test]
+    fn an_npm_install_launches_through_npms_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let exe = root.join(
+            "lib/node_modules/@deadbolt/cli/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
+        );
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        // Before npm links it, and outside npm: the binary itself.
+        assert_eq!(launcher_program(&exe), exe);
+        let elsewhere = root.join("opt/deadbolt");
+        assert_eq!(launcher_program(&elsewhere), elsewhere);
+        let wrapper = root.join("lib/node_modules/@deadbolt/cli/bin/deadbolt");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&exe, &wrapper).unwrap();
+        let bin = root.join("bin/deadbolt");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&wrapper, &bin).unwrap();
+        assert_eq!(launcher_program(&exe), bin);
+        // A link to another deadbolt isn't this one's.
+        let other = root.join("lib/node_modules/@deadbolt/cli-linux-x64-musl/bin/deadbolt");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "").unwrap();
+        assert_eq!(launcher_program(&other), other);
     }
 
     #[test]

@@ -215,7 +215,7 @@ pub async fn open(paths: &Paths) -> Result<()> {
                 return Ok(());
             }
             if !macos {
-                crate::desktop::ensure(&exe);
+                crate::desktop::ensure(&crate::desktop::launcher_program(&exe));
             }
             start(&exe)
         }
@@ -249,6 +249,12 @@ fn start(exe: &Path) -> Result<()> {
 /// install's package) and neither Applications folder has a Deadbolt yet.
 /// Best effort: opening the app doesn't wait on it.
 fn link_into_applications(bundle: &Path, home: &Path) {
+    let ours = home.join("Applications/Deadbolt.app");
+    if stale_npm_link(std::fs::read_link(&ours).ok().as_deref(), bundle)
+        && let Err(error) = std::fs::remove_file(&ours)
+    {
+        tracing::warn!("removing {}: {error}", ours.display());
+    }
     let Some(link) = applications_link(bundle, home, |p| p.symlink_metadata().is_ok()) else {
         return;
     };
@@ -258,6 +264,15 @@ fn link_into_applications(bundle: &Path, home: &Path) {
     {
         eprintln!("Linked {} to {}", link.display(), bundle.display());
     }
+}
+
+/// Whether `~/Applications/Deadbolt.app`, a link to `target`, is one an npm
+/// install made that no longer leads to `bundle` (npm moved its package), so
+/// it's repointed. Anything else there is left alone.
+fn stale_npm_link(target: Option<&Path>, bundle: &Path) -> bool {
+    target.is_some_and(|target| {
+        target != bundle && target.components().any(|c| c.as_os_str() == "node_modules")
+    })
 }
 
 /// Where [`link_into_applications`] links `bundle`, if it should.
@@ -455,6 +470,21 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn only_a_link_an_npm_install_made_elsewhere_is_repointed() {
+        let bundle = Path::new(
+            "/p/lib/node_modules/@deadbolt/cli/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app",
+        );
+        let moved = Path::new("/p/lib/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app");
+        assert!(stale_npm_link(Some(moved), bundle));
+        assert!(!stale_npm_link(Some(bundle), bundle));
+        assert!(!stale_npm_link(
+            Some(Path::new("/Applications/Deadbolt.app")),
+            bundle
+        ));
+        assert!(!stale_npm_link(None, bundle));
     }
 
     #[test]
