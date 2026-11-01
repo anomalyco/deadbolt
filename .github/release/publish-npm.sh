@@ -32,13 +32,15 @@ for file in "$npm_dir"/*.tgz; do
 done
 
 list=$(mktemp)
+# Matches read their whole input (no grep -q): under pipefail, a writer cut
+# off by an early exit fails the pipeline.
 for file in "$npm_dir"/*.tgz; do
   IFS=$'\t' read -r name version config install < <(tar -xzOf "$file" package/package.json |
     jq -r '[.name, .version, ((.publishConfig // {}) | keys - ["access"] | length > 0),
       ((.scripts // {}) | (has("preinstall") or has("install") or has("postinstall")))] | @tsv')
   # shellcheck disable=SC2086 # $expected is a word list
-  printf '%s\n' $expected | grep -qxF -- "$name" || die "Unexpected package $name in $file"
-  ! cut -f1 "$list" | grep -qxF -- "$name" || die "Two tarballs hold $name."
+  printf '%s\n' $expected | grep -xF -- "$name" > /dev/null || die "Unexpected package $name in $file"
+  ! cut -f1 "$list" | grep -xF -- "$name" > /dev/null || die "Two tarballs hold $name."
   [ "$version" = "$v" ] || die "$name has version $version, expected $v"
   [ "$config" = false ] || die "$name sets publishConfig beyond access"
   # Only the wrapper runs a script: its postinstall links bin/deadbolt.
@@ -46,7 +48,8 @@ for file in "$npm_dir"/*.tgz; do
   case "$name" in
     @deadbolt/cli-darwin-*)
       # The signed app, whose helper is the command (scripts/package-npm.sh).
-      tar -tzf "$file" | grep -qxF package/Deadbolt.app/Contents/Helpers/deadbolt-enclave ||
+      tar -tzf "$file" > "$RUNNER_TEMP/npm-files"
+      grep -xF package/Deadbolt.app/Contents/Helpers/deadbolt-enclave "$RUNNER_TEMP/npm-files" > /dev/null ||
         die "$name doesn't carry Deadbolt.app."
       ;;
     @deadbolt/cli-linux-*)
@@ -56,7 +59,7 @@ for file in "$npm_dir"/*.tgz; do
   esac
   printf '%s\t%s\n' "$name" "$file" >> "$list"
 done
-for name in $expected; do cut -f1 "$list" | grep -qxF -- "$name" || die "Missing package $name"; done
+for name in $expected; do cut -f1 "$list" | grep -xF -- "$name" > /dev/null || die "Missing package $name"; done
 
 # The wrapper resolves its platform packages, so it publishes last.
 order=$(mktemp)
