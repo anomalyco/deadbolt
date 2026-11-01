@@ -107,8 +107,6 @@ enum Commands {
     },
     /// Lock the store.
     Lock,
-    /// Show the agent, this device, its vaults and peers.
-    Status,
     /// Sync now with every device (or only the devices in --vault), or
     /// mirror another password manager into --vault.
     Sync {
@@ -406,7 +404,7 @@ enum SyncCommand {
 enum AgentCommand {
     /// Stop the agent (locks the store).
     Stop,
-    /// Show whether the agent is running.
+    /// Show whether the agent is running, and whether it's locked.
     Status,
 }
 
@@ -500,9 +498,8 @@ fn main() -> ExitCode {
 }
 
 /// Whether `command` may end with the agent's update notice: not the
-/// agent, hosts and helpers other programs run, `update` and `status`
-/// (which say it themselves), `debug watch`, the app, or `run`, whose output is
-/// its program's.
+/// agent, hosts and helpers other programs run, `update` (which says it
+/// itself), `debug watch`, the app, or `run`, whose output is its program's.
 fn notices_updates(command: &Commands) -> bool {
     !matches!(
         command,
@@ -510,7 +507,6 @@ fn notices_updates(command: &Commands) -> bool {
             | Commands::BrowserHost { .. }
             | Commands::SshSign { .. }
             | Commands::Update(_)
-            | Commands::Status
             | Commands::Debug(DebugCommand::Watch)
             | Commands::App
             | Commands::Run(_)
@@ -545,7 +541,6 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Join { .. }
                 | Commands::Unlock { .. }
                 | Commands::Lock
-                | Commands::Status
                 | Commands::Debug(_)
                 | Commands::Activity { .. }
                 | Commands::Agent { .. }
@@ -652,7 +647,12 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Agent {
             command: Some(AgentCommand::Status),
         } => match client::running(&paths).await {
-            Some(agent) => println!("running pid {} version {}", agent.pid, agent.version),
+            Some(agent) => {
+                println!("running pid {} version {}", agent.pid, agent.version);
+                if let Some(status) = client::status(&paths).await {
+                    println!("{}", lock_state(&status));
+                }
+            }
             None => {
                 println!("not running");
                 return Ok(ExitCode::FAILURE);
@@ -827,10 +827,6 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             client::ensure_running(&paths).await?;
             client::simple(&paths, Command::Lock).await?;
             println!("locked");
-        }
-        Commands::Status => {
-            let status = client::ensure_running(&paths).await?;
-            print_status(&status);
         }
         Commands::Debug(DebugCommand::Whoami { json }) => caller::whoami(&paths, json).await?,
         Commands::Activity { since, limit, json } => {
@@ -1090,38 +1086,14 @@ fn vault_line(vault: &VaultInfo) -> String {
     line
 }
 
-fn print_status(status: &Status) {
-    println!(
-        "agent\trunning pid {} version {}",
-        status.pid, status.version
-    );
-    let state = if !status.initialized {
-        "not set up".to_string()
+fn lock_state(status: &Status) -> String {
+    if !status.initialized {
+        "not set up".into()
     } else if !status.unlocked {
-        "locked".to_string()
+        "locked".into()
     } else if let Some(secs) = status.locks_in_secs {
         format!("unlocked (locks in {secs}s)")
     } else {
-        "unlocked".to_string()
-    };
-    println!("state\t{state}");
-    if let Some(device) = &status.device {
-        println!("device\t{} {}", device_name(device), short(&device.id));
-    }
-    if status.unlocked {
-        let vaults: Vec<String> = status
-            .vaults
-            .iter()
-            .map(|v| format!("{}{}", v.name, if v.default { "*" } else { "" }))
-            .collect();
-        println!("vaults\t{}", vaults.join(" "));
-        println!("peers\t{}/{} online", status.peers_online, status.peers);
-    }
-    if let Some(update) = &status.update {
-        println!(
-            "update\t{} available ({}): deadbolt update",
-            update.version,
-            update::installed_with(&update.method)
-        );
+        "unlocked".into()
     }
 }

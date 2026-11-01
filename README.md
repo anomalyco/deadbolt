@@ -100,7 +100,7 @@ Found a problem? In the standalone build, use **Settings → Report an issue**; 
 deadbolt update
 ```
 
-This updates Deadbolt.app or the `deadbolt` it runs from (running npm, pnpm, bun, yarn or Homebrew when one of them installed it), and every extension folder registered with `deadbolt browser install --extension-dir`. Reload the extension afterwards. The agent checks for updates in the background and only tells you (`deadbolt status`, and one line at a terminal at most once a day); it never installs anything itself. `DEADBOLT_NO_UPDATE_CHECK=1` turns the check off. Releases: [`docs/releasing.md`](docs/releasing.md).
+This updates Deadbolt.app or the `deadbolt` it runs from (running npm, pnpm, bun, yarn or Homebrew when one of them installed it), and every extension folder registered with `deadbolt browser install --extension-dir`. Reload the extension afterwards. The agent checks for updates in the background and only tells you (one line at a terminal at most once a day, and in the app's Settings; `deadbolt update --check` asks on the spot); it never installs anything itself. `DEADBOLT_NO_UPDATE_CHECK=1` turns the check off. Releases: [`docs/releasing.md`](docs/releasing.md).
 
 ### Not available yet
 

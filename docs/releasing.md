@@ -84,7 +84,7 @@ Two builds of `deadbolt` per architecture:
   loads Wayland, X11 and the GPU drivers when a window opens, so the job fails
   unless every `NEEDED` library is glibc's (libc, libm, libdl, libpthread,
   the loader) or libgcc_s, and no symbol needs a glibc newer than 2.28. It then runs `--version`,
-  `--help`, `status`, `agent status`, `init`, `new`, `ls` and `app` (which
+  `--help`, `init`, `agent status`, `new`, `ls` and `app` (which
   must say there's no graphical session) in AlmaLinux 8 minimal, which has no display and no
   desktop libraries.
 - **musl, static, without the app** (`linux-x64-musl`, `linux-arm64-musl`):
@@ -361,12 +361,11 @@ channel's current release isn't the build it runs, a rollback included.
   app that can't be replaced where it is don't. A failure is logged and
   tried again next time. `DEADBOLT_NO_UPDATE_CHECK=1` in the agent's
   environment turns it off.
-- **Notifications:** what the check found is in `deadbolt status`
-  (`update	<version> available (installed with bun): deadbolt update`),
-  `deadbolt debug watch` emits `{"change":"update"}` when it changes, and the
+- **Notifications:** what the check found is in the agent's `status`
+  reply, `deadbolt debug watch` emits `{"change":"update"}` when it changes, and the
   desktop app's Settings show a quiet "Deadbolt <version> is out" row.
   Interactive commands (stdin and stderr terminals, no `--json`; not
-  `status`, `debug watch`, `update`, `run`, the app or the agent) end with one
+  `debug watch`, `update`, `run`, the app or the agent) end with one
   stderr line, at most once a day per version (`update-notice` in the state
   directory): `deadbolt <version> is out (installed with bun): run deadbolt
   update`. The CLI only reads the agent's answer; with no agent running it

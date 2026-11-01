@@ -30,6 +30,23 @@ fn manifest(version: &str, sequence: u64) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The update the agent's status reply carries, as the app and the
+/// terminal notice read it.
+fn update(device: &Device) -> Option<deadbolt_client::protocol::UpdateInfo> {
+    let paths = deadbolt_client::Paths::from_vars(|name| match name {
+        "DEADBOLT_HOME" => Some(device.path("home").into()),
+        "XDG_RUNTIME_DIR" => Some(device.path("run").into()),
+        "XDG_STATE_HOME" => Some(device.path("state").into()),
+        "XDG_CONFIG_HOME" => Some(device.path("config").into()),
+        _ => None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(deadbolt_client::status(&paths))
+        .expect("the agent's status")
+        .update
+}
+
 #[test]
 fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
     let a = Device::new();
@@ -64,8 +81,7 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
         }
     };
     assert_eq!(next(), serde_json::json!({"change": "watching"}));
-    let status = || a.run(&["status"]);
-    assert!(!status().contains("update\t"), "{}", status());
+    assert_eq!(update(&a), None);
 
     // A new release: the check (every second here) finds it, and only says so.
     files
@@ -73,12 +89,10 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
         .unwrap()
         .insert(DEV.to_string(), manifest("0.0.0-dev-9999", 2));
     assert_eq!(next(), serde_json::json!({"change": "update"}));
-    let out = status();
-    assert!(
-        out.contains("update\t0.0.0-dev-9999 available (standalone): deadbolt update"),
-        "{out}"
-    );
-    assert!(out.contains("state\tnot set up"), "{out}");
+    let found = update(&a).expect("an update");
+    assert_eq!(found.version, "0.0.0-dev-9999");
+    assert_eq!(found.method, "standalone");
+    assert_eq!(a.state(), "not set up");
 
     // Back to this build (a rollback): nothing to say any more.
     files
@@ -86,7 +100,7 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
         .unwrap()
         .insert(DEV.to_string(), manifest(env!("CARGO_PKG_VERSION"), 3));
     assert_eq!(next(), serde_json::json!({"change": "update"}));
-    assert!(!status().contains("update\t"));
+    assert_eq!(update(&a), None);
     a.run(&["agent", "stop"]);
     assert!(wait(&mut watch, Duration::from_secs(10)).success());
 
@@ -97,14 +111,14 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
         .unwrap()
         .insert(DEV.to_string(), manifest("0.0.0-dev-9999", 4));
     let out = b.output(
-        b.cmd(&["status"])
+        b.cmd(&["debug", "whoami"])
             .env("DEADBOLT_RELEASE_URL", &base)
             .env("DEADBOLT_UPDATE_CHECK_CHANNEL", "dev")
             .env("DEADBOLT_NO_UPDATE_CHECK", "1"),
     );
     assert!(out.status.success());
     std::thread::sleep(Duration::from_secs(3));
-    assert!(!b.run(&["status"]).contains("update\t"));
+    assert_eq!(update(&b), None);
 }
 
 /// Copies this deadbolt to `to`, with the `deadbolt-enclave` beside it that
@@ -259,12 +273,17 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
     bun_install(&root, "0.0.0-dev-9999", false);
     let pid = |status: &str| {
         status
-            .lines()
-            .find_map(|l| l.strip_prefix("agent\trunning pid "))
+            .strip_prefix("running pid ")
             .and_then(|l| l.split_whitespace().next())
             .map(str::to_string)
     };
-    let before = String::from_utf8_lossy(&update(&["status"]).stdout).to_string();
+    // Through the link: `debug whoami` starts the agent (or, on macOS, only
+    // passes the new deadbolt's agent check), then `agent status` names it.
+    let agent = || {
+        assert!(update(&["debug", "whoami"]).status.success());
+        String::from_utf8_lossy(&update(&["agent", "status"]).stdout).to_string()
+    };
+    let before = agent();
     let old = pid(&before).unwrap_or_else(|| panic!("{before}"));
     let out = update(&["update", "--channel", "dev", "--yes"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -273,8 +292,7 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
     assert!(stdout.contains("Updated"), "{stdout}");
     assert!(stdout.contains("Restarted the agent."), "{stdout}");
     assert!(!stderr.contains("warning"), "{stderr}");
-    // Through the link: on macOS only the new deadbolt passes its agent's check.
-    let after = String::from_utf8_lossy(&update(&["status"]).stdout).to_string();
+    let after = agent();
     let new = pid(&after).unwrap_or_else(|| panic!("{after}"));
     assert_ne!(new, old, "{after}");
     a.run(&["agent", "stop"]);
