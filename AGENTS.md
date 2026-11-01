@@ -1,3 +1,4 @@
+<!-- tallow -->
 # Deadbolt
 
 An alpha, local-first password manager in Rust. No compatibility shims: change
