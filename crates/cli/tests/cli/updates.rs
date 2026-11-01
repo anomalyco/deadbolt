@@ -39,7 +39,7 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
     )])));
     let base = release_service(files.clone());
     let mut watch = a
-        .cmd(&["watch"])
+        .cmd(&["debug", "watch"])
         .env("DEADBOLT_RELEASE_URL", &base)
         .env("DEADBOLT_UPDATE_CHECK_CHANNEL", "dev")
         .stdout(Stdio::piped())

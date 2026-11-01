@@ -378,7 +378,7 @@ pub fn not_from_here(info: &CallerInfo) -> String {
         Some(host) => format!("This shell runs under {host} ({})", info.label),
         None => format!("This shell has OPENCODE_SESSION_ID set ({})", info.label),
     };
-    format!("{why}; run it from a terminal outside it, or in the app (see `deadbolt whoami`)")
+    format!("{why}; run it from a terminal outside it, or in the app (see `deadbolt debug whoami`)")
 }
 
 /// Nobody in particular: a status asked for without a connection.

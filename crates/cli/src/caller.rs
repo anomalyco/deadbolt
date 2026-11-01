@@ -1,4 +1,4 @@
-//! Who this CLI is to the agent (`deadbolt whoami`), what callers did
+//! Who this CLI is to the agent (`deadbolt debug whoami`), what callers did
 //! (`deadbolt activity`), and the checks every command starts with: what
 //! this process claims to be, and that the agent is this binary before a
 //! passphrase goes to it.

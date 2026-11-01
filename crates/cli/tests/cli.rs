@@ -878,7 +878,7 @@ fn whoami_and_activity_name_the_caller_never_values() {
     let a = Device::new();
     a.run(&["init"]);
     let me = a.output(
-        a.cmd(&["whoami", "--json"])
+        a.cmd(&["debug", "whoami", "--json"])
             .env("DEADBOLT_CALLER", "Deadbolt")
             .env("OPENCODE_SESSION_ID", "ses_test"),
     );
@@ -1701,7 +1701,7 @@ fn ai_agents_cant_send_the_browsers_fills_and_saves() {
         // Why (a claim here, or an AI host above the test), and where to
         // go instead.
         assert!(message.contains("This shell "), "{reply}");
-        assert!(message.contains("deadbolt whoami"), "{reply}");
+        assert!(message.contains("deadbolt debug whoami"), "{reply}");
         assert!(!reply.to_string().contains("hunter2"), "{reply}");
     }
     // Looking at a page's logins (no values) still answers.
@@ -2530,7 +2530,11 @@ fn watch_prints_changes_as_json_lines() {
     a.run(&["init", "--device-name", "alpha"]);
     let vault = a.run(&["vault", "ls"]);
     let short = vault.split('\t').nth(1).unwrap().to_string();
-    let mut child = a.cmd(&["watch"]).stdout(Stdio::piped()).spawn().unwrap();
+    let mut child = a
+        .cmd(&["debug", "watch"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {

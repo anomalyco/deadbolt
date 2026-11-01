@@ -363,10 +363,10 @@ channel's current release isn't the build it runs, a rollback included.
   environment turns it off.
 - **Notifications:** what the check found is in `deadbolt status`
   (`update	<version> available (installed with bun): deadbolt update`),
-  `deadbolt watch` emits `{"change":"update"}` when it changes, and the
+  `deadbolt debug watch` emits `{"change":"update"}` when it changes, and the
   desktop app's Settings show a quiet "Deadbolt <version> is out" row.
   Interactive commands (stdin and stderr terminals, no `--json`; not
-  `status`, `watch`, `update`, `run`, the app or the agent) end with one
+  `status`, `debug watch`, `update`, `run`, the app or the agent) end with one
   stderr line, at most once a day per version (`update-notice` in the state
   directory): `deadbolt <version> is out (installed with bun): run deadbolt
   update`. The CLI only reads the agent's answer; with no agent running it
