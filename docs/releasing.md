@@ -178,7 +178,8 @@ package manager skipped it. Where install scripts don't run (pnpm, bun, npm
 with scripts disallowed), the placeholder runs the postinstall on first use,
 then the command. On
 musl it prefers the `-musl` package, else the glibc one, each falling back to
-the other. It links rather than copies, since Deadbolt knows its files by real
+the other and saying so (on glibc the stand-in has no app; a registry that
+doesn't serve a just-published version yet is the usual reason). It links rather than copies, since Deadbolt knows its files by real
 path: on macOS the command is the app's own `Contents/Helpers/deadbolt`, so
 the CLI, the agent and the app are one install, Touch ID's helper sits beside
 it, and `deadbolt app` opens that Deadbolt.app, first linking it as

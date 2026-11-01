@@ -87,29 +87,45 @@ pub enum Manager {
 }
 
 impl Manager {
-    /// The release service's distribution kind.
+    /// The release service's distribution kind. npm publishes in the same
+    /// release run, right after the service, so the channel's version is
+    /// npm's too.
     fn distribution(self) -> &'static str {
         match self {
             Self::Brew | Self::BrewCask => "brew",
-            Self::Npm => "npm",
-            Self::Nix | Self::Cargo | Self::System => "unknown",
+            Self::Npm | Self::Nix | Self::Cargo | Self::System => "unknown",
         }
     }
 
-    /// What to run when the manifest names no command.
-    fn hint(self) -> &'static str {
+    /// Who updates it, for people.
+    fn name(self) -> &'static str {
         match self {
+            Self::Brew | Self::BrewCask => "Homebrew",
+            Self::Nix => "Nix",
+            Self::Cargo => "Cargo",
+            Self::System => "its package manager",
+            Self::Npm => "npm",
+        }
+    }
+
+    /// What to run when the manifest names no command, for `channel`.
+    fn hint(self, channel: &str) -> String {
+        let fixed = match self {
             Self::Brew => "brew upgrade anomalyco/tap/deadbolt",
             Self::BrewCask => "brew upgrade --cask anomalyco/tap/deadbolt",
             Self::Nix => "update it with Nix, which installed it",
             Self::Cargo => "reinstall it with cargo install, which installed it",
             Self::System => "update it with the package manager that installed it",
-            Self::Npm => match build_channel() {
-                Some("dev") => "npm i -g @deadbolt/cli@dev",
-                Some("beta") => "npm i -g @deadbolt/cli@beta",
-                _ => "npm i -g @deadbolt/cli@latest",
-            },
-        }
+            Self::Npm => {
+                let tag = if channel == "stable" {
+                    "latest"
+                } else {
+                    channel
+                };
+                return format!("npm i -g @deadbolt/cli@{tag}");
+            }
+        };
+        fixed.into()
     }
 }
 
@@ -569,15 +585,26 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
     check_sequence(&state, artifact, channel, &text, args.allow_rollback)?;
     match decision {
         Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),
-        Decision::None("up_to_date") => println!("{what} {shown} is up to date on {channel}"),
+        Decision::None("up_to_date") => {
+            println!("{what} {shown} is up to date on {channel}");
+            if let Install::Managed(manager) = &install {
+                println!("{} updates it: {}", manager.name(), manager.hint(channel));
+            }
+        }
         Decision::None("rollout_deferred") => println!(
             "{what} {shown}: a new {channel} release is rolling out and hasn't reached this \
              computer yet; try again later"
         ),
-        Decision::None("distribution_pending" | "distribution_unlisted") => println!(
-            "{what} {shown} is Homebrew's to update, and Homebrew doesn't offer {channel}'s \
-             current release yet; try again later"
-        ),
+        Decision::None("distribution_pending" | "distribution_unlisted") => {
+            let manager = match &install {
+                Install::Managed(manager) => manager.name(),
+                _ => "its package manager",
+            };
+            println!(
+                "{what} {shown} is {manager}'s to update, and {manager} doesn't offer \
+                 {channel}'s current release yet; try again later"
+            )
+        }
         Decision::None(reason) => bail!("{channel} has no {what} for {target} ({reason})"),
         Decision::Notify {
             version,
@@ -591,7 +618,7 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
             println!("{what} {version} is available on {channel} (this is {shown})");
             match command {
                 Some(command) => println!("Update it with: {command}"),
-                None => println!("To update: {}", manager.hint()),
+                None => println!("To update: {}", manager.hint(channel)),
             }
             if let Some(notes) = notes_url {
                 println!("Release notes: {notes}");

@@ -98,14 +98,26 @@ function verify() {
   return childProcess.spawnSync(target, ["--version"], { stdio: "ignore" }).status === 0
 }
 
+// Says so when this system's first choice wasn't installable (a registry
+// that doesn't serve the new version yet, say) and another build stands in:
+// on glibc that's the static build, which has no desktop app.
+function fellBack(name, names) {
+  if (name === names[0]) return
+  console.error(
+    `deadbolt: installed ${name}, as ${names[0]}@${dependencies[names[0]]} couldn't be installed` +
+      (name.endsWith("-musl") ? " (this build has no desktop app)" : "") +
+      `. Reinstall @deadbolt/cli later to get ${names[0]}.`,
+  )
+}
+
 function main() {
   const names = packageNames()
   for (const name of names) {
     try {
       link(binaryIn(resolvePackage(name)))
-      if (verify()) return
+      if (verify()) return fellBack(name, names)
     } catch {
-      if (installPackage(name) && verify()) return
+      if (installPackage(name) && verify()) return fellBack(name, names)
     }
   }
   throw new Error(
