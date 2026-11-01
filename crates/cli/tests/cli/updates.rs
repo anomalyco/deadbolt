@@ -117,7 +117,9 @@ fn bun_install(root: &Path, installs: &str, fails: bool) -> (PathBuf, PathBuf) {
     let package = modules.join("@deadbolt/cli-linux-x64");
     let exe = package.join("bin/deadbolt");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-    if !exe.exists() && std::fs::hard_link(BIN, &exe).is_err() {
+    // A copy, never a hard link: macOS can name any of an inode's links as
+    // a running program's path, so other tests' agents would seem to run it.
+    if !exe.exists() {
         std::fs::copy(BIN, &exe).unwrap();
     }
     std::fs::write(
