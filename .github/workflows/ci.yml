@@ -7,6 +7,8 @@ on:
   schedule:
     - cron: "0 5 * * *"
 
+# A hung apt or Playwright download fails its step after 10 minutes, and
+# every job has a ceiling, so a stuck runner never blocks a PR for long.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -22,6 +24,7 @@ jobs:
     name: Rust (${{ matrix.os }})
     if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
+        timeout-minutes: 10
       # Same steps as `bun run check`; cargo-deny stays in its dedicated job below.
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
@@ -45,6 +49,7 @@ jobs:
     name: Browser cores (wasm32)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -55,6 +60,7 @@ jobs:
     name: Browser extension
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: extension
@@ -91,6 +97,7 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
+        timeout-minutes: 10
       - run: bun e2e/standalone.ts --smoke
 
   # The native e2e scenarios again, against the browser-only device and its
@@ -119,6 +126,7 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
+        timeout-minutes: 10
       - run: |
           mkdir -p e2e-out
           bun e2e/run.ts --standalone --shard ${{ matrix.shard }}/4 --stills e2e-out/stills 2>&1 | tee e2e-out/run.log
@@ -149,6 +157,7 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
+        timeout-minutes: 10
       - run: bun run e2e:parallel --jobs 2 --only security
 
   # The whole e2e suite, stills and the passkey run against a real
@@ -174,9 +183,11 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
+        timeout-minutes: 10
       - run: cargo +stable build -p deadbolt-cli --locked
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
+        timeout-minutes: 10
       - run: |
           mkdir -p e2e-out
           bun e2e/run.ts --shard ${{ matrix.shard }}/4 --deadbolt ../target/debug/deadbolt --stills e2e-out/stills 2>&1 | tee e2e-out/run.log
@@ -191,6 +202,7 @@ jobs:
     name: cargo-deny
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -211,4 +223,5 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
+        timeout-minutes: 10
       - run: cargo test --workspace --release --locked
