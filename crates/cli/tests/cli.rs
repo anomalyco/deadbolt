@@ -1713,7 +1713,10 @@ fn ai_agents_cant_send_the_browsers_fills_and_saves() {
 #[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();
-    let old = a.output(a.cmd(&["debug", "whoami"]).env("DEADBOLT_TEST_VERSION", "0.0.0-old"));
+    let old = a.output(
+        a.cmd(&["debug", "whoami"])
+            .env("DEADBOLT_TEST_VERSION", "0.0.0-old"),
+    );
     assert!(old.status.success());
     let pid = a.agent_pid().unwrap();
     // Two builds of one protocol, in turns: neither replaces the other's agent.
@@ -1734,7 +1737,10 @@ fn shares_an_agent_of_another_build() {
 #[test]
 fn replaces_an_agent_of_an_older_protocol() {
     let a = Device::new();
-    let old = a.output(a.cmd(&["debug", "whoami"]).env("DEADBOLT_TEST_PROTOCOL", "1"));
+    let old = a.output(
+        a.cmd(&["debug", "whoami"])
+            .env("DEADBOLT_TEST_PROTOCOL", "1"),
+    );
     assert!(old.status.success());
     let old_pid = a.agent_pid().unwrap();
 

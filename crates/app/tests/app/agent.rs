@@ -435,7 +435,7 @@ fn create_a_vault_in_the_app() {
     assert!(shows(&rt, "personal is empty"));
     // The CLI sees the device and vault the app made.
     assert!(device.output(&["vault", "ls"]).contains("personal"));
-    assert!(device.output(&["status"]).contains("alpha"));
+    assert!(device.output(&["devices"]).contains("alpha"));
 }
 
 /// Shows a code on `device`'s app and pairs it from `inviter`; returns the
@@ -548,7 +548,14 @@ fn cancelling_a_join_during_setup_waits_for_it() {
     assert_eq!(notice.severity, Severity::Neutral, "{notice:?}");
     assert!(notice.body.contains("set up now"), "{notice:?}");
     assert!(o.code.is_none(), "no code after the cancel");
-    assert!(device.output(&["status"]).contains("beta"));
+    // Set up with no vault: only the agent's status names the device.
+    let status = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(deadbolt_client::status(&device.paths()))
+        .expect("the agent's status");
+    assert_eq!(status.device.and_then(|d| d.name).as_deref(), Some("beta"));
 }
 
 /// Runs `worker` until it reports the end of its request, collecting what it said.
