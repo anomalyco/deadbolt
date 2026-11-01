@@ -107,6 +107,16 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
     assert!(!b.run(&["status"]).contains("update\t"));
 }
 
+/// Copies this deadbolt to `to`, with the `deadbolt-enclave` beside it that
+/// a macOS build needs to check its agent.
+fn copy_deadbolt(to: &Path) {
+    std::fs::copy(BIN, to).unwrap();
+    let enclave = Path::new(BIN).with_file_name("deadbolt-enclave");
+    if enclave.exists() {
+        std::fs::copy(&enclave, to.with_file_name("deadbolt-enclave")).unwrap();
+    }
+}
+
 /// A bun global install laid out under `root` (`bun/install/global/…`,
 /// linked from `bun/bin/deadbolt`), with a fake `bun` beside that link that
 /// lists `@deadbolt/cli`, logs its arguments to `root/bun.log` and on
@@ -122,7 +132,7 @@ fn bun_install(root: &Path, installs: &str, fails: bool) -> (PathBuf, PathBuf) {
     // A copy, never a hard link: macOS can name any of an inode's links as
     // a running program's path, so other tests' agents would seem to run it.
     if !exe.exists() {
-        std::fs::copy(BIN, &exe).unwrap();
+        copy_deadbolt(&exe);
     }
     std::fs::write(
         package.join("package.json"),
@@ -152,7 +162,7 @@ fn bun_install(root: &Path, installs: &str, fails: bool) -> (PathBuf, PathBuf) {
     } else {
         let copy = root.join("new-deadbolt");
         if !copy.exists() {
-            std::fs::copy(BIN, &copy).unwrap();
+            copy_deadbolt(&copy);
         }
         format!(
             "/bin/rm -f '{exe}'; printf '#!/bin/sh\\nif [ \"$1\" = --version ]; then echo \"deadbolt {installs} (dev)\"; exit; fi\\nexec \"{copy}\" \"$@\"\\n' > '{exe}'; /bin/chmod 755 '{exe}'",
@@ -263,7 +273,8 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
     assert!(stdout.contains("Updated"), "{stdout}");
     assert!(stdout.contains("Restarted the agent."), "{stdout}");
     assert!(!stderr.contains("warning"), "{stderr}");
-    let after = a.run(&["status"]);
+    // Through the link: on macOS only the new deadbolt passes its agent's check.
+    let after = String::from_utf8_lossy(&update(&["status"]).stdout).to_string();
     let new = pid(&after).unwrap_or_else(|| panic!("{after}"));
     assert_ne!(new, old, "{after}");
     a.run(&["agent", "stop"]);
