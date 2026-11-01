@@ -351,8 +351,8 @@ channel's current release isn't the build it runs, a rollback included.
   it's unpacked, run or moved. Nothing needs the vault, so it works locked.
   `--check` prints what's available and exits 10 if anything is, else 0.
   Requests send `User-Agent: deadbolt/<build channel or source>/<version>/cli`.
-- **Background checks:** the agent checks a minute or two after it starts
-  (jittered), then every 6 hours or so, whether `update` would install
+- **Background checks:** the agent checks when it starts, then every hour,
+  whether `update` would install
   something, with the same manifest rules, limits and User-Agent, npm's
   version for npm's package and Homebrew's for Homebrew. It never downloads
   or installs anything, nor writes the sequence floors, and ignores a
