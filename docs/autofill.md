@@ -1489,6 +1489,24 @@ birthday whole (in the order a placeholder shows) or in parts, an expiry as
 number with spaces when the placeholder shows groups, or one slice per box
 (all the boxes or none). A select with no matching option is left alone.
 
+An identity that keeps a whole address in its first line ("1112 Cole St, San
+Francisco, CA, 94117, United States") with no city or postal code of its own
+has it split for a form that asks for the parts (`content/address.ts`): the
+street in the first line (a unit in the second, if the form has one), and the
+city, region, postal code and country in their own fields. It reads US,
+Canadian, Australian and UK addresses and "PLZ City" ones; an address it can't
+read with confidence, or a form with one address box, gets the line whole.
+The identity's own fields always win.
+
+A country, state or calling-code combobox (an input with `role=combobox` that
+opens a list the page draws, as Base UI, Headless UI or React Aria render
+one) is chosen in, not typed in (`content/combobox.ts`): the input gets the
+field checks, the name is typed to bring the option up, and the matching
+option in the list the input names (`aria-controls`, `aria-owns`), drawn and
+on top at its middle, gets a click; the input has to show it after. With no
+match, what was typed is taken back. The country goes before the region,
+wherever it is in the form, since a state list can depend on it.
+
 An identity goes only into fields the user can see as the page stands:
 nothing is scrolled into view to fill it, and a field smaller than 40×16
 CSS pixels, not wholly on screen, or covered at its middle (Deadbolt's own
