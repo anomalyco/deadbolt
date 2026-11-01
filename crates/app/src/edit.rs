@@ -1,14 +1,14 @@
 //! Adding, changing and deleting items, in the detail pane. ⌘N opens a form
 //! for a new login (or card), ⌘E one for the selected item, and ⌘⌫ asks to
-//! delete it in place. The agent checks what's saved; its refusal shows on
+//! delete it in place. The daemon checks what's saved; its refusal shows on
 //! the field it names. An edit saves only the fields it changed, in one
 //! change, so another device's edit to the other fields stays. If the item
 //! changes or goes elsewhere while it's open, the form says so and keeps
-//! what was typed. Passwords come from the agent's generator. A file field
+//! what was typed. Passwords come from the daemon's generator. A file field
 //! (a document's file, an attachment) is chosen with Choose File…, read
 //! here, and sent whole; a file already saved stays as it is unless another
 //! is chosen or it's removed.
-//! Locking, or the agent stopping, wipes the form wherever it was.
+//! Locking, or the daemon stopping, wipes the form wherever it was.
 
 mod fix;
 mod form;
@@ -23,14 +23,14 @@ use deadbolt_client::protocol::{AppAction, ItemInfo};
 use rune::{Key, KeyEvent, TextEdit, Tx};
 use zeroize::Zeroizing;
 
-use crate::agent::{Failure, Job};
+use crate::daemon::{Failure, Job};
 use crate::model::{App, Screen};
 use crate::onboarding::sentence;
 use form::problem;
 
 /// The generator's lengths, from the length control.
 pub const LENGTHS: [usize; 5] = [16, 20, 24, 32, 64];
-/// The agent's default length.
+/// The daemon's default length.
 const DEFAULT_LENGTH: usize = 24;
 /// The menu items.
 pub const NEW: &str = "New Item";
@@ -142,7 +142,7 @@ impl App {
         }
     }
 
-    /// A delete is on its way to the agent: the selection, the search and
+    /// A delete is on its way to the daemon: the selection, the search and
     /// the pane hold until it answers.
     pub fn deleting(&self) -> bool {
         self.edit.delete.as_ref().is_some_and(|d| d.busy)
@@ -253,7 +253,7 @@ impl App {
     }
 
     /// Closes the form, wiping what was typed. The search takes focus back.
-    /// A form that's saving stays until the agent answers.
+    /// A form that's saving stays until the daemon answers.
     pub fn cancel_edit(&mut self) {
         if self.saving() {
             return;
@@ -363,7 +363,7 @@ impl App {
                 seq,
             },
         };
-        self.agent.send(job);
+        self.daemon.send(job);
     }
 
     /// The form's "Show theirs": the item as it is now, without what was typed.
@@ -554,7 +554,7 @@ impl App {
     // ---------------------------------------------------------------------------------------
     // The generator
 
-    /// Asks the agent for a password at the form's length and symbols.
+    /// Asks the daemon for a password at the form's length and symbols.
     pub(crate) fn next_generation_seq(&mut self) -> u64 {
         self.edit.generations += 1;
         self.edit.generations
@@ -572,7 +572,7 @@ impl App {
         self.edit.generations += 1;
         form.generating = Some(self.edit.generations);
         let url = form.site_url();
-        self.agent.send(Job::Generate {
+        self.daemon.send(Job::Generate {
             length: self.edit.length,
             symbols: self.edit.symbols,
             url,
@@ -671,7 +671,7 @@ impl App {
         delete.busy = true;
         delete.error = None;
         self.edit.seq += 1;
-        self.agent.send(Job::Remove {
+        self.daemon.send(Job::Remove {
             id: delete.id.clone(),
             seq: self.edit.seq,
         });

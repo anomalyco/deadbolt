@@ -5,7 +5,7 @@ use deadbolt_client::protocol::ItemInfo;
 use rune::Tx;
 
 use super::App;
-use crate::agent::{Failure, Job};
+use crate::daemon::{Failure, Job};
 
 /// Sorts items favorites-first, then case-insensitively by label, then id.
 pub fn sort_items(items: &mut [ItemInfo]) {
@@ -55,7 +55,7 @@ impl App {
         sort_items(&mut self.items);
         tx.scroll_into_view(format!("item-{id}"));
         self.fav_seq += 1;
-        self.agent.send(Job::Favorite {
+        self.daemon.send(Job::Favorite {
             id,
             favorite,
             seq: self.fav_seq,

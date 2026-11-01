@@ -2,7 +2,7 @@
 // sender. senderOrigin and fillableOrigin are ported from Foyer
 // (github.com/R44VC0RP/foyer, src/autofill/origin.ts, by Ryan Vogel).
 //
-// The agent makes the real decision: it works out the page's site from the
+// The daemon makes the real decision: it works out the page's site from the
 // origin and refuses another site's login. The extension's job is to pass the
 // right origin, and to give a frame nothing unless it is on the same site as
 // the page around it.
@@ -40,7 +40,7 @@ const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/
 
 /**
  * The registrable domain of a host under the full Public Suffix List, private
- * section included, as the agent computes it. An IP address, localhost and a
+ * section included, as the daemon computes it. An IP address, localhost and a
  * single label are their own site; a public suffix itself has none.
  */
 export function siteOf(hostname: string): string | null {
@@ -84,7 +84,7 @@ const ACTION_AFTER = /\s+(?:(?:sign|log)[ -]?(?:in|on|up)|login)$/i
  * that names the site ("GitHub" of "Sign in to GitHub · GitHub", "Acme" of
  * "Create your account · Acme"), without the page's action around it, with
  * runs of spaces and control characters made one space, trimmed and capped
- * at 128 characters, as the agent wants it. Without one, the site.
+ * at 128 characters, as the daemon wants it. Without one, the site.
  */
 export function saveTitle(raw: unknown, site: string): string {
   const clean = typeof raw === "string" ? raw.replace(/[\s\p{Cc}]+/gu, " ").trim() : ""

@@ -72,7 +72,7 @@ const browserPassword = "browser-only-synthetic-secret-83219"
 const cliPassword = "cli-only-synthetic-secret-97264"
 let context: BrowserContext | undefined
 let joining: ReturnType<typeof Bun.spawn> | undefined
-/** The CLI agent while it's suspended (SIGSTOP), to resume before stopping it. */
+/** The CLI daemon while it's suspended (SIGSTOP), to resume before stopping it. */
 let suspended: number | undefined
 /** The real demo site the CLI runs sign up, change a password and check out on. */
 const DEMO = "https://acme-demo.i.vogel.dev"
@@ -1371,10 +1371,10 @@ async function unlockOnPage(device: Page) {
   await device.getByRole("button", { name: "Unlock", exact: true }).click()
   await until("device page unlocks", async () => await state(device) === "ready", 60_000)
 }
-/** The CLI agent's pid, from `deadbolt agent status`. */
-async function agentPid() {
-  const pid = Number(/running pid (\d+)/.exec(await cli("agent", "status"))?.[1])
-  if (!(pid > 0)) throw new Error("the CLI agent isn't running")
+/** The CLI daemon's pid, from `deadbolt debug daemon status`. */
+async function daemonPid() {
+  const pid = Number(/running pid (\d+)/.exec(await cli("debug", "daemon", "status"))?.[1])
+  if (!(pid > 0)) throw new Error("the CLI daemon isn't running")
   return pid
 }
 /** Reads `deadbolt join`'s code, pairs the extension with it, and waits for the join to finish. */
@@ -1759,7 +1759,7 @@ try {
 
     // A peer that stops answering mid-connection (a sleeping laptop): the
     // sync alarm's background sync waits on it, and the vault still answers.
-    suspended = await agentPid()
+    suspended = await daemonPid()
     process.kill(suspended, "SIGSTOP")
     await worker.evaluate((name) => chrome.alarms.create(name, { when: Date.now() + 50, periodInMinutes: 5 }), SYNC_ALARM)
     await until("sync alarm fires", () => worker.evaluate(async (name) => ((await chrome.alarms.get(name))?.scheduledTime ?? 0) > Date.now() + 60_000, SYNC_ALARM), 10_000)
@@ -1833,7 +1833,7 @@ try {
     if (cliMarker === null) await rm(join(dist, ".deadbolt-extension"), { force: true })
     else await writeFile(join(dist, ".deadbolt-extension"), cliMarker)
   }
-  if (!smoke) await cli("agent", "stop").catch(() => {})
+  if (!smoke) await cli("debug", "daemon", "stop").catch(() => {})
   server.stop(true)
   if (video && recordings.length) {
     await mkdir(video, { recursive: true })

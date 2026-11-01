@@ -1,13 +1,13 @@
 //! Deadbolt Send: hand a sealed bundle (files, secrets, vault items) to someone
 //! through a one-time link, live and peer to peer.
 //!
-//! The sender's agent serves each share on [`SEND_ALPN`] from an iroh endpoint of
-//! its own (a random key per agent run, not the device key) until it is picked
+//! The sender's daemon serves each share on [`SEND_ALPN`] from an iroh endpoint of
+//! its own (a random key per daemon run, not the device key) until it is picked
 //! up, expires or is revoked. Nothing is stored anywhere else. The link carries
 //! everything the receiver needs, after `#` so it never reaches a server:
 //! [`SendTicket`] (the sender's endpoint, an access secret and the content key).
 //!
-//! The same code runs natively (the agent, tests) and in the browser
+//! The same code runs natively (the daemon, tests) and in the browser
 //! (`wasm32-unknown-unknown`, relay only), where `crates/send-web` wraps
 //! [`receive`] for the receive page at `deadbolt.pw/r`.
 //!

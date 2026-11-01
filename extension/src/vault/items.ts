@@ -11,7 +11,7 @@ import type { App, View } from "./app"
 import { button, copied, glyph, iconButton, keepFocus, refuse, slidingHighlight, toolbar } from "./kit"
 import { metaEditor, starButton, tagChips } from "./tags"
 
-/** Names the agent and the app give fields, where its own name doesn't read well. */
+/** Names the daemon and the app give fields, where its own name doesn't read well. */
 const LABELS: Record<string, string> = {
   url: "Website",
   otp: "One-time password",
@@ -54,7 +54,7 @@ export function kindName(app: App, kind: string): string {
 /** A type's tile: its first letter, as a login's avatar is the title's. */
 export const kindAvatar = (item: ItemSummary) => avatar(item.title)
 
-/** A file's size as the agent writes it: "812 bytes", "1.2 MB". */
+/** A file's size as the daemon writes it: "812 bytes", "1.2 MB". */
 const size = (bytes: number) => (bytes < 1000 ? `${bytes} bytes` : bytes < 1e6 ? `${(bytes / 1e3).toFixed(1)} KB` : `${(bytes / 1e6).toFixed(1)} MB`)
 
 /** One secret value of an item; Strict asks for the passphrase first (`reauth`). */

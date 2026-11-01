@@ -244,7 +244,7 @@ pub fn page(s: &App, k: &Kit) -> El {
     let mut activity = vec![row_el(
         Row::Activity,
         "Recent activity",
-        about(k, "What apps and commands asked the agent for"),
+        about(k, "What apps and commands asked the daemon for"),
         show,
     )];
     activity.extend(entries);
@@ -377,7 +377,7 @@ fn devices(s: &App, k: &Kit) -> El {
     setting(k, "devices", false, device, about(k, &shares), el())
 }
 
-/// A newer Deadbolt the agent's background check found, quietly: nothing
+/// A newer Deadbolt the daemon's background check found, quietly: nothing
 /// installs until `deadbolt update` runs.
 fn update(s: &App, k: &Kit) -> Option<El> {
     let update = s.status.as_ref()?.update.as_ref()?;

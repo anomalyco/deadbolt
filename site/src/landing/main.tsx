@@ -62,7 +62,7 @@ function Landing() {
         <dl className="facts">
           <div><dt>no recovery</dt><Justified as="dd" text="lose every device and the vault is gone. there is no server holding a copy and no reset email. pair a second device early." /></div>
           <div><dt>removal is a promise about the future</dt><Justified as="dd" text="a removed device can't sync anything new, but it keeps what it already had. rotate the passwords it could see." /></div>
-          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background agent, pairing, sync and a bitwarden import. no apps or browser extension yet." /></div>
+          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background daemon, pairing, sync and a bitwarden import. no apps or browser extension yet." /></div>
         </dl>
       </section>
 

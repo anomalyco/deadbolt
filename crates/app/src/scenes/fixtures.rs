@@ -1,4 +1,4 @@
-//! Synthetic vault, item and loopback-agent fixtures shared across scenes.
+//! Synthetic vault, item and loopback-daemon fixtures shared across scenes.
 
 use deadbolt_client::protocol::{
     Code, DeviceInfo, FieldInfo, Finding, HealthCounts, HealthPeer, HealthReport, ImportReport,
@@ -6,14 +6,14 @@ use deadbolt_client::protocol::{
 };
 use rune::Tx;
 
-use crate::agent::{self, Agent, Job};
+use crate::daemon::{self, Daemon, Job};
 use crate::model::{App, Screen};
 use crate::onboarding::worker::Stage;
 use crate::onboarding::{Flow, Step};
 use crate::view::{Notice, Severity};
 use crate::{import, install, shortcut};
 
-/// How long the `vault-243` scene's agent takes over each request, about
+/// How long the `vault-243` scene's daemon takes over each request, about
 /// what a real one does with its connection and peer check.
 pub const LOOPBACK_COST: f64 = 0.03;
 /// Items in the `vault-243` scene.
@@ -287,10 +287,10 @@ pub(super) fn vault(s: &mut App) {
     detail_for_selection(s);
 }
 
-/// A vault of `MANY` logins with an agent that answers on the app's clock
-/// (`Agent::loopback`), for holding an arrow down the list.
+/// A vault of `MANY` logins with a daemon that answers on the app's clock
+/// (`Daemon::loopback`), for holding an arrow down the list.
 pub(super) fn vault_243(s: &mut App) {
-    s.agent = Agent::loopback(many_answer, LOOPBACK_COST);
+    s.daemon = Daemon::loopback(many_answer, LOOPBACK_COST);
     s.status = Some(status(true));
     s.screen = Screen::Vault;
     s.items = (0..MANY).map(many_item).collect();
@@ -301,7 +301,7 @@ pub(super) fn vault_243(s: &mut App) {
 }
 
 /// The vault with Recently Deleted open on four items, deleted hours to
-/// weeks ago, newest first as the agent lists them.
+/// weeks ago, newest first as the daemon lists them.
 pub(super) fn trash(s: &mut App) {
     vault(s);
     s.open_trash();
@@ -330,7 +330,7 @@ pub(super) fn trash(s: &mut App) {
     });
     let seq = s.trash.seq();
     s.apply(
-        agent::Done::Trash {
+        daemon::Done::Trash {
             seq,
             result: Ok((None, items.to_vec())),
         },
@@ -361,9 +361,9 @@ pub(super) fn trash_item(s: &mut App) {
     };
     let seq = s.trash.item_seq();
     s.apply(
-        agent::Done::TrashItem {
+        daemon::Done::TrashItem {
             seq,
-            result: Ok(agent::Values::new(item)),
+            result: Ok(daemon::Values::new(item)),
         },
         &mut Tx::default(),
     );
@@ -395,7 +395,7 @@ fn many_item(i: usize) -> ItemInfo {
     }
 }
 
-fn many_answer(job: Job) -> Option<agent::Done> {
+fn many_answer(job: Job) -> Option<daemon::Done> {
     let values = |id: &str| {
         let i = usize::from_str_radix(id.get(..4)?, 16).ok()?;
         let item = many_item(i);
@@ -410,18 +410,18 @@ fn many_answer(job: Job) -> Option<agent::Done> {
             field("url", "url", format!("https://{}", item.label)),
             field("notes", "note", format!("Fixture item {i} of {MANY}.")),
         ];
-        Some(agent::Values::new(ItemInfo { fields, ..item }))
+        Some(daemon::Values::new(ItemInfo { fields, ..item }))
     };
-    let missing = || agent::Failure {
+    let missing = || daemon::Failure {
         code: None,
         message: "no such item".into(),
     };
     Some(match job {
-        Job::Get { id, seq, .. } => agent::Done::Item {
+        Job::Get { id, seq, .. } => daemon::Done::Item {
             seq,
             result: values(&id).ok_or_else(missing),
         },
-        Job::Peek { id, epoch, .. } => agent::Done::Peeked {
+        Job::Peek { id, epoch, .. } => daemon::Done::Peeked {
             result: values(&id).ok_or_else(missing),
             id,
             epoch,
@@ -470,7 +470,7 @@ pub(super) fn generated(s: &mut App) {
     let Some(seq) = s.generating() else { return };
     let password = zeroize::Zeroizing::new("Vq7#mRz2!pKx9@wLt4&nBe8".to_owned());
     s.apply(
-        agent::Done::Generated {
+        daemon::Done::Generated {
             seq,
             result: Ok(password),
         },
@@ -509,7 +509,7 @@ pub(super) fn detail_for_selection(s: &mut App) {
             ),
             field("comment", "text", "deploy@anoma.ly"),
         ],
-        // As the agent sends it: everything but the private key.
+        // As the daemon sends it: everything but the private key.
         "passkey" => vec![
             field("rp-id", "text", &item.label),
             field("username", "text", item.detail.as_deref().unwrap_or("")),
@@ -543,7 +543,7 @@ pub(super) fn detail_for_selection(s: &mut App) {
             field("password", "secret", "correct-horse"),
             field("security", "text", "WPA3"),
         ],
-        // As the agent lists it: the file's name, not its contents.
+        // As the daemon lists it: the file's name, not its contents.
         "document" => vec![
             field("file", "file", "passport-scan.pdf"),
             field("notes", "note", "Scanned 2026-03-02."),
@@ -584,7 +584,7 @@ pub(super) fn detail_for_selection(s: &mut App) {
     };
     let otp = item.kind == "login" && matches!(item.label.as_str(), "github.com" | "Cloudflare");
     if otp {
-        // The app never holds the secret: the agent leaves it out.
+        // The app never holds the secret: the daemon leaves it out.
         fields.insert(3, field("otp", "otp", ""));
     }
     s.set_detail(Some(ItemInfo { fields, ..item }));

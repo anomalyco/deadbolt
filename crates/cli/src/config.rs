@@ -1,8 +1,8 @@
 //! `$XDG_CONFIG_HOME/deadbolt/config.toml`:
 //!
 //! ```toml
-//! # Lock the agent after this long without a deadbolt command (idle timeout).
-//! # "never" (the default) keeps it unlocked until `deadbolt lock`, the agent
+//! # Lock the daemon after this long without a deadbolt command (idle timeout).
+//! # "never" (the default) keeps it unlocked until `deadbolt lock`, the daemon
 //! # stops, or the machine reboots. Units: s, m, h, d.
 //! unlock_timeout = "8h"
 //!
@@ -39,7 +39,7 @@ use anyhow::{Context, Result, bail};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-/// Runtime switches are read once when the agent starts. Both are for
+/// Runtime switches are read once when the daemon starts. Both are for
 /// tests and development only ([`test_env`]).
 pub struct Environment {
     pub local_net: bool,
@@ -73,7 +73,7 @@ pub fn env(name: &str) -> Result<String, std::env::VarError> {
 
 /// A switch for tests and development (`DEADBOLT_NET`, `DEADBOLT_KDF`,
 /// `DEADBOLT_TEST_*`): read only in debug builds, so nothing in a release
-/// build's environment, which a caller can set for the agent it starts,
+/// build's environment, which a caller can set for the daemon it starts,
 /// weakens the store's KDF, cuts it off the network or makes it claim
 /// another build. Release builds always act as if it's unset.
 pub fn test_env(name: &str) -> Option<String> {
@@ -148,7 +148,7 @@ pub struct ExtensionDir {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExtensionBuild {
-    /// Fills from the agent through `deadbolt browser-host`.
+    /// Fills from the daemon through `deadbolt browser-host`.
     #[default]
     Native,
     /// Its own vault in the browser, a device of its own.

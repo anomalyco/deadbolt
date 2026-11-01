@@ -1,12 +1,12 @@
 //! Holding an arrow down a long list: every frame shows a whole page, the
 //! highlight is on the selection on the frame it's made, and the requests
-//! waiting on the agent stay few. The `vault-243` scene's agent answers on
+//! waiting on the daemon stay few. The `vault-243` scene's daemon answers on
 //! the app's clock, `LOOPBACK_COST` a request.
 
 use std::collections::VecDeque;
 
 use deadbolt_app::MANY;
-use deadbolt_app::agent::{Done, Job, next_jobs};
+use deadbolt_app::daemon::{Done, Job, next_jobs};
 use deadbolt_app::model::{App, is_secret};
 use deadbolt_client::protocol::Change;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
@@ -76,10 +76,10 @@ fn holding_down_shows_a_whole_page_every_frame() {
             let lit = top(&rt, "highlight").unwrap();
             assert!((row - lit).abs() < 0.5, "step {step}: {lit} is on {row}");
         }
-        let (waiting, _) = rt.state.agent.backlog().unwrap();
+        let (waiting, _) = rt.state.daemon.backlog().unwrap();
         assert!(waiting <= 8, "step {step}: {waiting} requests wait");
     }
-    let (_, most) = rt.state.agent.backlog().unwrap();
+    let (_, most) = rt.state.daemon.backlog().unwrap();
     assert!(most <= 8, "at most {most} requests ever waited");
     assert!(
         missed.iter().all(|&step| step < 2),

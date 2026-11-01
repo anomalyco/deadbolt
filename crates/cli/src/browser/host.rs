@@ -1,15 +1,15 @@
 //! The native messaging host: the browser extension's connection to the
-//! agent. The message set is specified in `docs/autofill.md`.
+//! daemon. The message set is specified in `docs/autofill.md`.
 //!
 //! The browser starts it per `connectNative` and talks over stdin/stdout in
 //! frames of a native-endian `u32` length and that many bytes of UTF-8 JSON.
 //! Requests are answered in order, but for passkey ceremonies, which answer
 //! when done ([`super::passkeys`]), and their cancels, which answer at once
-//! however busy the agent is; `changed` messages from the agent's watch
+//! however busy the daemon is; `changed` messages from the daemon's watch
 //! stream are pushed in between. It exits when stdin closes.
 //!
-//! The host only checks requests' shape and turns them into agent commands:
-//! the agent finds a page's site from its origin and decides what it gets.
+//! The host only checks requests' shape and turns them into daemon commands:
+//! the daemon finds a page's site from its origin and decides what it gets.
 //! The host never prompts for a passphrase or Touch ID.
 
 use std::sync::Arc;
@@ -40,7 +40,7 @@ pub const PROTOCOL: u32 = 3;
 pub const MAX_REQUEST: usize = 64 * 1024;
 /// The browser's limit on a message from the host.
 pub const MAX_REPLY: usize = 1024 * 1024;
-/// How often to look for an agent to watch while none runs.
+/// How often to look for a daemon to watch while none runs.
 const RECONNECT: Duration = Duration::from_secs(2);
 
 /// The longest item name the vault takes.
@@ -602,11 +602,11 @@ fn done(reply: Reply) -> Result<(), Refusal> {
 pub(super) fn unexpected() -> Refusal {
     Refusal {
         code: Code::Failed,
-        message: "unexpected reply from the agent".into(),
+        message: "unexpected reply from the daemon".into(),
     }
 }
 
-/// One connection's state. Requests that ask the agent are answered one
+/// One connection's state. Requests that ask the daemon are answered one
 /// at a time, in order ([`Serial`]); passkey ceremonies and cancels are
 /// dealt with as they arrive, so a cancel never waits behind them.
 struct Host {
@@ -617,8 +617,8 @@ struct Host {
 /// The state of requests answered in order.
 struct Serial {
     paths: Paths,
-    /// Whether the watcher says `started` when it next finds an agent: set
-    /// when a watched agent goes away or hello couldn't reach one, cleared
+    /// Whether the watcher says `started` when it next finds a daemon: set
+    /// when a watched daemon goes away or hello couldn't reach one, cleared
     /// when hello did.
     announce: Arc<AtomicBool>,
     checks: Bucket,
@@ -791,7 +791,7 @@ impl Serial {
     async fn handle(&mut self, request: Request) -> Result<Body, Refusal> {
         match request {
             Request::Hello => {
-                // Cleared first: the agent this hello may start must not be
+                // Cleared first: the daemon this hello may start must not be
                 // announced if the watcher reconnects before hello returns.
                 self.announce.store(false, Ordering::SeqCst);
                 let (body, reached) = hello(&self.paths).await;
@@ -1110,8 +1110,8 @@ fn prune_learn_logs(dir: &std::path::Path, now: std::time::SystemTime) {
     }
 }
 
-/// Starts the agent if none runs, never unlocking it.
-/// Also whether an agent answered.
+/// Starts the daemon if none runs, never unlocking it.
+/// Also whether a daemon answered.
 async fn hello(paths: &Paths) -> (Body, bool) {
     let (status, detail) = match client::ensure_running(paths).await {
         Ok(status) if !status.initialized => (
@@ -1137,7 +1137,7 @@ async fn hello(paths: &Paths) -> (Body, bool) {
     (body, status != "unavailable")
 }
 
-/// What the extension hears of a change in the agent, if anything.
+/// What the extension hears of a change in the daemon, if anything.
 fn changed(change: &Change) -> Option<&'static str> {
     match change {
         Change::Locked => Some("locked"),
@@ -1153,10 +1153,10 @@ fn changed(change: &Change) -> Option<&'static str> {
     }
 }
 
-/// Pushes the agent's changes. While no agent runs it looks for one every
-/// `reconnect`. A stream counts only once the agent said it's watching: one
-/// that refuses or hangs up first (an agent of another protocol) is no
-/// change. Says `started` on finding an agent if `announce` is set.
+/// Pushes the daemon's changes. While no daemon runs it looks for one every
+/// `reconnect`. A stream counts only once the daemon said it's watching: one
+/// that refuses or hangs up first (a daemon of another protocol) is no
+/// change. Says `started` on finding a daemon if `announce` is set.
 async fn watch(
     paths: Paths,
     frames: mpsc::Sender<Zeroizing<Vec<u8>>>,
@@ -1417,10 +1417,10 @@ mod tests {
         assert!(bucket.take(later + second * 2));
     }
 
-    /// A fake agent at `paths`: each connection gets the next of `script`'s
+    /// A fake daemon at `paths`: each connection gets the next of `script`'s
     /// lines and is closed, round and round if `cycle`, else holding the
     /// last connection open.
-    fn fake_agent(paths: &Paths, script: Vec<Vec<Message>>, cycle: bool) {
+    fn fake_daemon(paths: &Paths, script: Vec<Vec<Message>>, cycle: bool) {
         let listener = tokio::net::UnixListener::bind(&paths.socket).unwrap();
         tokio::spawn(async move {
             let count = script.len();
@@ -1472,7 +1472,7 @@ mod tests {
         (pushed, announce.load(Ordering::SeqCst))
     }
 
-    /// An agent that won't be watched (another protocol) or hangs up
+    /// A daemon that won't be watched (another protocol) or hangs up
     /// before watching isn't one that stopped.
     #[tokio::test]
     async fn a_refused_watch_is_no_change() {
@@ -1480,24 +1480,24 @@ mod tests {
         let paths = test_paths(dir.path());
         let refused = Message::Error {
             code: ErrorCode::Version,
-            message: "the agent speaks protocol 6".into(),
+            message: "the daemon speaks protocol 6".into(),
             grant: None,
             passkeys: None,
         };
-        fake_agent(&paths, vec![vec![refused], vec![]], true);
+        fake_daemon(&paths, vec![vec![refused], vec![]], true);
         let (pushed, announce) = pushes(paths, false, Duration::from_millis(300)).await;
         assert_eq!(pushed, Vec::<Value>::new());
         assert!(!announce);
     }
 
     #[tokio::test]
-    async fn an_agent_that_goes_away_is_announced_when_back() {
+    async fn a_daemon_that_goes_away_is_announced_when_back() {
         let watching = || Message::Change {
             change: Change::Watching,
         };
         let dir = tempfile::tempdir().unwrap();
         let paths = test_paths(dir.path());
-        fake_agent(
+        fake_daemon(
             &paths,
             vec![
                 vec![
@@ -1514,10 +1514,10 @@ mod tests {
         assert_eq!(pushed, ["locked", "stopped", "started"]);
         assert!(!announce);
 
-        // Armed by a hello that found no agent.
+        // Armed by a hello that found no daemon.
         let dir = tempfile::tempdir().unwrap();
         let paths = test_paths(dir.path());
-        fake_agent(&paths, vec![vec![watching()]], false);
+        fake_daemon(&paths, vec![vec![watching()]], false);
         let (pushed, _) = pushes(paths, true, Duration::from_millis(300)).await;
         assert_eq!(pushed, ["started"]);
     }
@@ -1549,8 +1549,8 @@ mod tests {
     async fn passkey_ceremonies_answer_when_done_and_can_be_cancelled() {
         let dir = tempfile::tempdir().unwrap();
         let paths = test_paths(dir.path());
-        // An agent that takes the request and never answers.
-        fake_agent(&paths, vec![vec![]], false);
+        // A daemon that takes the request and never answers.
+        fake_daemon(&paths, vec![vec![]], false);
         let mut host = Host::new(paths);
         let (frames, mut outbox) = mpsc::channel(16);
         let get = serde_json::json!({
@@ -1585,7 +1585,7 @@ mod tests {
     }
 
     /// Learning lines go to their session's own log, in order, readable by
-    /// this user only, without an agent; a session id that isn't a UUID
+    /// this user only, without a daemon; a session id that isn't a UUID
     /// never becomes a path.
     #[tokio::test]
     async fn learn_lines_append_to_the_sessions_log() {
@@ -1719,13 +1719,13 @@ mod tests {
         frame
     }
 
-    /// A page flooding passkey calls keeps the agent busy listing; another
+    /// A page flooding passkey calls keeps the daemon busy listing; another
     /// tab's cancel is still answered at once.
     #[tokio::test]
     async fn a_cancel_is_not_stuck_behind_listing() {
         let dir = tempfile::tempdir().unwrap();
         let paths = test_paths(dir.path());
-        // An agent that takes every request and never answers.
+        // A daemon that takes every request and never answers.
         let listener = tokio::net::UnixListener::bind(&paths.socket).unwrap();
         tokio::spawn(async move {
             let mut held = Vec::new();
@@ -1809,7 +1809,7 @@ mod tests {
                 verified: true,
             },
         };
-        fake_agent(&paths, vec![vec![items], vec![filled]], false);
+        fake_daemon(&paths, vec![vec![items], vec![filled]], false);
         let mut host = Host::new(paths);
         let (frames, _outbox) = mpsc::channel(16);
         let mut ask = async |request: Value| {
@@ -1833,7 +1833,7 @@ mod tests {
                     "brand": "Visa", "last4": "4242", "expiry": "2028-08", "billing": home,
                     "fields": ["number", "expiry"]}]})
         );
-        // Refused before the agent hears of them.
+        // Refused before the daemon hears of them.
         for bad in [
             serde_json::json!({"id": 2, "type": "forms", "origin": origin, "kinds": []}),
             serde_json::json!({"id": 2, "type": "forms", "origin": origin, "kinds": ["login"]}),
@@ -1861,7 +1861,7 @@ mod tests {
     #[tokio::test]
     async fn passkey_lists_are_rate_limited() {
         let dir = tempfile::tempdir().unwrap();
-        // No agent: each list that gets through says so.
+        // No daemon: each list that gets through says so.
         let mut host = Host::new(test_paths(dir.path()));
         let (frames, _outbox) = mpsc::channel(16);
         let list = br#"{"id": 1, "type": "passkey-list", "origin": "https://example.com"}"#;

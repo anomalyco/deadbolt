@@ -8,7 +8,7 @@ use deadbolt_client::protocol::{AgentClientInfo, AgentGrantInfo, Command, Fill, 
 use rune::{El, Tx, col, row, text};
 use rune_kit::Kit;
 
-use crate::agent::{Done, Failure, Job};
+use crate::daemon::{Done, Failure, Job};
 use crate::model::App;
 
 /// What Revoke removes.
@@ -18,7 +18,7 @@ pub enum Revoke {
     Grant(String),
 }
 
-/// Clients and grants, as the agent lists them.
+/// Clients and grants, as the daemon lists them.
 pub type Listing = (Vec<AgentClientInfo>, Vec<AgentGrantInfo>);
 
 #[derive(Default)]
@@ -57,7 +57,7 @@ impl App {
         self.send_agents(None);
     }
 
-    /// Something changed in the agent (pairing and grants are Activity
+    /// Something changed in the daemon (pairing and grants are Activity
     /// entries): an open list asks again.
     pub(crate) fn on_agents_changed(&mut self) {
         if self.agents.open {
@@ -72,7 +72,7 @@ impl App {
     fn send_agents(&mut self, revoke: Option<Revoke>) {
         self.agents.seq += 1;
         self.agents.loading = true;
-        self.agent.send(Job::Agents {
+        self.daemon.send(Job::Agents {
             seq: self.agents.seq,
             revoke,
         });
@@ -109,12 +109,12 @@ pub(crate) async fn run(paths: &Paths, seq: u64, revoke: Option<Revoke>) -> Done
             }
             None => {}
         }
-        let clients = crate::agent::call(paths, Command::AgentClientList, |r| match r {
+        let clients = crate::daemon::call(paths, Command::AgentClientList, |r| match r {
             Reply::AgentClients { clients } => Some(clients),
             _ => None,
         })
         .await?;
-        let grants = crate::agent::call(paths, Command::AgentGrantList, |r| match r {
+        let grants = crate::daemon::call(paths, Command::AgentGrantList, |r| match r {
             Reply::AgentGrants { grants } => Some(grants),
             _ => None,
         })

@@ -1,8 +1,8 @@
 //! End-to-end tests: each device is a separate set of directories with its
-//! own agent process, networking over localhost only except the opt-in ignored
+//! own daemon process, networking over localhost only except the opt-in ignored
 //! standalone browser sync test, which requires public relays.
 
-// The agent reads the test switches these set (`DEADBOLT_NET`,
+// The daemon reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
 #![cfg(test)]
 #![cfg(debug_assertions)]
@@ -146,7 +146,7 @@ impl Device {
 
     /// `cmd`, to run reparented away from the test's process tree, as from
     /// a person's own terminal: the tests may run under an AI host such as
-    /// OpenCode, and the agent walks a caller's parents (by ppid, so
+    /// OpenCode, and the daemon walks a caller's parents (by ppid, so
     /// `setsid` wouldn't help) to refuse AIs what a person may do.
     ///
     /// The returned `/bin/sh` stands in for `cmd`: give it stdio and spawn
@@ -259,16 +259,16 @@ echo $? >"$status.tmp" && mv "$status.tmp" "$status"
         String::from_utf8(output.stderr).unwrap()
     }
 
-    fn agent_pid(&self) -> Option<String> {
-        let out = self.try_run(&["agent", "status"]);
+    fn daemon_pid(&self) -> Option<String> {
+        let out = self.try_run(&["debug", "daemon", "status"]);
         let out = String::from_utf8(out.stdout).unwrap();
         out.strip_prefix("running pid ")
             .map(|rest| rest.split_whitespace().next().unwrap().to_string())
     }
 
-    /// The lock state `agent status` shows under its first line.
+    /// The lock state `debug daemon status` shows under its first line.
     fn state(&self) -> String {
-        let out = self.run(&["agent", "status"]);
+        let out = self.run(&["debug", "daemon", "status"]);
         out.lines().nth(1).unwrap_or_default().to_string()
     }
 
@@ -276,7 +276,7 @@ echo $? >"$status.tmp" && mv "$status.tmp" "$status"
         let mut log = String::new();
         if let Ok(dirs) = std::fs::read_dir(self.path("state")) {
             for dir in dirs.flatten() {
-                if let Ok(text) = std::fs::read_to_string(dir.path().join("agent.log")) {
+                if let Ok(text) = std::fs::read_to_string(dir.path().join("daemon.log")) {
                     log.push_str(&text);
                 }
             }
@@ -298,12 +298,12 @@ echo $? >"$status.tmp" && mv "$status.tmp" "$status"
 
 impl Drop for Device {
     fn drop(&mut self) {
-        if let Err(error) = self.cmd(&["agent", "stop"]).output() {
-            eprintln!("test cleanup could not stop agent: {error}");
+        if let Err(error) = self.cmd(&["debug", "daemon", "stop"]).output() {
+            eprintln!("test cleanup could not stop daemon: {error}");
         }
         if std::thread::panicking() {
             eprintln!(
-                "--- agent log {}\n{}",
+                "--- daemon log {}\n{}",
                 self.dir.path().display(),
                 self.log()
             );
@@ -560,8 +560,8 @@ fn pairing_membership_and_removal() {
     let out = c.run(&["sync", "--vault", "other"]);
     assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
 
-    // Restarting the agent keeps everything (store + meta).
-    a.run(&["agent", "stop"]);
+    // Restarting the daemon keeps everything (store + meta).
+    a.run(&["debug", "daemon", "stop"]);
     a.run(&["unlock"]);
     assert_eq!(a.devices(), ["alpha", "beta"]);
     assert!(a.run(&["vault", "ls"]).contains("other\t"));
@@ -616,7 +616,7 @@ fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
     assert_eq!(a.devices(), ["alpha"]);
 }
 
-/// The agent's side of `join` on a device that isn't set up, as a client
+/// The daemon's side of `join` on a device that isn't set up, as a client
 /// without a passphrase up front sees it: the code, then `joined` asking for
 /// the passphrase, and nothing on disk before the answer. Hanging up instead
 /// discards the join; the inviter then lists a device never seen, which
@@ -635,7 +635,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
             "XDG_CONFIG_HOME" => Some(b.path("config").into()),
             _ => None,
         });
-        // The test's own process may run under an AI host, which the agent
+        // The test's own process may run under an AI host, which the daemon
         // refuses `join`: talk to the socket through a bridge run as from a
         // person's terminal (`Device::detach`). Closing its stdin hangs up.
         let mut bridge = b
@@ -751,7 +751,7 @@ fn a_new_device_join_needs_a_passphrase_source() {
 /// watcher with `app` set. The first opening adds the desktop entry.
 #[cfg(target_os = "linux")]
 #[test]
-fn app_comes_forward_through_the_agent_instead_of_starting_again() {
+fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
     use deadbolt_client::protocol::Change;
     use std::os::unix::fs::PermissionsExt;
 
@@ -801,10 +801,10 @@ fn app_comes_forward_through_the_agent_instead_of_starting_again() {
             .collect::<Vec<_>>()
     };
 
-    // No agent: the app starts, and takes the launcher's token itself.
+    // No daemon: the app starts, and takes the launcher's token itself.
     app(&[("XDG_ACTIVATION_TOKEN", "one")]);
     eventually("the first start", || started() == ["ui one"]);
-    assert_eq!(a.agent_pid(), None, "opening the app starts no agent");
+    assert_eq!(a.daemon_pid(), None, "opening the app starts no daemon");
     let written = std::fs::read_to_string(&entry).unwrap();
     assert!(
         written.contains(&format!("Exec={} app\n", deadbolt.display())),
@@ -813,7 +813,7 @@ fn app_comes_forward_through_the_agent_instead_of_starting_again() {
     // An entry already there stays as it is.
     std::fs::write(&entry, "[Desktop Entry]\nExec=/elsewhere app\n").unwrap();
 
-    // An agent, but no app watching: it starts.
+    // A daemon, but no app watching: it starts.
     a.run(&["debug", "whoami"]);
     app(&[("XDG_ACTIVATION_TOKEN", "two")]);
     eventually("the second start", || started() == ["ui one", "ui two"]);
@@ -864,17 +864,47 @@ fn app_comes_forward_through_the_agent_instead_of_starting_again() {
 }
 
 #[test]
-fn agent_is_single_instance() {
+fn daemon_is_single_instance() {
     let a = Device::new();
     a.run(&["init"]);
-    let pid = a.agent_pid().expect("agent running");
-    let out = a.try_run(&["agent"]);
+    let pid = a.daemon_pid().expect("daemon running");
+    let out = a.try_run(&["daemon"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("already running"));
-    assert_eq!(a.agent_pid(), Some(pid));
-    assert_eq!(a.run(&["agent", "stop"]), "stopped\n");
-    assert_eq!(a.agent_pid(), None);
-    assert_eq!(a.run(&["agent", "stop"]), "not running\n");
+    assert_eq!(a.daemon_pid(), Some(pid));
+    assert_eq!(a.run(&["debug", "daemon", "stop"]), "stopped\n");
+    assert_eq!(a.daemon_pid(), None);
+    assert_eq!(a.run(&["debug", "daemon", "stop"]), "not running\n");
+}
+
+/// An older build's `deadbolt update` restarts the daemon as `deadbolt
+/// agent` and waits for it at `agent.sock`.
+#[test]
+fn the_daemon_answers_under_its_old_name() {
+    let a = Device::new();
+    a.run(&["init"]);
+    a.run(&["debug", "daemon", "stop"]);
+    let paths = deadbolt_client::Paths::from_vars(|name| match name {
+        "DEADBOLT_HOME" => Some(a.path("home").into()),
+        "XDG_RUNTIME_DIR" => Some(a.path("run").into()),
+        "XDG_STATE_HOME" => Some(a.path("state").into()),
+        "XDG_CONFIG_HOME" => Some(a.path("config").into()),
+        _ => None,
+    });
+    let old = paths.socket.with_file_name("agent.sock");
+    let mut daemon = a
+        .cmd(&["agent"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    eventually("the old socket to answer", || {
+        std::os::unix::net::UnixStream::connect(&old).is_ok()
+    });
+    assert!(a.daemon_pid().is_some());
+    assert_eq!(a.run(&["debug", "daemon", "stop"]), "stopped\n");
+    assert!(wait(&mut daemon, Duration::from_secs(30)).success());
+    assert!(std::fs::symlink_metadata(&old).is_err());
 }
 
 #[test]
@@ -942,7 +972,7 @@ fn detached_code(device: &Device, args: &[&str], input: &str) -> (i32, String, S
     )
 }
 
-/// One request to the agent, as an agent client sends it.
+/// One request to the daemon, as an agent client sends it.
 fn agent_request(device: &Device, request: serde_json::Value) -> serde_json::Value {
     use std::os::unix::net::UnixStream;
     let paths = deadbolt_client::Paths::from_vars(|name| match name {
@@ -1714,15 +1744,15 @@ fn ai_agents_cant_send_the_browsers_fills_and_saves() {
 }
 
 #[test]
-fn shares_an_agent_of_another_build() {
+fn shares_a_daemon_of_another_build() {
     let a = Device::new();
     let old = a.output(
         a.cmd(&["debug", "whoami"])
             .env("DEADBOLT_TEST_VERSION", "0.0.0-old"),
     );
     assert!(old.status.success());
-    let pid = a.agent_pid().unwrap();
-    // Two builds of one protocol, in turns: neither replaces the other's agent.
+    let pid = a.daemon_pid().unwrap();
+    // Two builds of one protocol, in turns: neither replaces the other's daemon.
     for _ in 0..2 {
         a.run(&["debug", "whoami"]);
         assert_eq!(a.state(), "not set up");
@@ -1732,53 +1762,53 @@ fn shares_an_agent_of_another_build() {
         );
         assert!(out.status.success());
     }
-    assert_eq!(a.agent_pid().unwrap(), pid);
-    let out = a.run(&["agent", "status"]);
+    assert_eq!(a.daemon_pid().unwrap(), pid);
+    let out = a.run(&["debug", "daemon", "status"]);
     assert!(out.ends_with("version 0.0.0-old\nnot set up\n"), "{out}");
 }
 
 #[test]
-fn replaces_an_agent_of_an_older_protocol() {
+fn replaces_a_daemon_of_an_older_protocol() {
     let a = Device::new();
     let old = a.output(
         a.cmd(&["debug", "whoami"])
             .env("DEADBOLT_TEST_PROTOCOL", "1"),
     );
     assert!(old.status.success());
-    let old_pid = a.agent_pid().unwrap();
+    let old_pid = a.daemon_pid().unwrap();
 
     a.run(&["debug", "whoami"]);
     assert_eq!(a.state(), "not set up");
-    let pid = a.agent_pid().unwrap();
+    let pid = a.daemon_pid().unwrap();
     assert_ne!(pid, old_pid);
     a.run(&["debug", "whoami"]);
-    assert_eq!(a.agent_pid().unwrap(), pid);
+    assert_eq!(a.daemon_pid().unwrap(), pid);
 }
 
 #[test]
-fn leaves_an_agent_of_a_newer_protocol_running() {
+fn leaves_a_daemon_of_a_newer_protocol_running() {
     let a = Device::new();
     let newer = a.output(a.cmd(&["debug", "whoami"]).env(
         "DEADBOLT_TEST_PROTOCOL",
         (deadbolt_client::protocol::PROTOCOL_VERSION + 1).to_string(),
     ));
     assert!(newer.status.success());
-    let pid = a.agent_pid().unwrap();
+    let pid = a.daemon_pid().unwrap();
 
     let error = a.fail(&["debug", "whoami"]);
     for part in [
-        "a newer Deadbolt agent is running",
+        "a newer Deadbolt daemon is running",
         BIN,
         &format!("pid {pid}"),
-        "deadbolt agent stop",
+        "deadbolt debug daemon stop",
     ] {
         assert!(error.contains(part), "{error}");
     }
-    assert_eq!(a.agent_pid().unwrap(), pid);
+    assert_eq!(a.daemon_pid().unwrap(), pid);
     // The way out it names works.
-    assert_eq!(a.run(&["agent", "stop"]), "stopped\n");
+    assert_eq!(a.run(&["debug", "daemon", "stop"]), "stopped\n");
     a.run(&["debug", "whoami"]);
-    assert_ne!(a.agent_pid().unwrap(), pid);
+    assert_ne!(a.daemon_pid().unwrap(), pid);
 }
 
 #[test]
@@ -2051,8 +2081,8 @@ fn items() {
     );
     a.run(&["rm", "gitlab"]);
 
-    // Everything survives an agent restart.
-    a.run(&["agent", "stop"]);
+    // Everything survives a daemon restart.
+    a.run(&["debug", "daemon", "stop"]);
     a.run(&["unlock"]);
     assert_eq!(a.run(&["ls"]).lines().count(), 7);
 }
@@ -2584,7 +2614,7 @@ fn watch_prints_changes_as_json_lines() {
     assert_eq!(next(), serde_json::json!({"change": "locked"}));
     a.run(&["unlock"]);
     assert_eq!(next(), serde_json::json!({"change": "unlocked"}));
-    a.run(&["agent", "stop"]);
+    a.run(&["debug", "daemon", "stop"]);
     assert_eq!(next(), serde_json::json!({"change": "stopping"}));
     assert!(wait(&mut child, Duration::from_secs(10)).success());
     assert!(
@@ -3019,7 +3049,7 @@ fn browser_host_checks_and_saves_logins() {
     host.close();
 }
 
-/// A generated password waits in the agent, for its page's origin only:
+/// A generated password waits in the daemon, for its page's origin only:
 /// as a candidate until the extension says it went into the page, then
 /// until it's saved. Nothing is saved before, locking forgets it, and rules
 /// that allow only weak passwords get none.
@@ -3274,27 +3304,27 @@ fn browser_host_when_locked_or_not_set_up() {
     ] {
         assert_error(&host.ask(request), "locked");
     }
-    // A stopped agent is locked too, and the host never starts one but
+    // A stopped daemon is locked too, and the host never starts one but
     // for hello, nor prompts.
-    a.run(&["agent", "stop"]);
+    a.run(&["debug", "daemon", "stop"]);
     assert_error(
         &host.ask(serde_json::json!({"type": "list", "origin": "https://github.com"})),
         "locked",
     );
-    assert!(a.agent_pid().is_none());
+    assert!(a.daemon_pid().is_none());
     host.close();
 }
 
-/// The agent hello starts isn't news.
+/// The daemon hello starts isn't news.
 #[test]
-fn browser_host_announces_only_agents_that_come_back() {
+fn browser_host_announces_only_daemons_that_come_back() {
     let a = Device::new();
     a.run(&["init", "--device-name", "alpha"]);
-    a.run(&["agent", "stop"]);
+    a.run(&["debug", "daemon", "stop"]);
     let mut host = Host::start(&a);
     let hello = host.ask(serde_json::json!({"type": "hello"}));
     assert_eq!(hello["status"], "locked", "{hello}");
-    // The watcher looks for an agent every 2 s.
+    // The watcher looks for a daemon every 2 s.
     if let Some(message) = host.pushed(Duration::from_secs(5)) {
         panic!("pushed {message}");
     }
@@ -3316,9 +3346,9 @@ fn browser_host_pushes_changes() {
         "ready"
     );
     // The watch connects on its own; wait until an edit shows up. Edits are
-    // all it pushes: no `started` for the agent hello found running.
+    // all it pushes: no `started` for the daemon hello found running.
     let mut n = 0;
-    eventually("the host to watch the agent", || {
+    eventually("the host to watch the daemon", || {
         n += 1;
         new(
             &a,
@@ -3341,7 +3371,7 @@ fn browser_host_pushes_changes() {
     assert_eq!(change(&mut host), "locked");
     a.run(&["unlock"]);
     assert_eq!(change(&mut host), "unlocked");
-    a.run(&["agent", "stop"]);
+    a.run(&["debug", "daemon", "stop"]);
     assert_eq!(change(&mut host), "stopped");
     a.run(&["unlock"]);
     assert_eq!(change(&mut host), "started");
@@ -3582,7 +3612,7 @@ fn browser_host_registers_and_signs_in_with_passkeys() {
     );
     host.close();
 
-    // The private key never leaves the agent.
+    // The private key never leaves the daemon.
     let show = a.run(&["show", "--reveal", "example.com"]);
     assert!(
         show.contains("example.com") && !show.contains("private-key"),
@@ -3879,7 +3909,7 @@ fn the_release_helper_builds_every_swift_source() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let script = std::fs::read_to_string(root.join("scripts/build-enclave.sh")).unwrap();
     let build = std::fs::read_to_string(root.join("build.rs")).unwrap();
-    let mut sources: Vec<String> = std::fs::read_dir(root.join("src/agent"))
+    let mut sources: Vec<String> = std::fs::read_dir(root.join("src/daemon"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .filter(|name| name.ends_with(".swift"))
@@ -3892,7 +3922,7 @@ fn the_release_helper_builds_every_swift_source() {
             "build-enclave.sh doesn't compile {name}"
         );
         assert!(
-            build.contains(&format!("\"src/agent/{name}\"")),
+            build.contains(&format!("\"src/daemon/{name}\"")),
             "build.rs doesn't compile {name}"
         );
     }
@@ -5069,7 +5099,7 @@ fn documents_and_attachments() {
 }
 
 /// A .1pux with a document and an attachment: the client reads the files
-/// export.data names, and the agent maps every category to its type.
+/// export.data names, and the daemon maps every category to its type.
 #[test]
 fn import_1pux_with_files() {
     use zip::write::SimpleFileOptions;

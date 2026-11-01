@@ -33,7 +33,7 @@ sync. Unsupported operations fail rather than silently delegating to a native ho
 
 ### Passkeys
 
-The native agent and standalone worker call `deadbolt-core::passkeys` and
+The native daemon and standalone worker call `deadbolt-core::passkeys` and
 `deadbolt-core::webauthn`: shared RP/origin validation, exclusion checks,
 registration fields and new-item planning, ES256 signing, canonical CBOR,
 client data and authenticator flags. A synced passkey has the same item schema
@@ -86,7 +86,7 @@ stored account labels use the same filtering with a 256-character limit.
 
 ### Shared autofill rules
 
-Both the native agent and wasm device call `deadbolt-core::site`, moved from the
+Both the native daemon and wasm device call `deadbolt-core::site`, moved from the
 CLI without changing its policy: the full Public Suffix List including private
 suffixes, same-site subdomains, every saved URL field, and origin/host/parent/site
 ranking. Recent fills break ranking ties in encrypted local metadata. The same
@@ -140,7 +140,7 @@ cards, identities, API credentials, SSH keys, documents, databases, servers,
 Wi-Fi networks, licenses, bank accounts, passports, IDs, memberships, crypto
 wallets and synced passkeys). Labels, details, search words, the field each
 row copies and input normalization come from `deadbolt-core::listing`, moved
-from the native agent, so both name, find and write an item the same way.
+from the native daemon, so both name, find and write an item the same way.
 Search never looks at a secret value. `device-items` lists them, `device-item`
 returns one with plain values only (secrets say they are there; a file says
 its name and size), and `device-secret {ref, field}` returns one secret, or a
@@ -295,7 +295,7 @@ rather than retaining its old policy.
 ## Security compared with the native-host model
 
 With the native host, the unlocked database and device key reside in the native
-agent process; the extension receives selected fields over native messaging. In
+daemon process; the extension receives selected fields over native messaging. In
 standalone mode **the unlocked vault lives in the browser process**, in wasm memory
 owned by the extension worker. Compromising the extension, its privileged renderer
 or its update supply chain can disclose every unlocked item and the device key.
@@ -579,7 +579,7 @@ Scenarios check the same things, except where the builds differ on purpose:
 - its menu offers to unlock;
 - cards ask for nothing more under Comfortable.
 
-The native-agent `passkeys` and `formsTouchId` scenarios are skipped in this
+The native-daemon `passkeys` and `formsTouchId` scenarios are skipped in this
 parity harness. Real standalone passkey ceremonies and Strict reauthentication
 are covered separately by `e2e/standalone.ts`, including offline smoke in CI.
 CI runs the parity harness in four shards (`extension-standalone-e2e`).
@@ -645,7 +645,7 @@ pairs a CLI started with `deadbolt join`, checks the browser's login reached it 
 both devices are listed, and never asks the extension to sync: a browser write
 reaches the CLI through the CLI's own sync, and a login the CLI writes while the
 extension is locked appears on the device page after unlock through background
-sync. It fills that login through the inline menu, then suspends the CLI agent
+sync. It fills that login through the inline menu, then suspends the CLI daemon
 (`SIGSTOP`, a peer that stops answering mid-connection), fires the sync alarm, and
 checks hello, list and fill each answer within the limit while that sync waits.
 `--latency-ms` sets the limit (default 1000 ms, 1500 ms when `CI` is set); the
@@ -827,20 +827,20 @@ The first run could ask the native host to run `deadbolt approve <code>` itself.
 It doesn't, for three reasons:
 
 - Pairing admits a device to the vault: whoever holds the code's other end
-  gets every item. The CLI's `approve` runs on an unlocked agent without asking
+  gets every item. The CLI's `approve` runs on an unlocked daemon without asking
   again, so a native message that triggers it would turn any compromise of the
   extension (the threat this document already accepts for the standalone
   vault) into silent admission of an attacker's device into the native vault,
   which the extension never otherwise reaches.
 - The standalone build has no `nativeMessaging` permission, and adding it
-  would give the standalone build a channel to the native agent's whole host
+  would give the standalone build a channel to the native daemon's whole host
   protocol (`docs/autofill.md`), contradicting "no native-host fallback" above.
 - The user's terminal (or the app's Approve) is the confirmation the code
   exchange needs anyway: it proves the person at this browser also controls the
   native device.
 
 So the extension only starts the join and shows the code and the command. An
-automated path needs an admit step in the agent that requires the user every
+automated path needs an admit step in the daemon that requires the user every
 time (Touch ID or the passphrase in the app or CLI, not in the extension) and
 a host message that can do nothing else; that is follow-up work and needs its
 own security review. The `.deadbolt-extension` marker that makes the offer

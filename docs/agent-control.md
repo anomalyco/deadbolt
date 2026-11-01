@@ -12,7 +12,7 @@ AI (an AI host among its parents, or a claimed `OPENCODE_SESSION_ID`; a
 hint, so it only ever refuses):
 
 - sees a value (`item-get`, so `get` and `show`, and `item-code`) only with
-  Touch ID raised by the agent each time, as `deadbolt read`; without Touch
+  Touch ID raised by the daemon each time, as `deadbolt read`; without Touch
   ID, or with it cancelled or denied, it is `forbidden` (exit 4, "refused"
   in Activity);
 - is refused the Never tier outright: `setup`, `unlock`,
@@ -43,26 +43,26 @@ Not yet:
   and `item-restore` (`site-save` with a login and `passkey-create` are, as
   above).
 
-Words: **the agent** is Deadbolt's background agent (`deadbolt agent`), as
+Words: **the daemon** is Deadbolt's background process (`deadbolt daemon`), as
 everywhere else in these docs. **An AI** is an AI agent calling Deadbolt.
 **A caller** is any process on the control socket that isn't Deadbolt.app or
 the browser host.
 
 ## Summary
 
-- **The agent decides, per caller.** Today any process running as Kit can
+- **The daemon decides, per caller.** Today any process running as Kit can
   read every secret once the vault is unlocked (`docs/autofill.md`, threat
   model). An AI's shell runs as Kit, so it can too. This design makes the
-  agent look at who is asking and what for, the way it already checks a
+  daemon look at who is asking and what for, the way it already checks a
   page's site before a fill.
 - **Use, don't read.** An AI gets secrets into a command's environment or a
   file (`deadbolt run`, `deadbolt inject`), not into its transcript.
   Printing a value is possible, costs a Touch ID tap every time, and says so.
 - **A finger approves, not a click.** Approvals are a Deadbolt panel plus a
-  Touch ID sheet raised by the agent itself. Kit's AIs have Accessibility
+  Touch ID sheet raised by the daemon itself. Kit's AIs have Accessibility
   (cua-driver, computer use) and can click anything; they can't touch the
   sensor.
-- **Grants live in the agent.** The caller holds nothing it could copy or
+- **Grants live in the daemon.** The caller holds nothing it could copy or
   stretch. Locking drops every grant.
 - **Everything is logged** in an Activity list in the app, without values.
 
@@ -93,7 +93,7 @@ How today's protocol (`crates/client/src/protocol.rs`) maps:
   password locks Kit out until he restores it) and any change to an
   existing item's URLs. URLs decide where the browser extension fills, so
   adding `evil.example` to the GitHub login would hand the GitHub password
-  to that site. Values come from stdin or the agent's generator, never
+  to that site. Values come from stdin or the daemon's generator, never
   argv. Old values stay in the item's history (`Vault::history`), so a bad
   write can be undone. `item-restore` too: a restored login fills on its
   sites again.
@@ -108,7 +108,7 @@ How today's protocol (`crates/client/src/protocol.rs`) maps:
   them, `docs/app.md`), `lock` (makes things safer), `generate` (no vault
   needed), `sync`, `app-activate` (brings the desktop app forward).
 - **Browser only:** `site-logins`, `site-fill`, `site-check`, `site-save`
-  and `site-generate` with its check, keep and drop, from a caller the agent
+  and `site-generate` with its check, keep and drop, from a caller the daemon
   sees as the browser host (next section).
 
 `policy::decide(&Caller, &Command, &Grants) -> Allow | Ask | Deny` is one
@@ -118,18 +118,18 @@ every command for every kind of caller.
 
 ## Who is asking
 
-The agent reads the socket's peer, not anything the caller says:
+The daemon reads the socket's peer, not anything the caller says:
 
 - **The process:** macOS gives the peer's audit token (`LOCAL_PEERTOKEN`):
   pid plus pid version, so a reused pid can't pass. Linux gives
-  `SO_PEERCRED`: pid and uid, with no pid version. The agent remembers
+  `SO_PEERCRED`: pid and uid, with no pid version. The daemon remembers
   each peer it identified by pid, uid and pid version; on Linux the last is
   the process's start time (clock ticks), read from `/proc` after the
   connection, so it is missing if the process has already exited, and a
   process that `exec`s another program keeps its start time and so the
   entry made for the first. One more reason a Linux peer is labels only
   (below). The workspace forbids `unsafe`, so this comes from a dependency
-  (`nix`, in `deadbolt-client`'s `peer` module, shared by the agent, the
+  (`nix`, in `deadbolt-client`'s `peer` module, shared by the daemon, the
   CLI and the app).
 - **Its code signature:** checked against the audit token
   (`SecCodeCopyGuestWithAttributes`) in the hash-pinned Swift helper that
@@ -145,9 +145,9 @@ The agent reads the socket's peer, not anything the caller says:
 
 That sorts every connection into one of three:
 
-- **Deadbolt.app:** a process running the `MacOS/Deadbolt` of the agent's
+- **Deadbolt.app:** a process running the `MacOS/Deadbolt` of the daemon's
   own bundle, by real path, that is that code: for a Developer ID build,
-  signed by the team compiled into the agent (`DEADBOLT_APPLE_TEAM_ID`, or
+  signed by the team compiled into the daemon (`DEADBOLT_APPLE_TEAM_ID`, or
   the team in `DEADBOLT_APPLE_SIGNING_IDENTITY`, at build time) as
   `pw.deadbolt.app`; for an ad-hoc build, matching that file's cdhash, since
   two ad-hoc builds with one identifier aren't the same code. A copy of the
@@ -156,7 +156,7 @@ That sorts every connection into one of three:
   `deadbolt` binary: run from its bundle it is only ever the app
   (`docs/app.md`, One command), but a copy elsewhere would run CLI commands
   under the app's signature. Outside a bundle there's no app: `deadbolt ui`
-  is the agent's own code under its own identity, a caller. Everything, as
+  is the daemon's own code under its own identity, a caller. Everything, as
   today.
   - **Ad-hoc is only as strong as the bundle's directory.** Something that
     can write into `Deadbolt.app` can swap `MacOS/Deadbolt` and be the app.
@@ -166,8 +166,8 @@ That sorts every connection into one of three:
   paired, speaking for an extension install Kit paired. Site commands only.
   Today any process can run `deadbolt browser-host chrome-extension://…`,
   name any origin and get that site's password; this closes it.
-  - **Until pairing lands** (build order 3), the agent calls a peer the
-    browser host when it runs the agent's own code with `browser-host`
+  - **Until pairing lands** (build order 3), the daemon calls a peer the
+    browser host when it runs the daemon's own code with `browser-host`
     arguments. Arguments are read by pid and a process can rewrite its own,
     so that label is for Activity only and never grants anything.
   - **Why not a vendor list or the extension id:** the id's manifest key is
@@ -179,7 +179,7 @@ That sorts every connection into one of three:
   - **Pair once per install, with a tap.** On first connect the extension
     makes a key pair (WebCrypto, non-extractable) and asks to pair; Deadbolt
     shows the browser (its signing identity: team ID, or cdhash when
-    ad-hoc) and the profile, and Kit taps. The agent pins that browser
+    ad-hoc) and the profile, and Kit taps. The daemon pins that browser
     identity and the extension's public key together. Later connects answer
     a challenge with the key and must come from the pinned browser. A new
     browser, a new profile or a reinstalled extension pairs again; an
@@ -201,7 +201,7 @@ That sorts every connection into one of three:
 is read after the connection, so a process can race it. A Linux peer is
 always a caller, its check `unverified`, and its label ends "unverified
 (Linux)" in `debug whoami`, Activity and the app. Nothing a Linux peer sends is
-taken on its word: the agent refuses every `ActivityReport`, so the app's
+taken on its word: the daemon refuses every `ActivityReport`, so the app's
 reveals and copies aren't entries there. Its requests for the values it
 shows are, as an unverified caller's.
 
@@ -217,7 +217,7 @@ shows are, as an unverified caller's.
 
 **Why a compromised caller can't widen its own scope:**
 
-- The grant (items, fields, tier, anchor, expiry) is a row in the agent,
+- The grant (items, fields, tier, anchor, expiry) is a row in the daemon,
   fixed from what Kit saw when he approved. The caller holds no token to
   edit or replay. Anything outside the row asks again.
 - It can't approve itself: approvals are answered only by Deadbolt.app's
@@ -226,23 +226,23 @@ shows are, as an unverified caller's.
   code signature, not by name or by what they ask for.
 - It can't loosen the rules: no env var or `config.toml` key weakens the
   gate. Anything that would (later: standing grants) lives in `store.redb`
-  and changes in the app with a tap. Restarting the agent leaves it locked,
+  and changes in the app with a tap. Restarting the daemon leaves it locked,
   with no grants.
-- It can't fake the agent: on every connection, before sending anything
+- It can't fake the daemon: on every connection, before sending anything
   (a passphrase, a request, a watch), the app and the CLI
   check that the socket's owner runs from the exact `deadbolt` they expect
   (the CLI's own binary, the app's bundled helper), by real path, and is
   that code: by team and the `deadbolt` identifier for a Developer ID build,
   by the cdhash of that file for an ad-hoc one. A copy elsewhere is refused.
-  A process that stops the agent and binds the socket gets nothing. The
-  check is `deadbolt_client::set_agent_check`, run once per agent process
+  A process that stops the daemon and binds the socket gets nothing. The
+  check is `deadbolt_client::set_daemon_check`, run once per daemon process
   (known by its audit token); a client that sets none can't send `setup` or
   `unlock` at all, and checks only the owner's user for the rest. `stop`
   goes to whatever holds the socket, so a stale or foreign one can be
   stopped. The CLI runs its hash-pinned helper; the app runs the
   `deadbolt-enclave` in its own bundle, which the bundle's signature covers.
   - So after rebuilding an ad-hoc build, the new binary won't talk to the
-    agent the old one started until `deadbolt agent stop`, as it already
+    daemon the old one started until `deadbolt debug daemon stop`, as it already
     wouldn't unlock it.
   - Every macOS distribution ships `deadbolt-enclave` beside `deadbolt`
     (the release tarballs, Homebrew, `deadbolt.pw/install`). Without it,
@@ -250,8 +250,8 @@ shows are, as an unverified caller's.
     unchecked fallback.
   - On Linux the check is only that the socket's owner runs as this user.
     The socket's 0700 directory keeps other users out; that isn't
-    authentication, and any process of Kit's could stand in for the agent.
-  - The agent, for its part, takes its runtime directory only if it's a
+    authentication, and any process of Kit's could stand in for the daemon.
+  - The daemon, for its part, takes its runtime directory only if it's a
     real directory of this user's (not a symlink), makes it 0700 before
     binding, and drops any connection from another user.
 - What it can still do: use what was granted, from inside the anchor,
@@ -270,11 +270,11 @@ per-session key held by OpenCode is under Later.
 ## Approving
 
 ```text
-caller ── resolve ──▶ agent: decide → ask
-agent ── watch: approvals ──▶ Deadbolt.app (opened if not running)
+caller ── resolve ──▶ daemon: decide → ask
+daemon ── watch: approvals ──▶ Deadbolt.app (opened if not running)
 panel: who · what · scope        [Deny]  [Allow once]  [Allow 15 min]
-Allow ──▶ agent runs deadbolt-enclave confirm "<reason the agent wrote>"
-Touch ID ──▶ grant row in agent ──▶ caller gets the values
+Allow ──▶ daemon runs deadbolt-enclave confirm "<reason the daemon wrote>"
+Touch ID ──▶ grant row in daemon ──▶ caller gets the values
 ```
 
 **The panel shows:**
@@ -289,11 +289,11 @@ Touch ID ──▶ grant row in agent ──▶ caller gets the values
 One prompt per command: `run` asks for all its references at once. Deny has
 focus. Esc, closing the panel and 60 s without an answer all deny.
 
-**The Touch ID sheet** carries the agent's own sentence, built from
+**The Touch ID sheet** carries the daemon's own sentence, built from
 verified facts: `Allow OpenCode to run "wrangler deploy" with Cloudflare ›
 token, once`. The helper checks the finger with `LAContext`. That's a yes or
 no, which `docs/touch-id.md` calls weak for protecting a key at rest. It's
-fine here: the agent already holds the keys and only needs to know a finger
+fine here: the daemon already holds the keys and only needs to know a finger
 touched, from a helper it hash-checks before running.
 
 **Scopes:**
@@ -321,7 +321,7 @@ touched, from a helper it hash-checks before running.
 
 **What can't spoof a prompt:**
 
-- **A fake window:** only the agent grants, and only after a tap through its
+- **A fake window:** only the daemon grants, and only after a tap through its
   own helper. A window someone else draws grants nothing.
 - **Synthetic clicks and keys:** a click never approves on its own.
   1Password lists Accessibility-enabled apps getting past its prompt as an
@@ -338,13 +338,13 @@ touched, from a helper it hash-checks before running.
 
 ## Lock, limits, activity
 
-- **Lock:** any lock (⌘L, idle, sleep, screen lock, `deadbolt lock`, agent
+- **Lock:** any lock (⌘L, idle, sleep, screen lock, `deadbolt lock`, daemon
   stop) drops every grant and pending prompt. While locked, callers get
   `locked` (see Decision 3).
 - **Idle lock:** caller requests don't count as use, as `site-logins`
   doesn't, so a looping AI can't hold the vault open.
 - **Limits, per anchor:**
-  - One prompt on screen at a time across the agent, and at most 3 queued
+  - One prompt on screen at a time across the daemon, and at most 3 queued
     per anchor. More get `rate_limited`.
   - 3 denials or timeouts in 10 minutes and that anchor's prompts deny
     themselves for 10 minutes, shown in Activity. A runaway AI can't wear
@@ -360,7 +360,7 @@ touched, from a helper it hash-checks before running.
   - The app's Settings › Activity lists them, with live grants and Revoke.
     The CLI has `deadbolt activity`, and `watch` sends an `activity` change.
   - The app reports its own reveals and copies (`ActivityReport`), which
-    the agent can't see; every copy in the app, the editor's ⌘C included,
+    the daemon can't see; every copy in the app, the editor's ⌘C included,
     goes through one function that reports it. The app's own requests, a
     caller's `status`, `watch` and `app-activate`, the browser host's lookups
     (`site-logins`, `site-check`, `passkey-list`, and `site-generate-check`
@@ -370,7 +370,7 @@ touched, from a helper it hash-checks before running.
     itself. `site-generate` and `site-generate-keep` are entries naming the
     page, never the password or its id.
   - An entry is written before its reply goes, so a client that never reads
-    the reply, or the agent stopping, can't lose it.
+    the reply, or the daemon stopping, can't lose it.
   - **Bounded.** Each string in an entry (the claim, labels, paths, titles,
     field names) keeps at most 256 bytes, marked "…(cut)", and each list 16
     items. Past 60 entries a minute from one anchor (the tty and its
@@ -397,7 +397,7 @@ touched, from a helper it hash-checks before running.
   the prompt. This stops accidents, not a determined command, which is why
   the prompt shows the command.
 - **Never in argv, logs, errors or Activity**, as today. Writes take values
-  on stdin or generate them in the agent.
+  on stdin or generate them in the daemon.
 - **A `deadbolt` OpenCode skill** with 2password's rules, so AIs learn the
   safe path first.
 
@@ -448,7 +448,7 @@ Later:
   `Run { argv, cwd, mask }`, `Inject { output }` or `Read`. It may send
   `Event::Waiting { approval, summary }` (the CLI prints "Waiting for
   approval in Deadbolt…"), then replies `Secrets { values }` in reference
-  order. When the peer is a genuine `deadbolt`, the agent checks `argv`
+  order. When the peer is a genuine `deadbolt`, the daemon checks `argv`
   against the peer's real arguments; otherwise the panel says "unknown
   program".
 - `ItemGet` gains `fields: Option<Vec<String>>`. `Some([])` is Look; named
@@ -465,8 +465,8 @@ Later:
 
 1. **Caller identity and Activity, observe only.** Peer token, signature
    check, tty, ancestry, `debug whoami`, `activity`, the app's Activity list. The
-   app and CLI check the agent they talk to. Nothing is refused yet.
-2. **Approvals.** The agent's queue, the app's panel, `confirm`, the
+   app and CLI check the daemon they talk to. Nothing is refused yet.
+2. **Approvals.** The daemon's queue, the app's panel, `confirm`, the
    passphrase fallback, grants and anchors, lock dropping them, limits.
 3. **Enforce.** `policy::decide`. Read asks (`get`, `show --reveal`,
    `code`), Never refuses AIs, site commands only from a paired browser
@@ -485,7 +485,7 @@ Later:
 
 2026-10-29. Build orders 4 and 5, without the approval panel of build
 order 2: until approvals exist, standing grants stand in for "Allow 15
-min", and Touch ID raised by the agent for each read.
+min", and Touch ID raised by the daemon for each read.
 
 ```sh
 deadbolt run --env GH_TOKEN=deadbolt://personal/GitHub/token -- gh release create v1
@@ -535,7 +535,7 @@ changed since (same device, inode, size and modification time, recorded in
 
 **`deadbolt read`.** Prints one value, the Read tier.
 
-**Who gets values.** The agent's `resolve {refs, purpose}` (`run`,
+**Who gets values.** The daemon's `resolve {refs, purpose}` (`run`,
 `inject` or `read`) decides from the caller:
 
 - Not an AI (no AI host among its parents, no claimed OpenCode session):
@@ -543,7 +543,7 @@ changed since (same device, inode, size and modification time, recorded in
 - An AI, for `run` or `inject`: only what live grants cover, each item,
   field and purpose; otherwise `not-granted`, naming what is missing and
   the `deadbolt agents allow-secrets` line that would allow it.
-- An AI, for `read` (and `inject` to stdout): Touch ID raised by the agent
+- An AI, for `read` (and `inject` to stdout): Touch ID raised by the daemon
   every time, with its own sentence ("show personal › GitHub › password to
   an AI agent"). No grant skips that prompt, but a run or inject grant
   lets the AI learn the value another way (below). Without Touch ID
@@ -610,17 +610,17 @@ and "standing grants" items of Later, made unattended. Browse's side of the
 contract is in Browse's repo; this is Deadbolt's.
 
 ```text
-AI ── secrets.signIn ──▶ Browse relay ── agent-fill {client, origin, login, want} ──▶ agent
+AI ── secrets.signIn ──▶ Browse relay ── agent-fill {client, origin, login, want} ──▶ daemon
                          (reads the frame's origin over CDP,      checks token, grant, site
                           types the values, forgets them)  ◀────  values (never to the AI)
 ```
 
 **Pairing a client.** `deadbolt agents add-client browse` (Browse's
-`opencode-browser deadbolt connect` runs it) asks the agent for a new client.
-The agent makes an id and a token of 32 random bytes (64 hex digits), keeps
+`opencode-browser deadbolt connect` runs it) asks the daemon for a new client.
+The daemon makes an id and a token of 32 random bytes (64 hex digits), keeps
 only the token's SHA-256, and returns the token once. The client stores it
 (Browse: 0600 under its data root) and sends `client: {id, token}` with every
-request; the agent finds the id and compares the hashes in constant time.
+request; the daemon finds the id and compares the hashes in constant time.
 An unknown id, a wrong token or a removed client is `forbidden`.
 
 **Granting.** Allowing everything is meant to be easy.
@@ -644,16 +644,16 @@ allowed, with the caller-chosen client name in quotes: "pair a NEW agent
 client "browse" with Deadbolt", "let agent client "browse" use logins for
 github.com without asking".
 
-- Touch ID, raised by the agent itself with its own sentence ("let browse
+- Touch ID, raised by the daemon itself with its own sentence ("let browse
   sign in to sites for AI agents"), when Touch ID unlock is on and set up;
 - the vault passphrase, typed on the CLI's terminal (no echo) or given with
   `--passphrase-stdin`. Never `DEADBOLT_PASSPHRASE`: an AI's shell inherits
-  Kit's environment. The CLI checks the agent's identity before it sends the
-  passphrase, as for `unlock`. The agent checks it on a copy of the wrapped
+  Kit's environment. The CLI checks the daemon's identity before it sends the
+  passphrase, as for `unlock`. The daemon checks it on a copy of the wrapped
   key set, off the session's lock, so fills and the app carry on during the
   KDF; one check runs at a time, and after 5 wrong ones every check waits 30
   seconds, doubling up to 10 minutes, until a right one (`rate-limited`).
-  The backoff is one for every passphrase the agent checks: `unlock`
+  The backoff is one for every passphrase the daemon checks: `unlock`
   (locked, or unlocked asking for a longer idle timeout) and this proof
   share it, so none of them is a faster way to guess the passphrase. The
   app's unlock screen says "Too many wrong passphrases. Try again in N s.".
@@ -791,7 +791,7 @@ challenge, allow_credentials, user_verification}` → `passkey-assertion` with
   approval is not. Shape (from Ryan's Foyer, which already fills this way):
   - **By reference.** The AI sees metadata and an opaque ref, picks the ref
     and the step, and gets back only "submitted" or "failed". Values go
-    agent → extension → field, never to the AI.
+    daemon → extension → field, never to the AI.
   - **Approval bound to the browser's facts.** The tap shows and checks the
     frame origin the browser reports and delivers to that exact
     `documentId`, so a page that navigates during the wait gets nothing.

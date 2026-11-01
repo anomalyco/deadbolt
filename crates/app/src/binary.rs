@@ -62,12 +62,12 @@ pub fn search_dirs(path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
 
 /// This program's path with symlinks resolved, so a link named like a
 /// bundle's executable (`Some.app/Contents/MacOS/Deadbolt`) doesn't make its
-/// directory this app's bundle, with that bundle's helper as the agent.
+/// directory this app's bundle, with that bundle's helper as the daemon.
 pub fn resolved(exe: PathBuf) -> PathBuf {
     std::fs::canonicalize(&exe).unwrap_or(exe)
 }
 
-/// The agent program for the app at `exe` ([`resolved`]): the bundle's own
+/// The daemon program for the app at `exe` ([`resolved`]): the bundle's own
 /// helper inside Deadbolt.app, else `override_bin` (`DEADBOLT_BIN`), else
 /// this very binary, which is `deadbolt` with the app built in.
 pub fn discover(exe: Option<&Path>, override_bin: Option<&OsStr>) -> PathBuf {
@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn outside_a_bundle_the_agent_is_this_binary_unless_overridden() {
+    fn outside_a_bundle_the_daemon_is_this_binary_unless_overridden() {
         let exe = Path::new("/home/kit/.local/bin/deadbolt");
         assert_eq!(discover(Some(exe), None), exe);
         assert_eq!(discover(Some(exe), Some(OsStr::new(""))), exe);

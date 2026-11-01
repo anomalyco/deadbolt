@@ -1,6 +1,6 @@
 //! What clients show of items and how they take input for them: type
 //! names, sign-in providers, an item's label, detail and search words, and
-//! typing and normalizing a field's value. The native agent and the
+//! typing and normalizing a field's value. The native daemon and the
 //! browser-only device both use these, so an item is named, found and
 //! written the same way on every device.
 
@@ -117,7 +117,7 @@ pub fn primary_field(kind: &str) -> Option<&'static str> {
 }
 
 /// `month` of a 2- or 4-digit `year` (20YY) as `YYYY-MM`. The month is not
-/// range-checked here; the item rules do that. Shared by the agent's input
+/// range-checked here; the item rules do that. Shared by the daemon's input
 /// normalization and the importer.
 pub fn format_month(month: u8, year: &str) -> Option<String> {
     let year = year.trim();

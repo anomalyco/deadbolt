@@ -1,13 +1,13 @@
 #[cfg(not(unix))]
 compile_error!("deadbolt currently supports Unix platforms only");
 
-mod agent;
 mod agents;
 mod app;
 mod browser;
 mod caller;
 mod client;
 mod config;
+mod daemon;
 mod desktop;
 mod health;
 mod import;
@@ -43,7 +43,7 @@ use crate::protocol::{
 flags, env and stdin. The passphrase comes from DEADBOLT_PASSPHRASE or \
 --passphrase-stdin. Only when stdin and stderr are terminals does deadbolt ask for \
 what is missing; otherwise it fails, with exit code 3 if the store is locked and 4 \
-if the agent refused the request."
+if the daemon refused the request."
 )]
 struct Cli {
     /// Read the passphrase from the first line of stdin instead of
@@ -59,7 +59,7 @@ struct Cli {
 
 /// Exit code when the store is locked.
 const EXIT_LOCKED: u8 = 3;
-/// Exit code when the agent refused the request (not granted, forbidden).
+/// Exit code when the daemon refused the request (not granted, forbidden).
 const EXIT_DENIED: u8 = 4;
 
 #[derive(Subcommand)]
@@ -112,7 +112,7 @@ enum Commands {
         #[command(subcommand)]
         command: Option<SyncCommand>,
     },
-    /// List what callers asked the agent for, and what the app showed or
+    /// List what callers asked Deadbolt for, and what the app showed or
     /// copied, newest first. Names items and fields, never values.
     Activity {
         /// Only entries this recent (30m, 1h, 7d).
@@ -131,11 +131,13 @@ enum Commands {
     /// is in `deadbolt activity`.
     #[command(subcommand)]
     Agents(agents::AgentsCommand),
-    /// Run the background agent in the foreground, or manage it.
-    Agent {
-        #[command(subcommand)]
-        command: Option<AgentCommand>,
-    },
+    /// Run Deadbolt's background daemon in the foreground. Clients start it.
+    #[command(hide = true)]
+    Daemon,
+    /// The daemon under its old name, as an update from an older build
+    /// starts it.
+    #[command(name = "agent", hide = true)]
+    OldDaemon,
     /// Enable, disable or check Touch ID unlock on macOS.
     #[command(name = "touchid", visible_alias = "touch-id")]
     TouchId {
@@ -217,7 +219,7 @@ enum Commands {
     ///
     /// The link is the key: whoever opens it first gets the contents,
     /// decrypted in their browser. Nothing is uploaded anywhere; the
-    /// deadbolt agent on this computer serves the link live until it is
+    /// Deadbolt daemon on this computer serves the link live until it is
     /// opened, expires (default 1h) or is revoked, and only while it runs.
     ///
     ///   deadbolt send ./report.pdf ./keys/          files and folders
@@ -261,10 +263,11 @@ enum Commands {
     ///
     /// Downloads are checked against the release's size and SHA-256 and, on
     /// macOS, its code signature before anything is replaced. Installs from
-    /// Homebrew or another package manager get its command instead. The agent
+    /// Homebrew or another package manager get its command instead. The daemon
     /// restarts on the new build, locked. Works while the vault is locked.
     Update(update::UpdateArgs),
-    /// Diagnostics: how the agent sees you, its live change stream.
+    /// Diagnostics: how the daemon sees you, its live change stream, the
+    /// daemon itself.
     #[command(subcommand)]
     Debug(DebugCommand),
     /// Serve the browser extension at ORIGIN over stdin/stdout. Browsers
@@ -275,15 +278,20 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DebugCommand {
-    /// Show how the agent sees this process: its verified program, terminal
+    /// Show how the daemon sees this process: its verified program, terminal
     /// and parents, and what it claims (DEADBOLT_CALLER, OPENCODE_SESSION_ID).
     Whoami {
         #[arg(long)]
         json: bool,
     },
-    /// Print what changes in the agent as JSON lines: lock state, items,
-    /// vaults and devices, never values. Ends when the agent stops.
+    /// Print what changes in the daemon as JSON lines: lock state, items,
+    /// vaults and devices, never values. Ends when the daemon stops.
     Watch,
+    /// Show whether the background daemon is running and locked, or stop it.
+    Daemon {
+        #[command(subcommand)]
+        command: Option<DaemonCommand>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -396,11 +404,11 @@ enum SyncCommand {
 }
 
 #[derive(Subcommand)]
-enum AgentCommand {
-    /// Stop the agent (locks the store).
-    Stop,
-    /// Show whether the agent is running, and whether it's locked.
+enum DaemonCommand {
+    /// Show whether the daemon is running, and whether it's locked.
     Status,
+    /// Stop the daemon (locks the store).
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -442,19 +450,19 @@ fn main() -> ExitCode {
     }
     let json = args.iter().any(|a| a == "--json");
     let cli = Cli::parse_from(args);
-    let agent = matches!(cli.command, Commands::Agent { command: None });
-    // The agent's update notice: only to a person at a terminal.
+    let daemon = matches!(cli.command, Commands::Daemon | Commands::OldDaemon);
+    // The daemon's update notice: only to a person at a terminal.
     let notice = !json && notices_updates(&cli.command) && prompt::interactive();
-    // Commands die quietly when piped into `head`. The agent and the browser
+    // Commands die quietly when piped into `head`. The daemon and the browser
     // host keep Rust's ignored SIGPIPE: a client hanging up mid-reply must
     // not kill them before they clean up.
-    if !agent && !matches!(cli.command, Commands::BrowserHost { .. }) {
+    if !daemon && !matches!(cli.command, Commands::BrowserHost { .. }) {
         sigpipe::reset();
     }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| if agent { "warn,deadbolt=info" } else { "warn" }.into()),
+                .unwrap_or_else(|_| if daemon { "warn,deadbolt=info" } else { "warn" }.into()),
         )
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -486,13 +494,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// Whether `command` may end with the agent's update notice: not the
-/// agent, hosts and helpers other programs run, `update` (which says it
+/// Whether `command` may end with the daemon's update notice: not the
+/// daemon, hosts and helpers other programs run, `update` (which says it
 /// itself), `debug watch`, the app, or `run`, whose output is its program's.
 fn notices_updates(command: &Commands) -> bool {
     !matches!(
         command,
-        Commands::Agent { .. }
+        Commands::Daemon
+            | Commands::OldDaemon
             | Commands::BrowserHost { .. }
             | Commands::Update(_)
             | Commands::Debug(DebugCommand::Watch)
@@ -531,7 +540,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Lock
                 | Commands::Debug(_)
                 | Commands::Activity { .. }
-                | Commands::Agent { .. }
+                | Commands::Daemon
+                | Commands::OldDaemon
                 | Commands::TouchId { .. }
                 | Commands::Run(_)
                 | Commands::Inject(_)
@@ -580,7 +590,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 println!("{line}");
             }
         }
-        Commands::Agent { command: None } => agent::serve(paths).await?,
+        Commands::Daemon => daemon::serve(paths, false).await?,
+        Commands::OldDaemon => daemon::serve(paths, true).await?,
         Commands::Agents(command) => agents::run(&paths, command, vault, from_stdin).await?,
         Commands::Run(args) => return secrets::run(&paths, args, from_stdin).await,
         Commands::Inject(args) => secrets::inject(&paths, args, from_stdin).await?,
@@ -623,17 +634,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             extension_dir: Some(dir),
         }) => browser::unregister_extension_dir(&dir, &paths.config)?,
         Commands::BrowserHost { origin } => browser::host::run(paths, &origin).await?,
-        Commands::Agent {
-            command: Some(AgentCommand::Stop),
-        } => {
+        Commands::Debug(DebugCommand::Daemon {
+            command: Some(DaemonCommand::Stop),
+        }) => {
             let stopped = client::stop(&paths).await?;
             println!("{}", if stopped { "stopped" } else { "not running" });
         }
-        Commands::Agent {
-            command: Some(AgentCommand::Status),
-        } => match client::running(&paths).await {
-            Some(agent) => {
-                println!("running pid {} version {}", agent.pid, agent.version);
+        Commands::Debug(DebugCommand::Daemon {
+            command: None | Some(DaemonCommand::Status),
+        }) => match client::running(&paths).await {
+            Some(daemon) => {
+                println!("running pid {} version {}", daemon.pid, daemon.version);
                 if let Some(status) = client::status(&paths).await {
                     println!("{}", lock_state(&status));
                 }

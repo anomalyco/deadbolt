@@ -5,7 +5,7 @@ use rune::{El, Tx, row, spacer};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl};
 use zeroize::Zeroizing;
 
-use crate::agent::{Failure, Job};
+use crate::daemon::{Failure, Job};
 use crate::edit::Problem;
 use crate::model::App;
 use crate::onboarding::sentence;
@@ -57,7 +57,7 @@ impl App {
             .map(|f| f.edit.text.trim().to_owned())
             .filter(|c| !c.is_empty());
         form.set_generating(Some(seq));
-        self.agent.send(Job::SshGenerate {
+        self.daemon.send(Job::SshGenerate {
             kind: self.ssh.kind,
             comment,
             seq,
@@ -104,7 +104,7 @@ impl App {
             .map(|f| f.edit.text.trim().to_owned())
             .filter(|c| !c.is_empty());
         form.set_generating(Some(seq));
-        self.agent.send(Job::SshImportFile { path, comment, seq });
+        self.daemon.send(Job::SshImportFile { path, comment, seq });
     }
 
     pub(crate) fn on_ssh_generated(&mut self, seq: u64, result: Result<SshGeneratedKey, Failure>) {

@@ -2,7 +2,7 @@
 // @deadbolt/cli's postinstall: points bin/deadbolt at this platform's
 // `deadbolt` from its @deadbolt/cli-<platform> package, as @opencode/cli's
 // postinstall does. On macOS that's Deadbolt.app's Contents/Helpers/deadbolt
-// (the package carries the signed app), so the command, the agent and the app
+// (the package carries the signed app), so the command, the daemon and the app
 // are one install, and `deadbolt app` opens that Deadbolt.app. Links, never
 // copies: Deadbolt knows its own files by real path (the Touch ID helper
 // beside it, the app around it).

@@ -55,7 +55,7 @@ fn detail(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         offer,
         crate::import::view::imported(s, k),
         notice(s, k),
-        agent_notice(s, k),
+        daemon_notice(s, k),
     ]
     .into_iter()
     .flatten();
@@ -301,7 +301,7 @@ fn field_frame(
         )
 }
 
-/// The one-time code: the agent's current code in 3+3 groups, rolling to
+/// The one-time code: the daemon's current code in 3+3 groups, rolling to
 /// the next as its period ends, beside a bar that empties over the period.
 /// Each period's bar wipes in from the left. Copy copies the current code.
 fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit, on: bool) -> El {
@@ -385,7 +385,7 @@ fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit, on: bool) -> El {
     )
 }
 
-/// A file: its name, and Save… (a dialog, then the agent sends its
+/// A file: its name, and Save… (a dialog, then the daemon sends its
 /// contents to write there).
 fn file_row(item: &str, field: &FieldInfo, k: &Kit, on: bool) -> El {
     let name = &field.name;
@@ -416,7 +416,7 @@ fn field_row(s: &App, item: &str, kind: &str, field: &FieldInfo, k: &Kit, on: bo
         return file_row(item, field, k, on);
     }
     let secret = is_secret(&field.kind);
-    // The agent leaves one-time password secrets out (only the code field
+    // The daemon leaves one-time password secrets out (only the code field
     // gives a code), so there's nothing here to show or copy.
     let held = field.kind != "otp";
     let revealed = held && s.revealed.iter().any(|f| f == &field.name);
@@ -505,7 +505,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
     Some(status_pill(k, "copy-notice", pill))
 }
 
-fn agent_notice(s: &App, k: &Kit) -> Option<El> {
+fn daemon_notice(s: &App, k: &Kit) -> Option<El> {
     // With no list (it failed to load) there's nothing else on the page to
     // say why, so the notice shows then too.
     let n = s
@@ -514,7 +514,7 @@ fn agent_notice(s: &App, k: &Kit) -> Option<El> {
         .filter(|_| s.selected_item().is_some() || !s.loaded)?;
     Some(
         text(n.clone())
-            .key("agent-notice")
+            .key("daemon-notice")
             .font(k.ty.text_small)
             .color(k.c.danger.fg)
             .wrap()

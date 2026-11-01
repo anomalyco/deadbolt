@@ -1,7 +1,7 @@
 //! Recently Deleted: ⇧⌘⌫ or ⌘K open it over the vault, the keys move and
 //! open an item read-only, and a restore brings it back to the vault.
 
-use deadbolt_app::agent::{Done, Job, Values};
+use deadbolt_app::daemon::{Done, Job, Values};
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{Key, Mods};
 

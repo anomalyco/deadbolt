@@ -1,5 +1,5 @@
 // Generated passwords on the page side: what a sign-up or change-password
-// form's new-password boxes ask of a password (sent to the agent, which makes
+// form's new-password boxes ask of a password (sent to the daemon, which makes
 // it), whether one fits their `pattern`, and which generated password was
 // filled here, so a submit names it by id instead of sending it.
 //
@@ -230,9 +230,9 @@ export function fitsPattern(fields: Field[], value: string): boolean {
 }
 
 /**
- * The generated password last filled here and its id, and the last the agent
- * kept. Only in this content script's memory. Until the agent keeps one, a
- * submit sends it as typed: the agent couldn't resolve its id.
+ * The generated password last filled here and its id, and the last the daemon
+ * kept. Only in this content script's memory. Until the daemon keeps one, a
+ * submit sends it as typed: the daemon couldn't resolve its id.
  */
 let filled: { id: string; value: string } | null = null
 let kept: { id: string; value: string } | null = null
@@ -241,12 +241,12 @@ export function rememberGenerated(id: string, value: string) {
   filled = { id, value }
 }
 
-/** The agent kept the generated password filled under `id`. */
+/** The daemon kept the generated password filled under `id`. */
 export function keptGenerated(id: string) {
   if (filled?.id === id) kept = filled
 }
 
-/** The id of the generated password, if `value` is one the agent kept. */
+/** The id of the generated password, if `value` is one the daemon kept. */
 export function generatedId(value: string | undefined): string | undefined {
   return kept && value === kept.value ? kept.id : undefined
 }

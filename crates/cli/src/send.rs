@@ -1,8 +1,8 @@
 //! `deadbolt send`: one-time links to files, secrets and vault items, served
-//! live by the agent (see `docs/proposals/send.md`), and its `ls`, `show`
+//! live by the daemon (see `docs/proposals/send.md`), and its `ls`, `show`
 //! and `revoke` for the links made.
 //!
-//! The client builds and seals the bundle; the agent gets only the sealed
+//! The client builds and seals the bundle; the daemon gets only the sealed
 //! bytes and the access secret, never the content key, which goes straight
 //! into the link.
 
@@ -422,7 +422,7 @@ pub async fn send(
         println!("{}", *link);
     }
     eprintln!(
-        "send {}: {}, {}, expires {}. Served live from this computer: it ends if the deadbolt agent stops.",
+        "send {}: {}, {}, expires {}. Served live from this computer: it ends if the deadbolt debug daemon stops.",
         send.id,
         send.label,
         opens(send.opens),
@@ -467,7 +467,7 @@ async fn manage(paths: &Paths, command: SendCommand) -> Result<()> {
                 return Ok(());
             }
             if sends.is_empty() {
-                eprintln!("no sends (they end when the deadbolt agent stops)");
+                eprintln!("no sends (they end when the deadbolt debug daemon stops)");
             }
             for send in &sends {
                 println!(
@@ -536,10 +536,10 @@ fn link_base() -> String {
 fn sender_addr(sender: &SenderInfo) -> Result<SenderAddr> {
     let bytes = HEXLOWER
         .decode(sender.id.as_bytes())
-        .context("the agent's send endpoint id is not hex")?;
+        .context("the daemon's send endpoint id is not hex")?;
     let id = bytes
         .try_into()
-        .map_err(|_| anyhow!("the agent's send endpoint id is not 32 bytes"))?;
+        .map_err(|_| anyhow!("the daemon's send endpoint id is not 32 bytes"))?;
     Ok(SenderAddr {
         id,
         relay_url: sender.relay_url.clone(),

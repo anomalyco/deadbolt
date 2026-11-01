@@ -47,8 +47,8 @@ public final class AutoFillControllerModel {
         case configuration
     }
 
-    private let client: any AutofillAgentClient
-    private let launcher: any AgentLaunching
+    private let client: any AutofillDaemonClient
+    private let launcher: any DaemonLaunching
     private let identitySyncer: IdentitySyncer?
     private weak var completer: (any ExtensionContextCompleting)?
     private let pollIntervalsMS: [UInt64]
@@ -79,8 +79,8 @@ public final class AutoFillControllerModel {
     public var onChange: (@MainActor () -> Void)?
 
     public init(
-        client: any AutofillAgentClient,
-        launcher: any AgentLaunching,
+        client: any AutofillDaemonClient,
+        launcher: any DaemonLaunching,
         identitySyncer: IdentitySyncer?,
         completer: any ExtensionContextCompleting,
         pollIntervalsMS: [UInt64] = [40, 80, 120, 180, 250, 300, 350, 400, 500, 600, 600, 600]
@@ -109,7 +109,7 @@ public final class AutoFillControllerModel {
         recordIdentifier: String?,
         fallbackUsername: String,
         service: AutofillService,
-        client: any AutofillAgentClient,
+        client: any AutofillDaemonClient,
         identitySyncer: IdentitySyncer?,
         completer: any ExtensionContextCompleting
     ) async {
@@ -149,7 +149,7 @@ public final class AutoFillControllerModel {
                     _ = await syncer.syncIfNeeded(client: client, reportedHash: reportedHash)
                 }
             }
-        } catch let callError as AgentCallError {
+        } catch let callError as DaemonCallError {
             completer.cancelRequest(code: callError.extensionErrorCodeForSilentRequest)
         } catch {
             completer.cancelRequest(code: .failed)
@@ -283,10 +283,10 @@ public final class AutoFillControllerModel {
         runTask { [weak self] in
             guard let self else { return }
             do {
-                _ = try await self.callAgent(.unlockBiometric, timeout: Self.interactiveTimeout)
+                _ = try await self.callDaemon(.unlockBiometric, timeout: Self.interactiveTimeout)
                 self.touchIdInFlight = false
                 await self.resumeAfterUnlock()
-            } catch let err as AgentCallError {
+            } catch let err as DaemonCallError {
                 self.touchIdInFlight = false
                 if !err.isBiometricCancelled {
                     self.unlockError = err.userFacingUnlockMessage
@@ -318,13 +318,13 @@ public final class AutoFillControllerModel {
         runTask { [weak self] in
             guard let self else { return }
             do {
-                _ = try await self.callAgent(
+                _ = try await self.callDaemon(
                     .unlock(passphrase: rawPassphrase),
                     timeout: Self.interactiveTimeout
                 )
                 self.unlocking = false
                 await self.resumeAfterUnlock()
-            } catch let err as AgentCallError {
+            } catch let err as DaemonCallError {
                 self.unlocking = false
                 self.unlockError = err.userFacingUnlockMessage
                 self.refreshLockedScreen()
@@ -409,7 +409,7 @@ public final class AutoFillControllerModel {
     ) async {
         let targetService: AutofillService? = service.kind == .app ? nil : service
         do {
-            let reply = try await callAgent(
+            let reply = try await callDaemon(
                 .autofillFill(
                     service: targetService,
                     login: login,
@@ -432,14 +432,14 @@ public final class AutoFillControllerModel {
                 password: password,
                 reportedHash: fill.identitiesHash
             )
-        } catch let err as AgentCallError {
+        } catch let err as DaemonCallError {
             touchIdInFlight = false
             if err.isBiometricCancelled {
                 await refreshStatusAfterFailedBiometric()
                 return
             }
             switch err {
-            case let .agentError(code, message):
+            case let .daemonError(code, message):
                 switch code {
                 case .locked:
                     unlockError = nil
@@ -544,7 +544,7 @@ public final class AutoFillControllerModel {
 
     private func loadPickerItems(services: [AutofillService]) async {
         do {
-            let reply = try await callAgent(
+            let reply = try await callDaemon(
                 .autofillList(services: services),
                 timeout: Self.statusTimeout
             )
@@ -564,8 +564,8 @@ public final class AutoFillControllerModel {
                     _ = await syncer.syncIfNeeded(client: clientRef, reportedHash: hash)
                 }
             }
-        } catch let err as AgentCallError {
-            if case let .agentError(code, _) = err, code == .locked {
+        } catch let err as DaemonCallError {
+            if case let .daemonError(code, _) = err, code == .locked {
                 refreshLockedScreen()
                 return
             }
@@ -587,7 +587,7 @@ public final class AutoFillControllerModel {
         runTask { [weak self] in
             guard let self else { return }
             do {
-                let reply = try await self.callAgent(
+                let reply = try await self.callDaemon(
                     .autofillFill(
                         service: targetService,
                         login: item.login,
@@ -611,13 +611,13 @@ public final class AutoFillControllerModel {
                     password: password,
                     reportedHash: fill.identitiesHash
                 )
-            } catch let err as AgentCallError {
+            } catch let err as DaemonCallError {
                 self.filling = false
                 if err.isBiometricCancelled {
                     self.notify()
                     return
                 }
-                if case let .agentError(code, _) = err, code == .locked {
+                if case let .daemonError(code, _) = err, code == .locked {
                     self.pendingPickerFill = item
                     self.refreshLockedScreen()
                     if self.touchIdReady {
@@ -637,17 +637,17 @@ public final class AutoFillControllerModel {
 
     private func connectAndFetchStatus() async -> AutofillStatusReply? {
         do {
-            if case let .autofillStatus(st) = try await callAgent(
+            if case let .autofillStatus(st) = try await callDaemon(
                 .autofillStatus,
                 timeout: Self.statusTimeout
             ) {
                 return st
             }
-        } catch let err as AgentCallError {
+        } catch let err as DaemonCallError {
             if case .cancelled = err {
                 return nil
             }
-            if case .agentUnavailable = err {
+            if case .daemonUnavailable = err {
                 setScreen(.connecting("Starting Deadbolt…"))
                 _ = await launcher.startInBackground()
                 for waitMS in pollIntervalsMS {
@@ -658,14 +658,14 @@ public final class AutoFillControllerModel {
                     if Task.isCancelled || finished {
                         return nil
                     }
-                    if let reply = try? await callAgent(.autofillStatus, timeout: 1.0),
+                    if let reply = try? await callDaemon(.autofillStatus, timeout: 1.0),
                        case let .autofillStatus(st) = reply
                     {
                         return st
                     }
                 }
                 setScreen(
-                    .failed("Can't reach Deadbolt. Open Deadbolt to start its background agent.")
+                    .failed("Can't reach Deadbolt. Open Deadbolt to start its background daemon.")
                 )
                 return nil
             }
@@ -680,7 +680,7 @@ public final class AutoFillControllerModel {
     }
 
     private func refreshStatusAfterFailedBiometric() async {
-        if let reply = try? await callAgent(.autofillStatus, timeout: Self.statusTimeout),
+        if let reply = try? await callDaemon(.autofillStatus, timeout: Self.statusTimeout),
            case let .autofillStatus(st) = reply
         {
             touchIdReady = st.touchIdReady
@@ -702,7 +702,7 @@ public final class AutoFillControllerModel {
         }
     }
 
-    private func callAgent(
+    private func callDaemon(
         _ command: AutofillCommand,
         timeout: TimeInterval
     ) async throws -> AutofillReply {

@@ -1,7 +1,7 @@
 //! Pure password health engine: per-item memoization, cross-vault reuse
 //! clustering, site breach date checks, and 2FA / passkey availability.
 //!
-//! No network or disk IO happens here; the background agent supplies an
+//! No network or disk IO happens here; the background daemon supplies an
 //! ephemeral `reuse_key`, a store-derived `hibp_key` for encrypted breach-cache
 //! lookups, and any cached HIBP counts.
 

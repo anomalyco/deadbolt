@@ -422,7 +422,7 @@ try {
 } finally {
   await Promise.allSettled([...contexts].map((c) => c.close()))
 
-  await cli("agent", "stop").catch(() => {})
+  await cli("debug", "daemon", "stop").catch(() => {})
   for (const p of [pb, pc]) p.close()
   await services.close()
 }

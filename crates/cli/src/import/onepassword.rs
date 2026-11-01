@@ -675,7 +675,7 @@ fn ssh(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     let mut comment = field(["comment", "comment"]);
     if (public.is_none() || fingerprint.is_none())
         && let Some((derived_pub, derived_fp, derived_comment)) =
-            crate::agent::ssh_keys::derive_fields(
+            crate::daemon::ssh_keys::derive_fields(
                 &private,
                 passphrase.as_deref(),
                 comment.as_deref(),

@@ -1,4 +1,4 @@
-//! The Activity table: what callers asked the agent, sealed like everything
+//! The Activity table: what callers asked the daemon, sealed like everything
 //! else and kept on this device only. Rows are opaque bytes with a time.
 //!
 //! The table has a budget ([`Budget`]): past it the oldest rows go, and a

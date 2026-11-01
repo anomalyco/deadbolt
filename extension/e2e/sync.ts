@@ -193,7 +193,7 @@ try {
 
   // Genuine concurrent edits: both replicas have the same starting log, then
   // every transport is cut BEFORE either writes (not merely simultaneous RPCs).
-  await cli("agent", "stop")
+  await cli("debug", "daemon", "stop")
   await close(a)
   await close(b)
   a = await launch("a", true)
@@ -229,7 +229,7 @@ try {
   // The peer returns while the browser is locked. Unlock starts background sync;
   // don't use an explicit sync here to hide a missing wakeup.
   await request(a.page, { type: "device-lock" })
-  await cli("agent", "stop")
+  await cli("debug", "daemon", "stop")
   await cli("unlock")
   await cli("new", "login", "--name", "While locked", "password=synthetic-locked")
   check(await state(a.page) === "locked", "returning peer does not unlock the browser")
@@ -241,8 +241,8 @@ try {
   await close(b)
   await request(a.page, { type: "device-lock" })
   await cli("new", "login", "--name", "After restart", "password=synthetic-restart")
-  suspended = Number(/running pid (\d+)/.exec(await cli("agent", "status"))?.[1])
-  check(suspended > 0, "found only this fixture's CLI agent")
+  suspended = Number(/running pid (\d+)/.exec(await cli("debug", "daemon", "status"))?.[1])
+  check(suspended > 0, "found only this fixture's CLI daemon")
   process.kill(suspended, "SIGSTOP")
   await unlock(a.page)
   let settled = false
@@ -286,6 +286,6 @@ try {
 } finally {
   if (suspended) process.kill(suspended, "SIGCONT")
   await Promise.allSettled([...contexts].map(c => c.close()))
-  await cli("agent", "stop").catch(() => {})
+  await cli("debug", "daemon", "stop").catch(() => {})
   await rm(root, { recursive: true, force: true })
 }

@@ -532,7 +532,7 @@ pub(super) fn quiet(k: &Kit, field: El, edit: &rune::TextEdit, invalid: bool) ->
 }
 
 /// Show or hide, and for the generated password, a new one. A value the
-/// agent keeps back has nothing to show until a new one is typed.
+/// daemon keeps back has nothing to show until a new one is typed.
 fn secret_actions(k: &Kit, input: &Input, i: usize, generates: bool, saving: bool) -> El {
     let shown = input.edit.is_revealed();
     let noun = title_case(&input.name);

@@ -1,6 +1,6 @@
 [package]
 name = "deadbolt-app"
-description = "Deadbolt's desktop app: a Rune client of the running agent, built into `deadbolt` (docs/app.md)."
+description = "Deadbolt's desktop app: a Rune client of the running daemon, built into `deadbolt` (docs/app.md)."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

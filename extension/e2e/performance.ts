@@ -271,13 +271,13 @@ try {
     await rpc(page, { type: "device-pair", code })
     if (await joining.exited) throw new Error("CLI join failed")
     await Promise.all([drained, diagnostics])
-    await cli("ls") // starts the joined peer's agent
+    await cli("ls") // starts the joined peer's daemon
     for (let n = 0; n < runs; n++) {
       const t = performance.now()
       await rpc(page, { type: "device-sync", wait: true })
       record("sync one CLI peer", performance.now() - t)
     }
-    await cli("agent", "stop")
+    await cli("debug", "daemon", "stop")
     for (let n = 0; n < runs; n++) {
       const t = performance.now()
       await rpc(page, { type: "device-sync", wait: true })
@@ -318,7 +318,7 @@ try {
 } finally {
   await results()
   if (joiner?.exitCode === null) joiner.kill()
-  if (binary) await cli("agent", "stop").catch(() => {})
+  if (binary) await cli("debug", "daemon", "stop").catch(() => {})
   await context.close()
   server.stop()
   await rm(root, { recursive: true, force: true })

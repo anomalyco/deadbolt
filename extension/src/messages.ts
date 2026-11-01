@@ -79,7 +79,7 @@ export const FIELDS_FOR: Record<FormRole, HostField[]> = {
 /** Every host field the roles need, once each. */
 export const fieldsFor = (roles: FormRole[]) => [...new Set(roles.flatMap((r) => FIELDS_FOR[r]))]
 
-/** Host fields that make the agent ask for Touch ID. */
+/** Host fields that make the daemon ask for Touch ID. */
 export const VERIFIED_FIELDS: HostField[] = ["number", "cvv"]
 
 /** How the menu names what an identity fills, by role, in the order it lists them. */
@@ -242,11 +242,11 @@ export type ToContent =
    */
   /**
    * `generated`: the id of the generated password in `values`, kept by the
-   * agent once the page has it. `notice`: a sign-in session's step filled
+   * daemon once the page has it. `notice`: a sign-in session's step filled
    * without a pick shows a pill on the field, with this token for its frame.
    */
   | { type: "db:fill"; values: FillValues; form: number; approval: string; generated?: string; notice?: string; automatic?: true }
-  /** The agent kept the generated password filled under this id: a submit names it by id from now on. */
+  /** The daemon kept the generated password filled under this id: a submit names it by id from now on. */
   | { type: "db:generated"; generated: string }
   /**
    * Which of the form's fields may be filled now (see Approved). With
@@ -420,7 +420,7 @@ export type MenuLoadReply =
   /**
    * An identity or card field's menu: the identities or cards to pick from.
    * `into`: a card goes into a payment provider's frame too ("Stripe").
-   * `verify`: the agent asks for Touch ID before a card's number goes out.
+   * `verify`: the daemon asks for Touch ID before a card's number goes out.
    * `passphrase`: the browser-only vault, under Strict, asks for the passphrase first.
    */
   /** `fills`: for each identity, by ref, what of the section it has values for ("name", "email", "address"). */
@@ -655,7 +655,7 @@ export interface ItemKind {
 
 /**
  * One item in the page's list (device-items): its type, label and detail
- * as the agent names them, and the words a search finds it by (never a
+ * as the daemon names them, and the words a search finds it by (never a
  * secret). A login also has its Account's fields.
  */
 export interface ItemSummary extends Partial<Account> {

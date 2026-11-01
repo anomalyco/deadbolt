@@ -10,7 +10,7 @@ use deadbolt_client::protocol::{
 };
 use rune::{SecretCopy, Tx};
 
-use crate::agent;
+use crate::daemon;
 use crate::model::{App, Screen};
 use crate::onboarding::worker::{Progress, Stage, Worker};
 use crate::onboarding::{Flow, Step};
@@ -37,7 +37,7 @@ fn staged(s: &mut App, copy: fn(&mut App, &mut Tx)) {
 }
 
 fn failed(s: &mut App) {
-    s.screen = Screen::Failed("connecting to the agent: Connection refused (os error 61)".into());
+    s.screen = Screen::Failed("connecting to the daemon: Connection refused (os error 61)".into());
 }
 
 pub(crate) const SCENES: &[Scene] = &[
@@ -95,7 +95,7 @@ pub(crate) const SCENES: &[Scene] = &[
         s.onboarding.notice = Some(Notice::new(
             Severity::Danger,
             "Couldn't create the vault",
-            "Connecting to the agent: connection refused. Try again.",
+            "Connecting to the daemon: connection refused. Try again.",
         ));
     }),
     // Creating, then created at 1.2 s: the moment, then the empty vault at 2.7 s.
@@ -155,7 +155,7 @@ pub(crate) const SCENES: &[Scene] = &[
             s,
             Severity::Danger,
             "Couldn't join",
-            "The agent stopped. Try again.",
+            "The daemon stopped. Try again.",
         );
     }),
     ("failed", failed),
@@ -377,7 +377,7 @@ pub(crate) const SCENES: &[Scene] = &[
         s.edit_selected();
         typed(s, "username", "kit@anoma.ly");
     }),
-    // The agent refused a card number.
+    // The daemon refused a card number.
     ("edit-invalid", |s| {
         vault(s);
         s.new_item();
@@ -386,9 +386,9 @@ pub(crate) const SCENES: &[Scene] = &[
         s.save();
         let seq = s.edit_seq();
         s.apply(
-            agent::Done::Saved {
+            daemon::Done::Saved {
                 seq,
-                result: Err(agent::Failure {
+                result: Err(daemon::Failure {
                     code: None,
                     message: "invalid value for number: must be 12-19 digits".into(),
                 }),
@@ -470,7 +470,7 @@ pub(crate) const SCENES: &[Scene] = &[
             dropped: Vec::new(),
         };
         s.apply(
-            agent::Done::Mirrored {
+            daemon::Done::Mirrored {
                 seq: 1,
                 result: Ok(report),
             },
@@ -574,7 +574,7 @@ pub(crate) const SCENES: &[Scene] = &[
             ],
         );
         s.apply(
-            agent::Done::Agents {
+            daemon::Done::Agents {
                 seq: 1,
                 result: Ok(listing),
             },
@@ -594,14 +594,14 @@ pub(crate) const SCENES: &[Scene] = &[
         vault(s);
         s.open_settings();
         s.sync_one_password();
-        let failure = agent::Failure {
+        let failure = daemon::Failure {
             code: None,
             message: "1Password: not signed in. Sign in to the 1Password app and turn on \
                 Settings › Developer › Integrate with 1Password CLI"
                 .into(),
         };
         s.apply(
-            agent::Done::Mirrored {
+            daemon::Done::Mirrored {
                 seq: 1,
                 result: Err(failure),
             },

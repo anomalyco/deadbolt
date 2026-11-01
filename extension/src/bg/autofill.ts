@@ -306,7 +306,7 @@ export class Autofill {
    *
    * On a sign-up or change-password form's new-password box (`kind`), the
    * menu offers a generated password within the page's `rules` instead, if
-   * the agent says they allow a strong one.
+   * the daemon says they allow a strong one.
    *
    * In the top page, the token goes back to the content script, which opens
    * the menu under the field. A field in a frame below gets the menu only
@@ -362,7 +362,7 @@ export class Autofill {
     let rows = 0
     let only: string[] | undefined
     const state = this.host.status.state
-    // Locked or not, the agent says whether the page's rules allow a strong password: no row if they don't.
+    // Locked or not, the daemon says whether the page's rules allow a strong password: no row if they don't.
     if (generate && (state === "locked" || state === "ready")) rows = await this.host.send({ type: "generate-check", origin: target.origin, ...generate }).then(() => 1, () => 0)
     else if (state === "locked") {
       if (explicit || !this.lockedShown.has(site)) rows = 1
@@ -451,9 +451,9 @@ export class Autofill {
   }
 
   /**
-   * The user picked the generated password: the agent makes one within the
+   * The user picked the generated password: the daemon makes one within the
    * page's rules, a candidate for the page's origin, and it goes into every
-   * new-password box the content script approves. Once it's in, the agent
+   * new-password box the content script approves. Once it's in, the daemon
    * holds it as pending; one that didn't go in is dropped. Nothing is saved;
    * a successful submit offers to (see Saver). The content script asked for
    * the characters and lengths its boxes' patterns take (see generate.ts), so
@@ -480,7 +480,7 @@ export class Autofill {
         filled = sanitizeRoles(ack?.filled)
       } finally {
         if (!filled.includes("new-password")) await this.host.send({ type: "generate-drop", origin: t.origin, generated }).catch(() => {})
-        // Only once the agent holds it may the page name it by id. If it
+        // Only once the daemon holds it may the page name it by id. If it
         // can't (locked, gone, disconnected), a submit sends it as typed.
         else if (await this.host.send({ type: "generate-keep", origin: t.origin, generated }).then(() => true, () => false))
           await sendToFrame(t, { type: "db:generated", generated })
@@ -923,7 +923,7 @@ export class Autofill {
       const reply = await this.list(target.origin).catch(() => null)
       const account = reply?.accounts.find((a) => a.ref === s.ref)
       if (!account || generation !== this.generation(target.tabId)) return
-      // The agent lists a login for every origin of its saved hosts' sites
+      // The daemon lists a login for every origin of its saved hosts' sites
       // and their subdomains; a step here fills only on the pick's own origin,
       // or one whose host a saved URL of the login names exactly.
       if (target.origin !== s.origin && !account.urls.some((u) => sameHost(u, target.origin))) return

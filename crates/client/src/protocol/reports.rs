@@ -140,7 +140,7 @@ pub struct Code {
     pub period: u64,
     /// Unix seconds when the next code takes over.
     pub valid_until: u64,
-    /// Milliseconds until then, from the agent's clock; at least 1.
+    /// Milliseconds until then, from the daemon's clock; at least 1.
     pub remaining_ms: u64,
 }
 

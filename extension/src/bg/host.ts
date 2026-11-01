@@ -67,7 +67,7 @@ export class Host implements VaultBackend {
     return this.ready
   }
 
-  /** Asks the host how Deadbolt is doing. Hello also starts the agent. */
+  /** Asks the host how Deadbolt is doing. Hello also starts the daemon. */
   async hello(change?: Change): Promise<void> {
     try {
       const reply = await this.send({ type: "hello" })
@@ -141,9 +141,9 @@ export class Host implements VaultBackend {
         this.setStatus({ state: "locked", detail: "Unlock Deadbolt to fill passwords" }, change)
         break
       case "stopped":
-        // Hello would start the agent again; wait for `started`, which the
-        // host sends once an agent runs again. A host that couldn't watch the
-        // agent never says `stopped`; a `locked` error then asks hello (send).
+        // Hello would start the daemon again; wait for `started`, which the
+        // host sends once a daemon runs again. A host that couldn't watch the
+        // daemon never says `stopped`; a `locked` error then asks hello (send).
         this.setStatus({ state: "locked", detail: "Deadbolt isn't running" }, change)
         break
       case "unlocked":

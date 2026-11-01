@@ -186,7 +186,7 @@ try {
   try { await context?.close() } finally {
     for (const tunnel of tunnels) { tunnel.client.destroy(); tunnel.upstream.destroy() }
     await new Promise<void>(resolve => proxy.close(() => resolve()))
-    await cli("agent", "stop").catch(() => {})
+    await cli("debug", "daemon", "stop").catch(() => {})
     await rm(root, { recursive: true, force: true })
   }
 }

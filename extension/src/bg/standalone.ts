@@ -69,7 +69,7 @@ const tooMany = (wait: number) => `Too many wrong passphrases. Try again in ${Ma
  * is refused here, before the vault sees it, and no capability is claimed
  * for it. `learn` never reaches the vault: the
  * learning log is kept here (bg/learn-log.ts), locked or not, as the host
- * keeps it outside the agent.
+ * keeps it outside the daemon.
  */
 const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel", "learn"])
 /** Requests that count as use for the idle lock. Listing a page's logins or forms doesn't (docs/autofill.md). */

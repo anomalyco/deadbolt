@@ -1,6 +1,6 @@
-//! Who this CLI is to the agent (`deadbolt debug whoami`), what callers did
+//! Who this CLI is to the daemon (`deadbolt debug whoami`), what callers did
 //! (`deadbolt activity`), and the checks every command starts with: what
-//! this process claims to be, and that the agent is this binary before a
+//! this process claims to be, and that the daemon is this binary before a
 //! passphrase goes to it.
 
 use std::path::PathBuf;
@@ -15,14 +15,14 @@ use crate::protocol::{
 };
 
 /// Claims `DEADBOLT_CALLER` and `OPENCODE_SESSION_ID` for every request, and
-/// checks the agent before sending it a passphrase.
+/// checks the daemon before sending it a passphrase.
 pub fn install() {
     let var = |name| config::env(name).ok().filter(|v: &String| !v.is_empty());
     deadbolt_client::set_claim(Claim {
         caller: var("DEADBOLT_CALLER"),
         opencode_session: var("OPENCODE_SESSION_ID"),
     });
-    deadbolt_client::set_agent_check(Box::new(|socket| {
+    deadbolt_client::set_daemon_check(Box::new(|socket| {
         let exe = own_exe().map_err(|e| format!("locating this binary: {e}"))?;
         peer::check(&socket, &helper()?, &exe)
     }));
@@ -36,7 +36,7 @@ pub fn own_exe() -> std::io::Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn helper() -> Result<PathBuf, String> {
-    crate::agent::biometric::helper().map_err(|e| format!("{e:#}"))
+    crate::daemon::biometric::helper().map_err(|e| format!("{e:#}"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -130,7 +130,7 @@ fn kebab(value: &impl serde::Serialize) -> String {
 
 /// `deadbolt activity` lists this many entries unless told otherwise.
 const DEFAULT_LIMIT: u32 = 500;
-/// The most the agent sends in one `ActivityList`.
+/// The most the daemon sends in one `ActivityList`.
 const PAGE: u32 = 1_000;
 
 pub async fn activity(
@@ -148,7 +148,7 @@ pub async fn activity(
         None => None,
     };
     crate::client::ensure_running(paths).await?;
-    // The agent sends at most a page at a time; more go back by id.
+    // The daemon sends at most a page at a time; more go back by id.
     let mut left = limit.unwrap_or(DEFAULT_LIMIT);
     let mut before = None;
     while left > 0 {

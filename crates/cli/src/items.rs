@@ -173,7 +173,7 @@ fn parse(arg: &str) -> Result<FieldInput> {
     })
 }
 
-/// The field type known before talking to the agent: explicit, or from the
+/// The field type known before talking to the daemon: explicit, or from the
 /// item type's schema.
 fn known_type(kind: Option<&str>, input: &FieldInput) -> Option<FieldType> {
     match &input.kind {
@@ -232,7 +232,7 @@ fn fill_required(kind: &str, inputs: &mut Vec<FieldInput>) -> Result<()> {
             continue;
         }
         // `deadbolt new ssh` without `private-key=` generates an Ed25519 key in
-        // the agent, matching `deadbolt new login` without `password=`.
+        // the daemon, matching `deadbolt new login` without `password=`.
         if kind == "ssh" && field.name == "private-key" {
             continue;
         }
@@ -728,8 +728,8 @@ mod tests {
             kind: kind.into(),
             value: value.into(),
         };
-        // The agent's side: otp values only when asked.
-        let agent = |otp: bool| ItemInfo {
+        // The daemon's side: otp values only when asked.
+        let daemon = |otp: bool| ItemInfo {
             id: "c0ffee".into(),
             short: "c0ff".into(),
             kind: "login".into(),
@@ -771,7 +771,7 @@ mod tests {
                     bail!("not a get");
                 };
                 sent.push((query.join(" "), otp));
-                Ok(agent(otp))
+                Ok(daemon(otp))
             };
             let (got, _) = get(None, vec!["github".into()], name, fetch).await.unwrap();
             assert_eq!(got.as_str(), value, "{name:?}");

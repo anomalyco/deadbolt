@@ -1,6 +1,6 @@
-//! Settings' Activity: what callers asked the agent for, and what this app
-//! showed or copied, newest first, as the agent recorded it. Never values.
-//! The app tells the agent about its own reveals and copies, which the agent
+//! Settings' Activity: what callers asked the daemon for, and what this app
+//! showed or copied, newest first, as the daemon recorded it. Never values.
+//! The app tells the daemon about its own reveals and copies, which the daemon
 //! can't see.
 
 use deadbolt_client::Paths;
@@ -8,7 +8,7 @@ use deadbolt_client::protocol::{ActivityEntry, AppAction, Command, Outcome, Repl
 use rune::{El, Tx, col, text};
 use rune_kit::Kit;
 
-use crate::agent::{Done, Failure, Job};
+use crate::daemon::{Done, Failure, Job};
 use crate::model::App;
 
 /// How many of the newest entries Settings shows.
@@ -48,12 +48,12 @@ impl App {
     fn load_activity(&mut self) {
         self.activity.seq += 1;
         self.activity.loading = true;
-        self.agent.send(Job::Activity {
+        self.daemon.send(Job::Activity {
             seq: self.activity.seq,
         });
     }
 
-    /// The agent recorded something: an open list asks again.
+    /// The daemon recorded something: an open list asks again.
     pub(crate) fn on_activity_changed(&mut self) {
         if self.activity.open {
             self.load_activity();
@@ -83,15 +83,15 @@ impl App {
         }
     }
 
-    /// Tells the agent this app showed or copied `field` of the shown item.
+    /// Tells the daemon this app showed or copied `field` of the shown item.
     pub(crate) fn report(&self, action: AppAction, field: &str) {
         let Some(item) = self.page() else { return };
         self.report_item(action, &item.id, &item.label, field);
     }
 
-    /// Tells the agent this app showed or copied `field` of the item `id`.
+    /// Tells the daemon this app showed or copied `field` of the item `id`.
     pub(crate) fn report_item(&self, action: AppAction, id: &str, title: &str, field: &str) {
-        self.agent.send(Job::Report {
+        self.daemon.send(Job::Report {
             action,
             item: id.into(),
             title: title.into(),
@@ -106,7 +106,7 @@ pub(crate) async fn list(paths: &Paths, seq: u64) -> Done {
         limit: Some(SHOWN),
         before: None,
     };
-    let result = crate::agent::call(paths, command, |r| match r {
+    let result = crate::daemon::call(paths, command, |r| match r {
         Reply::Activity { entries } => Some(entries),
         _ => None,
     })
@@ -128,7 +128,7 @@ pub(crate) async fn report(
         title,
         field,
     };
-    // A report the agent missed (locked, gone) isn't the user's problem.
+    // A report the daemon missed (locked, gone) isn't the user's problem.
     drop(deadbolt_client::simple(paths, command).await);
     Done::Reported
 }

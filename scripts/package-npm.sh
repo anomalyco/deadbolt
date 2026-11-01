@@ -11,7 +11,7 @@
 # tarballs) and sign-macos/ (the signed, notarized, stapled
 # Deadbolt-<version>-macos-universal.zip). The darwin packages carry that
 # Deadbolt.app: the command is its Contents/Helpers/deadbolt, so the CLI, the
-# agent and the app are one install. Run on macOS (ditto keeps the bundle as
+# daemon and the app are one install. Run on macOS (ditto keeps the bundle as
 # signed). Writes <out>/deadbolt-cli-*.tgz.
 set -euo pipefail
 

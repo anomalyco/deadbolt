@@ -161,7 +161,7 @@ pub fn file_value(name: &str, contents: &[u8]) -> zeroize::Zeroizing<String> {
 }
 
 /// A file field's name and its contents in base64. The contents are `None`
-/// where a value holds the name alone: what the agent lists in place of a
+/// where a value holds the name alone: what the daemon lists in place of a
 /// file it wasn't asked for.
 pub fn file_parts(value: &str) -> (&str, Option<&str>) {
     match value.split_once('\n') {
@@ -556,7 +556,7 @@ static SCHEMAS: [Schema; 18] = [
     },
     // A WebAuthn passkey: an item of its own, found by relying party id
     // rather than URL. Binary values are base64url; the private key is a
-    // PKCS#8 P-256 key that only the agent reads (see docs/autofill.md).
+    // PKCS#8 P-256 key that only the daemon reads (see docs/autofill.md).
     Schema {
         kind: "passkey",
         fields: &[

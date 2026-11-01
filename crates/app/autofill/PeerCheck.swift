@@ -1,8 +1,8 @@
 // Mutual code-signature verification and bundle/App-Group discovery for
 // `DeadboltAutoFill.appex` (`docs/macos-autofill.md`).
 //
-// Mirrors `crates/client/src/peer.rs`, `crates/cli/src/agent/identify.swift`,
-// and `crates/cli/src/agent/enclave.swift`.
+// Mirrors `crates/client/src/peer.rs`, `crates/cli/src/daemon/identify.swift`,
+// and `crates/cli/src/daemon/enclave.swift`.
 
 import Darwin
 import Foundation
@@ -19,11 +19,11 @@ private let currentCPUType: Int = 0x0100_0007
 
 public struct ContainingBundle: Equatable, Sendable {
     public let appURL: URL
-    public let agentBinaryURL: URL
+    public let daemonBinaryURL: URL
 
-    public init(appURL: URL, agentBinaryURL: URL) {
+    public init(appURL: URL, daemonBinaryURL: URL) {
         self.appURL = appURL
-        self.agentBinaryURL = agentBinaryURL
+        self.daemonBinaryURL = daemonBinaryURL
     }
 
     /// Resolves `Deadbolt.app` and `Contents/Helpers/deadbolt` from the
@@ -43,8 +43,8 @@ public struct ContainingBundle: Equatable, Sendable {
         else {
             return nil
         }
-        let agent = contents.appendingPathComponent("Helpers/deadbolt").resolvingSymlinksInPath()
-        return ContainingBundle(appURL: app, agentBinaryURL: agent)
+        let daemon = contents.appendingPathComponent("Helpers/deadbolt").resolvingSymlinksInPath()
+        return ContainingBundle(appURL: app, daemonBinaryURL: daemon)
     }
 }
 
@@ -126,16 +126,16 @@ public enum PeerCheck {
     }
 
     /// Verifies that the process listening on `socketFD` runs as this UID from
-    /// `expectedAgentURL` (canonicalized) and carries Deadbolt's valid signature:
+    /// `expectedDaemonURL` (canonicalized) and carries Deadbolt's valid signature:
     /// - Signed builds (`requiredTeamID != nil`): Apple-anchored signature for
     ///   `requiredTeamID` with identifier in `allowedSigningIDs`.
     /// - Ad-hoc builds (`requiredTeamID == nil`): dynamic `cdhash` equals the
-    ///   valid static `cdhash` of `expectedAgentURL` on disk.
-    public static func verifyAgent(
+    ///   valid static `cdhash` of `expectedDaemonURL` on disk.
+    public static func verifyDaemon(
         socketFD: Int32,
-        expectedAgentURL: URL,
+        expectedDaemonURL: URL,
         requiredTeamID: String?,
-        allowedSigningIDs: Set<String> = AutofillWire.agentSigningIDs
+        allowedSigningIDs: Set<String> = AutofillWire.daemonSigningIDs
     ) throws {
         var token = audit_token_t()
         var tokenLen = socklen_t(MemoryLayout<audit_token_t>.size)
@@ -145,7 +145,7 @@ public enum PeerCheck {
             }
         }
         guard rc == 0, Int(tokenLen) == MemoryLayout<audit_token_t>.size else {
-            throw AgentCallError.peerRejected("could not read the agent's audit token")
+            throw DaemonCallError.peerRejected("could not read the daemon's audit token")
         }
 
         let words: [UInt32] = withUnsafeBytes(of: &token.val) { raw in
@@ -156,12 +156,12 @@ public enum PeerCheck {
         let peerUID = words[1]
         let peerPID = Int32(bitPattern: words[5])
         guard peerUID == getuid() else {
-            throw AgentCallError.peerRejected("the agent (pid \(peerPID)) runs as another user")
+            throw DaemonCallError.peerRejected("the daemon (pid \(peerPID)) runs as another user")
         }
 
-        let expectedCanonical = expectedAgentURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let expectedCanonical = expectedDaemonURL.resolvingSymlinksInPath().standardizedFileURL.path
         guard FileManager.default.isExecutableFile(atPath: expectedCanonical) else {
-            throw AgentCallError.peerRejected("Deadbolt's agent binary is missing at \(expectedCanonical)")
+            throw DaemonCallError.peerRejected("Deadbolt's daemon binary is missing at \(expectedCanonical)")
         }
 
         let tokenData = withUnsafeBytes(of: &token) { Data($0) }
@@ -170,7 +170,7 @@ public enum PeerCheck {
         guard SecCodeCopyGuestWithAttributes(nil, guestAttrs, [], &guestCode) == errSecSuccess,
               let guestCode
         else {
-            throw AgentCallError.peerRejected("the agent (pid \(peerPID)) exited")
+            throw DaemonCallError.peerRejected("the daemon (pid \(peerPID)) exited")
         }
 
         let runningInfo = try readSignature(
@@ -182,23 +182,23 @@ public enum PeerCheck {
 
         var guestAgain: SecCode?
         guard SecCodeCopyGuestWithAttributes(nil, guestAttrs, [], &guestAgain) == errSecSuccess else {
-            throw AgentCallError.peerRejected("the agent (pid \(peerPID)) exited while being verified")
+            throw DaemonCallError.peerRejected("the daemon (pid \(peerPID)) exited while being verified")
         }
 
         guard let runningPath = runningInfo.path else {
-            throw AgentCallError.peerRejected("could not resolve the running agent's executable path")
+            throw DaemonCallError.peerRejected("could not resolve the running daemon's executable path")
         }
         let runningCanonical = URL(fileURLWithPath: runningPath)
             .resolvingSymlinksInPath()
             .standardizedFileURL
             .path
         guard runningCanonical == expectedCanonical else {
-            throw AgentCallError.peerRejected(
+            throw DaemonCallError.peerRejected(
                 "the socket peer runs \(runningCanonical), not \(expectedCanonical)"
             )
         }
         guard runningInfo.valid else {
-            throw AgentCallError.peerRejected("the running agent has an invalid code signature")
+            throw DaemonCallError.peerRejected("the running daemon has an invalid code signature")
         }
 
         if let requiredTeamID {
@@ -206,8 +206,8 @@ public enum PeerCheck {
                   let signingID = runningInfo.signingID,
                   allowedSigningIDs.contains(signingID)
             else {
-                throw AgentCallError.peerRejected(
-                    "the running agent is not signed by team \(requiredTeamID) as Deadbolt"
+                throw DaemonCallError.peerRejected(
+                    "the running daemon is not signed by team \(requiredTeamID) as Deadbolt"
                 )
             }
         } else {
@@ -217,8 +217,8 @@ public enum PeerCheck {
                   !diskHash.isEmpty,
                   runningInfo.cdhash == diskHash
             else {
-                throw AgentCallError.peerRejected(
-                    "the running agent does not match Deadbolt's binary on disk"
+                throw DaemonCallError.peerRejected(
+                    "the running daemon does not match Deadbolt's binary on disk"
                 )
             }
         }
@@ -293,7 +293,7 @@ public enum PeerCheck {
             &staticCode
         ) == errSecSuccess, let staticCode
         else {
-            throw AgentCallError.peerRejected("could not inspect \(path)")
+            throw DaemonCallError.peerRejected("could not inspect \(path)")
         }
         let checkFlags = SecCSFlags(
             rawValue: kSecCSDoNotValidateExecutable | kSecCSDoNotValidateResources
