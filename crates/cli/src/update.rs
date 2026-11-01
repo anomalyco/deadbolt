@@ -1559,11 +1559,13 @@ async fn agent_runs(paths: &Paths, program: impl Fn(&Path) -> bool) -> bool {
     })
 }
 
-/// Restarts the agent from `program` after an update, as `ensure_running`.
+/// Restarts the agent from `program` after an update. Not through
+/// `ensure_running`: its agent check wants this process's own binary, which
+/// the update just replaced or deleted, so the new agent would never pass.
 async fn restart_agent(paths: &Paths, program: PathBuf) {
     let launch = deadbolt_client::Launch { program };
-    match deadbolt_client::ensure_running(paths, &launch).await {
-        Ok(status) if status.initialized => {
+    match deadbolt_client::start(paths, &launch).await {
+        Ok(_) if deadbolt_store::is_initialized(&paths.data) => {
             println!("Restarted the agent; the vault is locked until you unlock it.");
         }
         Ok(_) => println!("Restarted the agent."),
