@@ -110,8 +110,10 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
 /// A bun global install laid out under `root` (`bun/install/global/…`,
 /// linked from `bun/bin/deadbolt`), with a fake `bun` beside that link that
 /// lists `@deadbolt/cli`, logs its arguments to `root/bun.log` and on
-/// `install` puts a stand-in saying `deadbolt <installs>` in place, or
-/// fails when `fails`. Returns the user's link and the installed `deadbolt`.
+/// `install` puts a new file in place, as bun does: a stand-in whose
+/// `--version` says `deadbolt <installs>` and which otherwise runs a copy of
+/// this deadbolt, so its agent starts. Or it fails, when `fails`. Returns
+/// the user's link and the installed `deadbolt`.
 fn bun_install(root: &Path, installs: &str, fails: bool) -> (PathBuf, PathBuf) {
     let modules = root.join("bun/install/global/node_modules");
     let package = modules.join("@deadbolt/cli-linux-x64");
@@ -148,9 +150,14 @@ fn bun_install(root: &Path, installs: &str, fails: bool) -> (PathBuf, PathBuf) {
         "echo 'resolving @deadbolt/cli'; echo 'error: GET https://registry.npmjs.org/@deadbolt%2fcli - 503' >&2; exit 1"
             .to_string()
     } else {
+        let copy = root.join("new-deadbolt");
+        if !copy.exists() {
+            std::fs::copy(BIN, &copy).unwrap();
+        }
         format!(
-            "/bin/rm -f '{exe}'; printf '#!/bin/sh\\necho \"deadbolt {installs} (dev)\"\\n' > '{exe}'; /bin/chmod 755 '{exe}'",
-            exe = exe.display()
+            "/bin/rm -f '{exe}'; printf '#!/bin/sh\\nif [ \"$1\" = --version ]; then echo \"deadbolt {installs} (dev)\"; exit; fi\\nexec \"{copy}\" \"$@\"\\n' > '{exe}'; /bin/chmod 755 '{exe}'",
+            exe = exe.display(),
+            copy = copy.display()
         )
     };
     let bun = bin.join("bun");
@@ -235,12 +242,31 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
         "{stderr}"
     );
 
-    // bun works: the new deadbolt answers through the user's link.
+    // bun works: the new deadbolt answers through the user's link, and the
+    // agent, which ran the old one, comes back on it. bun deletes the file
+    // this `deadbolt update` runs from, which mustn't make the new agent
+    // look like it never started.
     bun_install(&root, "0.0.0-dev-9999", false);
+    let pid = |status: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("agent\trunning pid "))
+            .and_then(|l| l.split_whitespace().next())
+            .map(str::to_string)
+    };
+    let before = String::from_utf8_lossy(&update(&["status"]).stdout).to_string();
+    let old = pid(&before).unwrap_or_else(|| panic!("{before}"));
     let out = update(&["update", "--channel", "dev", "--yes"]);
-    assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
     assert!(stdout.contains("Updated"), "{stdout}");
+    assert!(stdout.contains("Restarted the agent."), "{stdout}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+    let after = a.run(&["status"]);
+    let new = pid(&after).unwrap_or_else(|| panic!("{after}"));
+    assert_ne!(new, old, "{after}");
+    a.run(&["agent", "stop"]);
     let ran = log();
     let install = ran.lines().find(|l| l.starts_with("install")).unwrap();
     let args: Vec<&str> = install.split(' ').collect();

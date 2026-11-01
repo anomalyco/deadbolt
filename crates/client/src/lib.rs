@@ -577,6 +577,35 @@ pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Er
             }
         }
     }
+    spawn(paths, launch)?;
+    for _ in 0..250 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if let Some(status) = status(paths).await {
+            return Ok(status);
+        }
+    }
+    Err(Error::NotStarted(paths.log.clone()))
+}
+
+/// Starts `launch.program`'s agent, for when none runs, and waits until an
+/// agent answers. Unlike [`ensure_running`] it doesn't apply the [`AgentCheck`]:
+/// an updater's own binary may be gone or replaced by then, so the check,
+/// which wants that very binary, can't vouch for the new agent. Nothing is
+/// sent to it but `status`.
+pub async fn start(paths: &Paths, launch: &Launch) -> Result<AgentId, Error> {
+    spawn(paths, launch)?;
+    for _ in 0..250 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if let Some(agent) = running(paths).await {
+            return Ok(agent);
+        }
+    }
+    Err(Error::NotStarted(paths.log.clone()))
+}
+
+/// Runs `<launch.program> agent` in its own process group, logging to
+/// `paths.log`.
+fn spawn(paths: &Paths, launch: &Launch) -> Result<(), Error> {
     if let Some(dir) = paths.log.parent() {
         fs::create_dir_all(dir).map_err(|e| Error::CreateDir(dir.into(), e))?;
     }
@@ -593,13 +622,7 @@ pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Er
         .process_group(0)
         .spawn()
         .map_err(|e| Error::Spawn(launch.program.clone(), e))?;
-    for _ in 0..250 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        if let Some(status) = status(paths).await {
-            return Ok(status);
-        }
-    }
-    Err(Error::NotStarted(paths.log.clone()))
+    Ok(())
 }
 
 /// True when no process holds the agent lock file.
