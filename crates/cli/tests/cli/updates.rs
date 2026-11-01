@@ -273,12 +273,17 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
     bun_install(&root, "0.0.0-dev-9999", false);
     let pid = |status: &str| {
         status
-            .lines()
-            .find_map(|l| l.strip_prefix("agent\trunning pid "))
+            .strip_prefix("running pid ")
             .and_then(|l| l.split_whitespace().next())
             .map(str::to_string)
     };
-    let before = String::from_utf8_lossy(&update(&["status"]).stdout).to_string();
+    // Through the link: `debug whoami` starts the agent (or, on macOS, only
+    // passes the new deadbolt's agent check), then `agent status` names it.
+    let agent = || {
+        assert!(update(&["debug", "whoami"]).status.success());
+        String::from_utf8_lossy(&update(&["agent", "status"]).stdout).to_string()
+    };
+    let before = agent();
     let old = pid(&before).unwrap_or_else(|| panic!("{before}"));
     let out = update(&["update", "--channel", "dev", "--yes"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -287,8 +292,7 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
     assert!(stdout.contains("Updated"), "{stdout}");
     assert!(stdout.contains("Restarted the agent."), "{stdout}");
     assert!(!stderr.contains("warning"), "{stderr}");
-    // Through the link: on macOS only the new deadbolt passes its agent's check.
-    let after = String::from_utf8_lossy(&update(&["status"]).stdout).to_string();
+    let after = agent();
     let new = pid(&after).unwrap_or_else(|| panic!("{after}"));
     assert_ne!(new, old, "{after}");
     a.run(&["agent", "stop"]);
