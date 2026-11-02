@@ -188,6 +188,13 @@ const HIDDEN: Record<string, string> = {
   "text-cover": hiddenForm(coverField("pointer-events:none;overflow:hidden;font:120px/38px sans-serif;color:#f4f4f5;white-space:nowrap").replace("></div></div>", ">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</div></div>")),
   "shadow-spread-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;box-shadow:0 0 0 400px #f4f4f5")),
   "outline-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;outline:400px solid #f4f4f5")),
+  // Not hidden: a click-through glow around the window's edges, in a closed shadow root (a browser automation
+  // extension's while it hands the page to the user), with the form clear of the glow's reach.
+  "edge-glow": hiddenForm(passwordField, `<span id="g"></span><style>body { margin: 160px }</style><script>document.getElementById("g").attachShadow({ mode: "closed" }).innerHTML = '<div style="position:fixed;inset:0;z-index:2147483647;pointer-events:none;box-shadow:inset 0 0 0 2px rgba(76,141,255,.55),inset 0 0 80px rgba(76,141,255,.1)"></div>'</script>`),
+  // Hidden: an inset shadow's spread fills a click-through box over it.
+  "inset-shadow-cover": hiddenForm(coverField("pointer-events:none;box-shadow:inset 0 0 0 40px #f4f4f5")),
+  // Hidden: the same in an 8 px box its wrapper scales up over the field: its shadow reaches as far as it's scaled.
+  "scaled-inset-shadow-cover": hiddenForm(`<div style="position:relative">${passwordField}<div style="position:absolute;left:50%;top:50%;z-index:1;pointer-events:none;transform:scale(40)"><div style="width:8px;height:8px;margin:-4px;box-shadow:inset 0 0 0 4px #f4f4f5"></div></div></div>`),
   // Not hidden: Dark Reader's filter mode on the whole page.
   "dark-reader": hiddenForm(passwordField, `<style>html { filter: invert(1) hue-rotate(180deg) !important }</style>`),
   // Transparent glyphs drawn by an opaque text-shadow, in a box or a ::after.
@@ -2241,7 +2248,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader" || name === "shadow-owl") check(password === "correct horse", `a visible password field fills (${name})`)
+      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader" || name === "shadow-owl" || name === "edge-glow") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 
