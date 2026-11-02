@@ -15,8 +15,8 @@
 //! `/run/user/<uid>/deadbolt<suffix>` if that directory exists, so every
 //! session of the same user finds the same daemon; otherwise
 //! `$TMPDIR/deadbolt<suffix>-<uid>`.
-//! `<suffix>` is empty by default and `-<hash of DEADBOLT_HOME>` when
-//! `DEADBOLT_HOME` is set, so every store gets its own daemon.
+//! `<suffix>` is empty for `$HOME/.local/share/deadbolt`; other stores use
+//! `-<hash of the data directory>`, regardless of which variable selects it.
 //!
 //! The daemon takes the runtime dir only if it is a directory of this user's,
 //! not a symlink, and makes it 0700 ([`secure_dir`]): the fallback in a shared
@@ -61,15 +61,14 @@ impl Paths {
                     .fold(home.clone(), |path, part| path.join(part))
             })
         };
-        let suffix = match var("DEADBOLT_HOME") {
-            Some(home) => {
-                let hash = blake3::hash(home.as_os_str().as_encoded_bytes());
-                format!("-{}", &hash.to_hex()[..8])
-            }
-            None => String::new(),
-        };
         let data = var("DEADBOLT_HOME")
             .unwrap_or_else(|| xdg("XDG_DATA_HOME", &[".local", "share"]).join("deadbolt"));
+        let suffix = if data == home.join(".local/share/deadbolt") {
+            String::new()
+        } else {
+            let hash = blake3::hash(data.as_os_str().as_encoded_bytes());
+            format!("-{}", &hash.to_hex()[..8])
+        };
         let uid = user_id();
         let runtime = match var("XDG_RUNTIME_DIR").or_else(|| user_runtime_dir(uid)) {
             Some(dir) => dir.join(format!("deadbolt{suffix}")),
@@ -143,6 +142,104 @@ pub fn secure_dir(dir: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    fn paths(overrides: &[(&str, &str)]) -> Paths {
+        Paths::from_vars(|name| {
+            overrides
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+                .or_else(|| {
+                    match name {
+                        "HOME" => Some("/home/test"),
+                        "XDG_RUNTIME_DIR" => Some("/run/test"),
+                        "XDG_STATE_HOME" => Some("/state/test"),
+                        _ => None,
+                    }
+                    .map(OsString::from)
+                })
+        })
+    }
+
+    #[test]
+    fn different_xdg_stores_have_separate_daemon_files() {
+        let default = paths(&[]);
+        let office = paths(&[("XDG_DATA_HOME", "/profiles/office")]);
+        let personal = paths(&[("XDG_DATA_HOME", "/profiles/personal")]);
+        assert_eq!(office.data, Path::new("/profiles/office/deadbolt"));
+        assert_eq!(personal.data, Path::new("/profiles/personal/deadbolt"));
+        for (left, right) in [
+            (&default, &office),
+            (&default, &personal),
+            (&office, &personal),
+        ] {
+            assert_ne!(left.socket, right.socket);
+            assert_ne!(left.lock, right.lock);
+            assert_ne!(left.log, right.log);
+        }
+    }
+
+    #[test]
+    fn the_same_store_uses_the_same_daemon_through_either_override() {
+        for (xdg, data) in [
+            (
+                "/home/test/.local/share",
+                "/home/test/.local/share/deadbolt",
+            ),
+            ("/profiles/office", "/profiles/office/deadbolt"),
+        ] {
+            let xdg = paths(&[("XDG_DATA_HOME", xdg)]);
+            let explicit = paths(&[("DEADBOLT_HOME", data)]);
+            assert_eq!(xdg.data, Path::new(data));
+            assert_eq!(explicit.data, Path::new(data));
+            assert_eq!(xdg.socket, explicit.socket);
+            assert_eq!(xdg.lock, explicit.lock);
+            assert_eq!(xdg.log, explicit.log);
+        }
+    }
+
+    #[test]
+    fn the_default_store_keeps_its_daemon_files() {
+        for overrides in [
+            &[][..],
+            &[("XDG_DATA_HOME", "/home/test/.local/share")][..],
+            &[("DEADBOLT_HOME", "/home/test/.local/share/deadbolt")][..],
+            &[("DEADBOLT_HOME", ""), ("XDG_DATA_HOME", "")][..],
+        ] {
+            let paths = paths(overrides);
+            assert_eq!(paths.data, Path::new("/home/test/.local/share/deadbolt"));
+            assert_eq!(paths.socket, Path::new("/run/test/deadbolt/daemon.sock"));
+            assert_eq!(paths.lock, Path::new("/run/test/deadbolt/daemon.lock"));
+            assert_eq!(paths.log, Path::new("/state/test/deadbolt/daemon.log"));
+        }
+    }
+
+    #[test]
+    fn an_explicit_non_default_store_keeps_its_daemon_files() {
+        let paths = paths(&[("DEADBOLT_HOME", "/profiles/office/deadbolt")]);
+        assert_eq!(
+            paths.socket,
+            Path::new("/run/test/deadbolt-43a31408/daemon.sock")
+        );
+        assert_eq!(
+            paths.lock,
+            Path::new("/run/test/deadbolt-43a31408/daemon.lock")
+        );
+        assert_eq!(
+            paths.log,
+            Path::new("/state/test/deadbolt-43a31408/daemon.log")
+        );
+    }
+
+    #[test]
+    fn an_explicit_store_takes_precedence_over_xdg_data_home() {
+        let explicit = paths(&[("DEADBOLT_HOME", "/vault")]);
+        let both = paths(&[("DEADBOLT_HOME", "/vault"), ("XDG_DATA_HOME", "/other")]);
+        assert_eq!(both.data, Path::new("/vault"));
+        assert_eq!(both.socket, explicit.socket);
+        assert_eq!(both.lock, explicit.lock);
+        assert_eq!(both.log, explicit.log);
+    }
 
     #[test]
     fn a_runtime_dir_is_ours_and_private() {

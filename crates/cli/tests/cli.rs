@@ -5260,5 +5260,7 @@ fn ssh_key_items() {
 }
 #[path = "cli/health.rs"]
 mod health;
+#[path = "cli/paths.rs"]
+mod paths;
 #[path = "cli/updates.rs"]
 mod updates;
