@@ -236,10 +236,32 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
     assert!(log().contains("pm ls -g"), "{}", log());
     assert!(!log().contains("install"));
 
+    // npm serves the wrapper, but not yet this system's platform package.
     files.lock().unwrap().insert(
         DIST_TAGS.to_string(),
         br#"{"dev":"0.0.0-dev-9999"}"#.to_vec(),
     );
+    let out = update(&["update", "--check", "--channel", "dev"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("bun doesn't offer"), "{stdout}");
+
+    for target in [
+        "linux-x64",
+        "linux-arm64",
+        "linux-x64-musl",
+        "linux-arm64-musl",
+        "darwin-arm64",
+        "darwin-x64",
+    ] {
+        let name = format!("@deadbolt/cli-{target}");
+        files.lock().unwrap().insert(
+            format!("/release/{name}/0.0.0-dev-9999"),
+            serde_json::json!({"name": name, "version": "0.0.0-dev-9999"})
+                .to_string()
+                .into_bytes(),
+        );
+    }
     let out = update(&["update", "--check", "--channel", "dev"]);
     assert_eq!(out.status.code(), Some(10));
     let stdout = String::from_utf8_lossy(&out.stdout);

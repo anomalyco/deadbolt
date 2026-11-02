@@ -177,9 +177,15 @@ its version and that it runs, and installs the package itself when the
 package manager skipped it. Where install scripts don't run (pnpm, bun, npm
 with scripts disallowed), the placeholder runs the postinstall on first use,
 then the command. On
-musl it prefers the `-musl` package, else the glibc one, each falling back to
-the other and saying so (on glibc the stand-in has no app; a registry that
-doesn't serve a just-published version yet is the usual reason). It links rather than copies, since Deadbolt knows its files by real
+glibc it links only the glibc package (with the app), never the static build
+in its place; on musl it prefers the `-musl` package, else the glibc one; on
+glibc older than 2.28 only `-musl`, as the install script picks. The
+postinstall never fails the install (a package manager would remove the
+package and the user's `deadbolt` with it): when it can't link (npm doesn't
+serve the platform package yet, say), it says so in one line, exits 0 and
+leaves the placeholder, whose next run tries again and otherwise says why and
+exits 1, deleting nothing. A link replaces the placeholder only once it runs.
+It links rather than copies, since Deadbolt knows its files by real
 path: on macOS the command is the app's own `Contents/Helpers/deadbolt`, so
 the CLI, the daemon and the app are one install, Touch ID's helper sits beside
 it, and `deadbolt app` opens that Deadbolt.app, first linking it as
@@ -200,7 +206,9 @@ yarn install by running that manager (see Updater).
   `bin/deadbolt` in the Linux ones. It publishes with a clean npmrc,
   `--tag <dev|beta|latest> --access public --ignore-scripts --provenance`,
   platform packages first and the wrapper last, skipping versions the
-  registry already has. Dev versions (`0.0.0-dev-<run>[.<attempt>]`) are
+  registry already has. The registry shows large platform packages minutes
+  after publishing them, so the wrapper waits (up to 10 minutes, else the
+  job fails and a rerun resumes) until `npm view` shows all six. Dev versions (`0.0.0-dev-<run>[.<attempt>]`) are
   valid semver prereleases.
 - **Trusted publishing:** each of the seven packages trusts repository
   `anomalyco/deadbolt`, workflow `release.yml`, environment `release`. There
@@ -263,9 +271,13 @@ channel's current release isn't the build it runs, a rollback included.
     counts as bun), and takes the first that lists `@deadbolt/cli`. The
     version is what the registry serves for the channel
     (`registry.npmjs.org/-/package/@deadbolt/cli/dist-tags`, `latest` for
-    stable), which trails the release service by minutes: until it equals
-    the manifest's release (under the manifest's rollout rules), the update
-    is pending. Then, asked on a terminal unless `--yes`, it runs, pinned to
+    stable), which trails the release service by minutes, and the
+    registry must also have the platform package this system's postinstall
+    links (`registry.npmjs.org/@deadbolt/cli-<platform>/<v>`: `darwin-<arch>`,
+    `linux-<arch>`, or `linux-<arch>-musl` on musl or glibc older than 2.28),
+    which can trail the wrapper by minutes more: until both equal the
+    manifest's release (under the manifest's rollout rules), the update is
+    pending, for `update`, `--check` and the daemon's check alike. Then, asked on a terminal unless `--yes`, it runs, pinned to
     that version: `npm install --global @deadbolt/cli@<v>`,
     `pnpm add --global --allow-build=@deadbolt/cli @deadbolt/cli@<v>`,
     `bun install --global --trust --cache-dir <temp> @deadbolt/cli@<v>`
@@ -278,7 +290,8 @@ channel's current release isn't the build it runs, a rollback included.
     `bin/deadbolt`), which also lets the wrapper link itself, checks the
     version, and restarts the daemon from it (locked) if it ran from this
     install. On failure it prints the manager's last 12 lines of output, the
-    command it ran and what to do next. A package no manager claims gets the
+    command it ran and what to do next. It never removes or links files
+    itself; the manager and the postinstall do. A package no manager claims gets the
     command to run by hand.
   - Homebrew's `Cellar` (or a cask record) runs
     `brew upgrade anomalyco/tap/deadbolt` (`--cask` for the app) when the

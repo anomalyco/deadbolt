@@ -6,6 +6,11 @@
 // are one install, and `deadbolt app` opens that Deadbolt.app. Links, never
 // copies: Deadbolt knows its own files by real path (the Touch ID helper
 // beside it, the app around it).
+//
+// It never fails the install: a package manager that sees a failed script
+// removes the package, and with it the user's `deadbolt`. When it can't link
+// (npm doesn't serve this platform's package yet, say), it says so and leaves
+// the placeholder bin/deadbolt, which runs this again on first use.
 
 import childProcess from "node:child_process"
 import fs from "node:fs"
@@ -21,26 +26,32 @@ const target = path.join(directory, "bin", "deadbolt")
 const dependencies = packageJson.optionalDependencies ?? {}
 const platform = { darwin: "darwin", linux: "linux" }[os.platform()]
 const arch = { x64: "x64", arm64: "arm64" }[os.arch()]
-if (!platform || !arch) throw new Error(`Deadbolt has no build for ${os.platform()}-${os.arch()}`)
 const base = `@deadbolt/cli-${platform}-${arch}`
 const npm = process.env.npm_execpath?.endsWith("npm-cli.js") ? [process.execPath, process.env.npm_execpath] : ["npm"]
 
-function isMusl() {
-  if (platform !== "linux") return false
+// The system's libc, as the install script tells it: musl (Alpine,
+// /lib/ld-musl-*, or `ldd --version` says so), glibc older than 2.28 (too old
+// for the build with the app), else glibc.
+function libc() {
+  if (fs.existsSync("/etc/alpine-release")) return "musl"
   try {
-    if (fs.existsSync("/etc/alpine-release")) return true
-    if (fs.readdirSync("/lib").some((name) => name.startsWith("ld-musl-"))) return true
-    const result = childProcess.spawnSync("ldd", ["--version"], { encoding: "utf8" })
-    return `${result.stdout || ""}${result.stderr || ""}`.toLowerCase().includes("musl")
-  } catch {
-    return false
-  }
+    if (fs.readdirSync("/lib").some((name) => name.startsWith("ld-musl-"))) return "musl"
+  } catch {}
+  const result = childProcess.spawnSync("ldd", ["--version"], { encoding: "utf8" })
+  const text = `${result.stdout || ""}${result.stderr || ""}`
+  if (text.toLowerCase().includes("musl")) return "musl"
+  const version = text.split("\n")[0].trim().match(/(\d+)\.(\d+)$/)
+  if (version && (Number(version[1]) < 2 || (Number(version[1]) === 2 && Number(version[2]) < 28))) return "old-glibc"
+  return "glibc"
 }
 
-// The build with the app first; on musl, the static build first. Either runs
-// a glibc system's CLI, so each falls back to the other.
+// On glibc only the build with the app: never the static build quietly in
+// its place. On musl the static build, else the glibc one (which runs where
+// glibc compatibility is installed); on a glibc older than 2.28 only the
+// static build.
 function packageNames() {
-  const names = platform === "linux" ? (isMusl() ? [`${base}-musl`, base] : [base, `${base}-musl`]) : [base]
+  if (platform !== "linux") return [base]
+  const names = { musl: [`${base}-musl`, base], "old-glibc": [`${base}-musl`], glibc: [base] }[libc()]
   return names.filter((name) => dependencies[name])
 }
 
@@ -51,11 +62,19 @@ function binaryIn(packageDir) {
   return fs.existsSync(helper) ? helper : path.join(packageDir, "bin", "deadbolt")
 }
 
+// Links bin/deadbolt to `source` once a link beside it runs, so a build that
+// doesn't run here never replaces the placeholder.
 function link(source) {
   if (!fs.existsSync(source)) throw new Error(`Binary not found at ${source}`)
+  const staged = `${target}.link`
   fs.mkdirSync(path.dirname(target), { recursive: true })
-  fs.rmSync(target, { force: true })
-  fs.symlinkSync(path.relative(path.dirname(target), source), target)
+  fs.rmSync(staged, { force: true })
+  fs.symlinkSync(path.relative(path.dirname(target), source), staged)
+  if (childProcess.spawnSync(staged, ["--version"], { stdio: "ignore" }).status !== 0) {
+    fs.rmSync(staged, { force: true })
+    throw new Error(`${source} doesn't run here`)
+  }
+  fs.renameSync(staged, target)
 }
 
 function resolvePackage(name) {
@@ -94,40 +113,28 @@ function installPackage(name) {
   return true
 }
 
-function verify() {
-  return childProcess.spawnSync(target, ["--version"], { stdio: "ignore" }).status === 0
-}
-
-// Says so when this system's first choice wasn't installable (a registry
-// that doesn't serve the new version yet, say) and another build stands in:
-// on glibc that's the static build, which has no desktop app.
-function fellBack(name, names) {
-  if (name === names[0]) return
-  console.error(
-    `deadbolt: installed ${name}, as ${names[0]}@${dependencies[names[0]]} couldn't be installed` +
-      (name.endsWith("-musl") ? " (this build has no desktop app)" : "") +
-      `. Reinstall @deadbolt/cli later to get ${names[0]}.`,
-  )
-}
-
 function main() {
+  if (!platform || !arch) return `Deadbolt has no build for ${os.platform()}-${os.arch()}`
   const names = packageNames()
   for (const name of names) {
     try {
-      link(binaryIn(resolvePackage(name)))
-      if (verify()) return fellBack(name, names)
+      return link(binaryIn(resolvePackage(name)))
     } catch {
-      if (installPackage(name) && verify()) return fellBack(name, names)
+      try {
+        if (installPackage(name)) return
+      } catch {}
     }
   }
-  throw new Error(
-    `Failed to install Deadbolt. Try manually installing ${names.map((name) => JSON.stringify(name)).join(" or ")}.`,
+  const wanted = names.map((name) => `${name}@${dependencies[name]}`).join(" or ") || `a package for ${base}`
+  return (
+    `couldn't install ${wanted}; if it was just released, npm may not serve it yet. ` +
+    "`deadbolt` finishes this when it next runs, or reinstall @deadbolt/cli."
   )
 }
 
 try {
-  main()
+  const problem = main()
+  if (problem) console.error(`deadbolt: ${problem}`)
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
+  console.error(`deadbolt: ${error instanceof Error ? error.message : String(error)}`)
 }
