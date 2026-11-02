@@ -1,7 +1,7 @@
 //! Secret form fields, concealed clipboard copies, kept multi-line keys,
 //! wrapping public keys and one-time passwords.
 
-use deadbolt_app::agent::{Done, Job};
+use deadbolt_app::daemon::{Done, Job};
 use deadbolt_app::model::Screen;
 use deadbolt_client::protocol::AppAction;
 use rune::{Key, KeyEvent, Mods};
@@ -668,7 +668,7 @@ fn a_pasted_public_key_keeps_to_one_line() {
     assert_eq!(key, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 ci@anoma.ly!");
 }
 
-/// The agent keeps a login's one-time password back, so the form never has
+/// The daemon keeps a login's one-time password back, so the form never has
 /// it: left empty it stays, and typed into, it's replaced.
 #[test]
 fn an_edit_keeps_a_one_time_password_it_never_sees() {

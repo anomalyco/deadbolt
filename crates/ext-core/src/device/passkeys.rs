@@ -1,4 +1,4 @@
-//! Standalone storage/consent adapter for the same ceremonies as the agent.
+//! Standalone storage/consent adapter for the same ceremonies as the daemon.
 
 use std::cell::{Cell, RefCell};
 use std::time::Duration;

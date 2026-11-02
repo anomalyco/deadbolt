@@ -1,6 +1,6 @@
 //! Adding, changing and deleting items, headless: the vault scene with a
-//! scripted agent, so each test sees the jobs the app sends and answers them
-//! as the agent would. `agent.rs` runs the same against a real agent;
+//! scripted daemon, so each test sees the jobs the app sends and answers them
+//! as the daemon would. `daemon.rs` runs the same against a real daemon;
 //! `delete` covers conflicts, deletion, menus and 1Password sync, `restore`
 //! covers Recently Deleted, and `secrets` covers secret fields, concealed
 //! copies and kept multi-line keys.
@@ -11,7 +11,7 @@ mod secrets;
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use deadbolt_app::agent::{Agent, Done, Failure, Job, Values};
+use deadbolt_app::daemon::{Daemon, Done, Failure, Job, Values};
 use deadbolt_app::edit::{Conflict, Input};
 use deadbolt_app::model::App;
 use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo};
@@ -39,8 +39,8 @@ pub(super) fn rig(scene: &str) -> Rig {
     );
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
-    let (agent, jobs, replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     let mut rig = Rig { rt, jobs, replies };
     rig.settle(1.0);
     rig
@@ -516,10 +516,10 @@ fn saved(r: &mut Rig, seq: u64, id: &str) -> u64 {
     r.take_get(Some(id))
 }
 
-/// While a save waits on the agent the form takes nothing: no generator,
+/// While a save waits on the daemon the form takes nothing: no generator,
 /// type, typing, cancel or esc. The save's answer still lands.
 #[test]
-fn a_saving_form_holds_until_the_agent_answers() {
+fn a_saving_form_holds_until_the_daemon_answers() {
     let mut r = rig("vault");
     let seq = save_new_login(&mut r, Some("Vq7#mRz2!pKx9@wLt4&nBe8z"));
     assert!(r.rt.state.saving());
@@ -595,7 +595,7 @@ fn a_saved_form_closes_when_its_values_fail_to_come() {
     assert!(r.rt.state.editing(), "waiting on its values");
     r.reply(Done::Item {
         seq: get,
-        result: Err(failure("the agent couldn't read it")),
+        result: Err(failure("the daemon couldn't read it")),
     });
     assert!(!r.rt.state.editing() && r.rt.state.search.focused);
 }
@@ -983,7 +983,7 @@ fn add_offers_every_type() {
         assert_eq!(form.fields[0].name, first, "{kind}");
         assert_eq!(form.fields.len(), count, "{kind}");
     }
-    // An API credential needs its credential, as the agent says.
+    // An API credential needs its credential, as the daemon says.
     r.rt.update(|s, _| s.choose_type("api"));
     r.fill("username", "deploy-bot");
     r.command('s');

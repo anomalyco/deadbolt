@@ -82,7 +82,7 @@ async function launch(name: string, port: number) {
 async function pair(b: Page) {
   const { code } = (await request(b, { type: "device-join-start" })).reply
   if (typeof code !== "string") throw new Error("no synthetic pairing code")
-  await cli("pair", code)
+  await cli("approve", code)
   await until(
     "join admitted",
     async () => (await request(b, { type: "device-join-status" })).reply.phase === "admitted",
@@ -135,7 +135,7 @@ async function cliResult(...args: string[]) {
 }
 async function cli(...args: string[]) {
   const { out, err, code } = await cliResult(...args)
-  if (code !== 0) throw new Error(`CLI ${args[0]}: ${args[0] === "pair" ? err.replaceAll(args[1], "[code]") : err}`)
+  if (code !== 0) throw new Error(`CLI ${args[0]}: ${args[0] === "approve" ? err.replaceAll(args[1], "[code]") : err}`)
   return out.trim()
 }
 const nativeLogin = (name: string) => cli("new", "login", "--name", name, "password=initial")
@@ -422,7 +422,7 @@ try {
 } finally {
   await Promise.allSettled([...contexts].map((c) => c.close()))
 
-  await cli("agent", "stop").catch(() => {})
+  await cli("debug", "daemon", "stop").catch(() => {})
   for (const p of [pb, pc]) p.close()
   await services.close()
 }

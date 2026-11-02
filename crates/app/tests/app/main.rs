@@ -3,16 +3,16 @@
 
 #![cfg(test)]
 
-// Only agent, autofill, codes and import use it, and they run in debug builds only.
+// Only daemon, autofill, codes and import use it, and they run in debug builds only.
 #[cfg(debug_assertions)]
 mod support;
 
 mod deadbolt;
 
-mod agent;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod autofill;
 mod codes;
+mod daemon;
 mod edit;
 mod health;
 mod import;

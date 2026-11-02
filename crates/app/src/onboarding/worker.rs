@@ -12,7 +12,7 @@ use rune::Waker;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
-use crate::agent::Failure;
+use crate::daemon::Failure;
 use crate::worker::{Inbox, Poster};
 
 /// What a request is doing now. Sent as each slow part starts, so progress is
@@ -54,12 +54,12 @@ pub struct NewDevice {
 }
 
 pub struct Worker {
-    agent: Option<(Paths, Launch)>,
+    daemon: Option<(Paths, Launch)>,
     inbox: Inbox<Progress>,
     cancel: Option<oneshot::Sender<()>>,
     /// The running request's thread, so one runs at a time and close can wait for it.
     thread: Option<JoinHandle<()>>,
-    /// Progress to deliver at set times, for scenes (no agent).
+    /// Progress to deliver at set times, for scenes (no daemon).
     script: Vec<(f64, Progress)>,
     /// The device name lookup has started.
     naming: bool,
@@ -68,15 +68,15 @@ pub struct Worker {
 impl Worker {
     pub fn new(paths: Paths, launch: Launch) -> Worker {
         Worker {
-            agent: Some((paths, launch)),
+            daemon: Some((paths, launch)),
             ..Worker::offline()
         }
     }
 
-    /// No agent: requests go nowhere, for scenes and snapshots.
+    /// No daemon: requests go nowhere, for scenes and snapshots.
     pub fn offline() -> Worker {
         Worker {
-            agent: None,
+            daemon: None,
             inbox: Inbox::new(),
             cancel: None,
             thread: None,
@@ -85,7 +85,7 @@ impl Worker {
         }
     }
 
-    /// No agent; `script` arrives at the given seconds on the app's clock.
+    /// No daemon; `script` arrives at the given seconds on the app's clock.
     pub fn scripted(mut script: Vec<(f64, Progress)>) -> Worker {
         script.sort_by(|a, b| a.0.total_cmp(&b.0));
         Worker {
@@ -110,7 +110,7 @@ impl Worker {
     /// take tens of milliseconds) and posts it as `Progress::DeviceName`.
     /// Once per worker, and not offline: scenes name their devices.
     pub fn name_device(&mut self) {
-        if self.agent.is_none() || self.naming {
+        if self.daemon.is_none() || self.naming {
             return;
         }
         self.naming = true;
@@ -143,7 +143,7 @@ impl Worker {
     }
 
     /// Hangs up a pending join. A device setup already sent finishes first:
-    /// the agent completes it either way, so the join stops after it.
+    /// the daemon completes it either way, so the join stops after it.
     pub fn cancel(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             cancel.send(()).ok();
@@ -164,7 +164,7 @@ impl Worker {
         F: FnOnce(Paths, Launch, Poster<Progress>) -> Fut + Send + 'static,
         Fut: Future<Output = ()>,
     {
-        let Some((paths, launch)) = self.agent.clone() else {
+        let Some((paths, launch)) = self.daemon.clone() else {
             return;
         };
         // The screen starts a request only once the last one has reported, after
@@ -195,10 +195,10 @@ impl Worker {
     }
 }
 
-/// The agent's refusal when a device is set up twice; the app says the same.
+/// The daemon's refusal when a device is set up twice; the app says the same.
 pub const ALREADY_SET_UP: &str = "this device is already set up";
 
-/// Starts the agent and reads its status.
+/// Starts the daemon and reads its status.
 async fn start(paths: &Paths, launch: &Launch, post: &Poster<Progress>) -> Result<Status, Failure> {
     post.send(Progress::Stage(Stage::Starting));
     Ok(deadbolt_client::ensure_running(paths, launch).await?)
@@ -260,7 +260,7 @@ async fn create(
 
 /// Sets up the device if needed, then joins until the other device finishes
 /// or `cancelled` fires (or its sender drops). A cancel during setup waits for
-/// it: the agent finishes a setup it has started even if this hangs up, and
+/// it: the daemon finishes a setup it has started even if this hangs up, and
 /// the screen must know the device is set up.
 async fn join(
     paths: &Paths,
@@ -280,14 +280,14 @@ async fn join(
     set_up(paths, &status, device, post).await?;
     tokio::select! {
         biased;
-        // Dropping the request hangs up, which cancels the join in the agent.
+        // Dropping the request hangs up, which cancels the join in the daemon.
         _ = &mut cancelled => Err(cancel()),
         result = pair(paths, post) => result,
     }
 }
 
 /// Shows a code and receives the vault once the other device pairs. The
-/// device is set up already, so the agent never asks for a passphrase.
+/// device is set up already, so the daemon never asks for a passphrase.
 async fn pair(paths: &Paths, post: &Poster<Progress>) -> Result<VaultInfo, Failure> {
     post.send(Progress::Stage(Stage::MakingCode));
     let command = Command::Join {
@@ -321,6 +321,6 @@ async fn pair(paths: &Paths, post: &Poster<Progress>) -> Result<VaultInfo, Failu
 fn unexpected() -> Failure {
     Failure {
         code: None,
-        message: "unexpected reply from the agent".into(),
+        message: "unexpected reply from the daemon".into(),
     }
 }

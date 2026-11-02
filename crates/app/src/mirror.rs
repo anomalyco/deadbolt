@@ -1,13 +1,13 @@
-//! Syncing from 1Password: Settings' "Sync from 1Password" has the agent
+//! Syncing from 1Password: Settings' "Sync from 1Password" has the daemon
 //! mirror 1Password into the default vault, as `deadbolt sync 1password`
-//! does, and shows what it did. The agent runs 1Password's CLI; the app only
+//! does, and shows what it did. The daemon runs 1Password's CLI; the app only
 //! asks, and gets back counts.
 
 use deadbolt_client::protocol::MirrorReport;
 use rune::{El, Transition, Tx, col, text};
 use rune_kit::Kit;
 
-use crate::agent::{Failure, Job};
+use crate::daemon::{Failure, Job};
 use crate::model::App;
 
 #[derive(Default)]
@@ -36,12 +36,12 @@ impl App {
         self.mirror.syncing = true;
         self.mirror.result = None;
         self.mirror.seq += 1;
-        self.agent.send(Job::SyncOnePassword {
+        self.daemon.send(Job::SyncOnePassword {
             seq: self.mirror.seq,
         });
     }
 
-    /// The list follows on its own: the agent's writes come in on the watch.
+    /// The list follows on its own: the daemon's writes come in on the watch.
     pub(crate) fn on_mirrored(
         &mut self,
         seq: u64,

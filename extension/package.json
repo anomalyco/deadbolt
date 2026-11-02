@@ -2,7 +2,7 @@
   "name": "@deadbolt/extension",
   "private": true,
   "version": "0.1.0",
-  "description": "Deadbolt's browser extension: fill and save logins through the local Deadbolt agent.",
+  "description": "Deadbolt's browser extension: fill and save logins through the local Deadbolt daemon.",
   "type": "module",
   "scripts": {
     "build": "bun scripts/build.ts",

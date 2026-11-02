@@ -1,5 +1,5 @@
 //! The `deadbolt` binary the app is built into, for the tests that run it:
-//! a real agent (`support`), and the app itself as `deadbolt ui` headless.
+//! a real daemon (`support`), and the app itself as `deadbolt ui` headless.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

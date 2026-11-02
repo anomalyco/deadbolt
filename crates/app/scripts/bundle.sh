@@ -23,7 +23,7 @@ esac
 target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 # One program: `deadbolt` with the app built in. Contents/MacOS/Deadbolt and
 # Contents/Helpers/deadbolt are two copies of it, signed apart (the app as
-# pw.deadbolt.app, the CLI and agent as deadbolt), so the agent tells the app
+# pw.deadbolt.app, the CLI and daemon as deadbolt), so the daemon tells the app
 # from the CLI by signature and path; run as MacOS/Deadbolt it is only ever
 # the app.
 if $universal; then
@@ -98,7 +98,7 @@ fi
 # --timestamp` when set, or ad-hoc `-` otherwise) before embedding its whole-file
 # SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt` (both copies). Re-signing `deadbolt-enclave`
 # after `deadbolt` is compiled would alter its `__LINKEDIT` signature bytes and
-# break the agent's SHA-256 verification.
+# break the daemon's SHA-256 verification.
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
 if [[ $sign_id != "-" ]]; then
   team_id=${DEADBOLT_APPLE_TEAM_ID:-}

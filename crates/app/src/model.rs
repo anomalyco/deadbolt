@@ -1,4 +1,4 @@
-//! The app's state and what each agent reply does to it. No drawing here;
+//! The app's state and what each daemon reply does to it. No drawing here;
 //! `view.rs` reads this, and `model/{unlock,selection,copy,otp}` and
 //! `keys.rs` hold each capability's transitions.
 
@@ -20,7 +20,7 @@ use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status, code_field}
 use rune::{TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::agent::{Agent, Done, Failure, Job};
+use crate::daemon::{Daemon, Done, Failure, Job};
 use crate::onboarding::Onboarding;
 use crate::onboarding::worker::Worker;
 
@@ -45,7 +45,7 @@ pub struct App {
     /// The default shortcut isn't registered globally, so ⇧⌘Space inside
     /// Deadbolt opens and closes the panel (`panel::window::is_shortcut`).
     pub shortcut_fallback: bool,
-    pub agent: Agent,
+    pub daemon: Daemon,
     /// How long a copied secret stays on the clipboard.
     pub clear_after: f64,
     pub screen: Screen,
@@ -56,7 +56,7 @@ pub struct App {
     pub unlock_error: Option<String>,
     /// Whether the main window currently has focus.
     pub window_focused: bool,
-    /// A Touch ID prompt is in flight on the agent thread.
+    /// A Touch ID prompt is in flight on the daemon thread.
     pub touch_id_unlocking: bool,
     /// Touch ID was already auto-prompted for this lock/focus session.
     pub touch_id_prompted: bool,
@@ -119,14 +119,14 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(agent: Agent) -> App {
+    pub fn new(daemon: Daemon) -> App {
         App {
             installer: None,
             settings_open: false,
             nav: crate::keys::Nav::default(),
             hotkey: crate::shortcut::Hotkey::default(),
             shortcut_fallback: true,
-            agent,
+            daemon,
             clear_after: CLEAR_AFTER,
             screen: Screen::Connecting,
             status: None,
@@ -176,13 +176,13 @@ impl App {
     }
 
     // ---------------------------------------------------------------------------------------
-    // Agent replies
+    // Daemon replies
 
-    /// Applies what the agent sent back. True when anything changed.
+    /// Applies what the daemon sent back. True when anything changed.
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         self.clock = now;
         let mut changed = false;
-        for done in self.agent.drain(now) {
+        for done in self.daemon.drain(now) {
             self.apply(done, tx);
             changed = true;
         }
@@ -191,7 +191,6 @@ impl App {
         changed |= self.tick_copy(now, tx);
         self.tick_code(now, tx);
         changed |= self.tick_import(now);
-        changed |= self.poll_ssh(now, tx);
         if let Some(installer) = &mut self.installer {
             installer.stamp_copy(now, tx);
             changed |= installer.poll(now);
@@ -223,16 +222,15 @@ impl App {
             }
             Done::Status(Some(status)) => self.on_status(status, tx),
             Done::Connected(Err(failure)) => self.show(Screen::Failed(failure.message)),
-            Done::Status(None) => self.fail("The agent stopped.".into(), tx),
+            Done::Status(None) => self.fail("The daemon stopped.".into(), tx),
             Done::Unlocked(result) => self.on_unlocked(result, tx),
             Done::UnlockedBiometric(result) => self.on_unlocked_biometric(result, tx),
             Done::TouchIdSet { enabled, result } => self.on_touch_id_set(enabled, result, tx),
-            Done::SshAgentSet { enabled, result } => self.on_ssh_agent_set(enabled, result, tx),
             Done::Locked(result) => match result {
                 Ok(()) => {
                     self.on_locked(tx);
                     if !self.panel_inert() {
-                        self.agent.send(Job::Status);
+                        self.daemon.send(Job::Status);
                     }
                 }
                 Err(failure) => self.notice = Some(failure.message),
@@ -289,11 +287,11 @@ impl App {
             } => self.on_breach_checks_set(seq, enabled, result, tx),
             Done::Reported => {}
             Done::Changed(change) => self.on_change(change, tx),
-            Done::WatchLost => self.on_agent_gone(tx),
+            Done::WatchLost => self.on_daemon_gone(tx),
         }
     }
 
-    /// A change the agent streamed. It says what changed; this refetches.
+    /// A change the daemon streamed. It says what changed; this refetches.
     fn on_change(&mut self, change: Change, tx: &mut Tx) {
         // A panel that's confirming a copy or going only follows the vault
         // closing; its summon fetches the rest.
@@ -303,34 +301,34 @@ impl App {
         match change {
             // The stream is (again) live, or it dropped changes: fetch it all.
             Change::Watching | Change::Resync => {
-                self.agent.send(Job::Status);
+                self.daemon.send(Job::Status);
                 self.refresh();
             }
             Change::Locked if self.screen == Screen::Vault => {
                 self.on_locked(tx);
                 if !self.panel_inert() {
-                    self.agent.send(Job::Status);
+                    self.daemon.send(Job::Status);
                 }
             }
             // Onboarding decides from the status whether it can carry on.
-            Change::Locked if self.screen == Screen::Onboarding => self.agent.send(Job::Status),
-            Change::Unlocked if self.screen != Screen::Vault => self.agent.send(Job::Status),
+            Change::Locked if self.screen == Screen::Onboarding => self.daemon.send(Job::Status),
+            Change::Unlocked if self.screen != Screen::Vault => self.daemon.send(Job::Status),
             Change::Vaults => {
-                self.agent.send(Job::Status);
+                self.daemon.send(Job::Status);
                 self.refresh();
             }
-            Change::Devices { .. } => self.agent.send(Job::Status),
+            Change::Devices { .. } => self.daemon.send(Job::Status),
             Change::Activity => {
                 self.on_activity_changed();
                 self.on_agents_changed();
             }
             Change::Health => self.request_health(false),
-            Change::Update => self.agent.send(Job::Status),
+            Change::Update => self.daemon.send(Job::Status),
             Change::Items { vault } if self.shows(&vault) => {
                 self.refresh();
                 self.on_trash_changed();
             }
-            Change::Stopping => self.on_agent_gone(tx),
+            Change::Stopping => self.on_daemon_gone(tx),
             // Another launch (`deadbolt app`): only the main window's watch hears it.
             Change::Activate { token } => {
                 if let Some(windows) = &self.windows {
@@ -370,7 +368,7 @@ impl App {
         if self.panel_inert() {
             return;
         }
-        self.agent.send(Job::List {
+        self.daemon.send(Job::List {
             generation: self.generation,
         });
     }
@@ -414,7 +412,7 @@ impl App {
             if let Some((pending, _)) = &mut self.pending_copy {
                 *pending = self.seq;
             }
-            self.agent.send(Job::Get {
+            self.daemon.send(Job::Get {
                 id,
                 seq: self.seq,
                 cached: false,
@@ -422,22 +420,19 @@ impl App {
         }
     }
 
-    /// The agent stopped, which locked the store. The watch thread finds the
-    /// next agent; unlocking starts one.
-    fn on_agent_gone(&mut self, tx: &mut Tx) {
+    /// The daemon stopped, which locked the store. The watch thread finds the
+    /// next daemon; unlocking starts one.
+    fn on_daemon_gone(&mut self, tx: &mut Tx) {
         if self.screen == Screen::Vault {
             self.on_locked(tx);
         }
     }
 
     pub(crate) fn on_status(&mut self, mut status: Status, tx: &mut Tx) {
-        if let Some(prev) = &self.status {
-            if self.touch_id_busy {
-                status.touch_id_enabled = prev.touch_id_enabled;
-            }
-            if self.ssh.busy {
-                status.ssh_agent = prev.ssh_agent;
-            }
+        if self.touch_id_busy
+            && let Some(prev) = &self.status
+        {
+            status.touch_id_enabled = prev.touch_id_enabled;
         }
         let ready = status.initialized;
         let screen = if !status.initialized {
@@ -479,7 +474,7 @@ impl App {
 
     /// Every screen change after start-up comes through here. Leaving Locked
     /// wipes a part-typed passphrase and any stale unlock error, however it
-    /// was left: an unlock from the other window or the CLI, the agent
+    /// was left: an unlock from the other window or the CLI, the daemon
     /// stopping, onboarding.
     pub(crate) fn show(&mut self, screen: Screen) {
         if screen != Screen::Locked {

@@ -2,7 +2,7 @@ import { lazy, Suspense, type ReactNode } from "react"
 import { Ink } from "../print/Ink"
 import { Masthead } from "../print/Masthead"
 import { MeshStory } from "./stories/MeshStory"
-import { AgentStory } from "./stories/AgentStory"
+import { DaemonStory } from "./stories/DaemonStory"
 import { KeysStory } from "./stories/KeysStory"
 import { LogsStory } from "./stories/LogsStory"
 import { SyncStory } from "./stories/SyncStory"
@@ -30,12 +30,12 @@ const chapters: Chapter[] = [
   {
     id: "device", title: "one device, four crates",
     body: <>
-      <p>on each machine there are two processes. the <code>deadbolt</code> command you type is a thin client. the work happens in a background agent that the cli starts on first use. the agent is the only process that ever opens the store, it keeps the vault unlocked in memory, and while unlocked it runs the iroh node.</p>
-      <p>the code splits along the same lines: <code>deadbolt-core</code> is the pure model (entries, membership, items, merging) with no io at all; <code>deadbolt-store</code> is the encrypted file on disk; <code>deadbolt-net</code> is iroh, sync and pairing; <code>deadbolt-cli</code> is the binary, holding both the client and the agent.</p>
+      <p>on each machine there are two processes. the <code>deadbolt</code> command you type is a thin client. the work happens in a background daemon that the cli starts on first use. the daemon is the only process that ever opens the store, it keeps the vault unlocked in memory, and while unlocked it runs the iroh node.</p>
+      <p>the code splits along the same lines: <code>deadbolt-core</code> is the pure model (entries, membership, items, merging) with no io at all; <code>deadbolt-store</code> is the encrypted file on disk; <code>deadbolt-net</code> is iroh, sync and pairing; <code>deadbolt-cli</code> is the binary, holding both the client and the daemon.</p>
     </>,
-    scene: <AgentStory />,
+    scene: <DaemonStory />,
     why: <p>the cli was built agent-first: every command works from flags, env and stdin, and it never waits on a human without a terminal. an ai agent can drive it the same way you do.</p>,
-    code: [["crates/cli/src/main.rs", "the commands"], ["crates/cli/src/client.rs", "starts, replaces and talks to the agent"], ["crates/cli/src/protocol.rs", "the socket protocol: one json line per request"], ["crates/cli/src/agent/mod.rs", "the agent: lock, unlock, the membership gate"], ["crates/cli/src/paths.rs", "where the socket, store and logs live"]],
+    code: [["crates/cli/src/main.rs", "the commands"], ["crates/cli/src/client.rs", "starts, replaces and talks to the daemon"], ["crates/cli/src/protocol.rs", "the socket protocol: one json line per request"], ["crates/cli/src/daemon/mod.rs", "the daemon: lock, unlock, the membership gate"], ["crates/cli/src/paths.rs", "where the socket, store and logs live"]],
   },
   {
     id: "keys", title: "two keys",
@@ -44,7 +44,7 @@ const chapters: Chapter[] = [
       <p>there's no shared vault key in v1. data only moves over encrypted iroh connections between current members, and at rest each device seals its own copy under its own unlock key.</p>
     </>,
     scene: <KeysStory />,
-    why: <p>why not separate keys for signing and networking? neither could live in the secure enclave (it only does p-256), and both have to be in memory while the agent runs. two keys there would add a key without adding protection.</p>,
+    why: <p>why not separate keys for signing and networking? neither could live in the secure enclave (it only does p-256), and both have to be in memory while the daemon runs. two keys there would add a key without adding protection.</p>,
     code: [["crates/store/src/lib.rs", "the file layout, keys and integrity, documented at the top"], ["crates/store/src/kdf.rs", "argon2id parameters"], ["crates/store/src/crypto.rs", "xchacha20-poly1305 sealing"]],
   },
   {
@@ -61,11 +61,11 @@ const chapters: Chapter[] = [
   {
     id: "sync", title: "sync",
     body: <>
-      <p>sync is one simple exchange: "here's what i have, send me what i'm missing". each side sends its heads (the latest entry it holds from every log), works out from the other's heads what to send, and sends it. the protocol in <code>deadbolt-net</code> treats all of this as opaque bytes; the agent decides what heads and entries mean.</p>
-      <p>membership always goes first. when the agent unlocks, it first syncs membership with every member it can reach, and only sends membership entries until that round is done. that shrinks the window in which a device that was offline for a while still trusts a device someone removed.</p>
+      <p>sync is one simple exchange: "here's what i have, send me what i'm missing". each side sends its heads (the latest entry it holds from every log), works out from the other's heads what to send, and sends it. the protocol in <code>deadbolt-net</code> treats all of this as opaque bytes; the daemon decides what heads and entries mean.</p>
+      <p>membership always goes first. when the daemon unlocks, it first syncs membership with every member it can reach, and only sends membership entries until that round is done. that shrinks the window in which a device that was offline for a while still trusts a device someone removed.</p>
     </>,
     scene: <SyncStory />,
-    code: [["crates/net/src/sync.rs", "the deadbolt/sync/1 protocol"], ["crates/cli/src/agent/sync.rs", "what the agent puts in heads and how it orders entries"]],
+    code: [["crates/net/src/sync.rs", "the deadbolt/sync/1 protocol"], ["crates/cli/src/daemon/sync.rs", "what the daemon puts in heads and how it orders entries"]],
   },
   {
     id: "merge", title: "concurrent edits",
@@ -83,7 +83,7 @@ const chapters: Chapter[] = [
     </>,
     scene: <PairStory />,
     why: <p>the code check is what stops a man in the middle. someone who only saw the qr code can't produce matching digits on both screens.</p>,
-    code: [["crates/net/src/pair.rs", "the deadbolt/pair/1 protocol, step by step"], ["crates/cli/src/agent/pairing.rs", "offer, join and welcome"], ["crates/net/src/qr.rs", "the terminal qr code"]],
+    code: [["crates/net/src/pair.rs", "the deadbolt/pair/1 protocol, step by step"], ["crates/cli/src/daemon/pairing.rs", "offer, join and welcome"], ["crates/net/src/qr.rs", "the terminal qr code"]],
   },
   {
     id: "removal", title: "removal and the gate",
@@ -101,7 +101,7 @@ const crates: [string, string, string][] = [
   ["deadbolt-core", "the model: device ids, signed entries, membership, typed items, merging, heads. no io, no async.", "crates/core"],
   ["deadbolt-store", "one encrypted redb file per device: argon2id, xchacha20-poly1305, keyed hashes, zeroized keys.", "crates/store"],
   ["deadbolt-net", "iroh endpoint, the membership gate, deadbolt/sync/1 and deadbolt/pair/1, qr rendering.", "crates/net"],
-  ["deadbolt-cli", "the deadbolt binary: commands, the background agent, the socket protocol, bitwarden import.", "crates/cli"],
+  ["deadbolt-cli", "the deadbolt binary: commands, the background daemon, the socket protocol, bitwarden import.", "crates/cli"],
 ]
 
 const Audition = lazy(() => import("../sound/Audition.tsx").then(m => ({ default: m.Audition })))
@@ -141,7 +141,7 @@ export function Architecture() {
         <pre>{`$ cargo build -j 2
 $ cargo test -j 2            `}<span className="output">{"# core, store, net and multi-device cli tests"}</span>{`
 $ cargo build --release -j 2 `}<span className="output">{"# target/release/deadbolt"}</span></pre>
-        <p className="dim">the cli tests run real agents for several devices on localhost, with <code>DEADBOLT_NET=local</code> and a fast kdf.</p>
+        <p className="dim">the cli tests run real daemons for several devices on localhost, with <code>DEADBOLT_NET=local</code> and a fast kdf.</p>
 
         <h3>rough edges</h3>
         <ul className="plain">
@@ -150,7 +150,7 @@ $ cargo build --release -j 2 `}<span className="output">{"# target/release/deadb
           <li>no compaction: history, including deleted items, grows forever on every device.</li>
           <li>importing the same bitwarden export twice imports everything twice.</li>
           <li>the os keychain unlock (biometrics instead of the passphrase) is designed but not built.</li>
-          <li><code>deadbolt agent stop</code> followed straight away by another command could fail with "the agent is already running". fixed locally in <Src path="crates/cli/src/client.rs" />, not yet in main.</li>
+          <li><code>deadbolt debug daemon stop</code> followed straight away by another command could fail with "the daemon is already running". fixed locally in <Src path="crates/cli/src/client.rs" />, not yet in main.</li>
         </ul>
 
         <h3>good first things</h3>

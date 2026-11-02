@@ -1,7 +1,7 @@
 //! Every item type for the vault page: the list, an item's details, its
 //! secret values, adding, editing and deleting. Labels, details, search
 //! words and input typing come from `deadbolt_core::listing`, as the
-//! native agent names and writes them. Logins keep their own commands
+//! native daemon names and writes them. Logins keep their own commands
 //! (`device-save`, the page's `save`) for the site rules they need; this
 //! adds the other types, and a login's one-time password.
 
@@ -35,7 +35,7 @@ fn find(s: &Loaded, body: &Value) -> Result<Item> {
 }
 
 /// One row of the vault page's list: the type, the label and detail the
-/// agent gives it, the words a search finds it by (never a secret), and a
+/// daemon gives it, the words a search finds it by (never a secret), and a
 /// login's account as the page menus have it.
 fn summary(item: &Item, vault: &Vault) -> Value {
     let mut row = if item.kind == "login" {

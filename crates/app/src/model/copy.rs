@@ -100,7 +100,7 @@ impl App {
     }
 
     /// Saves the shown item's file field `field` where a Save dialog says:
-    /// the agent sends its contents and the worker writes them, readable
+    /// the daemon sends its contents and the worker writes them, readable
     /// only by the owner (`Job::SaveFile`), and Activity hears of it as a
     /// reveal. The quick panel saves nothing: it hides on the dialog.
     pub fn save_file(&mut self, field: &str, tx: &mut Tx) {
@@ -125,8 +125,8 @@ impl App {
         tx.save_file(options, move |s: &mut App, result, _| {
             if let Ok(Some(path)) = result {
                 s.report_item(AppAction::Reveal, &id, &title, &field);
-                s.agent
-                    .send(crate::agent::Job::SaveFile { id, field, path });
+                s.daemon
+                    .send(crate::daemon::Job::SaveFile { id, field, path });
             }
         });
     }

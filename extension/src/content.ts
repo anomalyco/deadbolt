@@ -315,7 +315,7 @@ async function submitted() {
   // before the password, and no check runs without one.
   if (!username && !password && !newPassword) return
   const roles = [...new Set(fields.map((f) => f.role))]
-  // A generated password stays with the agent: name it instead.
+  // A generated password stays with the daemon: name it instead.
   const generated = generatedId(newPassword)
   const attempt = ++submission
   send({ type: "db:capture", username, password, newPassword: generated ? undefined : newPassword, generated, title: document.title, kind, roles, submission: attempt })

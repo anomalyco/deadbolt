@@ -22,7 +22,6 @@ pub enum Row {
     Breaches,
     Shortcut,
     Command,
-    SshAgent,
     Sync,
     Agents,
     Activity,
@@ -36,7 +35,6 @@ impl Row {
             Row::Breaches => "breaches",
             Row::Shortcut => "shortcut",
             Row::Command => "command",
-            Row::SshAgent => "ssh-agent",
             Row::Sync => "op-sync",
             Row::Agents => "agents-row",
             Row::Activity => "activity-row",
@@ -56,7 +54,6 @@ pub fn rows(s: &App) -> Vec<Row> {
     if s.installer.is_some() {
         rows.push(Row::Command);
     }
-    rows.push(Row::SshAgent);
     rows.extend([Row::Sync, Row::Agents, Row::Activity]);
     rows
 }
@@ -120,7 +117,6 @@ impl App {
                 self.close_settings();
                 self.show_installer();
             }
-            Some(Row::SshAgent) if !self.ssh.busy => self.toggle_ssh_agent(),
             Some(Row::Sync) => self.sync_one_password(),
             Some(Row::Agents) => self.toggle_agents(),
             Some(Row::Activity) => self.toggle_activity(),
@@ -231,12 +227,6 @@ pub fn page(s: &App, k: &Kit) -> El {
             button,
         ));
     }
-    getting.push(row_el(
-        Row::SshAgent,
-        "SSH agent",
-        crate::ssh::setting_about(s, k),
-        crate::ssh::setting_controls(s, k),
-    ));
     let (synced, sync) = crate::mirror::setting(s, k);
     let sync = row_el(Row::Sync, "Sync from 1Password", synced, sync);
     let (show_agents, agent_list) = crate::agents::setting(s, k);
@@ -254,7 +244,7 @@ pub fn page(s: &App, k: &Kit) -> El {
     let mut activity = vec![row_el(
         Row::Activity,
         "Recent activity",
-        about(k, "What apps and commands asked the agent for"),
+        about(k, "What apps and commands asked the daemon for"),
         show,
     )];
     activity.extend(entries);
@@ -387,7 +377,7 @@ fn devices(s: &App, k: &Kit) -> El {
     setting(k, "devices", false, device, about(k, &shares), el())
 }
 
-/// A newer Deadbolt the agent's background check found, quietly: nothing
+/// A newer Deadbolt the daemon's background check found, quietly: nothing
 /// installs until `deadbolt update` runs.
 fn update(s: &App, k: &Kit) -> Option<El> {
     let update = s.status.as_ref()?.update.as_ref()?;

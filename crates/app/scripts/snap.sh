@@ -51,7 +51,6 @@ for theme in dark light; do
   app --scene shortcut-conflict --theme "$theme" --snap "$out/shortcut-conflict-$theme.png" "$@"
   app --scene settings-unavailable --theme "$theme" --snap "$out/settings-unavailable-$theme.png" "$@"
   app --scene settings-touch-id --theme "$theme" --snap "$out/settings-touch-id-$theme.png" "$@"
-  app --scene settings-ssh --theme "$theme" --snap "$out/settings-ssh-$theme.png" "$@"
   app --scene settings-agents --script scripts/settings-agents.json --at 1.5 --theme "$theme" --snap "$out/settings-agents-$theme.png" "$@"
   app --scene locked-touch-id --theme "$theme" --snap "$out/locked-touch-id-$theme.png" "$@"
   app --scene locked-touch-id-reset --theme "$theme" --snap "$out/locked-touch-id-reset-$theme.png" "$@"

@@ -7,7 +7,7 @@ internal APIs directly and update their callers.
 - `crates/core`: signed vault log, membership and item rules.
 - `crates/store`: encrypted redb persistence and passphrase derivation.
 - `crates/net`: iroh transport, membership gates, sync and pairing.
-- `crates/cli`: commands, background agent, control socket, deterministic simulator and `deadbolt update` (`src/update.rs`, docs/releasing.md "Updater").
+- `crates/cli`: commands, background daemon, control socket, deterministic simulator and `deadbolt update` (`src/update.rs`, docs/releasing.md "Updater").
 - `crates/app`: the Rune desktop app, a library built into `deadbolt` behind deadbolt-cli's default `app` feature (the static musl build turns it off); `deadbolt app` opens it, `deadbolt ui` runs it with Rune's flags (docs/app.md).
 - `crates/autofill`: the autofill engine: field and form classification from a value-free page snapshot, clue tables in `rules/*.toml` (not yet used by the extension).
 - `crates/send`: Deadbolt Send links, sealing and delivery (native and wasm32); `crates/send-web`: its browser build for the site's `/r`.

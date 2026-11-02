@@ -1,4 +1,4 @@
-//! Deadbolt's browser extension talks to the agent through this binary, run
+//! Deadbolt's browser extension talks to the daemon through this binary, run
 //! by the browser as a native messaging host (see `docs/autofill.md`).
 //!
 //! `deadbolt browser install` registers it: a manifest named

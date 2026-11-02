@@ -1,4 +1,4 @@
-//! The shown item's one-time code. The agent computes each one; the app
+//! The shown item's one-time code. The daemon computes each one; the app
 //! never holds the secret.
 
 use std::time::Duration;
@@ -7,17 +7,17 @@ use deadbolt_client::protocol::Code;
 use rune::Tx;
 use zeroize::Zeroizing;
 
-use crate::agent::{Failure, Job};
+use crate::daemon::{Failure, Job};
 
 use super::App;
 
 /// The one-time code's countdown bar, in points.
 pub const CODE_BAR: [f32; 2] = [40.0, 3.0];
 /// How long after a code's period ends the next is asked for, so the
-/// agent's clock is past the boundary too.
+/// daemon's clock is past the boundary too.
 pub const CODE_SLACK: f64 = 0.05;
 
-/// The shown item's one-time code. The agent computes each one; the app
+/// The shown item's one-time code. The daemon computes each one; the app
 /// never holds the secret. Wiped when dropped.
 pub struct Otp {
     pub item: String,
@@ -136,13 +136,13 @@ impl App {
             return;
         }
         otp.fetching = true;
-        self.agent.send(Job::Code {
+        self.daemon.send(Job::Code {
             id: otp.item.clone(),
             seq: self.seq,
         });
     }
 
-    /// The shown item's code, or `None` after asking the agent for the next
+    /// The shown item's code, or `None` after asking the daemon for the next
     /// one, which is copied as it lands.
     pub(super) fn code_for_copy(&mut self) -> Option<String> {
         let now = self.clock;
@@ -157,7 +157,7 @@ impl App {
         otp.copy_next = true;
         if !otp.fetching {
             otp.fetching = true;
-            self.agent.send(Job::Code {
+            self.daemon.send(Job::Code {
                 id: otp.item.clone(),
                 seq: self.seq,
             });

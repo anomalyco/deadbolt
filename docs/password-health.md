@@ -2,7 +2,7 @@
 
 2026-10-30. Plan, not built yet. Open decisions are at the end.
 
-Deadbolt audits saved credentials inside `deadbolt agent` and sends `Deadbolt.app` and the CLI only finding flags, counts, and item references, never secret values or password hashes. Five checks run offline by default using `zxcvbn` and ~292 KiB of bundled directory tables: **weak passwords**, **reused passwords**, **compromised websites**, **missing two-factor authentication**, and **passkeys available**. A sixth check, **breached passwords**, is strictly opt-in and queries Have I Been Pwned's k-anonymity range API (`5`-hex SHA-1 prefix with `Add-Padding: true`) directly from the agent, caching results encrypted in `store.redb`. Selecting a finding opens the item's edit form with a site-compatible generated password ready, keeps a one-click copy of the current password for the site's "Current password" prompt, and opens the site's change-password or 2FA setup page directly.
+Deadbolt audits saved credentials inside `deadbolt daemon` and sends `Deadbolt.app` and the CLI only finding flags, counts, and item references, never secret values or password hashes. Five checks run offline by default using `zxcvbn` and ~292 KiB of bundled directory tables: **weak passwords**, **reused passwords**, **compromised websites**, **missing two-factor authentication**, and **passkeys available**. A sixth check, **breached passwords**, is strictly opt-in and queries Have I Been Pwned's k-anonymity range API (`5`-hex SHA-1 prefix with `Add-Padding: true`) directly from the daemon, caching results encrypted in `store.redb`. Selecting a finding opens the item's edit form with a site-compatible generated password ready, keeps a one-click copy of the current password for the site's "Current password" prompt, and opens the site's change-password or 2FA setup page directly.
 
 ## Only password fields are scored, and weak ones use `zxcvbn`
 
@@ -31,7 +31,7 @@ That catches site-salted passwords such as `"github-alex-2026!"` that otherwise 
 
 Dropbox's `zxcvbn` model assigns brute-force characters a conservative cardinality of 10 (`10^len`) and marks scores `0..=2` (`< 10^8` guesses) as weak. Every password Deadbolt generates (`>= 60` combinatorial bits in `password_rules`, `>= 10^18` guesses; ~155 bits at the 24-character default) scores `4`, so replacing a weak password with Deadbolt's generator always clears the warning.
 
-`zxcvbn::Entropy` holds `Match` values containing `String` slices of the input password and does not implement `Zeroize`. The wrapper in `strength.rs` extracts only `Copy` numbers and an enum (`{ score: u8, guesses_log10: f32, reason: WeakReason }`) and drops `Entropy` before returning, so matched substrings are never stored in the agent memo or serialized.
+`zxcvbn::Entropy` holds `Match` values containing `String` slices of the input password and does not implement `Zeroize`. The wrapper in `strength.rs` extracts only `Copy` numbers and an enum (`{ score: u8, guesses_log10: f32, reason: WeakReason }`) and drops `Entropy` before returning, so matched substrings are never stored in the daemon memo or serialized.
 
 ### Avoiding false nags on PINs and non-passwords
 
@@ -41,17 +41,17 @@ Deadbolt's typed item schemas (`crates/core/src/item.rs`) separate human passwor
 2. **Site rule ceilings.** Deadbolt already embeds Apple's `quirks/password-rules.json` (`crates/core/src/site_password.rs`). Some banks and telecoms in that list cap logins at 4 to 8 digits or 8 characters, where `password_rules::strength(&rules, Field::default())` returns `Err(Refused::Weak)`. When a login's site has a quirk whose maximum strength cannot reach `Score::Three` and the saved password already uses the allowed length and classes, Deadbolt suppresses `Weak` rather than nagging the user to generate a password the site will refuse.
 3. **Per-item ignore.** For a voicemail or router PIN stored in `login.password` without a known site quirk, one action (`Ignore warning`) silences `Weak` on that item until its `password` value changes.
 
-## Reuse is detected in the agent with ephemeral keyed hashes
+## Reuse is detected in the daemon with ephemeral keyed hashes
 
 Neither `Deadbolt.app` nor the CLI receives secret values or hashes to find duplicates.
 
-When `Loaded` opens (`crates/cli/src/agent/session.rs`), the agent draws a random 32-byte `reuse_key` in a `Zeroizing<[u8; 32]>` buffer, kept in memory only and wiped when the store locks. For every audited password across all unlocked vaults on the device (excluding `wifi.password`, since 2.4 GHz and 5 GHz SSIDs on one router commonly share a passphrase), the agent computes:
+When `Loaded` opens (`crates/cli/src/daemon/session.rs`), the daemon draws a random 32-byte `reuse_key` in a `Zeroizing<[u8; 32]>` buffer, kept in memory only and wiped when the store locks. For every audited password across all unlocked vaults on the device (excluding `wifi.password`, since 2.4 GHz and 5 GHz SSIDs on one router commonly share a passphrase), the daemon computes:
 
 ```text
 digest = blake3::keyed_hash(&reuse_key, password.as_bytes())
 ```
 
-Items with identical `digest` values form a candidate cluster without holding duplicate plaintext strings in secondary maps. Across the control socket, the agent reports only group counts and item references (`{ vault, id, short, label, detail }`), never `digest`. Cross-vault reuse (such as the same password in `personal` and `work`) is caught automatically.
+Items with identical `digest` values form a candidate cluster without holding duplicate plaintext strings in secondary maps. Across the control socket, the daemon reports only group counts and item references (`{ vault, id, short, label, detail }`), never `digest`. Cross-vault reuse (such as the same password in `personal` and `work`) is caught automatically.
 
 ### Same-account deduplication
 
@@ -115,16 +115,16 @@ blake3::keyed_hash(hibp_cache_key, &sha1_bytes) -> { count: u64, checked_day: u3
 - **When lookups run (only while `breach_checks = true` and unlocked):**
   1. **Manual check** (`Check breaches` in Security or `deadbolt health --online`): queries uncached and expired prefixes at concurrency 8 over HTTP/2 connection reuse, streaming `checked / total` progress. A cold vault of 1,800 unique passwords takes ~225 RTT batches (~6–9 s once, ~25 MB compressed transfer) and 0 requests on subsequent opens.
   2. **Single-item write** (`ItemNew`, `ItemSet`, `SiteSave` changing `password`): checks that 1 prefix (~35 ms) in the background if uncached.
-  3. **Background refresh:** at most once every 24 hours while unlocked, rechecking expired `count == 0` entries at concurrency 2 with jitter. Locking or stopping the agent aborts in-flight HTTP tasks immediately and drops results. Background health tasks never count as activity for `unlock_timeout`.
+  3. **Background refresh:** at most once every 24 hours while unlocked, rechecking expired `count == 0` entries at concurrency 2 with jitter. Locking or stopping the daemon aborts in-flight HTTP tasks immediately and drops results. Background health tasks never count as activity for `unlock_timeout`.
 
 ### Breach dates vs password change dates
 
 Deadbolt's signed log entries intentionally carry no wall-clock timestamps (`docs/design.md`), so `Entry` cannot tell when a password was set. Recording a device-local `first_seen` timestamp in `store.redb` also fails: existing items and newly paired devices would appear "changed today" and silently miss older site breaches.
 
-Instead, store an optional agent-managed `password_changed` (`YYYY-MM-DD`) stamp on `Item` via `Change::PasswordChanged(Option<String>)` (wire tag `11` in `crates/core/src/entry.rs`), kept apart from `Item::fields` just like `Change::Source`:
+Instead, store an optional daemon-managed `password_changed` (`YYYY-MM-DD`) stamp on `Item` via `Change::PasswordChanged(Option<String>)` (wire tag `11` in `crates/core/src/entry.rs`), kept apart from `Item::fields` just like `Change::Source`:
 
 - **Day precision (`YYYY-MM-DD`)** matches `passkey.created` and HIBP's `BreachDate`, leaks no typing-time or timezone patterns across synced devices, keeps `data.rs` conflict resolution 100% causal (ties broken by entry hash), and powers the password age line on the item page (`"Login · Changed Mar 14, 2024"`).
-- **Written automatically:** whenever the agent creates an item with an audited password or changes that password (`items::create`, `items::set`, `autofill::site_save`), it writes `Change::PasswordChanged(Some(today))` in the same signed entry.
+- **Written automatically:** whenever the daemon creates an item with an audited password or changes that password (`items::create`, `items::set`, `autofill::site_save`), it writes `Change::PasswordChanged(Some(today))` in the same signed entry.
 - **Preserved on import and 1Password sync:** `.1pux` and `op` imports populate `password_changed` from the latest `passwordHistory` timestamp (falling back to `updatedAt`), and Bitwarden JSON imports populate it from `login.passwordRevisionDate` (falling back to `revisionDate`). Keeping `password_changed` off `Item::fields` preserves `item.fields` invariants and leaves `deadbolt sync 1password` `MirrorVersion` digests unchanged.
 
 Site breaches come from `GET https://haveibeenpwned.com/api/v3/breaches` (CC-BY-4.0, unauthenticated), filtered to verified, non-retired, non-fabricated, non-spam breaches that have a `Domain` and include `"Passwords"` in `DataClasses` (622 domains, 48 KiB compact JSON). Downloading the full 622-domain list sends **zero** user domains over the network. A snapshot ships bundled for offline use and refreshes at most once every 7 days into `"cli/site-breaches"` when `breach_checks = true`.
@@ -160,11 +160,11 @@ Together they add **~292 KiB uncompressed** (~70 KiB compressed in release archi
 
 ### Updating and attribution
 
-A scheduled weekly GitHub Actions workflow runs `scripts/sync-health-data.ts`, verifies the PGP `.sig` files published by `2fa.directory` and `passkeys.2fa.directory`, and opens a PR against `dev` when entries change. Bundling keeps offline installs working, makes every directory change reviewable in git, and avoids client traffic hitting community Cloudflare endpoints (`2fa.directory` asks apps to cache rather than poll from clients). Only `breaches.json` also refreshes directly in the agent once a week when `breach_checks = true`.
+A scheduled weekly GitHub Actions workflow runs `scripts/sync-health-data.ts`, verifies the PGP `.sig` files published by `2fa.directory` and `passkeys.2fa.directory`, and opens a PR against `dev` when entries change. Bundling keeps offline installs working, makes every directory change reviewable in git, and avoids client traffic hitting community Cloudflare endpoints (`2fa.directory` asks apps to cache rather than poll from clients). Only `breaches.json` also refreshes directly in the daemon once a week when `breach_checks = true`.
 
 Include upstream license files and commit/date stamps in `crates/core/data/health/` (`LICENSE.md`, `README.md`) and one attribution note under Settings › Security: *"Directory data from 2FA Directory, Passkeys Directory, Apple Password Manager Resources, and Have I Been Pwned."* (`cargo deny check` inspects Rust crate licenses in `Cargo.lock`, where `zxcvbn` is MIT.)
 
-## Incremental agent caching keeps 3,000-item vaults fast
+## Incremental daemon caching keeps 3,000-item vaults fast
 
 ### Protocol and caller policy
 
@@ -189,7 +189,7 @@ For a vault of 3,000 items (2,400 passwords, 1,800 unique) on an Apple Silicon M
 | 500-item import | `zxcvbn` x 500 new items + regroup | **~30–75 ms** |
 | Memory held while unlocked | 3,000 memo entries (`ItemId`, 32-byte digest, flags, ~120 B each) | **~360 KiB** |
 
-On unlock, `Agent` returns from `Unlock` / `UnlockBiometric` immediately and runs the cold pass on `tokio::task::spawn_blocking` over a `Zeroizing` snapshot of `(VaultId, ItemId, item_fingerprint, inputs)`. When it finishes, it populates `Session`'s health memo (skipping any item already edited in the meantime by comparing `item_fingerprint`) and sends `Change::Health`. Subsequent writes (`items::create`, `items::set`, `items::remove_id`, `import`, `mirror`, `autofill::site_save`, synced entries) recompute only items whose `item_fingerprint` changed. Locking drops `Session` and wipes the memo and `reuse_key`.
+On unlock, `Daemon` returns from `Unlock` / `UnlockBiometric` immediately and runs the cold pass on `tokio::task::spawn_blocking` over a `Zeroizing` snapshot of `(VaultId, ItemId, item_fingerprint, inputs)`. When it finishes, it populates `Session`'s health memo (skipping any item already edited in the meantime by comparing `item_fingerprint`) and sends `Change::Health`. Subsequent writes (`items::create`, `items::set`, `items::remove_id`, `import`, `mirror`, `autofill::site_save`, synced entries) recompute only items whose `item_fingerprint` changed. Locking drops `Session` and wipes the memo and `reuse_key`.
 
 ## UI: calm indicators, a keyboard Security view, and a one-step fix flow
 
@@ -230,7 +230,7 @@ Today `App::edit_selected` (`crates/app/src/edit.rs`) opens `Form` with the old 
 
 `App::fix_password` solves both:
 
-1. Selects the item, opens its edit `Form`, focuses `password`, and immediately requests a generated password from the agent, passing the item's `url` so `password_rules.rs` honors site quirks (such as `163.com`'s 16-character cap) while keeping at least 60 bits of entropy.
+1. Selects the item, opens its edit `Form`, focuses `password`, and immediately requests a generated password from the daemon, passing the item's `url` so `password_rules.rs` honors site quirks (such as `163.com`'s 16-character cap) while keeping at least 60 bits of entropy.
 2. Reveals the new candidate password in place (`set_revealed(true)`) with `Length` and `Symbols` controls shown (`form.generated = 1`), and copies the new candidate to the concealed clipboard (`Tx::copy_secret`).
 3. Because `Form` already retains `base: Option<Snapshot>`, renders two helper actions right under the generator bar while fixing an existing password:
    - **Open `<site>`** (`O`): opens the direct URL from `change-urls.json` when known (`https://github.com/settings/security`), falling back to the item's `url`.
@@ -267,7 +267,7 @@ Follow Deadbolt's capability layout (no `mod.rs`, files well under 800 non-test 
 - `crates/core/src/health.rs` + `crates/core/src/health/{strength,reuse,directory}.rs` + `crates/core/src/health_tests.rs`: pure scoring, schema scoping, keyed-hash reuse, directory matching, breach-date comparison.
 - `crates/core/data/health/`: `2fa.json`, `passkeys.json`, `breaches.json`, `change-urls.json`, `shared.json`, `README.md`, `LICENSE.md`, refreshed by `scripts/sync-health-data.ts`.
 - `crates/client/src/protocol/health.rs`: `HealthReport`, `ItemHealth`, `Finding`, `FindingKind`, `RiskLevel`, re-exported from `protocol.rs`.
-- `crates/cli/src/agent/health.rs` + `crates/cli/src/agent/health/hibp.rs`: `Session` incremental memo, `spawn_blocking` cold scan, `"cli/hibp-cache"` and `"cli/site-breaches"` persistence, `reqwest` HIBP range client with `Add-Padding: true` and debug-only loopback override `DEADBOLT_HIBP_URL`.
+- `crates/cli/src/daemon/health.rs` + `crates/cli/src/daemon/health/hibp.rs`: `Session` incremental memo, `spawn_blocking` cold scan, `"cli/hibp-cache"` and `"cli/site-breaches"` persistence, `reqwest` HIBP range client with `Add-Padding: true` and debug-only loopback override `DEADBOLT_HIBP_URL`.
 - `crates/cli/src/health.rs`: `deadbolt health` subcommands and text/JSON formatting.
 - `crates/app/src/health.rs` + `crates/app/src/health/view.rs`: Security view state, key handling, overview rendering, and inline item-page callout.
 
@@ -283,7 +283,7 @@ Follow Deadbolt's capability layout (no `mod.rs`, files well under 800 non-test 
    - Debug-only `DEADBOLT_HIBP_URL` (restricted to `127.0.0.1` and `[::1]` under `cfg!(debug_assertions)`, matching `DEADBOLT_RELEASE_URL` in `crates/cli/src/update.rs`).
    - Local `TcpListener` fixture serving padded `:0` and breached `:N` suffixes for public test vectors (`"password"` -> `5BAA6...`), verifying `Add-Padding: true`, prefix deduplication, permanent `count > 0` caching, 14-day TTL on `count == 0`, zero network traffic when `breach_checks = false`, and immediate cancellation on `deadbolt lock`.
 3. **Headless Rune app tests and scenes (`crates/app/tests/app/health.rs`, wired in `tests/app/main.rs`):**
-   - Loopback-agent fixtures (`scenes/fixtures.rs`) verifying `Security` opens from `⌘K` and `⇧⌘H` without fetching item secret values, `vault-head` does not shift row y-positions when health arrives, `Fix` opens the form with a revealed generated password and working `Copy current password`, and `snap.sh` captures `security`, `vault-risk`, and `fix-password` stills.
+   - Loopback-daemon fixtures (`scenes/fixtures.rs`) verifying `Security` opens from `⌘K` and `⇧⌘H` without fetching item secret values, `vault-head` does not shift row y-positions when health arrives, `Fix` opens the form with a revealed generated password and working `Copy current password`, and `snap.sh` captures `security`, `vault-risk`, and `fix-password` stills.
 
 ## Decisions
 

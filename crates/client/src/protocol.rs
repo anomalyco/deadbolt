@@ -1,13 +1,13 @@
-//! The control protocol between the CLI and the agent.
+//! The control protocol between the CLI and the daemon.
 //!
-//! Line-delimited JSON over the agent's Unix socket, one request per
+//! Line-delimited JSON over the daemon's Unix socket, one request per
 //! connection:
 //!
 //! ```text
-//! client -> agent   Request   {"v":1,"cmd":"...",...}
-//! agent  -> client  Message*  {"type":"event",...}         join only
-//! client -> agent   Answer    {"answer":true,"passphrase":"…"}   after an event that asks
-//! agent  -> client  Message   {"type":"ok",...} | {"type":"error",...}   final
+//! client -> daemon  Request   {"v":1,"cmd":"...",...}
+//! daemon -> client  Message*  {"type":"event",...}         join only
+//! client -> daemon  Answer    {"answer":true,"passphrase":"…"}   after an event that asks
+//! daemon -> client  Message   {"type":"ok",...} | {"type":"error",...}   final
 //! ```
 //!
 //! Only `joined` with `passphrase` set asks for an answer: the passphrase for a
@@ -17,26 +17,26 @@
 //! `watch` keeps the connection open and streams what changed:
 //!
 //! ```text
-//! client -> agent   Request   {"v":13,"cmd":"watch","app":false}
-//! agent  -> client  Message*  {"type":"change","change":"watching"}   first
+//! client -> daemon  Request   {"v":13,"cmd":"watch","app":false}
+//! daemon -> client  Message*  {"type":"change","change":"watching"}   first
 //!                             {"type":"change","change":"items","vault":"…"}
-//! agent  -> client  Message   {"type":"ok","reply":{"reply":"done"}}   after "stopping"
+//! daemon -> client  Message   {"type":"ok","reply":{"reply":"done"}}   after "stopping"
 //! ```
 //!
 //! Changes name what changed, never values: clients refetch. They are
 //! coalesced, so a burst (a sync batch, an import) arrives as one change per
 //! vault. A watcher that can't keep up gets `resync`, or is dropped if it
-//! stops reading. The stream ends when the client hangs up or the agent stops.
+//! stops reading. The stream ends when the client hangs up or the daemon stops.
 //!
 //! The desktop app's main window watches with `app` set. `app-activate` (a
 //! second launch) reaches the most recent such watcher as an `activate`
 //! change, so the running app comes forward instead of a second one starting.
 //!
 //! `status` and `stop` are answered whatever `v` says, so a client can always
-//! find and replace an agent of an older protocol. They are the only messages
+//! find and replace a daemon of an older protocol. They are the only messages
 //! exchanged between different builds, so `Request` and `Status` must stay
 //! readable by older and newer ones. `claimed` is left out when empty, so a
-//! status request reads the same to every agent.
+//! status request reads the same to every daemon.
 
 mod caller;
 mod health;
@@ -64,12 +64,12 @@ pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
-/// The longest line the agent reads, large enough for `import` of a big export.
+/// The longest line the daemon reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
 
-/// The longest line the agent reads on the macOS AutoFill App Group socket.
+/// The longest line the daemon reads on the macOS AutoFill App Group socket.
 pub const MAX_AUTOFILL_LINE: usize = 64 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,7 +107,7 @@ pub enum Command {
         enabled: bool,
     },
     Lock,
-    /// Streams [`Change`]s until the client hangs up or the agent stops.
+    /// Streams [`Change`]s until the client hangs up or the daemon stops.
     /// `app` marks the desktop app's main window, which `app-activate`
     /// brings forward.
     Watch {
@@ -147,7 +147,7 @@ pub enum Command {
     /// device that isn't set up, the device key and the vault stay in memory
     /// until the passphrase arrives: `passphrase` here, else the answer to
     /// `joined`. A `false` answer or hanging up discards them. `device_name`
-    /// (default: the agent's hostname) applies only then.
+    /// (default: the daemon's hostname) applies only then.
     Join {
         device_name: Option<String>,
         passphrase: Option<Secret>,
@@ -247,7 +247,7 @@ pub enum Command {
         query: Vec<String>,
     },
     /// Imports another password manager's export (the text of the file, see
-    /// [`crate::export`]); the agent detects the format. Items already in the
+    /// [`crate::export`]); the daemon detects the format. Items already in the
     /// vault, or earlier in the export, are skipped as duplicates. With
     /// `apply` it creates all new items or none, in as few entries as fit;
     /// without, it writes nothing. Replies `import`.
@@ -269,7 +269,7 @@ pub enum Command {
         url: Option<String>,
     },
     /// Mirrors 1Password into `vault` with the 1Password CLI (`op`), which
-    /// the agent runs: from every vault of `account` (`op`'s default
+    /// the daemon runs: from every vault of `account` (`op`'s default
     /// without one), or only the `op_vaults` named. Fails as `locked`
     /// before asking 1Password anything. With `dry_run` it writes nothing.
     /// Replies `mirror`.
@@ -310,7 +310,7 @@ pub enum Command {
     /// and the field's own limits, with at least 60 bits of entropy (else it
     /// fails `weak`). Nothing is saved: it's a candidate for `origin` until
     /// `site-generate-keep` says it went into the page, then pending until a
-    /// `site-save` names it, it expires or the agent locks. Replies
+    /// `site-save` names it, it expires or the daemon locks. Replies
     /// `site-generated`.
     SiteGenerate {
         origin: String,
@@ -362,7 +362,7 @@ pub enum Command {
     },
     /// Passkeys: makes a passkey for `rp_id` in the default vault, replacing
     /// one there for the same user, and returns the registration with
-    /// client data the agent builds from `origin`. Verifies the user with
+    /// client data the daemon builds from `origin`. Verifies the user with
     /// Touch ID first unless `verify` is `discouraged`; `required` without
     /// Touch ID fails before anything is stored. Binary values are
     /// base64url. Replies `passkey-created`.
@@ -381,7 +381,7 @@ pub enum Command {
     },
     /// Passkeys: signs `challenge` with one passkey, refused
     /// (`domain-mismatch`) unless its relying party is `rp_id`, with client
-    /// data the agent builds from `origin`. Verifies the user as
+    /// data the daemon builds from `origin`. Verifies the user as
     /// `PasskeyCreate` does. Replies `passkey-assertion`.
     PasskeyGet {
         origin: String,
@@ -413,9 +413,9 @@ pub enum Command {
         fields: Vec<String>,
     },
     /// Deadbolt Send: serves `sealed`, a bundle the client sealed with a
-    /// content key the agent never sees, to receivers that prove `secret`
+    /// content key the daemon never sees, to receivers that prove `secret`
     /// (64 hex digits), `opens` times (at least 1) for `ttl_secs`. Shares
-    /// live in the agent's memory and end when it stops; they need no
+    /// live in the daemon's memory and end when it stops; they need no
     /// unlock. Replies `send-created`.
     SendCreate {
         secret: Secret,
@@ -426,7 +426,7 @@ pub enum Command {
         /// What the sender sees in `send-list`.
         label: String,
     },
-    /// Every share this agent serves or served; replies `sends`.
+    /// Every share this daemon serves or served; replies `sends`.
     SendList,
     /// One share, by id or unique id prefix; replies `send`.
     SendShow {
@@ -464,7 +464,7 @@ pub enum Command {
     /// Agent sign-ins (`docs/agent-control.md`, "Standing grants"): pairs a
     /// new agent client, such as Browse's relay, and replies
     /// `agent-client-added` with its token, shown once. Needs the user:
-    /// Touch ID raised by the agent, or `passphrase`, which the CLI reads
+    /// Touch ID raised by the daemon, or `passphrase`, which the CLI reads
     /// from the terminal or `--passphrase-stdin`, never the environment.
     /// Refused (`forbidden`) to a caller Deadbolt takes for an AI.
     AgentClientAdd {
@@ -646,13 +646,8 @@ pub enum Command {
     BreachChecksSet {
         enabled: bool,
     },
-    /// Turns the SSH agent listener (`ssh.sock`) on or off in `config.toml`
-    /// and binds or drops the socket immediately. Replies `done`.
-    SshAgentSet {
-        enabled: bool,
-    },
     /// Generates a new SSH key pair (`ed25519` or `ecdsa-p256`) inside the
-    /// agent without writing to a vault yet; needs no unlock. Replies
+    /// daemon without writing to a vault yet; needs no unlock. Replies
     /// `ssh-generated`.
     SshGenerate {
         kind: SshKeyKind,
@@ -666,15 +661,6 @@ pub enum Command {
         private_key: Secret,
         passphrase: Option<Secret>,
         comment: Option<String>,
-    },
-    /// Signs `data` (standard base64 of raw bytes) in the OpenSSH `SSHSIG`
-    /// format (`ssh-keygen -Y sign`) using the vault's SSH key matching
-    /// `public_key`, approving with Touch ID (and unlocking with the same tap
-    /// when `touch_id_ready` is true). Replies `ssh-signature`.
-    SshSign {
-        public_key: String,
-        namespace: String,
-        data: String,
     },
 }
 
@@ -809,7 +795,7 @@ pub struct SecretGrantInfo {
 }
 
 /// A paired agent client's credentials, on every request it makes: its id
-/// and the token `agent-client-add` gave it (64 hex digits). The agent keeps
+/// and the token `agent-client-add` gave it (64 hex digits). The daemon keeps
 /// only the token's SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientAuth {
@@ -950,7 +936,7 @@ pub struct SiteField {
 }
 
 /// A password submitted on a web page: as the page had it, or the pending
-/// one `site-generate` made for the page's origin, by its id, which the agent
+/// one `site-generate` made for the page's origin, by its id, which the daemon
 /// fills in itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1082,7 +1068,7 @@ pub enum SiteStatus {
 /// A file from an export, beside its text: a `.1pux`'s attachment, named
 /// as in the archive's `files/` (`<documentId>__<fileName>`), its contents
 /// in base64. `too_large` (and no contents) for one over the cap or past
-/// what fits in the request, so the agent can say why it's left out. Wiped
+/// what fits in the request, so the daemon can say why it's left out. Wiped
 /// on drop; Debug leaves out the contents.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct ExportFile {
@@ -1101,7 +1087,7 @@ impl std::fmt::Debug for ExportFile {
     }
 }
 
-/// A field as typed by the user. Without `kind`, the agent uses the item
+/// A field as typed by the user. Without `kind`, the daemon uses the item
 /// type's field type, else the field's current type, else `text`. Wiped on
 /// drop; Debug leaves out the value.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -1147,7 +1133,7 @@ pub enum Message {
     },
 }
 
-/// What changed in the agent. Vaults are named by id.
+/// What changed in the daemon. Vaults are named by id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "change", rename_all = "kebab-case")]
 pub enum Change {
@@ -1174,7 +1160,7 @@ pub enum Change {
     Update,
     /// Changes were dropped because the watcher fell behind. Fetch everything.
     Resync,
-    /// The agent is stopping, which locks the store. The stream ends.
+    /// The daemon is stopping, which locks the store. The stream ends.
     Stopping,
     /// Only to an app watcher: another launch asked for the window. Show
     /// and focus it, with `token` for the compositor when there is one.
@@ -1376,7 +1362,7 @@ pub enum Reply {
     },
     SendCreated {
         send: SendInfo,
-        /// How receivers reach the agent's send endpoint.
+        /// How receivers reach the daemon's send endpoint.
         sender: SenderInfo,
     },
     Sends {
@@ -1473,10 +1459,6 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         comment: Option<String>,
     },
-    SshSignature {
-        /// PEM-armored `-----BEGIN SSH SIGNATURE-----` block.
-        signature: String,
-    },
 }
 
 /// A Deadbolt Send share, as its sender sees it. Never its secrets.
@@ -1517,7 +1499,7 @@ impl fmt::Display for SendState {
     }
 }
 
-/// The address of the agent's send endpoint.
+/// The address of the daemon's send endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SenderInfo {
     /// The endpoint id, 64 hex digits: a key of its own, not the device's.
@@ -1561,7 +1543,7 @@ pub struct ItemInfo {
     pub deleted_at: Option<u64>,
 }
 
-/// The field an item's one-time code comes from, as the agent picks it:
+/// The field an item's one-time code comes from, as the daemon picks it:
 /// `otp`, else the first field of type otp.
 pub fn code_field(fields: &[FieldInfo]) -> Option<usize> {
     let otp = |f: &FieldInfo| f.kind == "otp";
@@ -1594,10 +1576,10 @@ pub struct Status {
     pub pid: u32,
     pub version: String,
     pub protocol: u32,
-    /// The agent's executable, so a client that can't use it can say which one runs.
+    /// The daemon's executable, so a client that can't use it can say which one runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
-    /// The store directory this agent serves.
+    /// The store directory this daemon serves.
     pub home: String,
     pub initialized: bool,
     pub unlocked: bool,
@@ -1616,21 +1598,15 @@ pub struct Status {
     /// Whether Touch ID is enabled on this store, but its enrolled slot was
     /// reset (expired after 14 days, fingerprint set changed, or passphrase changed).
     pub touch_id_reset: bool,
-    /// Whether the SSH agent (`ssh.sock`) is turned on in config.toml.
-    #[serde(default)]
-    pub ssh_agent: bool,
-    /// Where SSH clients reach this agent's SSH socket when `ssh_agent` is on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_socket: Option<String>,
-    /// How the agent sees the client asking (`deadbolt debug whoami`).
+    /// How the daemon sees the client asking (`deadbolt debug whoami`).
     pub caller: CallerInfo,
-    /// A newer Deadbolt for this install, from the agent's background
+    /// A newer Deadbolt for this install, from the daemon's background
     /// check; `deadbolt update` installs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateInfo>,
 }
 
-/// A newer Deadbolt the agent's background check found (docs/releasing.md,
+/// A newer Deadbolt the daemon's background check found (docs/releasing.md,
 /// "Updater").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateInfo {

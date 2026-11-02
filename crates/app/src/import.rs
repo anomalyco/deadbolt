@@ -1,8 +1,8 @@
 //! Importing another password manager's export. A file dropped on the window
-//! or picked with Choose File… is read on the agent thread and previewed (the
-//! agent says what it would import); confirming imports it. The export's
-//! text never leaves that thread: the UI holds only the agent's report.
-//! Locking, or the agent stopping, forgets an import wherever it was.
+//! or picked with Choose File… is read on the daemon thread and previewed (the
+//! daemon says what it would import); confirming imports it. The export's
+//! text never leaves that thread: the UI holds only the daemon's report.
+//! Locking, or the daemon stopping, forgets an import wherever it was.
 
 pub mod view;
 
@@ -12,7 +12,7 @@ use std::time::Duration;
 use deadbolt_client::protocol::{ErrorCode, ImportReport, Tally, noun};
 use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
-use crate::agent::{ImportFailure, Imported, Job};
+use crate::daemon::{ImportFailure, Imported, Job};
 use crate::model::{App, Screen};
 use crate::onboarding::sentence;
 use crate::view::{Notice, Severity};
@@ -51,7 +51,7 @@ pub enum Phase {
     Idle,
     /// Choose File…'s dialog is up.
     Choosing,
-    /// Reading the file and asking the agent what it would import.
+    /// Reading the file and asking the daemon what it would import.
     Reading {
         path: PathBuf,
         name: String,
@@ -208,7 +208,7 @@ impl App {
         };
         self.import.error = None;
         self.enter_import();
-        self.agent.send(Job::Import {
+        self.daemon.send(Job::Import {
             path,
             apply: None,
             seq: self.import.seq,
@@ -226,7 +226,7 @@ impl App {
         }
         let preview = preview.clone();
         self.import.seq += 1;
-        self.agent.send(Job::Import {
+        self.daemon.send(Job::Import {
             path: preview.path.clone(),
             apply: Some(preview.digest),
             seq: self.import.seq,
@@ -309,7 +309,7 @@ impl App {
                     changed,
                 });
             }
-            Err(ImportFailure::Agent(f)) if f.locked() => self.on_locked(tx),
+            Err(ImportFailure::Daemon(f)) if f.locked() => self.on_locked(tx),
             Err(failure) => {
                 self.import.phase = Phase::Idle;
                 self.import.error = Some(problem(failure, &file, applied));
@@ -410,20 +410,20 @@ fn name(path: &Path) -> String {
 }
 
 /// What went wrong, coloured by how serious it is: a file that isn't an
-/// export (or one the agent can't map) is the person's to change; a read or
-/// agent failure is ours.
+/// export (or one the daemon can't map) is the person's to change; a read or
+/// daemon failure is ours.
 fn problem(failure: ImportFailure, file: &str, apply: bool) -> Notice {
     let not_export = |message: &str| {
         Notice::new(
             Severity::Caution,
             format!("{file} isn't an export Deadbolt can read"),
-            // The drop zone lists what it can read; the agent's own list would repeat it.
+            // The drop zone lists what it can read; the daemon's own list would repeat it.
             sentence(message.split("; import a ").next().unwrap_or(message)),
         )
     };
     match failure {
         ImportFailure::NotExport(message) => not_export(&message),
-        ImportFailure::Agent(f) if !apply && f.code == Some(ErrorCode::Failed) => {
+        ImportFailure::Daemon(f) if !apply && f.code == Some(ErrorCode::Failed) => {
             not_export(&f.message)
         }
         ImportFailure::Read(message) => Notice::new(
@@ -431,7 +431,7 @@ fn problem(failure: ImportFailure, file: &str, apply: bool) -> Notice {
             format!("Couldn't open {file}"),
             sentence(&message),
         ),
-        ImportFailure::Agent(f) => Notice::new(
+        ImportFailure::Daemon(f) => Notice::new(
             Severity::Danger,
             if apply {
                 format!("Couldn't import {file}")
@@ -553,22 +553,22 @@ mod tests {
 
     #[test]
     fn problems_are_coloured_by_whose_they_are() {
-        let agent = |code| {
-            ImportFailure::Agent(crate::agent::Failure {
+        let daemon = |code| {
+            ImportFailure::Daemon(crate::daemon::Failure {
                 code,
                 message: "not a known JSON export; import a 1Password .1pux or .csv, an Apple Passwords or browser .csv, or a Bitwarden .json export".into(),
             })
         };
-        let n = problem(agent(Some(ErrorCode::Failed)), "x.json", false);
+        let n = problem(daemon(Some(ErrorCode::Failed)), "x.json", false);
         assert_eq!(n.severity, Severity::Caution);
         assert_eq!(n.title, "x.json isn't an export Deadbolt can read");
         assert_eq!(n.body, "Not a known JSON export.");
         assert_eq!(
-            problem(agent(Some(ErrorCode::Failed)), "x.json", true).severity,
+            problem(daemon(Some(ErrorCode::Failed)), "x.json", true).severity,
             Severity::Danger
         );
         assert_eq!(
-            problem(agent(None), "x.json", false).severity,
+            problem(daemon(None), "x.json", false).severity,
             Severity::Danger
         );
         let read = problem(

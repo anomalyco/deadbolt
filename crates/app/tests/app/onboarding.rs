@@ -2,7 +2,7 @@
 //! appearances, the forms confirm in place, and the moment the vault is ready
 //! moves the way docs/app.md says.
 
-use deadbolt_app::agent::{Done, Failure};
+use deadbolt_app::daemon::{Done, Failure};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::worker::{Progress, Stage, Worker};
 use deadbolt_app::onboarding::{Flow, Step, moment};
@@ -86,9 +86,9 @@ fn every_state_renders_in_both_appearances() {
         (
             "code",
             &[
-                "Pair from your other device",
+                "Approve from your other device",
                 "violin garden tiger lamp zoo",
-                "deadbolt pair violin-garden-tiger-lamp-zoo",
+                "deadbolt approve violin-garden-tiger-lamp-zoo",
                 "Copy command",
                 "On a device with your vault, run:",
             ],
@@ -410,10 +410,10 @@ fn joining_lands_in_the_vault() {
     assert_eq!(rt.state.screen, Screen::Vault);
 }
 
-/// The agent locking (sleep, screen lock, CLI) mid-create or mid-join
+/// The daemon locking (sleep, screen lock, CLI) mid-create or mid-join
 /// leaves the flow where it is: it finishes or fails on its own.
 #[test]
-fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
+fn a_lock_from_the_daemon_does_not_interrupt_a_create_or_join() {
     use deadbolt_client::protocol::Change;
     let locked = {
         let mut st = runtime("locked", false).state.status.unwrap();
@@ -479,7 +479,7 @@ fn code_copied() -> (Runtime<App>, MemoryClipboard) {
     rt.frame(FRAME);
     assert_eq!(
         board(&clipboard).as_deref(),
-        Some("deadbolt pair violin-garden-tiger-lamp-zoo"),
+        Some("deadbolt approve violin-garden-tiger-lamp-zoo"),
         "the whole command is on the clipboard"
     );
     (rt, clipboard)
@@ -500,7 +500,7 @@ fn copied_command_survives_a_stale_clock() {
     settle(&mut rt, 0.1);
     rt.update(|s, tx| {
         s.clock = 0.0;
-        s.copy_command("deadbolt agent", tx);
+        s.copy_command("deadbolt daemon", tx);
     });
     rt.frame(FRAME);
     assert!(
@@ -523,7 +523,7 @@ fn a_copied_code_leaves_the_clipboard_with_the_screen() {
     assert_eq!(board(&clip), None, "close clears it");
     assert!(rt.state.onboarding.code.is_none());
 
-    // The agent stopping, which leaves onboarding for the failed screen.
+    // The daemon stopping, which leaves onboarding for the failed screen.
     let (mut rt, clip) = code_copied();
     rt.update(|s, tx| s.apply(Done::Status(None), tx));
     assert!(matches!(rt.state.screen, Screen::Failed(_)));
@@ -603,7 +603,7 @@ fn a_tall_step_stays_under_the_title_bar_and_scrolls() {
         s.onboarding.notice = Some(deadbolt_app::view::Notice {
             severity: Severity::Danger,
             title: "Couldn't create the vault".into(),
-            body: "Connecting to the agent: connection refused. Try again.".into(),
+            body: "Connecting to the daemon: connection refused. Try again.".into(),
         })
     });
     rt.set_viewport((640.0, 420.0), 1.0);

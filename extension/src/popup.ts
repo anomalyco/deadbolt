@@ -158,7 +158,7 @@ function statusBody(status: Status): HTMLElement | null {
         commandBlock("deadbolt browser install"),
       )
     case "unavailable":
-      return state(icon("plug"), "Deadbolt couldn't start", para(status.detail || "The agent didn't answer."))
+      return state(icon("plug"), "Deadbolt couldn't start", para(status.detail || "The daemon didn't answer."))
     case "not-set-up":
       if (!native) return state(icon("keyhole"), "Set up Deadbolt", para("Pair with a device that has your vault, or create a new vault."), openButton(true, "Set up"))
       return state(icon("keyhole"), "Set up Deadbolt first", para("Create your vault in the Deadbolt app, or run ", code("deadbolt init"), "."), openButton(true))

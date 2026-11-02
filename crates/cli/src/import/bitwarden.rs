@@ -113,7 +113,7 @@ fn ssh(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let mut fingerprint = text(key, "keyFingerprint");
     if (public.is_none() || fingerprint.is_none())
         && let Some((derived_pub, derived_fp, _)) =
-            crate::agent::ssh::keys::derive_fields(&private, None, None)
+            crate::daemon::ssh_keys::derive_fields(&private, None, None)
     {
         public = public.or(Some(derived_pub));
         fingerprint = fingerprint.or(Some(derived_fp));

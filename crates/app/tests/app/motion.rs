@@ -53,29 +53,29 @@ fn an_unlock_error_fades_in_and_the_button_moves_down() {
 }
 
 #[test]
-fn the_agent_notice_fades_in_and_out() {
+fn the_daemon_notice_fades_in_and_out() {
     let mut rt = runtime("vault");
-    rt.update(|s, _| s.notice = Some("The agent refused.".into()));
+    rt.update(|s, _| s.notice = Some("The daemon refused.".into()));
     rt.frame(FRAME);
-    let (_, fade) = at(&rt, "agent-notice").unwrap();
+    let (_, fade) = at(&rt, "daemon-notice").unwrap();
     assert!(fade < 0.5, "fades in (opacity {fade})");
     for _ in 0..60 {
         rt.frame(FRAME);
     }
-    assert_eq!(at(&rt, "agent-notice").unwrap().1, 1.0);
+    assert_eq!(at(&rt, "daemon-notice").unwrap().1, 1.0);
     rt.update(|s, _| s.notice = None);
     rt.frame(FRAME);
-    let (_, fade) = at(&rt, "agent-notice").expect("still leaving");
+    let (_, fade) = at(&rt, "daemon-notice").expect("still leaving");
     assert!(fade > 0.0 && fade < 1.0, "fades out (opacity {fade})");
     for _ in 0..60 {
         rt.frame(FRAME);
     }
-    assert_eq!(at(&rt, "agent-notice"), None);
+    assert_eq!(at(&rt, "daemon-notice"), None);
 }
 
 #[test]
 fn an_item_synced_in_fades_into_the_list_and_the_selection_stays() {
-    use deadbolt_app::agent::Done;
+    use deadbolt_app::daemon::Done;
     let mut rt = runtime("vault");
     let selected = rt.state.selected.clone();
     let mut items = rt.state.items.clone();
@@ -108,8 +108,8 @@ fn an_item_synced_in_fades_into_the_list_and_the_selection_stays() {
 }
 
 #[test]
-fn the_agent_locking_swaps_to_the_lock_screen_softly() {
-    use deadbolt_app::agent::Done;
+fn the_daemon_locking_swaps_to_the_lock_screen_softly() {
+    use deadbolt_app::daemon::Done;
     use deadbolt_client::protocol::Change;
     let mut rt = runtime("vault");
     rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
@@ -184,9 +184,9 @@ fn a_search_replaces_the_list_at_once() {
     }
 }
 
-/// The selected item's values, as the agent's reply brings them.
+/// The selected item's values, as the daemon's reply brings them.
 fn deliver(rt: &mut Runtime<App>) {
-    use deadbolt_app::agent::{Done, Values};
+    use deadbolt_app::daemon::{Done, Values};
     use deadbolt_client::protocol::FieldInfo;
     let mut item = rt.state.selected_item().unwrap().clone();
     item.fields = vec![FieldInfo {

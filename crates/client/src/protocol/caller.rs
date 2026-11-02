@@ -1,4 +1,4 @@
-//! Who is on the other end of the agent's socket (`docs/agent-control.md`,
+//! Who is on the other end of the daemon's socket (`docs/agent-control.md`,
 //! "Who is asking"), and the Activity list of what callers did. Never values.
 
 use serde::{Deserialize, Serialize};
@@ -18,11 +18,11 @@ impl Claim {
     }
 }
 
-/// How the agent sorts a connection, from what it verified about the peer.
+/// How the daemon sorts a connection, from what it verified about the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CallerClass {
-    /// Deadbolt.app, from the agent's own bundle.
+    /// Deadbolt.app, from the daemon's own bundle.
     App,
     /// This build's `deadbolt browser-host`, run by a browser.
     BrowserHost,
@@ -49,7 +49,7 @@ pub enum Check {
 /// How a Linux caller is marked, in its label and by whoami.
 pub const UNVERIFIED_LINUX: &str = "unverified (Linux)";
 
-/// A code signature as the agent verified it.
+/// A code signature as the daemon verified it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature {
     pub signing_id: Option<String>,
@@ -70,7 +70,7 @@ pub struct Ancestor {
     pub path: Option<String>,
 }
 
-/// How the agent sees one connection's peer.
+/// How the daemon sees one connection's peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallerInfo {
     pub class: CallerClass,
@@ -146,7 +146,7 @@ pub enum Outcome {
     Failed,
 }
 
-/// Something the app showed or copied, which the agent can't see itself.
+/// Something the app showed or copied, which the daemon can't see itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppAction {

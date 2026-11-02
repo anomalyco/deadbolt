@@ -43,7 +43,7 @@ async function cliResult(...args: string[]) {
   const child = Bun.spawn([deadbolt, ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
   try {
     const [out, error, exit] = await bounded(`CLI ${args[0]}`, Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]))
-    const redact = (s: string) => args[0] === "pair" ? s.replaceAll(args[1]!, "[pairing code]") : s
+    const redact = (s: string) => args[0] === "approve" ? s.replaceAll(args[1]!, "[pairing code]") : s
     return { out: redact(out.trim()), error: redact(error.trim()), exit }
   } finally { if (child.exitCode === null) { child.kill(); await child.exited } }
 }
@@ -115,7 +115,7 @@ try {
   await page.goto(new URL("device.html", worker.url()).href)
   const code = (await request(page, { type: "device-join-start" })).reply.code
   check(typeof code === "string", "browser reaches relay through CONNECT proxy")
-  await cli("pair", code)
+  await cli("approve", code)
   await until("admission", async () => (await request(page, { type: "device-join-status" })).reply.phase === "admitted")
   await request(page, { type: "device-join-finish", passphrase })
   const baseline = (await items(page)).find(i => i.title === "Network baseline")!
@@ -186,7 +186,7 @@ try {
   try { await context?.close() } finally {
     for (const tunnel of tunnels) { tunnel.client.destroy(); tunnel.upstream.destroy() }
     await new Promise<void>(resolve => proxy.close(() => resolve()))
-    await cli("agent", "stop").catch(() => {})
+    await cli("debug", "daemon", "stop").catch(() => {})
     await rm(root, { recursive: true, force: true })
   }
 }

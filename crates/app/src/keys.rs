@@ -52,7 +52,7 @@ pub struct Nav {
 
 /// Whether the item page shows this field. A passkey shows its site,
 /// username, date and notes; its credential id and user handle are the
-/// site's bookkeeping, and the agent never sends its private key.
+/// site's bookkeeping, and the daemon never sends its private key.
 pub fn shown(kind: &str, field: &str) -> bool {
     kind != "passkey" || matches!(field, "rp-id" | "username" | "created" | "notes")
 }

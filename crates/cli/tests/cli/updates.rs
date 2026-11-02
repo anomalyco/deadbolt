@@ -30,7 +30,7 @@ fn manifest(version: &str, sequence: u64) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The update the agent's status reply carries, as the app and the
+/// The update the daemon's status reply carries, as the app and the
 /// terminal notice read it.
 fn update(device: &Device) -> Option<deadbolt_client::protocol::UpdateInfo> {
     let paths = deadbolt_client::Paths::from_vars(|name| match name {
@@ -43,12 +43,12 @@ fn update(device: &Device) -> Option<deadbolt_client::protocol::UpdateInfo> {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
         .block_on(deadbolt_client::status(&paths))
-        .expect("the agent's status")
+        .expect("the daemon's status")
         .update
 }
 
 #[test]
-fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
+fn the_daemon_tells_status_and_watchers_when_an_update_is_out() {
     let a = Device::new();
     let files = Arc::new(Mutex::new(HashMap::from([(
         DEV.to_string(),
@@ -101,10 +101,10 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
         .insert(DEV.to_string(), manifest(env!("CARGO_PKG_VERSION"), 3));
     assert_eq!(next(), serde_json::json!({"change": "update"}));
     assert_eq!(update(&a), None);
-    a.run(&["agent", "stop"]);
+    a.run(&["debug", "daemon", "stop"]);
     assert!(wait(&mut watch, Duration::from_secs(10)).success());
 
-    // Opted out, the agent never asks.
+    // Opted out, the daemon never asks.
     let b = Device::new();
     files
         .lock()
@@ -122,7 +122,7 @@ fn the_agent_tells_status_and_watchers_when_an_update_is_out() {
 }
 
 /// Copies this deadbolt to `to`, with the `deadbolt-enclave` beside it that
-/// a macOS build needs to check its agent.
+/// a macOS build needs to check its daemon.
 fn copy_deadbolt(to: &Path) {
     std::fs::copy(BIN, to).unwrap();
     let enclave = Path::new(BIN).with_file_name("deadbolt-enclave");
@@ -136,7 +136,7 @@ fn copy_deadbolt(to: &Path) {
 /// lists `@deadbolt/cli`, logs its arguments to `root/bun.log` and on
 /// `install` puts a new file in place, as bun does: a stand-in whose
 /// `--version` says `deadbolt <installs>` and which otherwise runs a copy of
-/// this deadbolt, so its agent starts. Or it fails, when `fails`. Returns
+/// this deadbolt, so its daemon starts. Or it fails, when `fails`. Returns
 /// the user's link and the installed `deadbolt`.
 fn bun_install(root: &Path, installs: &str, fails: bool) -> (PathBuf, PathBuf) {
     let modules = root.join("bun/install/global/node_modules");
@@ -144,7 +144,7 @@ fn bun_install(root: &Path, installs: &str, fails: bool) -> (PathBuf, PathBuf) {
     let exe = package.join("bin/deadbolt");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
     // A copy, never a hard link: macOS can name any of an inode's links as
-    // a running program's path, so other tests' agents would seem to run it.
+    // a running program's path, so other tests' daemons would seem to run it.
     if !exe.exists() {
         copy_deadbolt(&exe);
     }
@@ -267,8 +267,8 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
     );
 
     // bun works: the new deadbolt answers through the user's link, and the
-    // agent, which ran the old one, comes back on it. bun deletes the file
-    // this `deadbolt update` runs from, which mustn't make the new agent
+    // daemon, which ran the old one, comes back on it. bun deletes the file
+    // this `deadbolt update` runs from, which mustn't make the new daemon
     // look like it never started.
     bun_install(&root, "0.0.0-dev-9999", false);
     let pid = |status: &str| {
@@ -277,25 +277,25 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
             .and_then(|l| l.split_whitespace().next())
             .map(str::to_string)
     };
-    // Through the link: `debug whoami` starts the agent (or, on macOS, only
-    // passes the new deadbolt's agent check), then `agent status` names it.
-    let agent = || {
+    // Through the link: `debug whoami` starts the daemon (or, on macOS, only
+    // passes the new deadbolt's daemon check), then `debug daemon` names it.
+    let daemon = || {
         assert!(update(&["debug", "whoami"]).status.success());
-        String::from_utf8_lossy(&update(&["agent", "status"]).stdout).to_string()
+        String::from_utf8_lossy(&update(&["debug", "daemon"]).stdout).to_string()
     };
-    let before = agent();
+    let before = daemon();
     let old = pid(&before).unwrap_or_else(|| panic!("{before}"));
     let out = update(&["update", "--channel", "dev", "--yes"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(stdout.contains("Updated"), "{stdout}");
-    assert!(stdout.contains("Restarted the agent."), "{stdout}");
+    assert!(stdout.contains("Restarted the daemon."), "{stdout}");
     assert!(!stderr.contains("warning"), "{stderr}");
-    let after = agent();
+    let after = daemon();
     let new = pid(&after).unwrap_or_else(|| panic!("{after}"));
     assert_ne!(new, old, "{after}");
-    a.run(&["agent", "stop"]);
+    a.run(&["debug", "daemon", "stop"]);
     let ran = log();
     let install = ran.lines().find(|l| l.starts_with("install")).unwrap();
     let args: Vec<&str> = install.split(' ').collect();

@@ -1,4 +1,4 @@
-//! Pure form state, item field schema, change diffing and agent refusal parsing.
+//! Pure form state, item field schema, change diffing and daemon refusal parsing.
 
 use deadbolt_client::protocol::{FieldInfo, FieldInput, ItemInfo};
 use deadbolt_core::tag::fold_tag;
@@ -16,7 +16,7 @@ pub fn editable(kind: &str) -> bool {
 }
 
 /// A built-in item type's fields: name, field type, required, spans lines.
-/// The agent's schema (`deadbolt_core::item`) is the authority; this is the
+/// The daemon's schema (`deadbolt_core::item`) is the authority; this is the
 /// form's layout.
 fn schema(kind: &str) -> &'static [(&'static str, &'static str, bool, bool)] {
     match kind {
@@ -224,7 +224,7 @@ pub struct Input {
     /// Values span lines: a text area, masked for a secret.
     pub lines: bool,
     pub edit: TextEdit,
-    /// The item has a value the agent keeps back (a one-time password's
+    /// The item has a value the daemon keeps back (a one-time password's
     /// secret): left empty, it stays; typed into, it's replaced.
     pub held: bool,
     /// A secret text area for a value the item has: left empty, it stands
@@ -596,7 +596,7 @@ impl Form {
     }
 }
 
-/// The agent's refusal, on the field it names where it names one.
+/// The daemon's refusal, on the field it names where it names one.
 pub(super) fn problem(message: &str) -> Problem {
     let after = |prefix: &str| message.find(prefix).map(|at| &message[at + prefix.len()..]);
     if let Some((field, reason)) = after("invalid value for ").and_then(|r| r.split_once(": ")) {
@@ -763,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agents_refusals_land_on_their_fields() {
+    fn the_daemons_refusals_land_on_their_fields() {
         let p = problem("invalid value for number: must be 12-19 digits");
         assert_eq!(p.field.as_deref(), Some("number"));
         assert_eq!(p.message, "Number must be 12 to 19 digits.");

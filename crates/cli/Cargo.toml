@@ -43,16 +43,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zeroize = "1.9"
 csv = "1.4"
-crypto-bigint = { version = "0.7", default-features = false, features = ["alloc", "zeroize"] }
 der = { version = "0.8", default-features = false, features = ["pem", "std"] }
 ed25519-dalek = { version = "3.0", features = ["pkcs8"] }
-hmac = "0.13.0"
 p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem", "getrandom"] }
 p384 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 p521 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 pkcs8 = { version = "0.11", default-features = false, features = ["pem", "encryption", "std"] }
-ring = "0.17"
-sha1 = { version = "0.11.0", default-features = false }
 ssh-key = { version = "0.7.0-rc.11", features = ["std", "ed25519", "p256", "p384", "p521", "encryption", "getrandom"] }
 url = "2.5.8"
 sha2 = "0.11"
@@ -66,6 +62,5 @@ zip = { version = "9.1", default-features = false, features = ["deflate-flate2-z
 [dev-dependencies]
 redb = "4"
 deadbolt-net = { path = "../net", features = ["sim"] }
-proptest = "1.9"
 tokio = { version = "1.53.3", features = ["test-util"] }
 memchr = "2.8"

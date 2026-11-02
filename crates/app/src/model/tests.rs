@@ -3,7 +3,7 @@ use rune::{Env, Runtime};
 
 use super::unlock::unlock_message;
 use super::{App, Failure, Screen, take_secret};
-use crate::agent::{Done, Values};
+use crate::daemon::{Done, Values};
 
 #[test]
 fn a_backed_off_unlock_says_when_to_try_again() {
@@ -194,7 +194,7 @@ fn a_hidden_panel_keeps_nothing() {
 }
 
 /// A part-typed passphrase goes as soon as either window leaves Locked
-/// without it: unlocked elsewhere (the other window, the CLI), the agent
+/// without it: unlocked elsewhere (the other window, the CLI), the daemon
 /// gone, or the device reset to onboarding.
 #[test]
 fn leaving_locked_wipes_a_part_typed_passphrase() {
@@ -232,11 +232,11 @@ fn leaving_locked_wipes_a_part_typed_passphrase() {
 
 #[test]
 fn touch_id_auto_prompts_on_launch_and_focus_never_on_background_lock() {
-    use crate::agent::{Agent, Failure, Job};
+    use crate::daemon::{Daemon, Failure, Job};
 
     let mut rt = vault();
-    let (agent, jobs, _replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, _replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     if let Some(st) = &mut rt.state.status {
         st.touch_id_available = true;
         st.touch_id_enabled = true;
@@ -245,7 +245,7 @@ fn touch_id_auto_prompts_on_launch_and_focus_never_on_background_lock() {
     locked_status.unlocked = false;
     locked_status.touch_id_ready = true;
 
-    // Window loses focus (user switches to another app), then agent locks in background.
+    // Window loses focus (user switches to another app), then daemon locks in background.
     rt.update(|s, tx| s.main_focus(false, tx));
     rt.update(|s, tx| {
         s.apply(Done::Changed(Change::Locked), tx);
@@ -342,9 +342,9 @@ fn touch_id_auto_prompts_on_launch_and_focus_never_on_background_lock() {
 
     // Hidden main window (`window_focused == false` on `--panel` launch) does not
     // auto-prompt on `Connected` until the window is actually focused.
-    let mut hidden = App::new(Agent::offline());
-    let (hidden_agent, hidden_jobs, _hidden_replies) = Agent::scripted();
-    hidden.agent = hidden_agent;
+    let mut hidden = App::new(Daemon::offline());
+    let (hidden_daemon, hidden_jobs, _hidden_replies) = Daemon::scripted();
+    hidden.daemon = hidden_daemon;
     assert!(!hidden.window_focused);
     hidden.apply(
         Done::Connected(Ok(locked_status.clone())),
@@ -368,12 +368,12 @@ fn touch_id_auto_prompts_on_launch_and_focus_never_on_background_lock() {
 
 #[test]
 fn quick_panel_touch_id_unlocks_and_dismisses_if_unfocused_on_cancel() {
-    use crate::agent::{Agent, Failure, Job};
+    use crate::daemon::{Daemon, Failure, Job};
     use crate::panel::Phase;
 
     let mut rt = panel("locked-touch-id");
-    let (agent, jobs, _replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, _replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     let locked_status = rt.state.status.clone().unwrap();
     let mut unlocked_status = locked_status.clone();
     unlocked_status.unlocked = true;
@@ -432,11 +432,11 @@ fn quick_panel_touch_id_unlocks_and_dismisses_if_unfocused_on_cancel() {
 
 #[test]
 fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
-    use crate::agent::{Agent, Failure, Job};
+    use crate::daemon::{Daemon, Failure, Job};
 
     let mut rt = main("settings-touch-id");
-    let (agent, jobs, _replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, _replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     assert!(rt.state.touch_id_enabled());
     let initial_status = rt.state.status.clone().unwrap();
 
@@ -455,7 +455,7 @@ fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
         "pending toggle value preserved across intermediate Status replies"
     );
 
-    // On TouchIdSet failure, the fresh Status from the agent restores the switch.
+    // On TouchIdSet failure, the fresh Status from the daemon restores the switch.
     rt.update(|s, tx| {
         s.apply(
             Done::TouchIdSet {
@@ -479,49 +479,18 @@ fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
 }
 
 #[test]
-fn settings_ssh_agent_toggle_and_ssh_key_generator_update_state() {
-    use crate::agent::{Agent, Failure, Job};
+fn ssh_key_generator_fills_the_new_item() {
+    use crate::daemon::{Daemon, Job};
     use crate::ssh::SshGeneratedKey;
     use deadbolt_client::protocol::SshKeyKind;
     use zeroize::Zeroizing;
 
-    let mut rt = main("settings-touch-id");
-    let (agent, jobs, _replies) = Agent::scripted();
-    rt.state.agent = agent;
-    assert!(!rt.state.ssh_agent_enabled());
-    let initial_status = rt.state.status.clone().unwrap();
-
-    rt.update(|s, _| s.toggle_ssh_agent());
-    assert!(rt.state.ssh_agent_enabled());
-    assert!(rt.state.ssh.busy);
-    assert!(jobs.try_iter().any(|j| matches!(j, Job::SshAgentSet(true))));
-
-    // Intermediate Status replies preserve the pending switch state.
-    rt.update(|s, tx| s.apply(Done::Status(Some(initial_status.clone())), tx));
-    assert!(rt.state.ssh_agent_enabled());
-
-    // Failure restores the prior switch state and shows the error.
-    rt.update(|s, tx| {
-        s.apply(
-            Done::SshAgentSet {
-                enabled: true,
-                result: Err((
-                    Failure {
-                        code: None,
-                        message: "bind failed".into(),
-                    },
-                    Some(Box::new(initial_status)),
-                )),
-            },
-            tx,
-        );
-    });
-    assert!(!rt.state.ssh_agent_enabled());
-    assert_eq!(rt.state.ssh.error.as_deref(), Some("bind failed"));
+    let mut rt = main("vault");
+    let (daemon, jobs, _replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
 
     // Generating an SSH key on a new SSH item fills private-key, public-key, and fingerprint.
     rt.update(|s, _| {
-        s.close_settings();
         s.new_item();
         s.choose_type("ssh");
         s.set_ssh_kind(SshKeyKind::EcdsaP256);
@@ -683,12 +652,12 @@ fn a_pre_refresh_item_reply_never_repopulates_the_cleared_cache() {
 
 #[test]
 fn reveal_on_a_cached_page_reports_only_once_its_values_land() {
-    use crate::agent::{Agent, Job};
+    use crate::daemon::{Daemon, Job};
     use deadbolt_client::protocol::AppAction;
 
     let mut rt = vault();
-    let (agent, jobs, _) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, _) = Daemon::scripted();
+    rt.state.daemon = daemon;
     let first = rt.state.detail.clone().unwrap();
     let second_head = rt
         .state

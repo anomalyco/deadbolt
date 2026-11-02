@@ -84,7 +84,7 @@ Two builds of `deadbolt` per architecture:
   loads Wayland, X11 and the GPU drivers when a window opens, so the job fails
   unless every `NEEDED` library is glibc's (libc, libm, libdl, libpthread,
   the loader) or libgcc_s, and no symbol needs a glibc newer than 2.28. It then runs `--version`,
-  `--help`, `init`, `agent status`, `new`, `ls` and `app` (which
+  `--help`, `init`, `debug daemon status`, `new`, `ls` and `app` (which
   must say there's no graphical session) in AlmaLinux 8 minimal, which has no display and no
   desktop libraries.
 - **musl, static, without the app** (`linux-x64-musl`, `linux-arm64-musl`):
@@ -106,8 +106,8 @@ bytes change. `verify-macos` checks every architecture slice's pin.
   `macos-arm64` and `macos-x64`, so an updater looks up its own target as
   Hex's does.
 - `Contents/MacOS/Deadbolt` and `Contents/Helpers/deadbolt` are the same
-  `deadbolt` (the app built in), built once and signed twice, so the agent
-  tells the app from the CLI ([app.md](app.md#one-bundle-one-agent)).
+  `deadbolt` (the app built in), built once and signed twice, so the daemon
+  tells the app from the CLI ([app.md](app.md#one-bundle-one-daemon)).
 - Code identities: `pw.deadbolt.app` (the app), `pw.deadbolt.cli` (`deadbolt`,
   in the app and the tarballs), `pw.deadbolt.app.enclave` (the helper), all
   Developer ID team `5NZ4Q7NXJ4` with the hardened runtime and a secure
@@ -181,7 +181,7 @@ musl it prefers the `-musl` package, else the glibc one, each falling back to
 the other and saying so (on glibc the stand-in has no app; a registry that
 doesn't serve a just-published version yet is the usual reason). It links rather than copies, since Deadbolt knows its files by real
 path: on macOS the command is the app's own `Contents/Helpers/deadbolt`, so
-the CLI, the agent and the app are one install, Touch ID's helper sits beside
+the CLI, the daemon and the app are one install, Touch ID's helper sits beside
 it, and `deadbolt app` opens that Deadbolt.app, first linking it as
 `~/Applications/Deadbolt.app` when neither Applications folder has one (so
 Launchpad and Finder list it). `deadbolt update` updates an npm, pnpm, bun or
@@ -232,10 +232,10 @@ channel's current release isn't the build it runs, a rollback included.
     symlink in the bundle is checked again. It must pass
     `codesign --verify --deep --strict` against
     `crates/app/update-requirement.txt` (compiled in) and
-    `spctl --assess --type execute`; then the app is quit, the agent stopped,
+    `spctl --assess --type execute`; then the app is quit, the daemon stopped,
     the old bundle renamed aside within its directory and moved to
     `~/.Trash/Deadbolt-<old version>.app`, the new one renamed into place,
-    quarantine cleared if present, and the agent restarted from whichever
+    quarantine cleared if present, and the daemon restarted from whichever
     bundle is in place, even if the swap failed and the old one was put back
     (the vault comes back locked). An app on a disk image or under App
     Translocation is refused, and one whose cask record exists
@@ -249,7 +249,7 @@ channel's current release isn't the build it runs, a rollback included.
     beside the install. On macOS a release without `deadbolt-enclave` doesn't
     replace a `deadbolt` that has one beside it (the new one pins its own
     helper). The running files are moved into the stage, the new pair renamed
-    in, and on any failure both old files come back. If the running agent is
+    in, and on any failure both old files come back. If the running daemon is
     this binary it is stopped and started again from the new one.
   - npm's package (checked before the bundle, as npm's darwin package
     carries Deadbolt.app): a path under `node_modules` whose package (the
@@ -276,7 +276,7 @@ channel's current release isn't the build it runs, a rollback included.
     Afterwards it runs the new `deadbolt --version` through the user's link
     (`~/.bun/bin/deadbolt`, `<prefix>/bin/deadbolt`, else the wrapper's
     `bin/deadbolt`), which also lets the wrapper link itself, checks the
-    version, and restarts the agent from it (locked) if it ran from this
+    version, and restarts the daemon from it (locked) if it ran from this
     install. On failure it prints the manager's last 12 lines of output, the
     command it ran and what to do next. A package no manager claims gets the
     command to run by hand.
@@ -351,7 +351,7 @@ channel's current release isn't the build it runs, a rollback included.
   it's unpacked, run or moved. Nothing needs the vault, so it works locked.
   `--check` prints what's available and exits 10 if anything is, else 0.
   Requests send `User-Agent: deadbolt/<build channel or source>/<version>/cli`.
-- **Background checks:** the agent checks when it starts, then every hour,
+- **Background checks:** the daemon checks when it starts, then every hour,
   whether `update` would install
   something, with the same manifest rules, limits and User-Agent, npm's
   version for npm's package and Homebrew's for Homebrew. It never downloads
@@ -359,22 +359,22 @@ channel's current release isn't the build it runs, a rollback included.
   manifest older than them; it works locked. Release builds that know their
   channel check; builds from source, Nix, Cargo and system installs, and an
   app that can't be replaced where it is don't. A failure is logged and
-  tried again next time. `DEADBOLT_NO_UPDATE_CHECK=1` in the agent's
+  tried again next time. `DEADBOLT_NO_UPDATE_CHECK=1` in the daemon's
   environment turns it off.
-- **Notifications:** what the check found is in the agent's `status`
+- **Notifications:** what the check found is in the daemon's `status`
   reply, `deadbolt debug watch` emits `{"change":"update"}` when it changes, and the
   desktop app's Settings show a quiet "Deadbolt <version> is out" row.
   Interactive commands (stdin and stderr terminals, no `--json`; not
-  `debug watch`, `update`, `run`, the app or the agent) end with one
+  `debug watch`, `update`, `run`, the app or the daemon) end with one
   stderr line, at most once a day per version (`update-notice` in the state
   directory): `deadbolt <version> is out (installed with bun): run deadbolt
-  update`. The CLI only reads the agent's answer; with no agent running it
+  update`. The CLI only reads the daemon's answer; with no daemon running it
   says nothing and never asks the network. Nothing installs until the user
   runs `deadbolt update`; the lock above keeps two from installing at once.
 - **Tests** point it at a fake service with `DEADBOLT_RELEASE_URL` and a fake
   registry with `DEADBOLT_NPM_REGISTRY_URL`, which only debug builds read and
   only for a URL on 127.0.0.1 or [::1]. `DEADBOLT_UPDATE_CHECK_CHANNEL`
-  (debug builds only) makes the agent check that channel at once and every
+  (debug builds only) makes the daemon check that channel at once and every
   second.
 - It doesn't require the protocol's `install.json` receipt: `update` is a
   command the user runs on the install in front of them, and package-manager
@@ -390,7 +390,7 @@ Both live in `anomalyco/homebrew-tap`, rendered from `packaging/homebrew/` by
   `deadbolt-enclave` beside it.
 - **Cask** `Casks/deadbolt.rb` (`brew install --cask anomalyco/tap/deadbolt`):
   the DMG, plus `binary` linking `Contents/Helpers/deadbolt` as `deadbolt`, so
-  the command is always the same build as the agent the app starts (the app
+  the command is always the same build as the daemon the app starts (the app
   treats that link as its own). The formula and the cask both own
   `bin/deadbolt`, so brew installs only one of them; Homebrew's cask
   `conflicts_with formula:` is not functional, so it is left out. `zap`

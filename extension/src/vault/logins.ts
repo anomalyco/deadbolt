@@ -42,7 +42,7 @@ async function secret(app: App, ref: string, passphrase?: string, prf?: string):
     const s = await secretOf(app, ref, "password", passphrase)
     return { password: s.value, message: s.message, reauth: s.reauth }
   }
-  // Touch ID: the PRF output stands in for the passphrase, checked by the agent like one.
+  // Touch ID: the PRF output stands in for the passphrase, checked by the daemon like one.
   const r = await app.run({ type: "device-secret", ref, field: "password", prf })
   if (r.ok && typeof r.reply.value === "string") return { password: r.reply.value }
   return { message: r.ok ? "Deadbolt didn't answer." : r.message, reauth: !r.ok && r.code === "passphrase_needed" }

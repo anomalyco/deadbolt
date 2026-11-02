@@ -3,7 +3,7 @@
 Deadbolt's browser extension for Chrome, Brave, Arc and Edge (Manifest V3). It
 fills and saves logins, and makes and signs in with passkeys, through
 `deadbolt browser-host`, the native messaging host, which passes each request
-to the Deadbolt agent. The agent decides which logins a page gets and signs
+to the Deadbolt daemon. The daemon decides which logins a page gets and signs
 with passkeys; the extension never holds the vault, a private key, or the
 passphrase.
 
@@ -111,7 +111,7 @@ rules (`bg/site.ts`), the passkey hook (`passkey-hook.ts`,
 autofill sign-in (`bg/passkeys.ts`), and the build script.
 
 Left out: Foyer's provider abstraction and Bun bridge (Deadbolt has one host),
-its passkey store and signing in the extension (the agent holds and signs),
+its passkey store and signing in the extension (the daemon holds and signs),
 its call reporting and FedCM hooks, SSO memory, the external-extension allowlist, sign-in recipe learning
 and its dataset, and the dashboard.
 
@@ -119,6 +119,6 @@ New for Deadbolt: the host client and protocol types, the popup and its save
 offers, the one in-page surface and its motion, the same-site frame check, the sign-in outcome probe, the
 postMessage token handoff, form-bound fills and fill acks, the single acked
 passkey port (Foyer accepted whichever port acked first), passkey prompts in
-the popup, generated passwords held by the agent until a sign-up goes through
+the popup, generated passwords held by the daemon until a sign-up goes through
 (only strong ones, with page patterns read by a small parser rather than run),
 the OpenCode theme and the icons.

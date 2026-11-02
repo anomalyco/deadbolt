@@ -8,7 +8,7 @@
 //! unpacked browser extension registered with `deadbolt browser install
 //! --extension-dir` is updated too (`extension`).
 //!
-//! The agent checks in the background ([`available`]) and only ever says
+//! The daemon checks in the background ([`available`]) and only ever says
 //! so: nothing is installed unless the user runs `deadbolt update`.
 //!
 //! Nothing downloaded runs or replaces anything before its size and SHA-256
@@ -147,7 +147,7 @@ impl Manager {
         }
     }
 
-    /// The install method's name in the agent's check
+    /// The install method's name in the daemon's check
     /// ([`UpdateInfo`](crate::protocol::UpdateInfo)).
     fn key(self) -> &'static str {
         match self {
@@ -249,7 +249,7 @@ fn upgrade_command(manager: Manager, version: &str) -> Option<Upgrade> {
     })
 }
 
-/// The install method's name for the agent's check: the
+/// The install method's name for the daemon's check: the
 /// install script's directory (`$DEADBOLT_INSTALL`, else `~/.local/bin`)
 /// is `curl`, any other standalone `deadbolt` `standalone`.
 pub fn method_key(install: &Install) -> &'static str {
@@ -467,7 +467,7 @@ fn wrapper_links(wrapper: &Path, exe: &Path) -> bool {
 /// `name`'s executable on PATH; bun also in `$BUN_INSTALL/bin`,
 /// `~/.bun/bin` and beside the global install `exe` is in, Homebrew in its
 /// usual prefixes, as a program started without a login shell's PATH (the
-/// agent from a launcher) may not find them otherwise.
+/// daemon from a launcher) may not find them otherwise.
 fn find_program(name: &str, exe: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let mut dirs: Vec<PathBuf> = crate::config::env("PATH")
@@ -746,9 +746,9 @@ impl Service {
         rustls::crypto::ring::default_provider()
             .install_default()
             .ok();
-        let agent = format!("deadbolt/{}/{VERSION}/cli", channel.unwrap_or("source"));
+        let user_agent = format!("deadbolt/{}/{VERSION}/cli", channel.unwrap_or("source"));
         let client = reqwest::Client::builder()
-            .user_agent(agent)
+            .user_agent(user_agent)
             .https_only(base.scheme() == "https" && registry.scheme() == "https")
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
@@ -958,7 +958,7 @@ async fn find(
     Ok(Some((url, text, decision)))
 }
 
-/// The agent's background check: whether this install has an update on
+/// The daemon's background check: whether this install has an update on
 /// `channel` that `deadbolt update` would install (the release service's
 /// rules, npm's version for npm's package, Homebrew's for Homebrew). It
 /// never downloads or installs anything, nor writes the sequence floors
@@ -1240,7 +1240,7 @@ fn user_link(manager: Manager, exe: &Path, wrapper: Option<&Path>) -> PathBuf {
 /// Updates the install `exe` with its package manager to `version`, then
 /// runs the new `deadbolt --version` through the user's link (which lets
 /// npm's wrapper link itself where the manager skipped its postinstall)
-/// and restarts the agent on it, locked, if it ran from `exe`.
+/// and restarts the daemon on it, locked, if it ran from `exe`.
 async fn update_package(
     paths: &Paths,
     manager: Manager,
@@ -1258,7 +1258,7 @@ async fn update_package(
     };
     let wrapper = package_of(exe);
     let link = user_link(manager, exe, wrapper.as_deref());
-    let ours = agent_runs(paths, |p| p == exe).await;
+    let ours = daemon_runs(paths, |p| p == exe).await;
     let cache = match upgrade.own_cache {
         true => Some(
             tempfile::Builder::new()
@@ -1321,9 +1321,9 @@ async fn update_package(
         _ => String::new(),
     };
     let new = link.canonicalize().unwrap_or_else(|_| link.clone());
-    // Whatever is in place now, its agent comes back.
-    if ours && stop_agent(paths).await {
-        restart_agent(paths, new).await;
+    // Whatever is in place now, its daemon comes back.
+    if ours && stop_daemon(paths).await {
+        restart_daemon(paths, new).await;
     }
     if said.split_whitespace().nth(1) != Some(version) {
         bail!(
@@ -1548,37 +1548,39 @@ fn read_floors(dir: &Path) -> Result<BTreeMap<String, u64>> {
     })
 }
 
-/// Whether the agent that runs is this `program`, so replacing it should
-/// replace the agent too.
-async fn agent_runs(paths: &Paths, program: impl Fn(&Path) -> bool) -> bool {
-    crate::client::running(paths).await.is_some_and(|agent| {
-        agent.program.is_some_and(|p| {
+/// Whether the daemon that runs is this `program`, so replacing it should
+/// replace the daemon too.
+async fn daemon_runs(paths: &Paths, program: impl Fn(&Path) -> bool) -> bool {
+    crate::client::running(paths).await.is_some_and(|daemon| {
+        daemon.program.is_some_and(|p| {
             let p = PathBuf::from(p.strip_suffix(" (deleted)").unwrap_or(&p));
             program(&p.canonicalize().unwrap_or(p))
         })
     })
 }
 
-/// Restarts the agent from `program` after an update. Not through
-/// `ensure_running`: its agent check wants this process's own binary, which
-/// the update just replaced or deleted, so the new agent would never pass.
-async fn restart_agent(paths: &Paths, program: PathBuf) {
+/// Restarts the daemon from `program` after an update. Not through
+/// `ensure_running`: its daemon check wants this process's own binary, which
+/// the update just replaced or deleted, so the new daemon would never pass.
+async fn restart_daemon(paths: &Paths, program: PathBuf) {
     let launch = deadbolt_client::Launch { program };
     match deadbolt_client::start(paths, &launch).await {
         Ok(_) if deadbolt_store::is_initialized(&paths.data) => {
-            println!("Restarted the agent; the vault is locked until you unlock it.");
+            println!("Restarted the daemon; the vault is locked until you unlock it.");
         }
-        Ok(_) => println!("Restarted the agent."),
-        Err(error) => eprintln!("warning: couldn't restart the agent: {error}"),
+        Ok(_) => println!("Restarted the daemon."),
+        Err(error) => eprintln!("warning: couldn't restart the daemon: {error}"),
     }
 }
 
-/// Stops the agent before its files are replaced; a failure is a warning.
-async fn stop_agent(paths: &Paths) -> bool {
+/// Stops the daemon before its files are replaced; a failure is a warning.
+async fn stop_daemon(paths: &Paths) -> bool {
     match crate::client::stop(paths).await {
         Ok(_) => true,
         Err(error) => {
-            eprintln!("warning: couldn't stop the old agent: {error}; run `deadbolt agent stop`");
+            eprintln!(
+                "warning: couldn't stop the old daemon: {error}; run `deadbolt debug daemon stop`"
+            );
             false
         }
     }
@@ -1796,7 +1798,7 @@ async fn update_cli(
             );
         }
     }
-    let ours = agent_runs(paths, |p| p == exe).await;
+    let ours = daemon_runs(paths, |p| p == exe).await;
     let mut files = Vec::new();
     for file in std::iter::once(&new).chain(&enclave) {
         use std::os::unix::fs::PermissionsExt;
@@ -1809,8 +1811,8 @@ async fn update_cli(
     files.push((new, exe.to_path_buf()));
     swap(&files, &stage.path().join("old"))?;
     println!("Updated {}", exe.display());
-    if ours && stop_agent(paths).await {
-        restart_agent(paths, exe.to_path_buf()).await;
+    if ours && stop_daemon(paths).await {
+        restart_daemon(paths, exe.to_path_buf()).await;
     }
     Ok(())
 }
@@ -1961,9 +1963,9 @@ async fn update_app(
         )?;
     }
 
-    // Verified: stop the old app and its agent, then swap.
+    // Verified: stop the old app and its daemon, then swap.
     let app_ran = quit_app()?;
-    stop_agent(paths).await;
+    stop_daemon(paths).await;
     let old = stage.path().join("old.app");
     let swapped = std::fs::rename(bundle, &old)
         .with_context(|| format!("moving {} aside", bundle.display()))
@@ -1973,8 +1975,8 @@ async fn update_app(
                 Err(error).with_context(|| format!("installing {}", bundle.display()))
             })
         });
-    // Whichever app is in place now, its agent comes back.
-    restart_agent(paths, bundle.join("Contents/Helpers/deadbolt")).await;
+    // Whichever app is in place now, its daemon comes back.
+    restart_daemon(paths, bundle.join("Contents/Helpers/deadbolt")).await;
     let reopen = || {
         if app_ran && let Err(error) = Command::new(OPEN).arg(bundle).status() {
             eprintln!("warning: couldn't reopen {}: {error}", bundle.display());
@@ -2058,8 +2060,8 @@ fn notice_line(update: &UpdateInfo) -> String {
 }
 
 /// Ends a command at a terminal with one line on stderr when the running
-/// agent's check found an update, at most once a day for each version.
-/// With no agent running it says nothing, and never asks the network.
+/// daemon's check found an update, at most once a day for each version.
+/// With no daemon running it says nothing, and never asks the network.
 pub async fn notice(paths: &Paths) {
     let status = tokio::time::timeout(Duration::from_secs(1), crate::client::status(paths)).await;
     let Some(update) = status.ok().flatten().and_then(|s| s.update) else {

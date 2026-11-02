@@ -1,5 +1,5 @@
-//! Talking to the agent: its control protocol, where its files live,
-//! starting it on demand, replacing an agent of an older protocol, and sending
+//! Talking to the daemon: its control protocol, where its files live,
+//! starting it on demand, replacing a daemon of an older protocol, and sending
 //! requests. The CLI and the desktop app are both clients of this crate.
 
 pub mod export;
@@ -32,24 +32,24 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Checks who holds the other end of a connection (a duplicate of its
 /// socket), before the client talks to it. `Err` says why not.
-pub type AgentCheck = Box<dyn Fn(OwnedFd) -> Result<(), String> + Send + Sync>;
+pub type DaemonCheck = Box<dyn Fn(OwnedFd) -> Result<(), String> + Send + Sync>;
 
-static AGENT_CHECK: OnceLock<AgentCheck> = OnceLock::new();
+static DAEMON_CHECK: OnceLock<DaemonCheck> = OnceLock::new();
 static CLAIM: OnceLock<Claim> = OnceLock::new();
-/// The agent process that last passed the [`AgentCheck`], as the kernel
+/// The daemon process that last passed the [`DaemonCheck`], as the kernel
 /// names it (on macOS its audit token, pid version included), so each
 /// connection to it doesn't run the check again.
 static CHECKED: Mutex<Option<peer::Peer>> = Mutex::new(None);
 
-/// Sets how this client checks the agent, on every connection. Without
+/// Sets how this client checks the daemon, on every connection. Without
 /// one, requests that carry a passphrase (`setup`, `unlock`) fail, and the
-/// rest only check that the agent runs as this user. The first call wins.
-pub fn set_agent_check(check: AgentCheck) {
-    drop(AGENT_CHECK.set(check));
+/// rest only check that the daemon runs as this user. The first call wins.
+pub fn set_daemon_check(check: DaemonCheck) {
+    drop(DAEMON_CHECK.set(check));
 }
 
 /// Sets what this client says about who drives it, sent with every request.
-/// The agent shows it as claimed and never trusts it. The first call wins.
+/// The daemon shows it as claimed and never trusts it. The first call wins.
 pub fn set_claim(claim: Claim) {
     if !claim.is_empty() {
         drop(CLAIM.set(claim));
@@ -65,23 +65,23 @@ fn request(command: Command) -> Request {
 }
 
 /// Checks `stream`'s peer before anything goes to it: that it runs as this
-/// user, then the [`AgentCheck`], unless that very process passed it
+/// user, then the [`DaemonCheck`], unless that very process passed it
 /// already. Without a check, `required` (a passphrase would follow) fails.
-async fn check_agent(stream: &UnixStream, required: bool) -> Result<(), String> {
-    let agent =
-        peer::Peer::of(stream).map_err(|e| format!("reading the agent's credentials: {e}"))?;
-    if agent.uid != rustix::process::getuid().as_raw() {
+async fn check_daemon(stream: &UnixStream, required: bool) -> Result<(), String> {
+    let daemon =
+        peer::Peer::of(stream).map_err(|e| format!("reading the daemon's credentials: {e}"))?;
+    if daemon.uid != rustix::process::getuid().as_raw() {
         return Err(format!(
-            "the agent (pid {}) runs as another user",
-            agent.pid
+            "the daemon (pid {}) runs as another user",
+            daemon.pid
         ));
     }
-    if *CHECKED.lock().unwrap_or_else(|e| e.into_inner()) == Some(agent) {
+    if *CHECKED.lock().unwrap_or_else(|e| e.into_inner()) == Some(daemon) {
         return Ok(());
     }
-    let Some(check) = AGENT_CHECK.get() else {
+    let Some(check) = DAEMON_CHECK.get() else {
         return if required {
-            Err("this client has no way to check the agent".into())
+            Err("this client has no way to check the daemon".into())
         } else {
             Ok(())
         };
@@ -93,30 +93,30 @@ async fn check_agent(stream: &UnixStream, required: bool) -> Result<(), String> 
     tokio::task::spawn_blocking(move || check(socket))
         .await
         .map_err(|e| e.to_string())??;
-    *CHECKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(agent);
+    *CHECKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(daemon);
     Ok(())
 }
 
-/// [`check_agent`] for `command`, as the error to report. `stop` goes to
+/// [`check_daemon`] for `command`, as the error to report. `stop` goes to
 /// whatever holds the socket: it sends nothing and asks nothing back, and it
-/// is how an agent that fails the check is stopped.
+/// is how a daemon that fails the check is stopped.
 async fn check_for(stream: &UnixStream, command: &Command) -> Result<(), Error> {
     if matches!(command, Command::Stop) {
         return Ok(());
     }
     let passphrase = command.carries_passphrase();
-    check_agent(stream, passphrase).await.map_err(|why| {
+    check_daemon(stream, passphrase).await.map_err(|why| {
         if passphrase {
-            Error::UncheckedAgent(why)
+            Error::UncheckedDaemon(why)
         } else {
-            Error::UnverifiedAgent(why)
+            Error::UnverifiedDaemon(why)
         }
     })
 }
 
-/// An error reported by the agent.
+/// An error reported by the daemon.
 #[derive(Debug)]
-pub struct AgentError {
+pub struct DaemonError {
     pub code: ErrorCode,
     pub message: String,
     /// With `not-granted`: what the user would have to allow.
@@ -125,27 +125,27 @@ pub struct AgentError {
     pub passkeys: Option<Vec<protocol::AgentPasskey>>,
 }
 
-impl fmt::Display for AgentError {
+impl fmt::Display for DaemonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for AgentError {}
+impl std::error::Error for DaemonError {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Agent(#[from] AgentError),
-    #[error("connecting to the agent")]
+    Daemon(#[from] DaemonError),
+    #[error("connecting to the daemon")]
     Connect(#[source] std::io::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Encode(serde_json::Error),
-    #[error("invalid reply from the agent")]
+    #[error("invalid reply from the daemon")]
     InvalidReply(#[source] serde_json::Error),
-    #[error("the agent closed the connection")]
+    #[error("the daemon closed the connection")]
     Closed,
     /// The caller's event handler failed.
     #[error(transparent)]
@@ -158,44 +158,44 @@ pub enum Error {
     CreateDir(PathBuf, #[source] std::io::Error),
     #[error("opening {}", .0.display())]
     OpenLog(PathBuf, #[source] std::io::Error),
-    #[error("starting the agent from {}", .0.display())]
+    #[error("starting the daemon from {}", .0.display())]
     Spawn(PathBuf, #[source] std::io::Error),
-    #[error("the agent did not start; see {}", .0.display())]
+    #[error("the daemon did not start; see {}", .0.display())]
     NotStarted(PathBuf),
-    #[error("the agent did not stop")]
+    #[error("the daemon did not stop")]
     NotStopped,
-    /// The agent failed the [`AgentCheck`], so the passphrase wasn't sent.
+    /// The daemon failed the [`DaemonCheck`], so the passphrase wasn't sent.
     #[error("not sending the passphrase: {0}")]
-    UncheckedAgent(String),
-    /// The agent failed the [`AgentCheck`], so nothing was sent to it.
-    #[error("not talking to the agent: {0}")]
-    UnverifiedAgent(String),
-    /// A line from the agent was longer than the protocol allows.
-    #[error("the agent sent a line longer than {MAX_LINE} bytes")]
+    UncheckedDaemon(String),
+    /// The daemon failed the [`DaemonCheck`], so nothing was sent to it.
+    #[error("not talking to the daemon: {0}")]
+    UnverifiedDaemon(String),
+    /// A line from the daemon was longer than the protocol allows.
+    #[error("the daemon sent a line longer than {MAX_LINE} bytes")]
     LineTooLong,
     #[error(
-        "a newer Deadbolt agent is running ({}, version {}, pid {}): it speaks protocol {}, and this copy speaks {}. Update this copy of Deadbolt, or stop that agent with `deadbolt agent stop` and try again",
+        "a newer Deadbolt daemon is running ({}, version {}, pid {}): it speaks protocol {}, and this copy speaks {}. Update this copy of Deadbolt, or stop that daemon with `deadbolt debug daemon stop` and try again",
         .0.program.as_deref().unwrap_or("unknown program"),
         .0.version,
         .0.pid,
         .0.protocol,
         PROTOCOL_VERSION
     )]
-    NewerAgent(Box<AgentId>),
+    NewerDaemon(Box<DaemonId>),
     #[error(
-        "a Deadbolt agent of another build is running ({}, version {}, pid {}): it says protocol {} but its status doesn't match this copy's. Stop it with `deadbolt agent stop` and try again",
+        "a Deadbolt daemon of another build is running ({}, version {}, pid {}): it says protocol {} but its status doesn't match this copy's. Stop it with `deadbolt debug daemon stop` and try again",
         .0.program.as_deref().unwrap_or("unknown program"),
         .0.version,
         .0.pid,
         .0.protocol
     )]
-    MismatchedAgent(Box<AgentId>),
+    MismatchedDaemon(Box<DaemonId>),
 }
 
 /// The fields every protocol's status reply carries, so a client can tell
-/// which agent is running even when the rest of its reply has another shape.
+/// which daemon is running even when the rest of its reply has another shape.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct AgentId {
+pub struct DaemonId {
     pub pid: u32,
     pub version: String,
     pub protocol: u32,
@@ -204,19 +204,19 @@ pub struct AgentId {
 }
 
 impl Error {
-    /// The agent's error code, when the agent refused the request.
+    /// The daemon's error code, when the daemon refused the request.
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
-            Self::Agent(error) => Some(error.code),
+            Self::Daemon(error) => Some(error.code),
             _ => None,
         }
     }
 }
 
-/// How to start an agent when none is running.
+/// How to start a daemon when none is running.
 #[derive(Debug, Clone)]
 pub struct Launch {
-    /// A `deadbolt` binary; the agent runs as `<program> agent`.
+    /// A `deadbolt` binary; the daemon runs as `<program> daemon`.
     pub program: PathBuf,
 }
 
@@ -234,7 +234,7 @@ where
 }
 
 /// [`call`] with an event handler that may take its time, such as one waiting
-/// for a person to choose a passphrase. If the agent finishes while an answer
+/// for a person to choose a passphrase. If the daemon finishes while an answer
 /// is pending, its final message ends the call at once and the pending answer
 /// is dropped.
 pub async fn converse<E, F>(
@@ -272,7 +272,7 @@ where
                         message = read_message(&mut lines) => match message? {
                             Message::Ok { reply } => return Ok(reply),
                             Message::Error { code, message, grant, passkeys } => {
-                                return Err(AgentError { code, message, grant, passkeys }.into());
+                                return Err(DaemonError { code, message, grant, passkeys }.into());
                             }
                             event => queued.push_back(event),
                         },
@@ -290,7 +290,7 @@ where
                 grant,
                 passkeys,
             } => {
-                return Err(AgentError {
+                return Err(DaemonError {
                     code,
                     message,
                     grant,
@@ -314,7 +314,7 @@ async fn read_message(lines: &mut LineReader<BufReader<OwnedReadHalf>>) -> Resul
 #[error("line too long")]
 struct TooLong;
 
-/// Reads the agent's lines, which carry values, into buffers that are wiped
+/// Reads the daemon's lines, which carry values, into buffers that are wiped
 /// on drop and grow without leaving copies behind (`export::append`), up to
 /// [`MAX_LINE`] bytes each.
 struct LineReader<R> {
@@ -433,12 +433,12 @@ pub async fn simple(paths: &Paths, command: Command) -> Result<Reply, Error> {
 /// A live `watch` stream. Dropping it hangs up.
 pub struct Watch {
     lines: LineReader<BufReader<OwnedReadHalf>>,
-    /// Held open: the agent ends the stream when the client stops writing.
+    /// Held open: the daemon ends the stream when the client stops writing.
     _write: OwnedWriteHalf,
 }
 
 impl Watch {
-    /// The next change, or `None` once the agent ended the stream (after
+    /// The next change, or `None` once the daemon ended the stream (after
     /// [`Change::Stopping`]). Cancel-safe.
     pub async fn next(&mut self) -> Result<Option<Change>, Error> {
         let Some(line) = self.lines.line().await? else {
@@ -452,7 +452,7 @@ impl Watch {
                 message,
                 grant,
                 passkeys,
-            } => Err(AgentError {
+            } => Err(DaemonError {
                 code,
                 message,
                 grant,
@@ -464,7 +464,7 @@ impl Watch {
     }
 }
 
-/// Subscribes to the running agent's changes. The first is
+/// Subscribes to the running daemon's changes. The first is
 /// [`Change::Watching`]; fetch state after it so nothing is missed. `app`
 /// marks the desktop app's main window, which alone gets
 /// [`Change::Activate`].
@@ -483,41 +483,41 @@ pub async fn watch(paths: &Paths, app: bool) -> Result<Watch, Error> {
     })
 }
 
-/// The running agent's status, or `None` when none is running, it fails
-/// this client's [`AgentCheck`], or it speaks a protocol whose status this
+/// The running daemon's status, or `None` when none is running, it fails
+/// this client's [`DaemonCheck`], or it speaks a protocol whose status this
 /// copy can't read.
 pub async fn status(paths: &Paths) -> Option<Status> {
     let probe = probe(paths).await?;
     probe.checked.ok().and(probe.status)
 }
 
-/// Which agent is running, whatever its protocol, or `None` when none is.
+/// Which daemon is running, whatever its protocol, or `None` when none is.
 /// What it says isn't checked: this only names it.
-pub async fn running(paths: &Paths) -> Option<AgentId> {
-    probe(paths).await.map(|probe| probe.agent)
+pub async fn running(paths: &Paths) -> Option<DaemonId> {
+    probe(paths).await.map(|probe| probe.daemon)
 }
 
-/// What one `status` asked of the running agent found.
+/// What one `status` asked of the running daemon found.
 struct Probe {
-    agent: AgentId,
+    daemon: DaemonId,
     status: Option<Status>,
-    /// Whether it passed this client's [`AgentCheck`], and if not, why.
+    /// Whether it passed this client's [`DaemonCheck`], and if not, why.
     checked: Result<(), String>,
 }
 
-/// Asks the running agent for its status once. Every agent answers `status`
+/// Asks the running daemon for its status once. Every daemon answers `status`
 /// whatever the request's protocol, but a status of another protocol may not
 /// decode as ours, so its identity is read on its own.
 async fn probe(paths: &Paths) -> Option<Probe> {
     #[derive(serde::Deserialize)]
     struct Head {
-        reply: AgentId,
+        reply: DaemonId,
     }
     let (line, checked) = tokio::time::timeout(STATUS_TIMEOUT, status_line(paths))
         .await
         .ok()?
         .ok()?;
-    let agent = serde_json::from_slice::<Head>(&line).ok()?.reply;
+    let daemon = serde_json::from_slice::<Head>(&line).ok()?.reply;
     let status = match serde_json::from_slice::<Message>(&line) {
         Ok(Message::Ok {
             reply: Reply::Status(status),
@@ -525,7 +525,7 @@ async fn probe(paths: &Paths) -> Option<Probe> {
         _ => None,
     };
     Some(Probe {
-        agent,
+        daemon,
         status,
         checked,
     })
@@ -535,9 +535,9 @@ async fn status_line(paths: &Paths) -> Result<(Zeroizing<Vec<u8>>, Result<(), St
     let stream = UnixStream::connect(&paths.socket)
         .await
         .map_err(Error::Connect)?;
-    // A status carries nothing secret either way, and naming an agent that
+    // A status carries nothing secret either way, and naming a daemon that
     // fails the check is how a client says which one to stop.
-    let checked = check_agent(&stream, false).await;
+    let checked = check_daemon(&stream, false).await;
     let (read, mut write) = stream.into_split();
     let body = encode_line(&request(Command::Status))?;
     write.write_all(&body).await?;
@@ -548,30 +548,30 @@ async fn status_line(paths: &Paths) -> Result<(Zeroizing<Vec<u8>>, Result<(), St
     Ok((line, checked))
 }
 
-/// Starts the agent unless one that speaks [`PROTOCOL_VERSION`] is running.
+/// Starts the daemon unless one that speaks [`PROTOCOL_VERSION`] is running.
 ///
 /// The app and the CLI share this rule, so two builds never take turns
-/// replacing each other's agent:
+/// replacing each other's daemon:
 ///
 /// - same protocol: reuse it, whatever its build
 /// - older protocol: stop it, then start `launch.program`
-/// - newer protocol: [`Error::NewerAgent`], leaving it running
+/// - newer protocol: [`Error::NewerDaemon`], leaving it running
 ///
-/// A rebuilt agent of the same protocol is only picked up once the running
-/// one stops (`deadbolt agent stop`).
+/// A rebuilt daemon of the same protocol is only picked up once the running
+/// one stops (`deadbolt debug daemon stop`).
 pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Error> {
     if let Some(Probe {
-        agent,
+        daemon,
         status,
         checked,
     }) = probe(paths).await
     {
-        match agent.protocol.cmp(&PROTOCOL_VERSION) {
+        match daemon.protocol.cmp(&PROTOCOL_VERSION) {
             std::cmp::Ordering::Equal => {
-                checked.map_err(Error::UnverifiedAgent)?;
-                return status.ok_or_else(|| Error::MismatchedAgent(Box::new(agent)));
+                checked.map_err(Error::UnverifiedDaemon)?;
+                return status.ok_or_else(|| Error::MismatchedDaemon(Box::new(daemon)));
             }
-            std::cmp::Ordering::Greater => return Err(Error::NewerAgent(Box::new(agent))),
+            std::cmp::Ordering::Greater => return Err(Error::NewerDaemon(Box::new(daemon))),
             std::cmp::Ordering::Less => {
                 stop(paths).await?;
             }
@@ -587,23 +587,23 @@ pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Er
     Err(Error::NotStarted(paths.log.clone()))
 }
 
-/// Starts `launch.program`'s agent, for when none runs, and waits until an
-/// agent answers. Unlike [`ensure_running`] it doesn't apply the [`AgentCheck`]:
+/// Starts `launch.program`'s daemon, for when none runs, and waits until an
+/// daemon answers. Unlike [`ensure_running`] it doesn't apply the [`DaemonCheck`]:
 /// an updater's own binary may be gone or replaced by then, so the check,
-/// which wants that very binary, can't vouch for the new agent. Nothing is
+/// which wants that very binary, can't vouch for the new daemon. Nothing is
 /// sent to it but `status`.
-pub async fn start(paths: &Paths, launch: &Launch) -> Result<AgentId, Error> {
+pub async fn start(paths: &Paths, launch: &Launch) -> Result<DaemonId, Error> {
     spawn(paths, launch)?;
     for _ in 0..250 {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        if let Some(agent) = running(paths).await {
-            return Ok(agent);
+        if let Some(daemon) = running(paths).await {
+            return Ok(daemon);
         }
     }
     Err(Error::NotStarted(paths.log.clone()))
 }
 
-/// Runs `<launch.program> agent` in its own process group, logging to
+/// Runs `<launch.program> daemon` in its own process group, logging to
 /// `paths.log`.
 fn spawn(paths: &Paths, launch: &Launch) -> Result<(), Error> {
     if let Some(dir) = paths.log.parent() {
@@ -615,7 +615,7 @@ fn spawn(paths: &Paths, launch: &Launch) -> Result<(), Error> {
         .open(&paths.log)
         .map_err(|e| Error::OpenLog(paths.log.clone(), e))?;
     Process::new(&launch.program)
-        .arg("agent")
+        .arg("daemon")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
@@ -625,7 +625,7 @@ fn spawn(paths: &Paths, launch: &Launch) -> Result<(), Error> {
     Ok(())
 }
 
-/// True when no process holds the agent lock file.
+/// True when no process holds the daemon lock file.
 fn lock_free(paths: &Paths) -> bool {
     match fs::File::options()
         .create(true)
@@ -638,11 +638,11 @@ fn lock_free(paths: &Paths) -> bool {
     }
 }
 
-/// Stops the agent. Returns whether one was running.
+/// Stops the daemon. Returns whether one was running.
 ///
-/// Waits until the lock file is really free before returning, so a new agent
-/// started right after `stop` (e.g. `deadbolt agent stop && deadbolt unlock`)
-/// doesn't fail with "the agent is already running" while the old process is
+/// Waits until the lock file is really free before returning, so a new daemon
+/// started right after `stop` (e.g. `deadbolt debug daemon stop && deadbolt unlock`)
+/// doesn't fail with "the daemon is already running" while the old process is
 /// still releasing the lock.
 pub async fn stop(paths: &Paths) -> Result<bool, Error> {
     if running(paths).await.is_none() {
@@ -699,15 +699,14 @@ mod tests {
         Paths {
             data: dir.join("data"),
             config: dir.join("config.toml"),
-            socket: dir.join("agent.sock"),
-            lock: dir.join("agent.lock"),
-            log: dir.join("agent.log"),
-            ssh_link: None,
+            socket: dir.join("daemon.sock"),
+            lock: dir.join("daemon.lock"),
+            log: dir.join("daemon.log"),
         }
     }
 
-    /// A request for the fake agents below. Not `join`, which carries a
-    /// passphrase and so needs an agent check these tests don't install.
+    /// A request for the fake daemons below. Not `join`, which carries a
+    /// passphrase and so needs a daemon check these tests don't install.
     fn join() -> Command {
         Command::Pair {
             code: "violin-garden-tiger-lamp-zoo".into(),
@@ -731,8 +730,8 @@ mod tests {
         }
     }
 
-    /// A one-request agent: reads the request, sends `joining`, then runs `rest`.
-    async fn agent<F, Fut>(listener: UnixListener, rest: F)
+    /// A one-request daemon: reads the request, sends `joining`, then runs `rest`.
+    async fn daemon<F, Fut>(listener: UnixListener, rest: F)
     where
         F: FnOnce(
             tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
@@ -777,17 +776,15 @@ mod tests {
             touch_id_enabled: false,
             touch_id_ready: false,
             touch_id_reset: false,
-            ssh_agent: false,
-            ssh_socket: None,
             caller: protocol::CallerInfo::unverified("test"),
             update: None,
         }
     }
 
-    /// A running agent of `protocol` that answers `status` and `stop`, and
+    /// A running daemon of `protocol` that answers `status` and `stop`, and
     /// records what it was asked. It goes away on `stop`, like a real one.
     /// Of another protocol, its status has another shape, as a real one's does.
-    fn fake_agent(paths: &Paths, protocol: u32) -> Arc<Mutex<Vec<&'static str>>> {
+    fn fake_daemon(paths: &Paths, protocol: u32) -> Arc<Mutex<Vec<&'static str>>> {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let listener = UnixListener::bind(&paths.socket).unwrap();
         let socket = paths.socket.clone();
@@ -802,7 +799,7 @@ mod tests {
                 let reply = match request.command {
                     Command::Status => Reply::Status(Box::new(status_of(protocol))),
                     Command::Stop => Reply::Done,
-                    other => panic!("an agent of another build was sent {other:?}"),
+                    other => panic!("a daemon of another build was sent {other:?}"),
                 };
                 let stopping = matches!(reply, Reply::Done);
                 log.lock()
@@ -843,11 +840,11 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_of_the_same_protocol_is_reused_whatever_its_build() {
+    fn a_daemon_of_the_same_protocol_is_reused_whatever_its_build() {
         run(async {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
-            let asked = fake_agent(&paths, PROTOCOL_VERSION);
+            let asked = fake_daemon(&paths, PROTOCOL_VERSION);
             let status = ensure_running(&paths, &launch(dir.path())).await.unwrap();
             assert_eq!((status.pid, status.version.as_str()), (41, "another-build"));
             // A second client of yet another build reuses it too: nobody replaces anybody.
@@ -857,11 +854,11 @@ mod tests {
     }
 
     #[test]
-    fn an_older_agent_is_stopped_before_ours_starts() {
+    fn an_older_daemon_is_stopped_before_ours_starts() {
         run(async {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
-            let asked = fake_agent(&paths, PROTOCOL_VERSION - 1);
+            let asked = fake_daemon(&paths, PROTOCOL_VERSION - 1);
             let result = ensure_running(&paths, &launch(dir.path())).await;
             assert_eq!(*asked.lock().unwrap(), ["status", "status", "stop"]);
             // Then it starts our binary, which this test doesn't have.
@@ -870,21 +867,21 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_agent_is_left_running_and_named() {
+    fn a_newer_daemon_is_left_running_and_named() {
         run(async {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
-            let asked = fake_agent(&paths, PROTOCOL_VERSION + 1);
+            let asked = fake_daemon(&paths, PROTOCOL_VERSION + 1);
             let error = ensure_running(&paths, &launch(dir.path()))
                 .await
                 .unwrap_err();
-            assert!(matches!(error, Error::NewerAgent(_)), "{error:?}");
+            assert!(matches!(error, Error::NewerDaemon(_)), "{error:?}");
             let message = error.to_string();
             for part in [
                 "/opt/homebrew/bin/deadbolt",
                 "another-build",
                 "pid 41",
-                "deadbolt agent stop",
+                "deadbolt debug daemon stop",
             ] {
                 assert!(message.contains(part), "{message}");
             }
@@ -898,7 +895,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
             let listener = UnixListener::bind(&paths.socket).unwrap();
-            let server = agent(listener, |mut lines, mut write| async move {
+            let server = daemon(listener, |mut lines, mut write| async move {
                 let answer = lines.next_line().await.unwrap().unwrap();
                 assert_eq!(answer, r#"{"answer":true,"passphrase":"hunter2"}"#);
                 let done = Message::Ok { reply: Reply::Done };
@@ -919,7 +916,7 @@ mod tests {
     /// with a status of this protocol, and appends what it was sent to
     /// `<socket>.sent`.
     #[test]
-    #[ignore = "run by every_connection_waits_for_the_agent_check"]
+    #[ignore = "run by every_connection_waits_for_the_daemon_check"]
     fn impostor() {
         let Some(socket) = std::env::var_os("DEADBOLT_TEST_IMPOSTOR") else {
             return;
@@ -959,11 +956,11 @@ mod tests {
     }
 
     /// Every connection waits for the client's check, which sees the very
-    /// connection the request would travel on, and runs once per agent
+    /// connection the request would travel on, and runs once per daemon
     /// process. Something else holding the socket gets nothing: not a
     /// passphrase, not a request, not a watcher, and its status isn't taken.
     #[test]
-    fn every_connection_waits_for_the_agent_check() {
+    fn every_connection_waits_for_the_daemon_check() {
         // The sockets each check was for. The other tests' connections are
         // checked too, concurrently, so only this test's socket is counted.
         static CHECKS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -983,7 +980,7 @@ mod tests {
                 line
             });
             assert!(
-                matches!(refused.0, Err(Error::UncheckedAgent(_))),
+                matches!(refused.0, Err(Error::UncheckedDaemon(_))),
                 "{:?}",
                 refused.0
             );
@@ -991,8 +988,8 @@ mod tests {
             drop(listener);
             fs::remove_file(&paths.socket).unwrap();
 
-            // The other tests' agents run in this process, and pass.
-            set_agent_check(Box::new(|socket| {
+            // The other tests' daemons run in this process, and pass.
+            set_daemon_check(Box::new(|socket| {
                 let socket = std::os::unix::net::UnixStream::from(socket);
                 if let Some(path) = socket
                     .peer_addr()
@@ -1001,11 +998,11 @@ mod tests {
                 {
                     CHECKS.lock().unwrap().push(path);
                 }
-                let agent = peer::Peer::of(&socket).map_err(|e| e.to_string())?;
-                if agent.pid == std::process::id() {
+                let daemon = peer::Peer::of(&socket).map_err(|e| e.to_string())?;
+                if daemon.pid == std::process::id() {
                     Ok(())
                 } else {
-                    Err(format!("pid {} is an impostor", agent.pid))
+                    Err(format!("pid {} is an impostor", daemon.pid))
                 }
             }));
 
@@ -1049,19 +1046,19 @@ mod tests {
                 error
             };
             let error = impostor_said(simple(&impostor, unlock()).await.unwrap_err());
-            assert!(matches!(error, Error::UncheckedAgent(_)), "{error:?}");
+            assert!(matches!(error, Error::UncheckedDaemon(_)), "{error:?}");
             let error = impostor_said(simple(&impostor, Command::VaultList).await.unwrap_err());
-            assert!(matches!(error, Error::UnverifiedAgent(_)), "{error:?}");
+            assert!(matches!(error, Error::UnverifiedDaemon(_)), "{error:?}");
             let Err(error) = watch(&impostor, true).await else {
                 panic!("an impostor's watch was taken");
             };
-            assert!(matches!(impostor_said(error), Error::UnverifiedAgent(_)));
+            assert!(matches!(impostor_said(error), Error::UnverifiedDaemon(_)));
             assert!(status(&impostor).await.is_none());
             assert_eq!(running(&impostor).await.map(|a| a.pid), Some(41));
             let error = ensure_running(&impostor, &launch(dir.path()))
                 .await
                 .unwrap_err();
-            assert!(matches!(impostor_said(error), Error::UnverifiedAgent(_)));
+            assert!(matches!(impostor_said(error), Error::UnverifiedDaemon(_)));
             let sent = fs::read_to_string(impostor.socket.with_extension("sent")).unwrap();
             assert!(!sent.is_empty());
             for line in sent.lines() {
@@ -1070,8 +1067,8 @@ mod tests {
             }
             drop(child);
 
-            // An agent that passes is checked once, however often it's asked.
-            fake_agent(&paths, PROTOCOL_VERSION);
+            // A daemon that passes is checked once, however often it's asked.
+            fake_daemon(&paths, PROTOCOL_VERSION);
             for _ in 0..5 {
                 assert!(status(&paths).await.is_some());
             }
@@ -1093,16 +1090,16 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_finishing_drops_a_pending_answer() {
+    fn the_daemon_finishing_drops_a_pending_answer() {
         run(async {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
             let listener = UnixListener::bind(&paths.socket).unwrap();
-            // The agent gives up while this one is still asking for the passphrase.
-            let server = agent(listener, |_lines, mut write| async move {
+            // The daemon gives up while this one is still asking for the passphrase.
+            let server = daemon(listener, |_lines, mut write| async move {
                 let declined = Message::Error {
                     code: ErrorCode::Failed,
-                    message: "the agent stopped".into(),
+                    message: "the daemon stopped".into(),
                     grant: None,
                     passkeys: None,
                 };
