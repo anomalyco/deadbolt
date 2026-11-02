@@ -7,10 +7,11 @@ import { MeshScene } from "./MeshScene"
 import "../styles.css"
 
 const github = "https://github.com/anomalyco/deadbolt"
+const macApp = "https://anoma.ly/release/deadbolt/desktop/dev/macos-arm64-dmg"
+const standalone = "https://anoma.ly/release/deadbolt/extension/dev/chromium-standalone"
 
 const installs = {
-  curl: "curl -fsSL https://deadbolt.pw/install | sh",
-  brew: "brew install anomalyco/tap/deadbolt",
+  curl: "curl -fsSL https://deadbolt.pw/install | DEADBOLT_CHANNEL=dev sh",
   source: "git clone git@github.com:anomalyco/deadbolt.git && cargo install --path deadbolt/crates/cli",
 } as const
 type Manager = keyof typeof installs
@@ -20,6 +21,7 @@ function Install() {
   return <div className="install">
     <div className="tabs" role="tablist">
       {(Object.keys(installs) as Manager[]).map(name => <button key={name} type="button" role="tab" aria-selected={manager === name} data-current={manager === name || undefined} onClick={() => setManager(name)}>{name}</button>)}
+      <a href={macApp}>mac app</a>
       <a href={github} target="_blank" rel="noopener">github</a>
     </div>
     <div className="command">$ {installs[manager]}</div>
@@ -46,6 +48,12 @@ function Landing() {
       </section>
 
       <section>
+        <h2>browser extension</h2>
+        <pre>{`# chrome, brave, arc, edge or helium, with deadbolt on this computer\n$ deadbolt browser install --extension-dir ~/deadbolt-extension\n$ deadbolt update\n`}{out("updated the browser extension in ~/deadbolt-extension")}{`\n# then load that folder unpacked in chrome://extensions\n\n# or the standalone build: its own device, no app or cli needed.\n# unzip it, load it unpacked, then pair it or create a vault\n`}</pre>
+        <a className="cta" href={standalone}>download the standalone extension →</a>
+      </section>
+
+      <section>
         <h2>how it works</h2>
         <ol className="steps">
           <li><Justified text="each device has its own key. it's the device's identity on the network and signs everything the device writes. it never leaves the device, and on disk it's sealed under your passphrase." /></li>
@@ -62,7 +70,7 @@ function Landing() {
         <dl className="facts">
           <div><dt>no recovery</dt><Justified as="dd" text="lose every device and the vault is gone. there is no server holding a copy and no reset email. pair a second device early." /></div>
           <div><dt>removal is a promise about the future</dt><Justified as="dd" text="a removed device can't sync anything new, but it keeps what it already had. rotate the passwords it could see." /></div>
-          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background agent, pairing, sync and a bitwarden import. no apps or browser extension yet." /></div>
+          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is an alpha: a cli, a mac app, a background agent, pairing, sync, a bitwarden import and a browser extension. there's no stable release yet, so installs follow the dev channel. phone apps are in progress." /></div>
         </dl>
       </section>
 
