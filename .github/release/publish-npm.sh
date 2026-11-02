@@ -6,8 +6,8 @@
 # no npm token). Names, the version and the package set come from this
 # script, never from the tarballs: each tarball's package.json is read as data
 # and must match. Platform packages publish before @deadbolt/cli, which
-# resolves them; versions already on the registry are skipped, so a rerun is
-# safe.
+# resolves them, and it waits until the registry shows them; versions already
+# on the registry are skipped, so a rerun is safe.
 #
 # Environment: DEADBOLT_VERSION, DEADBOLT_RELEASE_CHANNEL, GH_TOKEN (to verify
 # the tarballs' build provenance).
@@ -70,7 +70,25 @@ cat "$order"
 printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/npmrc"
 export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc"
 cd "$(mktemp -d)"
+
+# The registry shows a large platform package minutes after publishing it,
+# and a wrapper served before its platform package fails to install, so the
+# wrapper waits until every one shows (up to 10 minutes; a rerun resumes).
+wait_for_platform_packages() {
+  for _ in $(seq 60); do
+    missing=""
+    for target in $targets; do
+      [ "$(npm view "@deadbolt/cli-$target@$v" version 2> /dev/null)" = "$v" ] || missing="$missing @deadbolt/cli-$target"
+    done
+    [ -n "$missing" ] || return 0
+    echo "waiting for the registry to show$missing"
+    sleep 10
+  done
+  die "The registry doesn't show$missing at $v after 10 minutes."
+}
+
 while IFS=$'\t' read -r name file; do
+  [ "$name" != @deadbolt/cli ] || wait_for_platform_packages
   if npm view "$name@$v" version > /dev/null 2>&1; then
     echo "already published $name@$v"
     continue

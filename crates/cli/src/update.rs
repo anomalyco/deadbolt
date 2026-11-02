@@ -794,6 +794,19 @@ impl Service {
         Ok(tags.get(tag).and_then(|v| v.as_str()).map(str::to_string))
     }
 
+    /// Whether the registry serves `name` at `version`
+    /// (`<registry>/<name>/<version>`). Large platform packages show up
+    /// minutes after the small `@deadbolt/cli` that needs them.
+    async fn npm_has(&self, name: &str, version: &str) -> Result<bool> {
+        let url = self.registry.join(&format!("{name}/{version}"))?;
+        let Some(text) = self.small(&url).await? else {
+            return Ok(false);
+        };
+        let package: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("reading {url}"))?;
+        Ok(package.get("version").and_then(|v| v.as_str()) == Some(version))
+    }
+
     /// A small document's text, as manifests are read: `None` on 404.
     async fn small(&self, url: &Url) -> Result<Option<String>> {
         let fetch = async {
@@ -904,16 +917,76 @@ fn file_url(manifest: &Url, reference: &str) -> Result<Url> {
 // Running the update.
 
 /// For npm's package: npm, pnpm, bun and yarn install only what the
-/// registry serves for the channel (`served`), which trails the release
-/// service by minutes, so until it serves the release the update is
-/// pending, and never offered before the manager can install it.
-fn served_by_npm(decision: Decision, served: Option<&str>) -> Decision {
+/// registry serves for the channel (`served`, `@deadbolt/cli`'s dist-tag),
+/// which trails the release service by minutes, and the wrapper needs this
+/// system's platform package at that version too (`platform`: that version
+/// when the registry has it), which can trail the wrapper by minutes more.
+/// Until both are the release the update is pending, so it's never offered
+/// before the manager can install all of it.
+fn served_by_npm(decision: Decision, served: Option<&str>, platform: Option<&str>) -> Decision {
     match decision {
-        Decision::Notify { ref version, .. } if served != Some(version.as_str()) => {
+        Decision::Notify { ref version, .. }
+            if served != Some(version.as_str()) || platform != Some(version.as_str()) =>
+        {
             Decision::None("distribution_pending")
         }
         decision => decision,
     }
+}
+
+/// The platform package `@deadbolt/cli`'s postinstall links on this system
+/// (packaging/npm/postinstall.mjs) for the release service's `target`: on
+/// Linux the static `-musl` build only where `static_libc` says so, else the
+/// build with the app.
+fn platform_package(target: &str, static_libc: impl FnOnce() -> bool) -> String {
+    let target = target.replacen("macos-", "darwin-", 1);
+    let glibc = target.strip_suffix("-musl").unwrap_or(&target);
+    if target.starts_with("linux-") && static_libc() {
+        format!("@deadbolt/cli-{glibc}-musl")
+    } else {
+        format!("@deadbolt/cli-{glibc}")
+    }
+}
+
+/// Whether the postinstall picks the static build here, as the install
+/// script does: musl (Alpine, `/lib/ld-musl-*`, or `ldd --version` says so)
+/// or a glibc older than 2.28.
+fn static_libc() -> bool {
+    let musl_loader = std::fs::read_dir("/lib").is_ok_and(|dir| {
+        dir.flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("ld-musl-"))
+    });
+    if musl_loader || Path::new("/etc/alpine-release").exists() {
+        return true;
+    }
+    let ldd = Command::new("ldd")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+        })
+        .unwrap_or_default();
+    static_for(&ldd)
+}
+
+/// Whether `ldd --version` said musl or a glibc older than 2.28 (its first
+/// line ends in the version: "ldd (GNU libc) 2.36").
+fn static_for(ldd: &str) -> bool {
+    if ldd.to_lowercase().contains("musl") {
+        return true;
+    }
+    let version = ldd
+        .lines()
+        .next()
+        .and_then(|line| line.trim().rsplit(' ').next())
+        .and_then(|v| v.split_once('.'))
+        .and_then(|(major, minor)| Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?)));
+    version.is_some_and(|v| v < (2, 28))
 }
 
 /// The artifact `install` follows, what to call it, and its distribution
@@ -936,7 +1009,8 @@ fn artifact_of(install: &Install) -> Result<(&'static str, &'static str, &'stati
 
 /// The channel's manifest for `artifact` and what to do about it, `None`
 /// when the channel has none: [`decide`], then for npm's package
-/// [`served_by_npm`].
+/// [`served_by_npm`], for the platform package this system installs
+/// ([`platform_package`]).
 async fn find(
     service: &Service,
     install: &Install,
@@ -953,7 +1027,17 @@ async fn find(
         && matches!(decision, Decision::Notify { .. })
     {
         let served = service.npm_version(channel).await?;
-        decision = served_by_npm(decision, served.as_deref());
+        let platform = match &served {
+            Some(version) => {
+                let name = platform_package(running.target, static_libc);
+                service
+                    .npm_has(&name, version)
+                    .await?
+                    .then_some(version.as_str())
+            }
+            None => None,
+        };
+        decision = served_by_npm(decision, served.as_deref(), platform);
     }
     Ok(Some((url, text, decision)))
 }
@@ -2850,26 +2934,127 @@ mod tests {
             command: None,
             notes_url: None,
         };
-        assert_eq!(served_by_npm(notify("2"), Some("2")), notify("2"));
+        let pending = Decision::None("distribution_pending");
         assert_eq!(
-            served_by_npm(notify("2"), Some("1")),
-            Decision::None("distribution_pending")
+            served_by_npm(notify("2"), Some("2"), Some("2")),
+            notify("2")
         );
+        assert_eq!(served_by_npm(notify("2"), Some("1"), Some("2")), pending);
+        assert_eq!(served_by_npm(notify("2"), None, None), pending);
+        // The wrapper is out but not yet this system's platform package.
+        assert_eq!(served_by_npm(notify("2"), Some("2"), None), pending);
         assert_eq!(
-            served_by_npm(notify("2"), None),
-            Decision::None("distribution_pending")
-        );
-        assert_eq!(
-            served_by_npm(Decision::None("up_to_date"), None),
+            served_by_npm(Decision::None("up_to_date"), None, None),
             Decision::None("up_to_date")
         );
         // The manifest's rules still hold: npm's version alone offers nothing.
         let text = manifest(0, false);
         let d = decide("cli", "stable", &text, &running("2.3.8", "unknown", 50));
         assert_eq!(
-            served_by_npm(d, Some("2.4.0")),
+            served_by_npm(d, Some("2.4.0"), Some("2.4.0")),
             Decision::None("rollout_deferred")
         );
+    }
+
+    #[test]
+    fn waits_for_the_platform_package_the_postinstall_picks() {
+        let never = || -> bool { panic!("only Linux asks about libc") };
+        assert_eq!(
+            platform_package("macos-arm64", never),
+            "@deadbolt/cli-darwin-arm64"
+        );
+        // glibc gets the build with the app, even where the static build runs.
+        assert_eq!(
+            platform_package("linux-x64-musl", || false),
+            "@deadbolt/cli-linux-x64"
+        );
+        assert_eq!(
+            platform_package("linux-arm64", || true),
+            "@deadbolt/cli-linux-arm64-musl"
+        );
+        assert!(!static_for(
+            "ldd (Ubuntu GLIBC 2.35-0ubuntu3.8) 2.35\nCopyright (C) 2022"
+        ));
+        assert!(static_for("ldd (GNU libc) 2.17\n"));
+        assert!(static_for("musl libc (x86_64)\nVersion 1.2.5\n"));
+        assert!(!static_for(""));
+    }
+
+    /// `@deadbolt/cli` in `dir` as a package manager unpacks it, needing
+    /// platform packages at `0.0.0-test`, none of which is installed.
+    fn unpacked_wrapper(dir: &Path) -> PathBuf {
+        let wrapper = dir.join("node_modules/@deadbolt/cli");
+        std::fs::create_dir_all(wrapper.join("bin")).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/npm");
+        for file in ["postinstall.mjs", "bin/deadbolt"] {
+            let from = Path::new(file).file_name().unwrap();
+            std::fs::copy(root.join(from), wrapper.join(file)).unwrap();
+        }
+        let dependencies: serde_json::Map<String, serde_json::Value> = PLATFORM_PACKAGES
+            .iter()
+            .map(|name| (name.to_string(), serde_json::Value::from("0.0.0-test")))
+            .collect();
+        let package = serde_json::json!({
+            "name": PACKAGE,
+            "version": "0.0.0-test",
+            "optionalDependencies": dependencies,
+        });
+        std::fs::write(wrapper.join("package.json"), package.to_string()).unwrap();
+        wrapper
+    }
+
+    #[test]
+    fn the_postinstall_never_fails_the_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(node) = crate::config::env("PATH").ok().and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join("node"))
+                .find(|node| node.is_file())
+        }) else {
+            eprintln!("skipped: no node on PATH");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = unpacked_wrapper(dir.path());
+        // npm doesn't serve the platform package yet.
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("npm"),
+            "#!/bin/sh\necho 'npm error code ETARGET' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("npm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let node_dir = node.parent().unwrap();
+        let system = [Path::new("/usr/bin"), Path::new("/bin")];
+        let dirs = [&[bin.as_path(), node_dir][..], &system].concat();
+        let path = std::env::join_paths(dirs).unwrap();
+        let placeholder = std::fs::read(wrapper.join("bin/deadbolt")).unwrap();
+        let kept = || std::fs::read(wrapper.join("bin/deadbolt")).unwrap() == placeholder;
+
+        let out = Command::new(&node)
+            .arg(wrapper.join("postinstall.mjs"))
+            .env("PATH", &path)
+            .env_remove("npm_execpath")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert!(stderr.contains("npm may not serve it yet"), "{stderr}");
+        assert!(kept());
+
+        // The placeholder tries again, says why it can't run, and keeps itself.
+        let out = Command::new("/bin/sh")
+            .arg(wrapper.join("bin/deadbolt"))
+            .arg("--version")
+            .env("PATH", &path)
+            .env_remove("npm_execpath")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+        assert!(stderr.contains("again in a few minutes"), "{stderr}");
+        assert!(kept());
     }
 
     #[test]
