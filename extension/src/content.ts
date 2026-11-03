@@ -5,7 +5,7 @@
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
 import { deliveredCode, isVisible, scanPage, type Field } from "./content/detect"
-import { SIGNIN_SETTING } from "./auth-state"
+import { SIGNIN_SETTING, signInOn } from "./auth-state"
 import { authReport, SIGN_OUT, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
@@ -22,9 +22,9 @@ import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 const isTop = window === window.top
 let offerSignIn = false
 if (isTop) {
-  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { offerSignIn = s[SIGNIN_SETTING] === true; if (offerSignIn) scheduleScan() })
+  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { offerSignIn = signInOn(s[SIGNIN_SETTING]); if (offerSignIn) scheduleScan() })
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && SIGNIN_SETTING in changes) { offerSignIn = changes[SIGNIN_SETTING].newValue === true; scheduleScan() }
+    if (area === "local" && SIGNIN_SETTING in changes) { offerSignIn = signInOn(changes[SIGNIN_SETTING].newValue); scheduleScan() }
   })
 }
 const SCAN_INTERVAL_MS = 750

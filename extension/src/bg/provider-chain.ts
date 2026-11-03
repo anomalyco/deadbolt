@@ -1,6 +1,6 @@
 // One guarded corner pick, one provider account, one short-lived chain. This
 // authority is deliberately memory-only: a restarted worker cannot resume it.
-import { authState, exactSignInOrigin, SIGNIN_SETTING, type AuthReport } from "../auth-state"
+import { authState, exactSignInOrigin, SIGNIN_SETTING, signInEnabled, signInOn, type AuthReport } from "../auth-state"
 import { IDENTIFIER_ROLES, type FillValues, type PickReply, type ProviderReport } from "../messages"
 import type { Account, Passkey } from "../protocol"
 import { isProviderPage, isSignInPage, provider, returnsTo, type Provider } from "../signin"
@@ -48,7 +48,7 @@ export class ProviderChain {
   constructor(private host: VaultBackend, private passkeys: Passkeys, private linked: SignInWith) {
     host.onChange((status) => { if (status.state !== "ready") this.endAll() })
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && SIGNIN_SETTING in changes && changes[SIGNIN_SETTING].newValue !== true) this.endAll()
+      if (area === "local" && SIGNIN_SETTING in changes && !signInOn(changes[SIGNIN_SETTING].newValue)) this.endAll()
     })
     passkeys.automatic = (target, keys, optional) => this.passkey(target, keys, optional)
     passkeys.automaticSession = (target) => {
@@ -64,7 +64,7 @@ export class ProviderChain {
   }
   private live(s: Chain) { return this.chains.has(s) && !s.stop.signal.aborted && Date.now() < s.until && this.host.status.state === "ready" }
   private async ready(s: Chain) {
-    return this.live(s) && (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] === true && this.live(s)
+    return this.live(s) && await signInEnabled() && this.live(s)
   }
   private allowed(s: Chain, origin: string) { return origin === s.home.origin || isProviderPage(s.provider, origin) }
   /** A provider page the chain may act on: a sign-in or OAuth path whose return URLs, if any, lead to the home site. */
@@ -95,8 +95,9 @@ export class ProviderChain {
   }
 
   /**
-   * Called only by UniversalSignIn after its existing dwell/confirmPick, for a
-   * pick of a login linked to a provider with known sign-in hosts.
+   * Called only for a guarded pick of a login linked to a provider with known
+   * sign-in hosts, after the menu frame's dwell and confirmPick: the corner
+   * offer's (UniversalSignIn) or the inline menu's (Autofill.menuSignIn).
    */
   async start(target: FrameTarget, account: Account): Promise<PickReply> {
     this.stop(target.tabId)
@@ -105,7 +106,7 @@ export class ProviderChain {
     const username = account.signIn?.account
     const site = siteOf(new URL(target.origin).hostname)
     if (!p?.hosts.length || !username || !site || target.frameId !== 0 || !account.urls.some((u) => exactSignInOrigin(u, target.origin)) ||
-        this.host.status.state !== "ready" || (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true) return { ok: true }
+        this.host.status.state !== "ready" || !(await signInEnabled())) return { ok: true }
     if (generation !== this.generations.get(target.tabId) || this.host.status.state !== "ready") return { ok: true }
     const s: Chain = { id: crypto.randomUUID(), home: target, site, tab: target.tabId, provider: p, username,
       phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, busy: false, again: false,

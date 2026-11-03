@@ -346,7 +346,16 @@ try {
   }
   check(true, `${mode}: the vault has a synthetic Google login and an Acme login that signs in with it`)
 
-  // Off by default: no offer, and nothing on the provider either.
+  // On by default (never set): Acme gets the offer. Turned off: no offer, and nothing on the provider either.
+  {
+    check(await worker.evaluate(async () => !("offerToSignIn" in (await chrome.storage.local.get("offerToSignIn")))), "a new profile has never set \"Offer to sign in\"")
+    const p = await open("default", {})
+    await offer(p)
+    check(true, "on by default: Acme gets the corner offer")
+    await p.close()
+  }
+  await fresh()
+  await setting(false)
   {
     const p = await open("off", {})
     await p.waitForTimeout(2800)
@@ -390,6 +399,35 @@ try {
     const texts = await settles(w, "/account", "same tab")
     check(texts.includes("Signed in"), "back on Acme the pill says Signed in")
     noFocus(w, "same tab")
+    w.stop()
+    await p.close()
+  }
+
+  // The inline menu on Acme's own email field: a pick of the Google-linked
+  // login runs the same chain as the corner offer's pick.
+  await fresh()
+  {
+    const flow = "inline"
+    const p = await open(flow, {})
+    const w = await watch(p)
+    await p.click('input[name="email"]')
+    const menu = await until("the inline menu on Acme's email field", async () => {
+      for (const f of p.frames()) if (f.url().includes("/menu.html") && !await f.locator(".universal").count() && await f.locator("button.row", { hasText: "Google" }).count()) return f
+      return null
+    })
+    // The real dwell, then the one trusted pick.
+    await p.waitForTimeout(1400)
+    const row = menu.locator("button.row", { hasText: "Google" }).first()
+    const target = await row.boundingBox()
+    const recording = recordings.find((r) => r.page === p)
+    if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
+    await row.click()
+    await p.waitForURL(`${site}/account*`)
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, "an inline pick of the Google-linked login signs in through Google back to Acme")
+    check(hits(flow, (h) => google(h) && h.path === "/o/oauth2/v2/auth").length === 1 && hits(flow, (h) => google(h) && h.path === "/signin/select").map((h) => h.value).join() === GOOGLE_USER, "it clicks Acme's Google button once and only the linked account's tile")
+    check(posts(flow, "/v3/signin/challenge/pwd") === 1 && posts(flow, "/v3/signin/challenge/totp") === 1, "inline: password and code are each submitted exactly once")
+    await settles(w, "/account", "inline")
+    noFocus(w, "inline")
     w.stop()
     await p.close()
   }

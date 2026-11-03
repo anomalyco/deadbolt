@@ -1,4 +1,4 @@
-import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, type AuthReport } from "../auth-state"
+import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, signInOn, type AuthReport } from "../auth-state"
 import { provider as providerOf } from "../signin"
 import type { ProviderChain } from "./provider-chain"
 import type { MenuLoadReply, PickReply, SignInReply } from "../messages"
@@ -18,7 +18,7 @@ interface Offer extends FrameTarget {
 }
 interface Memory { signedIn?: number; quietUntil?: number }
 
-/** Opt-in offers only. Ordinary menu and Browse fills never enter this path. */
+/** The corner offer, with "Offer to sign in" on. Browse fills never enter this path. */
 export class UniversalSignIn {
   private offers = new Map<string, Offer>()
   private checking = new Set<number>()
@@ -29,13 +29,13 @@ export class UniversalSignIn {
     chrome.storage.onChanged?.addListener((changes, area) => {
       if (area !== "local" || !(SIGNIN_SETTING in changes)) return
       this.on = undefined
-      if (changes[SIGNIN_SETTING].newValue !== true) void this.closeAll()
+      if (!signInOn(changes[SIGNIN_SETTING].newValue)) void this.closeAll()
     })
   }
 
   /** Memoized until the setting changes; a failed read is retried next time. */
   private enabled() {
-    const on = this.on ??= chrome.storage.local.get(SIGNIN_SETTING).then((s) => s[SIGNIN_SETTING] === true)
+    const on = this.on ??= chrome.storage.local.get(SIGNIN_SETTING).then((s) => signInOn(s[SIGNIN_SETTING]))
     on.catch(() => { if (this.on === on) this.on = undefined })
     return on.catch(() => false)
   }

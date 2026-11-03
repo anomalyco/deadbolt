@@ -42,7 +42,7 @@ import { fillable, fillFields, ownValue, successor, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { learning } from "./learn"
 import { deepActiveElement, eventTarget, markOwnHost } from "./shadow"
-import { SIGNIN_SETTING } from "../auth-state"
+import { signInEnabled } from "../auth-state"
 
 export interface PageState {
   targets(): Field[]
@@ -1248,7 +1248,7 @@ function onKeyDown(event: KeyboardEvent) {
  * background's db:approve fixed for this fill. Answers with what was written.
  */
 async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Promise<FillAck> {
-  if (message.automatic && (!isTop || document.hidden || (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true)) return { filled: [] }
+  if (message.automatic && (!isTop || document.hidden || !(await signInEnabled()))) return { filled: [] }
   // A sign-in session's step (no pick) fills nothing while the tab learns: the user signs in by hand.
   if (message.notice && learning()) return { filled: [] }
   // A pick from the menu folded it into a pill on the field, which stays to

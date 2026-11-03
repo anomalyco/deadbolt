@@ -56,6 +56,8 @@ let active = 0
 let busy = false
 let mode: SurfaceMode = "accounts"
 let universal = false
+/** The logins whose pick here signs in (MenuLoadReply `signsIn`), not only fills. */
+let signsIn = new Set<string>()
 let universalExpanded = false
 /** When the user last pressed a key or pointer in the menu: what a pick is judged at. */
 let pressedAt = -Infinity
@@ -546,16 +548,18 @@ async function pick(i: number) {
   highlightEl.classList.remove("pressing")
   for (const el of Array.from(rowsEl.querySelectorAll(".avatar.busy"))) el.classList.add("spinning")
   const passkey = "passkey" in a
-  const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, passkey || universal ? "Signing in…" : "Filling…")
-  announce(passkey || universal ? "Signing in…" : "Filling…")
+  const signing = passkey || universal || ("account" in a && signsIn.has(a.account.ref))
+  const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, signing ? "Signing in…" : "Filling…")
+  announce(signing ? "Signing in…" : "Filling…")
   const ref = "identity" in a ? a.identity.ref : "card" in a ? a.card.ref : passkey ? a.passkey.ref : "account" in a ? a.account.ref : ""
   const reply = await send<PickReply>("generate" in a ? { type: "db:menu-generate", token } : { type: "db:menu-pick", token, ref })
   busy = false
   if (reply?.ok) {
     // A passkey's sign-in closes the surface from the background once it's through.
     if (passkey) return
-    settle(label, universal ? "Continuing sign-in" : "Filled", true)
-    announce(universal ? "Continuing sign-in" : "Filled")
+    const going = universal || reply.submitted === true
+    settle(label, going ? "Continuing sign-in" : "Filled", true)
+    announce(going ? "Continuing sign-in" : "Filled")
     return void setTimeout(() => done(), FILLED_STAYS_MS + 450)
   }
   const message = reply?.message || "Couldn't fill. Try again."
@@ -820,6 +824,7 @@ function show(reply: MenuLoadReply) {
   if (reply.kind === "status") return showStatus(reply.status)
   if (reply.kind === "forms") return showForms(reply)
   universal = reply.kind === "accounts" && reply.universal === true
+  signsIn = new Set(reply.kind === "accounts" ? (reply.signsIn ?? []) : [])
   surface.classList.toggle("universal", universal)
   // A new-password box offers one row, a generated password; otherwise the logins.
   // A "Sign in with …" login shows as that; one with a password too gets its fill row first.

@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import { authState, exactSignInOrigin, type AuthSignals } from "../src/auth-state"
+import { authState, exactSignInOrigin, signInOn, type AuthSignals } from "../src/auth-state"
 import { authReport, takeSignInAction } from "../src/content/auth-state"
 import type { PageState } from "../src/content/inline"
 
 const blank: AuthSignals = { loginForm: false, loginRoute: false, entry: false, signOut: false, accountMenu: false, appShell: false, challenge: false, uncertain: false }
 const state: PageState = { targets: () => [], form: () => 1, kind: () => null, rescan: () => {}, formFields: () => [], formsForm: () => 0 }
+
+test("\"Offer to sign in\" is on unless the person turned it off", () => {
+  // Never set (a new install, or one that never touched the toggle) is the default, on.
+  expect(signInOn(undefined)).toBe(true)
+  expect(signInOn(true)).toBe(true)
+  expect(signInOn(false)).toBe(false)
+})
 
 describe("auth state (suppression, not an authentication oracle)", () => {
   test("a login route alone and an empty app shell stay quiet", () => {

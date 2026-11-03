@@ -19,7 +19,7 @@
 // stopped session stays stopped in this document; only another session (a
 // new pick) can start again.
 
-import { SIGNIN_SETTING } from "../auth-state"
+import { SIGNIN_SETTING, signInOn } from "../auth-state"
 import { IDENTIFIER_ROLES, type FieldRole, type FillValues, type ProviderReport, type ToContent } from "../messages"
 import { isAccountPage, isChooserPage, isProviderPage, isSignInPage, provider as providerById, returnsTo, type Provider } from "../signin"
 import { reducedMotion, timing } from "../ui/motion"
@@ -631,9 +631,9 @@ export function initProviderChain(state: PageState, chainHooks: ChainHooks) {
   page = state
   hooks = chainHooks
   for (const type of ["pointerdown", "click", "keydown", "input"]) window.addEventListener(type, onGesture, true)
-  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { frameOffer = s[SIGNIN_SETTING] === true }, () => {})
+  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { frameOffer = signInOn(s[SIGNIN_SETTING]) }, () => {})
   chrome.storage.onChanged?.addListener((changes, area) => {
-    if (area === "local" && SIGNIN_SETTING in changes) frameOffer = changes[SIGNIN_SETTING].newValue === true
+    if (area === "local" && SIGNIN_SETTING in changes) frameOffer = signInOn(changes[SIGNIN_SETTING].newValue)
   })
   chrome.runtime.onMessage.addListener((message: ToContent, sender, respond) => {
     const type = message?.type
