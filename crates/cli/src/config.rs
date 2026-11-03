@@ -1,8 +1,8 @@
 //! `$XDG_CONFIG_HOME/deadbolt/config.toml`:
 //!
 //! ```toml
-//! # Lock the agent after this long without a deadbolt command (idle timeout).
-//! # "never" (the default) keeps it unlocked until `deadbolt lock`, the agent
+//! # Lock the daemon after this long without a deadbolt command (idle timeout).
+//! # "never" (the default) keeps it unlocked until `deadbolt lock`, the daemon
 //! # stops, or the machine reboots. Units: s, m, h, d.
 //! unlock_timeout = "8h"
 //!
@@ -36,9 +36,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-/// Runtime switches are read once when the agent starts. Both are for
+/// Runtime switches are read once when the daemon starts. Both are for
 /// tests and development only ([`test_env`]).
 pub struct Environment {
     pub local_net: bool,
@@ -72,7 +73,7 @@ pub fn env(name: &str) -> Result<String, std::env::VarError> {
 
 /// A switch for tests and development (`DEADBOLT_NET`, `DEADBOLT_KDF`,
 /// `DEADBOLT_TEST_*`): read only in debug builds, so nothing in a release
-/// build's environment, which a caller can set for the agent it starts,
+/// build's environment, which a caller can set for the daemon it starts,
 /// weakens the store's KDF, cuts it off the network or makes it claim
 /// another build. Release builds always act as if it's unset.
 pub fn test_env(name: &str) -> Option<String> {
@@ -104,15 +105,6 @@ pub fn wall_clock() -> Duration {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub enum SshApproval {
-    #[default]
-    #[serde(rename = "each")]
-    Each,
-    #[serde(rename = "15m")]
-    FifteenMinutes,
-}
-
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -124,12 +116,6 @@ pub struct Config {
     pub touch_id: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breach_checks: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_agent: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_approval: Option<SshApproval>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_allow_forwarding: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<ExtensionDir>,
     /// The single directory older configs registered, moved into
@@ -138,6 +124,14 @@ pub struct Config {
     extension_dir: Option<PathBuf>,
     #[serde(default, skip_serializing)]
     extension_build: Option<ExtensionBuild>,
+    /// The removed SSH agent's settings, read so older configs still load
+    /// and dropped on the next write.
+    #[serde(default, skip_serializing, rename = "ssh_agent")]
+    _ssh_agent: Option<IgnoredAny>,
+    #[serde(default, skip_serializing, rename = "ssh_approval")]
+    _ssh_approval: Option<IgnoredAny>,
+    #[serde(default, skip_serializing, rename = "ssh_allow_forwarding")]
+    _ssh_allow_forwarding: Option<IgnoredAny>,
 }
 
 /// An unpacked extension `deadbolt update` keeps current, and its build.
@@ -154,7 +148,7 @@ pub struct ExtensionDir {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExtensionBuild {
-    /// Fills from the agent through `deadbolt browser-host`.
+    /// Fills from the daemon through `deadbolt browser-host`.
     #[default]
     Native,
     /// Its own vault in the browser, a device of its own.
@@ -225,21 +219,6 @@ impl Config {
     pub fn breach_checks(&self) -> bool {
         self.breach_checks.unwrap_or(false)
     }
-
-    /// Whether the SSH agent socket is enabled in `config.toml`.
-    pub fn ssh_agent(&self) -> bool {
-        self.ssh_agent.unwrap_or(false)
-    }
-
-    /// How SSH signing approvals behave (`each` by default, or `15m` per terminal tab).
-    pub fn ssh_approval(&self) -> SshApproval {
-        self.ssh_approval.unwrap_or_default()
-    }
-
-    /// Whether forwarded `ssh -A` connections may sign by default.
-    pub fn ssh_allow_forwarding(&self) -> bool {
-        self.ssh_allow_forwarding.unwrap_or(false)
-    }
 }
 
 /// Updates `touch_id` in `path` (`config.toml`), preserving other settings.
@@ -250,11 +229,6 @@ pub fn set_touch_id(path: &Path, enabled: bool) -> Result<()> {
 /// Updates `breach_checks` in `path` (`config.toml`), preserving other settings.
 pub fn set_breach_checks(path: &Path, enabled: bool) -> Result<()> {
     change(path, |cfg| cfg.breach_checks = Some(enabled))
-}
-
-/// Updates `ssh_agent` in `path` (`config.toml`), preserving other settings.
-pub fn set_ssh_agent(path: &Path, enabled: bool) -> Result<()> {
-    change(path, |cfg| cfg.ssh_agent = Some(enabled))
 }
 
 /// Today's UTC date as `YYYY-MM-DD`.
@@ -396,6 +370,21 @@ mod tests {
         assert!(remove_extension_dir(&path, Path::new("/ext")).unwrap());
         assert!(!remove_extension_dir(&path, Path::new("/ext")).unwrap());
         assert_eq!(Config::load(&path).unwrap().extensions, [native]);
+    }
+
+    #[test]
+    fn drops_the_removed_ssh_agent_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "touch_id = true\nssh_agent = true\nssh_approval = \"15m\"\nssh_allow_forwarding = false\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).unwrap().touch_id());
+        set_breach_checks(&path, true).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("ssh"), "{text}");
     }
 
     #[test]

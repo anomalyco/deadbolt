@@ -12,6 +12,7 @@ const standalone = "https://anoma.ly/release/deadbolt/extension/dev/chromium-sta
 
 const installs = {
   curl: "curl -fsSL https://deadbolt.pw/install | DEADBOLT_CHANNEL=dev sh",
+  npm: "npm i -g @deadbolt/cli@dev",
   source: "git clone git@github.com:anomalyco/deadbolt.git && cargo install --path deadbolt/crates/cli",
 } as const
 type Manager = keyof typeof installs
@@ -44,7 +45,7 @@ function Landing() {
 
       <section>
         <h2>cli</h2>
-        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on a new phone\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt pair DBPAIRAGMRLX…\n`}{out("code 411308: adding device phone\nconfirm code 411308 matches the other device? [y/N] y\nadded phone to personal")}</pre>
+        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on a new phone\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt approve DBPAIRAGMRLX…\n`}{out("code 411308: adding device phone\nconfirm code 411308 matches the other device? [y/N] y\nadded phone to personal")}</pre>
       </section>
 
       <section>
@@ -70,7 +71,7 @@ function Landing() {
         <dl className="facts">
           <div><dt>no recovery</dt><Justified as="dd" text="lose every device and the vault is gone. there is no server holding a copy and no reset email. pair a second device early." /></div>
           <div><dt>removal is a promise about the future</dt><Justified as="dd" text="a removed device can't sync anything new, but it keeps what it already had. rotate the passwords it could see." /></div>
-          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is an alpha: a cli, a mac app, a background agent, pairing, sync, a bitwarden import and a browser extension. there's no stable release yet, so installs follow the dev channel. phone apps are in progress." /></div>
+          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is an alpha: a cli, a mac app, a background daemon, pairing, sync, a bitwarden import and a browser extension. there's no stable release yet, so installs follow the dev channel. phone apps are in progress." /></div>
         </dl>
       </section>
 

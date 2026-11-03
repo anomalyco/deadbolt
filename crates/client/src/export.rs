@@ -1,11 +1,11 @@
 //! Reading an export for [`Command::Import`](crate::protocol::Command::Import).
 //!
-//! Clients only turn the file into text; the agent detects the format and
+//! Clients only turn the file into text; the daemon detects the format and
 //! maps it. A 1Password `.1pux` is a zip: its `export.data`, and of the
 //! files under `files/` only the attachments and documents `export.data`
 //! names (by `documentId`), not its icons and avatars. An attachment larger
 //! than [`MAX_FILE`], or one past what fits in the request, is left out
-//! (the agent counts it as dropped). Anything else must be UTF-8 text.
+//! (the daemon counts it as dropped). Anything else must be UTF-8 text.
 //! Buffers holding the text and files are wiped, and errors never quote the
 //! file.
 
@@ -215,7 +215,7 @@ fn onepux(reader: impl Read + Seek) -> Result<Export, ExportError> {
 
 /// The `documentId`s `export.data` names, from its documents and file
 /// fields. Untyped JSON, so an error can't quote a value; unparsable text
-/// names none (the agent says why it can't read it).
+/// names none (the daemon says why it can't read it).
 fn document_ids(text: &str) -> Vec<String> {
     fn walk(value: &serde_json::Value, ids: &mut Vec<String>) {
         match value {

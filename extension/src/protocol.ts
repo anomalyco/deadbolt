@@ -19,13 +19,13 @@ export const IDENTITY_FIELDS = [
   "honorific", "given-name", "additional-name", "family-name", "nickname", "organization", "job-title", "email", "phone",
   "address-line1", "address-line2", "address-line3", "city", "region", "postal-code", "country", "birthday",
 ] as const
-/** A card's fields a form may ask for. `number` and `cvv` raise Touch ID in the agent when it's on; `expiry` is `YYYY-MM`. */
+/** A card's fields a form may ask for. `number` and `cvv` raise Touch ID in the daemon when it's on; `expiry` is `YYYY-MM`. */
 export const CARD_FIELDS = ["cardholder", "number", "expiry", "cvv", "brand"] as const
 export type IdentityField = (typeof IDENTITY_FIELDS)[number]
 export type CardField = (typeof CARD_FIELDS)[number]
 export type FormField = IdentityField | CardField
 
-/** A submitted password: as typed, or the one `generate` made, by its id (the agent holds it). */
+/** A submitted password: as typed, or the one `generate` made, by its id (the daemon holds it). */
 export type PasswordValue = { password: string; generated?: never } | { generated: string; password?: never }
 
 /** What a page says about a new-password field: its `passwordrules`, length limits and the characters its `pattern` takes. */
@@ -143,7 +143,7 @@ export interface PasskeysReply {
   /**
    * The browser-only vault only: whether its lock preset (Strict) asks for the
    * passphrase before a ceremony the site doesn't discourage verifying, as the
-   * worker holds it. The native agent leaves it out.
+   * worker holds it. The native daemon leaves it out.
    */
   asksPassphrase?: boolean
   passkeys: Passkey[]

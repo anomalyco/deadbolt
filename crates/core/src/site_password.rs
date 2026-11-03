@@ -1,5 +1,5 @@
 //! New passwords for web sign-up and change-password forms, and the
-//! pending ones the agent holds until a sign-up or change goes through.
+//! pending ones the daemon holds until a sign-up or change goes through.
 //!
 //! A site's rules come from Apple's password-manager-resources quirks
 //! (`data/password-rules`, compiled in), else from the field's
@@ -9,7 +9,7 @@
 //! page's origin, until the extension says it went into the page (it's then
 //! pending) or didn't (it's forgotten). A pending one waits until the
 //! extension saves it after a successful submit, it expires, newer pending
-//! ones push it out or the agent locks (the session holding it is dropped
+//! ones push it out or the daemon locks (the session holding it is dropped
 //! and the values wiped). Candidates never push out a pending password.
 
 use std::collections::HashMap;

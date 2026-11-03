@@ -3,25 +3,25 @@
 Deadbolt fills and saves passwords, and makes and signs in with passkeys, in
 Chromium browsers (Chrome, Brave, Arc, Edge, Chromium, Helium) through its own
 extension, in `extension/`. This doc covers
-the agent's side, the native messaging host, the extension, and the messages
+the daemon's side, the native messaging host, the extension, and the messages
 between them.
 
 ```text
-web page ─ content script ─ extension ══ native messaging ══ deadbolt browser-host ── agent socket ── agent
+web page ─ content script ─ extension ══ native messaging ══ deadbolt browser-host ── daemon socket ── daemon
                                           (stdin/stdout)        (shape checks only)                   (decides)
 ```
 
-- **The agent decides.** Matching a page to logins, refusing another site's
+- **The daemon decides.** Matching a page to logins, refusing another site's
   login, computing one-time codes and comparing passwords all happen in the
-  agent (`crates/cli/src/agent/autofill.rs`, rules in `crates/cli/src/site.rs`).
-  Each agent command names the page's origin and the agent works out the site
+  daemon (`crates/cli/src/daemon/autofill.rs`, rules in `crates/cli/src/site.rs`).
+  Each daemon command names the page's origin and the daemon works out the site
   itself, so nothing upstream can widen what a page gets.
 - **The host is a pipe.** `deadbolt browser-host` checks the shape of each
-  message, turns it into one agent command (`site-logins`, `site-fill`,
+  message, turns it into one daemon command (`site-logins`, `site-fill`,
   `site-generate` and its check, keep and drop, `site-check`, `site-save`,
-  `passkey-list`, `passkey-create`, `passkey-get`) and passes the agent's
+  `passkey-list`, `passkey-create`, `passkey-get`) and passes the daemon's
   watch stream back as `changed` messages. It never prompts for a passphrase
-  or Touch ID; the agent asks for Touch ID itself before it signs with a
+  or Touch ID; the daemon asks for Touch ID itself before it signs with a
   passkey (see Passkeys).
 - **The extension** finds login forms, asks the host, and fills. Saves need a
   click in the extension's own UI.
@@ -192,7 +192,7 @@ rolled back without overwriting a person's edits. TOTP still requires a learned
 authenticator flow and never fills or submits a delivery-code prompt. A matching
 passkey uses the existing RP/allow-list/verification and Strict reauthentication
 checks, not a second account prompt or weakened verification. It signs without
-a prompt only when the agent verifies the person (Touch ID on, and the site
+a prompt only when the daemon verifies the person (Touch ID on, and the site
 doesn't discourage verification); otherwise the chain ends and the usual
 passkey prompt asks, so no assertion is made without the person present.
 
@@ -203,7 +203,7 @@ One service worker owns the extension's only port to the host
 connect, reconnects with backoff (1s up to 60s) when the host goes away, and
 follows `changed`. It never asks for the passphrase: a locked vault shows
 "Unlock Deadbolt" and waits for `unlocked`. A `stopped` push shows Deadbolt as
-not running without sending hello, which would start the agent again.
+not running without sending hello, which would start the daemon again.
 
 - **Inline menu.** Focusing a username, email, password or code field in the
   top page after a click or keypress opens a menu of that site's logins,
@@ -549,7 +549,7 @@ not running without sending hello, which would start the agent again.
   was submitted, since a capture only ever leads to an offer the user has to
   accept, after the outcome is judged.) Deadbolt never submits. A step fills
   only on the origin the pick was on, or one whose host (and scheme) a
-  saved URL of the login names exactly: the agent lists a login on every
+  saved URL of the login names exactly: the daemon lists a login on every
   subdomain of its sites, so its say alone isn't enough here. Every fill
   goes through the same field checks and is bound to that frame, document
   and form snapshot. A frame gets a session only when it may have the menu
@@ -852,9 +852,9 @@ not running without sending hello, which would start the agent again.
   under a new-password box offers "Use a strong password". Picking it sends
   `generate` with what the boxes ask for: `minlength`, `maxlength`,
   `passwordrules`, and the characters and lengths their `pattern` takes. The
-  agent makes the password (Apple's quirks for the site win over
+  daemon makes the password (Apple's quirks for the site win over
   `passwordrules`, see generate) and it goes into every new-password box, the
-  new one and its confirmation. Nothing is saved then. The agent holds the
+  new one and its confirmation. Nothing is saved then. The daemon holds the
   password for the page's origin under an id, and a submit names it by that
   id, so the password doesn't travel back. It's offered under the rules above
   only if the submit goes through.
@@ -874,7 +874,7 @@ not running without sending hello, which would start the agent again.
   - **Held only once it's in the page.** A fresh password is a candidate. The
     extension sends `generate-keep` once it's in the page's new-password box,
     and `generate-drop` otherwise, such as when the page turned it down or the
-    user left. The page names it by id only once the agent has kept it; if
+    user left. The page names it by id only once the daemon has kept it; if
     the keep fails (locked, disconnected), a submit sends it as typed, so a
     sign-up that goes through still gets an offer. Kept passwords expire
     after 15 minutes and locking wipes them; candidates go after two minutes,
@@ -1077,9 +1077,9 @@ stays away and a sign-in session's later steps fill nothing.
   values typed into the frame's non-password fields replaced (`<email>`,
   `<n>`, `<typed>`), since a step 2 often names the account.
 - **The log** is `~/.local/state/deadbolt/learn/<session>.jsonl` (beside the
-  agent's log), one `start` line, then `step` lines, then an `end` line with
+  daemon's log), one `start` line, then `step` lines, then an `end` line with
   its reason. The native host writes it (see `learn` under Host messages);
-  the agent and the vault are never involved, and nothing syncs. Starting a
+  the daemon and the vault are never involved, and nothing syncs. Starting a
   session's log removes logs older than 30 days, then the oldest beyond the
   newest 50. `bun corpus/learned.ts` reports on the logs. The browser-only
   build keeps the same lines in the extension's IndexedDB under the same
@@ -1206,13 +1206,13 @@ uses the bounded [universal sign-in provider chain](#one-pick-through-a-provider
 
 ## Passkeys
 
-Deadbolt keeps passkeys in the vault and signs with them in the agent, so a
+Deadbolt keeps passkeys in the vault and signs with them in the daemon, so a
 passkey made on one device signs in on every device the vault syncs to. The
-private key never leaves the agent: not to the host, the extension or the
+private key never leaves the daemon: not to the host, the extension or the
 app.
 
 ```text
-page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ content script ── service worker ── host ── agent
+page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ content script ── service worker ── host ── daemon
         navigator.credentials        (page options only)                         sender.origin       Touch ID, signs
 ```
 
@@ -1224,9 +1224,9 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   relying party id, not to URLs, and because a login and its passkey change
   and go away independently. An item kind gets core's rules for free:
   required fields, and a secret field that listings, search and the app
-  never show. The agent alone reads the private key, to sign. Registering again for
+  never show. The daemon alone reads the private key, to sign. Registering again for
   the same user on the same relying party creates a new item and preserves the
-  old key: the site may reject or never receive the new registration. The agent
+  old key: the site may reject or never receive the new registration. The daemon
   checks `excludeCredentials` again just before saving, refusing duplicates the
   site excluded even if they appeared while the user was asked. Neither a new
   registration nor an assertion retires the old item automatically. Explicit
@@ -1245,7 +1245,7 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   any synced passkey.
 - **Flags:** UP (the user clicked Sign in or Save in Deadbolt's own UI), BE
   and BS always, AT on registration, and UV only after Touch ID.
-- **User verification (UV)** means the agent asked Touch ID and the Secure
+- **User verification (UV)** means the daemon asked Touch ID and the Secure
   Enclave released this store's biometric key, the same check unlock makes,
   and the key opened the store. It asks once per registration or sign-in,
   one prompt at a time, and closes the prompt if the request is cancelled.
@@ -1255,7 +1255,7 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   - `required`: Touch ID, or the request fails before anything is stored or
     signed ("this site requires user verification, and Touch ID is off or not
     set up"). The extension, which learns from `passkey-list` whether the
-    agent can verify, hands such a request to the browser instead, and the
+    daemon can verify, hands such a request to the browser instead, and the
     popup says when Touch ID will be asked.
   Clicking Deadbolt's prompt is presence, not verification, so it never sets
   UV on its own.
@@ -1270,9 +1270,9 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   passkey is the one the client names by ref (`agent-logins` lists each
   with its user name and display name), else the only one the grant covers
   among `allowCredentials` (all of the site's when empty); with several the
-  agent replies `choose-passkey` listing them, never their keys. A grant for
+  daemon replies `choose-passkey` listing them, never their keys. A grant for
   one login covers the passkeys with that login's username.
-- **Client data** is built by the agent from the origin the browser reported
+- **Client data** is built by the daemon from the origin the browser reported
   for the frame (`sender.origin`): `type`, the challenge, that origin, and
   `crossOrigin: false`. Nothing the page says goes into it except the
   challenge.
@@ -1281,7 +1281,7 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   Suffix List with its private section (`site::rp_id`). Never a public
   suffix (`github.io`, `co.uk`), an IP address or another site. The
   extension checks first (`SecurityError`, "This relying party ID isn't this
-  site's.") and the agent checks again (`domain_mismatch`).
+  site's.") and the daemon checks again (`domain_mismatch`).
 - **Frames:** a sandboxed or opaque frame (origin `"null"`) gets
   `NotAllowedError`, "Deadbolt offers no passkeys to sandboxed frames."
   Deadbolt takes a call only from a frame whose every ancestor, up to the top
@@ -1309,7 +1309,7 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   itself where the browser allows it, and the toolbar button gets a badge.
   If one of the site's `excludeCredentials` is already in the vault, the
   popup says so and the page gets `InvalidStateError`, as it does when one
-  is saved while the user is asked (the agent's `exists`).
+  is saved while the user is asked (the daemon's `exists`).
 - **Sign-in** (`get`) without `mediation` asks "Sign in to <rp id> with a
   passkey?" in the popup, with the site's passkeys (those in
   `allowCredentials`, or all for the relying party), Sign in, Use another
@@ -1327,7 +1327,7 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   picking a login fills it and leaves the request waiting, as the browser's
   own does. It waits until a passkey is picked, the page aborts or the
   document goes away. One request per document waits; a newer one replaces
-  it. In a frame on another origin of the site, the agent's client data
+  it. In a frame on another origin of the site, the daemon's client data
   (never `crossOrigin`) wouldn't be true, so there the request is held for
   the logins alone. With neither logins nor usable passkeys for the site,
   the request goes to the browser, so its dropdown still shows other
@@ -1348,11 +1348,11 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   of the top page for every frame in the tab, end the request: the signal
   with `AbortError`, the rest with `NotAllowedError`. The request counts from
   the moment it arrives, so these end it at any step, even before the prompt.
-  Before the prompt, before the agent is asked, and before the page gets a
+  Before the prompt, before the daemon is asked, and before the page gets a
   credential, the extension checks again that the call is live and its
   frame's document and ancestors are unchanged. A ceremony waiting for the
   host to reconnect is never sent once its request has ended. One already at
-  the agent gets `passkey-cancel`, which closes the Touch ID prompt.
+  the daemon gets `passkey-cancel`, which closes the Touch ID prompt.
 - **Limits:** a tab holds 8 requests at once, counted as each arrives; more
   get `NotAllowedError` before anything is asked. A document lists the
   site's passkeys (or, for an autofill request, its logins) 4 times at once,
@@ -1409,8 +1409,8 @@ The host's `forms` lists the identities and cards of every vault without
 values: an identity's title, a summary ("Kit Langton · 123 Main St,
 Brooklyn") and which form fields it has; a card's title, brand, last four
 digits, expiry, cardholder and billing identity. `fill-form` returns only the
-fields asked for, of one item. Both go to the agent as `form-items` and
-`form-fill` (agent protocol 16; host protocol 3, capability `forms`). See
+fields asked for, of one item. Both go to the daemon as `form-items` and
+`form-fill` (daemon protocol 16; host protocol 3, capability `forms`). See
 Host messages.
 
 ### Detection
@@ -1516,7 +1516,7 @@ holding what the user typed themselves is never overwritten (the same keyed
 digest of the last trusted input as for logins); a value Deadbolt filled
 before is, so picking Work after Home replaces Home's values.
 
-A card's number and security code make the agent ask for Touch ID; the
+A card's number and security code make the daemon ask for Touch ID; the
 extension waits up to 90 seconds for that answer with the pill on
 "Filling…". Turned down, nothing is written, not even the cardholder's
 name, and the pill says so.
@@ -1593,7 +1593,7 @@ other build defines that branch away.
 - **Fills give only what was asked,** and only form fields: an identity's ID
   numbers and notes and a card's PIN and notes are refused (`bad_request`).
 - **A card's number or security code verifies the user each time:** with
-  Touch ID on and enrolled, the agent raises it for "fill Visa •••• 4242 on
+  Touch ID on and enrolled, the daemon raises it for "fill Visa •••• 4242 on
   shop.com" and fills nothing if it is cancelled or fails. Without Touch ID,
   the user's explicit pick in the extension's menu is the verification (the
   same rule as a login's password), so `canVerify` tells the menu which it
@@ -1618,25 +1618,25 @@ other build defines that branch away.
 ## Threat model
 
 - **Same-user processes are trusted, as they are for the CLI.** Any program
-  running as you can run `deadbolt get`, talk to the agent socket, or run
+  running as you can run `deadbolt get`, talk to the daemon socket, or run
   `deadbolt browser-host` with the extension's origin as its argument. The
   origin check only confirms which browser extension connected; it doesn't
   stop local programs. Protection against them would need the OS, such as
   code signing checks on the socket peer.
 - **Web pages are not trusted.** A page can't reach the host: only the
   extension can, and the extension passes the frame origin the browser
-  reports, never anything the page said. The agent refuses another site's
+  reports, never anything the page said. The daemon refuses another site's
   login even if the extension asks for it (`domain_mismatch`), so a bug or a
   compromise in the extension's matching can't leak logins across sites.
-- **What leaves the agent:** a list carries titles, usernames, vault names
+- **What leaves the daemon:** a list carries titles, usernames, vault names
   and matching URLs, never passwords or one-time password secrets. A fill
   carries only what it asked for, and a one-time password only as its current
   code. A check returns new, update or same and which logins matched. It
   compares passwords by BLAKE3 hash, in constant time, and never reveals
   them.
-- **Secrets in transit** go only over stdin/stdout and the agent socket, never
+- **Secrets in transit** go only over stdin/stdout and the daemon socket, never
   argv. They are held in `Zeroizing` buffers, and Debug output prints
-  `<redacted>` in their place. Neither the host nor the agent logs them.
+  `<redacted>` in their place. Neither the host nor the daemon logs them.
 - **What a check tells the page.** A check is a password oracle for the
   page's site, so what a page can see of it is kept to one bit per site per
   ten minutes. A page can still choose a password and submit it in a way that
@@ -1730,12 +1730,12 @@ other build defines that branch away.
   is asked.
 - **Passkeys: a page signs only for itself.** A page can call WebAuthn as
   often as it likes, but every answer is bound to the origin the browser
-  reported for its frame, which the agent writes into the client data and
+  reported for its frame, which the daemon writes into the client data and
   checks the relying party id against. A page can't name another site's
   relying party, a public suffix, or reach Deadbolt from a sandboxed frame,
   and a frame with any cross-origin ancestor, or a Permissions Policy that
   turns WebAuthn off, never gets Deadbolt's passkeys. Both the
-  extension and the agent check, so a bug in either alone doesn't widen it.
+  extension and the daemon check, so a bug in either alone doesn't widen it.
 - **Passkeys: the user answers outside the page.** A registration or
   sign-in needs a click in the toolbar popup, or a pick in the inline menu
   under its visibility rules, never a page element. What the page learns
@@ -1749,7 +1749,7 @@ other build defines that branch away.
   changes the page's own calls, which are bound to its origin all the same.
   The port is taken before page scripts run and opened only by the hook's
   ack, so a page can't pose as another frame or inject calls into one.
-- **Passkeys: the private key stays in the agent.** Replies carry the public
+- **Passkeys: the private key stays in the daemon.** Replies carry the public
   key, the credential id, authenticator data, client data and the signature.
   A listing gives the extension the relying party id, credential id, vault,
   username and date. The app shows a passkey's site, username and date and
@@ -1779,7 +1779,7 @@ other build defines that branch away.
   `generate-drop` and passkey-list don't, because a browser asks for those on
   every page and would otherwise hold the vault open.
 - **Locked means locked.** While the store is locked, every request but hello
-  and `generate-check` gets `locked`. Hello starts the agent if it isn't running but never unlocks
+  and `generate-check` gets `locked`. Hello starts the daemon if it isn't running but never unlocks
   it.
 
 ## Host messages
@@ -1789,7 +1789,7 @@ many bytes of UTF-8 JSON. The extension connects with
 `chrome.runtime.connectNative("pw.deadbolt.browser")` and keeps the port open.
 Requests are answered in order, except passkey registrations and sign-ins,
 which wait on the user and answer when done, and `passkey-cancel`, which is
-answered at once, even while a request ahead of it waits on the agent.
+answered at once, even while a request ahead of it waits on the daemon.
 `changed` messages can arrive between replies.
 The host exits when the port closes.
 
@@ -1822,9 +1822,9 @@ The host exits when the port closes.
 - `ready`: unlocked.
 - `locked`: `detail` says "Unlock Deadbolt to fill passwords".
 - `not-set-up`: no device yet.
-- `unavailable`: the agent couldn't be reached or started; `detail` says why.
+- `unavailable`: the daemon couldn't be reached or started; `detail` says why.
 
-Hello starts the agent if needed. It's the only message that does.
+Hello starts the daemon if needed. It's the only message that does.
 
 ### list: the logins for a page
 
@@ -1856,7 +1856,7 @@ then to the title.
 ```
 
 `want` holds one to three of `username`, `password` and `totp`. The reply has
-only those the login has. `totp` is the current code, computed by the agent.
+only those the login has. `totp` is the current code, computed by the daemon.
 A login that isn't on the page's site gets `domain_mismatch`, and an unknown
 `ref` gets `not_found`.
 
@@ -1928,7 +1928,7 @@ to 4096 characters and the username at most 500.
 ```
 
 `entry` takes `"generated": "<id>"` in place of `password`; saving it lets the
-agent forget it.
+daemon forget it.
 
 - **Without `ref`:** creates a login in the default vault with `url`,
   `username` (when not blank) and `password`, named `title` unless that is
@@ -2057,7 +2057,7 @@ prunes the directory: logs older than 30 days go, then the oldest until 50
 are left with the new one. The host doesn't read the line: the extension
 puts no values in it. Lines come at most 100 at once, then one per 100 ms
 (`rate_limited`), and a session's log stops at 4 MiB (`bad_request`). It
-works without an agent and while locked.
+works without a daemon and while locked.
 
 ### changed (pushed)
 
@@ -2069,9 +2069,9 @@ works without an agent and while locked.
 
 - `locked` or `unlocked`.
 - `items`: logins or vaults changed, here or by sync.
-- `stopped`: the agent stopped, which locks it.
-- `started`: an agent is running again after the one watched went away, or
-  after a hello found none, so ask hello. The agent a hello starts isn't
+- `stopped`: the daemon stopped, which locks it.
+- `started`: a daemon is running again after the one watched went away, or
+  after a hello found none, so ask hello. The daemon a hello starts isn't
   announced.
 
 Pushes carry no id and no values. Refetch what's on screen.
@@ -2084,7 +2084,7 @@ Pushes carry no id and no values. Refetch what's on screen.
 
 `code` is one of:
 
-- `locked`: the store is locked, not set up, or no agent runs.
+- `locked`: the store is locked, not set up, or no daemon runs.
 - `not_found`: no such login, identity or card.
 - `domain_mismatch`: the login or URL isn't on the page's site.
 - `bad_request`: a malformed message, a page that gets no logins, or a value
@@ -2127,5 +2127,5 @@ check-then-save. The host is Deadbolt's own. The extension adapts parts of
 Foyer's: form detection, Shadow DOM traversal, filling, the inline menu and
 save prompt frames, frame targeting, the save flow, and the passkey hook,
 channel and frame and relying party checks (Foyer kept passkeys in the
-extension; here the agent holds and signs with them). Each adapted file says
+extension; here the daemon holds and signs with them). Each adapted file says
 so in its header, and `extension/README.md` lists what was kept and dropped.

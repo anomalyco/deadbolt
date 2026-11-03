@@ -55,7 +55,7 @@ If the paper recovery key is created **as the genesis device** (`MembershipOp::C
 - **How it works:**
   - The recovery key is the sole device at `first.depth == 0`.
   - Every interactive device (the creator laptop at `depth = 1`, phone at `depth = 2`, etc.) has `first.depth >= 1`.
-  - The recovery key stays offline and never runs `deadbolt agent`, so it cannot be stolen from an unlocked running session.
+  - The recovery key stays offline and never runs `deadbolt daemon`, so it cannot be stolen from an unlocked running session.
   - Because `RecoveryRemove` must undo what the thief already delivered, **signing via `Vault::remove` / `Vault::commit` is not sufficient**:
     1. `Vault::commit` uses `self.membership_tips` as `deps`. In `authorize` (`crates/core/src/membership.rs`), a removal only cuts operations by its target that the removal *did not see* (`!removal.saw(node)`). A removal whose `deps` are `self.membership_tips` sees—and therefore keeps—every `Remove` of honest devices and every sybil `Add` the thief already delivered.
     2. Any honest device that already applied a thief's `Remove(recovery)` considers `!vault.is_member(&recovery)`, so `Vault::commit` fails with `Error::NotMember`.

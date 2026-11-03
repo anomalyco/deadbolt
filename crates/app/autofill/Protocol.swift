@@ -1,4 +1,4 @@
-// Wire protocol between `DeadboltAutoFill.appex` and `deadbolt agent` over the
+// Wire protocol between `DeadboltAutoFill.appex` and `deadbolt daemon` over the
 // App Group Unix socket (`~/Library/Group Containers/<TEAM>.pw.deadbolt/s`).
 // Mirrors `crates/client/src/protocol.rs` (`generatedProtocolVersion` is
 // stamped from `PROTOCOL_VERSION` at build time).
@@ -14,7 +14,7 @@ public enum AutofillWire {
     public static let appGroupSuffix: String = "pw.deadbolt"
     public static let appBundleID: String = "pw.deadbolt.app"
     public static let autofillBundleID: String = "pw.deadbolt.app.autofill"
-    public static let agentSigningIDs: Set<String> = ["pw.deadbolt.cli", "deadbolt"]
+    public static let daemonSigningIDs: Set<String> = ["pw.deadbolt.cli", "deadbolt"]
 }
 
 public enum AutofillServiceKind: String, Codable, Equatable, Sendable {
@@ -529,7 +529,7 @@ public enum AutofillReply: Equatable, Sendable {
     case other(String)
 }
 
-public enum AgentErrorCode: String, Equatable, Sendable {
+public enum DaemonErrorCode: String, Equatable, Sendable {
     case locked
     case notInitialized = "not-initialized"
     case notFound = "not-found"
@@ -547,23 +547,23 @@ public enum AgentErrorCode: String, Equatable, Sendable {
     case unknown
 }
 
-public enum AgentCallError: Error, Equatable, Sendable {
-    case agentUnavailable(String)
+public enum DaemonCallError: Error, Equatable, Sendable {
+    case daemonUnavailable(String)
     case timedOut
     case cancelled
     case peerRejected(String)
     case invalidResponse(String)
-    case agentError(code: AgentErrorCode, message: String)
+    case daemonError(code: DaemonErrorCode, message: String)
 
     public var extensionErrorCodeForSilentRequest: ASExtensionError.Code {
         switch self {
-        case .agentUnavailable, .timedOut:
+        case .daemonUnavailable, .timedOut:
             return .userInteractionRequired
         case .cancelled:
             return .userCanceled
         case .peerRejected, .invalidResponse:
             return .failed
-        case let .agentError(code, _):
+        case let .daemonError(code, _):
             switch code {
             case .locked, .interactionRequired, .notInitialized:
                 return .userInteractionRequired
@@ -581,7 +581,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
         switch self {
         case .cancelled:
             return .userCanceled
-        case let .agentError(code, _):
+        case let .daemonError(code, _):
             switch code {
             case .notFound, .domainMismatch:
                 return .credentialIdentityNotFound
@@ -599,7 +599,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
         switch self {
         case .cancelled:
             return true
-        case let .agentError(code, message):
+        case let .daemonError(code, message):
             return code == .cancelled || message.localizedCaseInsensitiveContains("cancelled")
         default:
             return false
@@ -608,7 +608,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
 
     public var userFacingUnlockMessage: String {
         switch self {
-        case let .agentError(code, message):
+        case let .daemonError(code, message):
             if code == .rateLimited {
                 return message
             }
@@ -620,7 +620,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
             return message
         case let .peerRejected(reason):
             return reason
-        case let .agentUnavailable(reason):
+        case let .daemonUnavailable(reason):
             return reason
         case .timedOut:
             return "Deadbolt took too long to respond."
@@ -654,16 +654,16 @@ public enum WireDecoder {
         do {
             env = try decoder.decode(Envelope.self, from: line)
         } catch {
-            throw AgentCallError.invalidResponse("malformed JSON from agent: \(error.localizedDescription)")
+            throw DaemonCallError.invalidResponse("malformed JSON from daemon: \(error.localizedDescription)")
         }
         switch env.type {
         case "error":
-            let code = env.code.flatMap(AgentErrorCode.init(rawValue:)) ?? .unknown
-            let msg = env.message ?? "agent request failed"
-            throw AgentCallError.agentError(code: code, message: msg)
+            let code = env.code.flatMap(DaemonErrorCode.init(rawValue:)) ?? .unknown
+            let msg = env.message ?? "daemon request failed"
+            throw DaemonCallError.daemonError(code: code, message: msg)
         case "ok":
             guard let tag = env.reply?.reply else {
-                throw AgentCallError.invalidResponse("missing reply tag from agent")
+                throw DaemonCallError.invalidResponse("missing reply tag from daemon")
             }
             switch tag {
             case "done":
@@ -684,7 +684,7 @@ public enum WireDecoder {
                 return .other(tag)
             }
         default:
-            throw AgentCallError.invalidResponse("unexpected message type '\(env.type)'")
+            throw DaemonCallError.invalidResponse("unexpected message type '\(env.type)'")
         }
     }
 }

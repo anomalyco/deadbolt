@@ -348,7 +348,7 @@ fn list_row(
         .on_press_tx(move |s: &mut App, tx| s.press_row(&id, tx))
         .role("option")
         // A search replaces the list at once (an edit is instant: no
-        // `animate_edit_layout`). Rows an agent change adds or removes fade
+        // `animate_edit_layout`). Rows a daemon change adds or removes fade
         // in place while the rest slide to their new places.
         .motion(rune::tok::motion::REFLOW)
         .transition(

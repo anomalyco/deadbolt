@@ -1,4 +1,4 @@
-// Headless unit, live-agent socket, and offscreen snapshot suite for
+// Headless unit, live-daemon socket, and offscreen snapshot suite for
 // `DeadboltAutoFill.appex`. Invoked by `crates/app/tests/app/autofill.rs`
 // (and `--snap-dir <dir>` for offscreen UI stills; never opens a window).
 
@@ -112,12 +112,12 @@ private actor MockIdentityStore: IdentityStoreProviding {
     }
 }
 
-private struct NoopLauncher: AgentLaunching {
+private struct NoopLauncher: DaemonLaunching {
     func startInBackground() async -> Bool { false }
     func openContainingApp() async -> Bool { false }
 }
 
-private actor CountingMockClient: AutofillAgentClient {
+private actor CountingMockClient: AutofillDaemonClient {
     var snapshot: AutofillIdentitiesReply
     private(set) var calls: [AutofillCommand] = []
 
@@ -139,7 +139,7 @@ private actor CountingMockClient: AutofillAgentClient {
         case .autofillIdentities:
             return .autofillIdentities(snapshot)
         default:
-            throw AgentCallError.agentError(code: .forbidden, message: "unexpected mock call")
+            throw DaemonCallError.daemonError(code: .forbidden, message: "unexpected mock call")
         }
     }
 
@@ -195,18 +195,18 @@ private func testUnitAndWire() async throws {
 
     let located = ContainingBundle.locate(from: appexLink)
     try check(located?.appURL == realApp.resolvingSymlinksInPath().standardizedFileURL)
-    try check(located?.agentBinaryURL == helper.resolvingSymlinksInPath().standardizedFileURL)
+    try check(located?.daemonBinaryURL == helper.resolvingSymlinksInPath().standardizedFileURL)
     try check(ContainingBundle.locate(from: realApp) == nil)
 
     // Silent vs interactive error mapping.
-    let lockedErr = AgentCallError.agentError(code: .locked, message: "locked")
+    let lockedErr = DaemonCallError.daemonError(code: .locked, message: "locked")
     try check(lockedErr.extensionErrorCodeForSilentRequest == .userInteractionRequired)
-    let interactionErr = AgentCallError.agentError(code: .interactionRequired, message: "touch id")
+    let interactionErr = DaemonCallError.daemonError(code: .interactionRequired, message: "touch id")
     try check(interactionErr.extensionErrorCodeForSilentRequest == .userInteractionRequired)
-    let domainErr = AgentCallError.agentError(code: .domainMismatch, message: "mismatch")
+    let domainErr = DaemonCallError.daemonError(code: .domainMismatch, message: "mismatch")
     try check(domainErr.extensionErrorCodeForSilentRequest == .credentialIdentityNotFound)
     try check(domainErr.extensionErrorCodeForInteractiveRequest == .credentialIdentityNotFound)
-    try check(AgentCallError.cancelled.extensionErrorCodeForInteractiveRequest == .userCanceled)
+    try check(DaemonCallError.cancelled.extensionErrorCodeForInteractiveRequest == .userCanceled)
 
     // IdentitySyncer hash deduplication & 0600 file permissions.
     let hashFile = tmp.appendingPathComponent("identities.hash")
@@ -235,7 +235,7 @@ private func testUnitAndWire() async throws {
     let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue
     try check(perms == 0o600, "identities.hash must be mode 0600, got \(String(describing: perms))")
 
-    // Same reportedHash skips even calling the agent socket.
+    // Same reportedHash skips even calling the daemon socket.
     let didSync2 = await syncer.syncIfNeeded(client: mockClient, reportedHash: "hash-one")
     try check(!didSync2, "identical hash must skip sync")
     try check(await mockClient.callCount() == 1, "must not query socket when hash matches")
@@ -301,7 +301,7 @@ private func testSocketCancellation() throws {
 
     let started = DispatchTime.now().uptimeNanoseconds
     do {
-        _ = try UnixSocketAgentClient.performBlockingCall(
+        _ = try UnixSocketDaemonClient.performBlockingCall(
             socketPath: sockPath,
             command: .autofillStatus,
             timeout: 10.0,
@@ -310,7 +310,7 @@ private func testSocketCancellation() throws {
         )
         releasePeer.signal()
         throw TestFailure("expected cancelled error")
-    } catch let err as AgentCallError {
+    } catch let err as DaemonCallError {
         releasePeer.signal()
         let elapsedMS = (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
         try check(err == .cancelled, "expected .cancelled, got \(err)")
@@ -362,7 +362,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
         ),
     ]
 
-    actor SceneAgent: AutofillAgentClient {
+    actor SceneDaemon: AutofillDaemonClient {
         enum Mode {
             case lockedTouchID
             case picker(unassociated: Bool, logins: [SiteLogin])
@@ -389,11 +389,11 @@ private func renderSnapshots(outputDir: URL?) async throws {
                         AutofillStatusReply(initialized: true, unlocked: false, touchIdReady: true)
                     )
                 case .unlockBiometric:
-                    throw AgentCallError.cancelled
+                    throw DaemonCallError.cancelled
                 case .unlock:
-                    throw AgentCallError.agentError(code: .failed, message: "wrong passphrase")
+                    throw DaemonCallError.daemonError(code: .failed, message: "wrong passphrase")
                 default:
-                    throw AgentCallError.agentError(code: .locked, message: "locked")
+                    throw DaemonCallError.daemonError(code: .locked, message: "locked")
                 }
             case let .picker(unassociated, logins):
                 switch command {
@@ -416,7 +416,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
                         )
                     )
                 default:
-                    throw AgentCallError.agentError(code: .failed, message: "unused")
+                    throw DaemonCallError.daemonError(code: .failed, message: "unused")
                 }
             }
         }
@@ -438,7 +438,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
     // 1. Picker scene (multiple vaults, keyboard hint, dark mode)
     let completer1 = RecordingCompleter()
     let pickerModel = AutoFillControllerModel(
-        client: SceneAgent(mode: .picker(unassociated: false, logins: sampleLogins)),
+        client: SceneDaemon(mode: .picker(unassociated: false, logins: sampleLogins)),
         launcher: NoopLauncher(),
         identitySyncer: nil,
         completer: completer1
@@ -453,7 +453,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
     // 2. Unassociated native app picker scene (warning banner)
     let completer2 = RecordingCompleter()
     let appPickerModel = AutoFillControllerModel(
-        client: SceneAgent(mode: .picker(unassociated: true, logins: sampleLogins)),
+        client: SceneDaemon(mode: .picker(unassociated: true, logins: sampleLogins)),
         launcher: NoopLauncher(),
         identitySyncer: nil,
         completer: completer2
@@ -468,7 +468,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
     // 3. Locked screen (Touch ID button + passphrase fallback)
     let completer3 = RecordingCompleter()
     let lockedModel = AutoFillControllerModel(
-        client: SceneAgent(mode: .lockedTouchID),
+        client: SceneDaemon(mode: .lockedTouchID),
         launcher: NoopLauncher(),
         identitySyncer: nil,
         completer: completer3
@@ -498,7 +498,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
     // 5. Not initialized onboarding prompt
     let completer4 = RecordingCompleter()
     let uninitModel = AutoFillControllerModel(
-        client: SceneAgent(mode: .notInitialized),
+        client: SceneDaemon(mode: .notInitialized),
         launcher: NoopLauncher(),
         identitySyncer: nil,
         completer: completer4
@@ -511,19 +511,19 @@ private func renderSnapshots(outputDir: URL?) async throws {
     try verifyPNG(uninitView.renderOffscreenPNG(), name: "autofill-not-initialized")
 }
 
-// MARK: - Live Agent End-to-End Integration Test
+// MARK: - Live Daemon End-to-End Integration Test
 
 @MainActor
-private func testLiveAgent(
+private func testLiveDaemon(
     socketPath: String,
-    agentBinaryPath: String,
+    daemonBinaryPath: String,
     passphrase: String
 ) async throws {
-    let agentURL = URL(fileURLWithPath: agentBinaryPath)
-    let verifiedClient = UnixSocketAgentClient(socketPath: socketPath) { fd in
-        try PeerCheck.verifyAgent(
+    let daemonURL = URL(fileURLWithPath: daemonBinaryPath)
+    let verifiedClient = UnixSocketDaemonClient(socketPath: socketPath) { fd in
+        try PeerCheck.verifyDaemon(
             socketFD: fd,
-            expectedAgentURL: agentURL,
+            expectedDaemonURL: daemonURL,
             requiredTeamID: nil
         )
     }
@@ -635,12 +635,12 @@ private func testLiveAgent(
     do {
         let badLine = Data("{\"v\":\(AutofillWire.protocolVersion),\"cmd\":\"lock\"}\n".utf8)
         _ = badLine
-        // Lock the agent from outside is tested in step 7 when `--locked-phase` runs,
+        // Lock the daemon from outside is tested in step 7 when `--locked-phase` runs,
         // while here we verify PeerCheck rejects a mismatched binary path before sending passphrase!
-        let wrongBinaryClient = UnixSocketAgentClient(socketPath: socketPath) { fd in
-            try PeerCheck.verifyAgent(
+        let wrongBinaryClient = UnixSocketDaemonClient(socketPath: socketPath) { fd in
+            try PeerCheck.verifyDaemon(
                 socketFD: fd,
-                expectedAgentURL: URL(fileURLWithPath: "/usr/bin/true"),
+                expectedDaemonURL: URL(fileURLWithPath: "/usr/bin/true"),
                 requiredTeamID: nil
             )
         }
@@ -649,8 +649,8 @@ private func testLiveAgent(
             timeout: 2.0,
             handle: nil
         )
-        throw TestFailure("PeerCheck should have rejected /usr/bin/true as agent binary")
-    } catch let err as AgentCallError {
+        throw TestFailure("PeerCheck should have rejected /usr/bin/true as daemon binary")
+    } catch let err as DaemonCallError {
         guard case .peerRejected = err else {
             throw TestFailure("expected .peerRejected, got \(err)")
         }
@@ -658,17 +658,17 @@ private func testLiveAgent(
 }
 
 @MainActor
-private func testLiveLockedAgent(
+private func testLiveLockedDaemon(
     socketPath: String,
-    agentBinaryPath: String,
+    daemonBinaryPath: String,
     passphrase: String,
     recordId: String
 ) async throws {
-    let agentURL = URL(fileURLWithPath: agentBinaryPath)
-    let verifiedClient = UnixSocketAgentClient(socketPath: socketPath) { fd in
-        try PeerCheck.verifyAgent(
+    let daemonURL = URL(fileURLWithPath: daemonBinaryPath)
+    let verifiedClient = UnixSocketDaemonClient(socketPath: socketPath) { fd in
+        try PeerCheck.verifyDaemon(
             socketFD: fd,
-            expectedAgentURL: agentURL,
+            expectedDaemonURL: daemonURL,
             requiredTeamID: nil
         )
     }
@@ -730,7 +730,7 @@ struct AutoFillTestRunner {
             let args = Array(CommandLine.arguments.dropFirst())
             var snapDir: URL?
             var liveSocket: String?
-            var agentBinary: String?
+            var daemonBinary: String?
             var passphrase: String?
             var lockedRecordId: String?
 
@@ -743,9 +743,9 @@ struct AutoFillTestRunner {
                 case "--live-socket":
                     idx += 1
                     liveSocket = args[idx]
-                case "--agent-bin":
+                case "--daemon-bin":
                     idx += 1
-                    agentBinary = args[idx]
+                    daemonBinary = args[idx]
                 case "--passphrase":
                     idx += 1
                     passphrase = args[idx]
@@ -767,18 +767,18 @@ struct AutoFillTestRunner {
             try testSocketCancellation()
             try await renderSnapshots(outputDir: snapDir)
 
-            if let liveSocket, let agentBinary, let passphrase {
+            if let liveSocket, let daemonBinary, let passphrase {
                 if let lockedRecordId {
-                    try await testLiveLockedAgent(
+                    try await testLiveLockedDaemon(
                         socketPath: liveSocket,
-                        agentBinaryPath: agentBinary,
+                        daemonBinaryPath: daemonBinary,
                         passphrase: passphrase,
                         recordId: lockedRecordId
                     )
                 } else {
-                    try await testLiveAgent(
+                    try await testLiveDaemon(
                         socketPath: liveSocket,
-                        agentBinaryPath: agentBinary,
+                        daemonBinaryPath: daemonBinary,
                         passphrase: passphrase
                     )
                 }

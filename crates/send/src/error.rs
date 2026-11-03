@@ -3,7 +3,7 @@
 pub enum Error {
     #[error("invalid link: {0}")]
     InvalidLink(String),
-    /// The sender's agent can't be reached: it stopped, went offline, or the link
+    /// The sender's daemon can't be reached: it stopped, went offline, or the link
     /// is from an earlier run of it.
     #[error("the sender is offline: {0}")]
     Offline(String),

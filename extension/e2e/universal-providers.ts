@@ -32,7 +32,7 @@ const deadbolt = arg("--deadbolt") && resolve(arg("--deadbolt")!)
 if (native && !deadbolt) throw new Error("--native needs --deadbolt <path to the deadbolt binary>")
 const mode = native ? "native" : "standalone"
 const root = await mkdtemp(join(tmpdir(), "deadbolt-universal-providers-"))
-/** The real agent's throwaway store (see e2e/run.ts deadboltStore). Short: the socket path must fit a sockaddr. */
+/** The real daemon's throwaway store (see e2e/run.ts deadboltStore). Short: the socket path must fit a sockaddr. */
 const store = native ? await mkdtemp(process.platform === "darwin" ? "/tmp/dbup-" : join(tmpdir(), "dbup-")) : ""
 const storeEnv: Record<string, string> = native ? {
   DEADBOLT_HOME: join(store, "home"), XDG_RUNTIME_DIR: join(store, "run"), XDG_STATE_HOME: join(store, "state"), XDG_CONFIG_HOME: join(store, "config"),
@@ -327,7 +327,7 @@ async function noPasskeyPrompt(prefix: string, ms: number) {
 
 try {
   if (native) {
-    // The real agent's vault, filled as a person would with the CLI.
+    // The real daemon's vault, filled as a person would with the CLI.
     cli("new", "login", "--name", "Google", `url=${googleOrigin}`, `username=${GOOGLE_USER}`, `password=${GOOGLE_PASSWORD}`, `otp=${OTP}`)
     const listed = JSON.stringify(await hostRequest({ type: "list", origin: googleOrigin }))
     const ref = listed.match(/"ref":"([^"]+)"/)?.[1]
@@ -526,7 +526,7 @@ try {
   }
 
   // One trusted pick: chooser → Google's passkey challenge. The chain signs
-  // without a prompt only where the agent verifies the person (Touch ID on);
+  // without a prompt only where the daemon verifies the person (Touch ID on);
   // this throwaway store has none, and a site may discourage verification,
   // so the chain ends there and the usual passkey prompt asks. The person's
   // own Sign in makes the one assertion, verified by the server.
@@ -669,7 +669,7 @@ try {
   }
   server.stop(true)
   if (native) {
-    try { cli("agent", "stop") } catch {}
+    try { cli("debug", "daemon", "stop") } catch {}
     await rm(store, { recursive: true, force: true })
   }
   await rm(root, { recursive: true, force: true })

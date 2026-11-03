@@ -3,7 +3,7 @@
 use deadbolt_client::protocol::Status;
 use rune::Tx;
 
-use crate::agent::{Failure, Job};
+use crate::daemon::{Failure, Job};
 
 use super::{App, Screen, take_secret};
 
@@ -126,9 +126,9 @@ impl App {
         }
         self.touch_id_prompted = true;
         self.unlock_error = None;
-        if self.agent.is_live() {
+        if self.daemon.is_live() {
             self.touch_id_unlocking = true;
-            self.agent.send(Job::UnlockBiometric);
+            self.daemon.send(Job::UnlockBiometric);
         }
     }
 
@@ -161,9 +161,9 @@ impl App {
         if let Some(status) = &mut self.status {
             status.touch_id_enabled = next;
         }
-        if self.agent.is_live() {
+        if self.daemon.is_live() {
             self.touch_id_busy = true;
-            self.agent.send(Job::TouchIdSet(next));
+            self.daemon.send(Job::TouchIdSet(next));
         }
     }
 
@@ -179,7 +179,7 @@ impl App {
         }
         self.unlocking = true;
         self.unlock_error = None;
-        self.agent
+        self.daemon
             .send(Job::Unlock(take_secret(&mut self.passphrase)));
     }
 
@@ -190,18 +190,18 @@ impl App {
 
     pub fn lock(&mut self) {
         self.touch_id_prompted = true;
-        self.agent.send(Job::Lock);
+        self.daemon.send(Job::Lock);
     }
 
     pub fn retry(&mut self) {
         self.touch_id_prompted = false;
         self.show(Screen::Connecting);
-        self.agent.send(Job::Connect);
+        self.daemon.send(Job::Connect);
     }
 }
 
 pub(super) fn unlock_message(failure: &Failure) -> String {
-    // "Too many wrong passphrases. Try again in 30 s.", as the agent says.
+    // "Too many wrong passphrases. Try again in 30 s.", as the daemon says.
     if failure.code == Some(deadbolt_client::protocol::ErrorCode::RateLimited) {
         return failure.message.clone();
     }

@@ -237,9 +237,9 @@ pub fn team() -> Option<&'static str> {
     Some(env!("DEADBOLT_TEAM_ID")).filter(|t| !t.is_empty())
 }
 
-/// The signing identifier of Deadbolt's agent (`Contents/Helpers/deadbolt`,
+/// The signing identifier of Deadbolt's daemon (`Contents/Helpers/deadbolt`,
 /// and the CLI), as `bundle.sh` signs it.
-pub const AGENT_ID: &str = "deadbolt";
+pub const DAEMON_ID: &str = "deadbolt";
 /// The signing identifier of Deadbolt.app, its bundle identifier.
 pub const APP_ID: &str = "pw.deadbolt.app";
 /// The signing identifier of Deadbolt's macOS AutoFill extension
@@ -254,18 +254,21 @@ pub fn app_group() -> Option<String> {
     team().map(|t| format!("{t}.{APP_GROUP_SUFFIX}"))
 }
 
-/// Checks that `socket`'s peer is the agent at `expected` (this client's own
+/// Checks that `socket`'s peer is the daemon at `expected` (this client's own
 /// binary, or its bundle's helper), before a passphrase goes to it.
 ///
 /// On macOS, `helper` (`deadbolt-enclave`) looks the peer's code up by its
 /// audit token: it must run from `expected` itself, not a copy elsewhere, and
-/// be Deadbolt's agent by signature (`agent_is`). On Linux nothing tells two
+/// be Deadbolt's daemon by signature (`daemon_is`). On Linux nothing tells two
 /// processes of one user apart, so this checks only that the peer runs as
 /// this user; the socket's 0700 directory is what keeps others out.
 pub fn check(socket: &impl AsFd, helper: &Path, expected: &Path) -> Result<(), String> {
-    let peer = Peer::of(socket).map_err(|e| format!("reading the agent's credentials: {e}"))?;
+    let peer = Peer::of(socket).map_err(|e| format!("reading the daemon's credentials: {e}"))?;
     if peer.uid != rustix::process::getuid().as_raw() {
-        return Err(format!("the agent (pid {}) runs as another user", peer.pid));
+        return Err(format!(
+            "the daemon (pid {}) runs as another user",
+            peer.pid
+        ));
     }
     #[cfg(target_os = "macos")]
     {
@@ -276,13 +279,13 @@ pub fn check(socket: &impl AsFd, helper: &Path, expected: &Path) -> Result<(), S
             .canonicalize()
             .map_err(|e| format!("locating {}: {e}", expected.display()))?;
         let Some(found) = identify(helper, peer.token, std::slice::from_ref(&expected))? else {
-            return Err(format!("the agent (pid {}) exited", peer.pid));
+            return Err(format!("the daemon (pid {}) exited", peer.pid));
         };
         let code = found.code.unwrap_or_default();
         let file = found.files.into_iter().next().flatten();
-        agent_is(&code, file.as_ref(), &expected, team()).map_err(|why| {
+        daemon_is(&code, file.as_ref(), &expected, team()).map_err(|why| {
             format!(
-                "the agent (pid {}) {why}; run `deadbolt agent stop`",
+                "the daemon (pid {}) {why}; run `deadbolt debug daemon stop`",
                 peer.pid
             )
         })
@@ -303,11 +306,11 @@ pub fn missing_helper(helper: &Path) -> String {
     )
 }
 
-/// Whether running `code` is the agent at `expected` (canonical): it runs
-/// from that very file, and is Deadbolt's agent by signature, by `team` and
-/// [`AGENT_ID`] for a Developer ID build, else by the code hash of `file`,
+/// Whether running `code` is the daemon at `expected` (canonical): it runs
+/// from that very file, and is Deadbolt's daemon by signature, by `team` and
+/// [`DAEMON_ID`] for a Developer ID build, else by the code hash of `file`,
 /// the signature on disk at `expected`.
-pub fn agent_is(
+pub fn daemon_is(
     code: &CodeSignature,
     file: Option<&CodeSignature>,
     expected: &Path,
@@ -317,7 +320,7 @@ pub fn agent_is(
         let running = code.path.as_deref().unwrap_or("an unknown program");
         return Err(format!("runs {running}, not {}", expected.display()));
     }
-    if code.signed_as(file, team, AGENT_ID) {
+    if code.signed_as(file, team, DAEMON_ID) {
         Ok(())
     } else {
         Err(format!("isn't the code signed as {}", expected.display()))
@@ -438,7 +441,7 @@ pub mod linux {
 mod tests {
     use std::path::Path;
 
-    use super::{AGENT_ID, CodeSignature, agent_is};
+    use super::{CodeSignature, DAEMON_ID, daemon_is};
 
     fn sig(cdhash: &str, team: Option<&str>, id: &str, valid: bool) -> CodeSignature {
         CodeSignature {
@@ -489,11 +492,11 @@ mod tests {
         ));
     }
 
-    /// A client takes only the agent running from the file it expects, by
+    /// A client takes only the daemon running from the file it expects, by
     /// that file's code hash (ad-hoc) or Deadbolt's team and identifier: a
     /// byte-for-byte copy elsewhere, beside other files, is refused.
     #[test]
-    fn the_agent_is_that_file_not_a_copy() {
+    fn the_daemon_is_that_file_not_a_copy() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().canonicalize().unwrap().join("deadbolt");
         let copy = dir.path().canonicalize().unwrap().join("copy");
@@ -506,44 +509,44 @@ mod tests {
             cdhash: Some("aa".into()),
             valid: true,
         };
-        let file = sig("aa", None, AGENT_ID, true);
+        let file = sig("aa", None, DAEMON_ID, true);
 
         assert_eq!(
-            agent_is(&running(&real, None, "x"), Some(&file), &real, None),
+            daemon_is(&running(&real, None, "x"), Some(&file), &real, None),
             Ok(())
         );
-        let moved = agent_is(&running(&copy, None, "x"), Some(&file), &real, None);
+        let moved = daemon_is(&running(&copy, None, "x"), Some(&file), &real, None);
         assert!(moved.unwrap_err().contains("not"), "a copy is refused");
-        let other = sig("bb", None, AGENT_ID, true);
-        assert!(agent_is(&running(&real, None, "x"), Some(&other), &real, None).is_err());
-        assert!(agent_is(&running(&real, None, "x"), None, &real, None).is_err());
+        let other = sig("bb", None, DAEMON_ID, true);
+        assert!(daemon_is(&running(&real, None, "x"), Some(&other), &real, None).is_err());
+        assert!(daemon_is(&running(&real, None, "x"), None, &real, None).is_err());
         let mut forged = running(&real, None, "x");
         forged.valid = false;
-        assert!(agent_is(&forged, Some(&file), &real, None).is_err());
+        assert!(daemon_is(&forged, Some(&file), &real, None).is_err());
         let nowhere = CodeSignature {
             path: None,
             ..running(&real, None, "x")
         };
-        assert!(agent_is(&nowhere, Some(&file), &real, None).is_err());
+        assert!(daemon_is(&nowhere, Some(&file), &real, None).is_err());
 
-        // A Developer ID build wants its own team and the agent's identifier,
+        // A Developer ID build wants its own team and the daemon's identifier,
         // whatever the file on disk says.
         let team = Some("TEAM123456");
         assert_eq!(
-            agent_is(&running(&real, team, AGENT_ID), None, &real, team),
+            daemon_is(&running(&real, team, DAEMON_ID), None, &real, team),
             Ok(())
         );
         assert!(
-            agent_is(
-                &running(&real, Some("OTHER12345"), AGENT_ID),
+            daemon_is(
+                &running(&real, Some("OTHER12345"), DAEMON_ID),
                 None,
                 &real,
                 team
             )
             .is_err()
         );
-        assert!(agent_is(&running(&real, team, "pw.deadbolt.app"), None, &real, team).is_err());
-        assert!(agent_is(&running(&real, None, AGENT_ID), Some(&file), &real, team).is_err());
-        assert!(agent_is(&running(&copy, team, AGENT_ID), None, &real, team).is_err());
+        assert!(daemon_is(&running(&real, team, "pw.deadbolt.app"), None, &real, team).is_err());
+        assert!(daemon_is(&running(&real, None, DAEMON_ID), Some(&file), &real, team).is_err());
+        assert!(daemon_is(&running(&copy, team, DAEMON_ID), None, &real, team).is_err());
     }
 }

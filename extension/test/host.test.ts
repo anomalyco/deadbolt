@@ -201,7 +201,7 @@ describe("Host", () => {
 
     ports[0].push({ type: "changed", change: "stopped" })
     expect(host.status).toEqual({ state: "locked", detail: "Deadbolt isn't running" })
-    // Stopped must not send hello: hello would start the agent again.
+    // Stopped must not send hello: hello would start the daemon again.
     expect(ports[0].sent).toHaveLength(1)
 
     ports[0].push({ type: "changed", change: "unlocked" })

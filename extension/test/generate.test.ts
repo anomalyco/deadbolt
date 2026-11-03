@@ -113,7 +113,7 @@ describe("patterns", () => {
   })
 })
 
-test("only the value filled, once the agent kept it, names the generated password", () => {
+test("only the value filled, once the daemon kept it, names the generated password", () => {
   rememberGenerated("g1", "Generated-1")
   // Not kept yet: a submit sends it as typed.
   expect(generatedId("Generated-1")).toBeUndefined()
@@ -122,7 +122,7 @@ test("only the value filled, once the agent kept it, names the generated passwor
   keptGenerated("g1")
   expect(generatedId("Generated-1")).toBe("g1")
   expect(generatedId("Generated-1 edited")).toBeUndefined()
-  // A newer one the agent didn't keep yet names no id.
+  // A newer one the daemon didn't keep yet names no id.
   rememberGenerated("g2", "Generated-2")
   expect(generatedId("Generated-2")).toBeUndefined()
   keptGenerated("g2")

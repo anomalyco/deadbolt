@@ -5,7 +5,7 @@ use std::time::Duration;
 use deadbolt_client::protocol::{AppAction, Code, ItemInfo, code_field, noun, primary_field};
 use rune::Tx;
 
-use crate::agent::{Failure, Job, Values};
+use crate::daemon::{Failure, Job, Values};
 
 use super::otp::Otp;
 use super::{App, copy_label, forget, is_secret};
@@ -19,7 +19,7 @@ const AHEAD: isize = 4;
 const BEHIND: isize = 2;
 
 impl App {
-    /// Dropping a stale item wipes its values (`agent::Values`); its page is
+    /// Dropping a stale item wipes its values (`daemon::Values`); its page is
     /// kept for going back to it, unless the vault changed since.
     pub(super) fn on_item(&mut self, seq: u64, result: Result<Values, Failure>, tx: &mut Tx) {
         if !self.accepts_vault_replies() {
@@ -230,7 +230,7 @@ impl App {
             // A page already held stays for the rest of its moment.
             self.held = shown.filter(|s| self.cache.contains(s)).map(|s| (s, None));
         }
-        self.agent.send(Job::Get {
+        self.daemon.send(Job::Get {
             id,
             seq: self.seq,
             cached,
@@ -264,9 +264,9 @@ impl App {
     /// Reads ahead the rows around the selection the cache doesn't have,
     /// nearest first and mostly the way it's moving, replacing the batch
     /// before. Only in the main window, on a move of the user's
-    /// (`select_by_hand`): a read counts as use for the agent's idle lock.
+    /// (`select_by_hand`): a read counts as use for the daemon's idle lock.
     fn prefetch(&mut self, d: isize) {
-        if self.panel.is_some() || !self.agent.is_live() {
+        if self.panel.is_some() || !self.daemon.is_live() {
             return;
         }
         let visible = self.visible();
@@ -296,7 +296,7 @@ impl App {
         }
         self.peeks += 1;
         for id in ids {
-            self.agent.send(Job::Peek {
+            self.daemon.send(Job::Peek {
                 id,
                 epoch: self.cache.epoch(),
                 batch: self.peeks,
@@ -311,7 +311,7 @@ impl App {
             && let Some(id) = self.selected.clone()
             && self.cache.contains(&id)
         {
-            self.agent.send(Job::Get {
+            self.daemon.send(Job::Get {
                 id,
                 seq: self.seq,
                 cached: false,

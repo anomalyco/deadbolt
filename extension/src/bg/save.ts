@@ -70,7 +70,7 @@ interface Capture {
   site: string
   /**
    * Where the passwords were submitted, which a check and save go to: a
-   * generated one is the agent's for this origin only. Until one is, where
+   * generated one is the daemon's for this origin only. Until one is, where
    * the username was.
    */
   origin: string
@@ -86,7 +86,7 @@ interface Capture {
   password?: string
   /** Sign-up and change-password forms. */
   newPassword?: string
-  /** Instead of `newPassword`: the id of the generated password the agent holds. */
+  /** Instead of `newPassword`: the id of the generated password the daemon holds. */
   generated?: string
   /** What a new login is named and where it's saved: the title and URL of the page the passwords were submitted on. */
   title: string

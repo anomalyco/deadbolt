@@ -1,6 +1,6 @@
 [package]
 name = "deadbolt-client"
-description = "The agent's control protocol, its file locations, and a client that starts and talks to it."
+description = "The daemon's control protocol, its file locations, and a client that starts and talks to it."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

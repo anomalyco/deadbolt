@@ -33,9 +33,9 @@ don't: they're yours to edit until a sync takes them over.
 3. Run `deadbolt sync 1password --dry-run` and approve 1Password's prompt.
    Read the plan, then run it without `--dry-run`.
 
-The sync runs in Deadbolt's background agent, which finds `op` on its `PATH`
-or in Homebrew's `bin`. `DEADBOLT_OP` is read by the agent, so set it before
-the agent starts (or `deadbolt agent stop` first).
+The sync runs in Deadbolt's background daemon, which finds `op` on its `PATH`
+or in Homebrew's `bin`. `DEADBOLT_OP` is read by the daemon, so set it before
+the daemon starts (or `deadbolt debug daemon stop` first).
 
 ## How it works
 
@@ -62,7 +62,7 @@ provenance: the item isn't a mirror, isn't labelled, and nothing changes it
 until a sync takes it over. The export names your user rather than the
 account; a sync knows both.
 
-Then, under the agent's lock:
+Then, under the daemon's lock:
 
 | In 1Password | In Deadbolt | The sync |
 |---|---|---|
@@ -103,7 +103,7 @@ sync stops rather than delete them.
 
 One sync runs at a time; a second is refused until the first finishes. Each
 `op` call has two minutes (plus a little per item fetched) before it's
-killed. Locking Deadbolt, stopping its agent, or cancelling the command
+killed. Locking Deadbolt, stopping its daemon, or cancelling the command
 also kills `op`, and nothing is written. A sync waiting on `op` doesn't keep
 Deadbolt unlocked: the idle timeout still locks it.
 
@@ -203,5 +203,5 @@ otherwise.
   1Password's own prompts. `op` is 1Password's supported interface, gated by
   its own approval.
 - **Secrets stay off disk and out of argv.** Item ids go to `op` on stdin;
-  values come back on a pipe into the agent and nowhere else. Reports hold
+  values come back on a pipe into the daemon and nowhere else. Reports hold
   titles and field names only, never values.

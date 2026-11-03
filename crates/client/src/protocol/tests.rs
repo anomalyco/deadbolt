@@ -271,7 +271,7 @@ fn watch_round_trips_as_flat_json_lines() {
 }
 
 /// A claim rides beside the command and is left out when there is none,
-/// so a status request reads the same to agents of every protocol.
+/// so a status request reads the same to daemons of every protocol.
 #[test]
 fn a_claim_rides_beside_the_command() {
     let claimed = Request {

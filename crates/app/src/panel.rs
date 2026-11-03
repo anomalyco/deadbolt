@@ -1,6 +1,6 @@
 //! The quick panel: a small window for finding an item and copying it.
 //! Type to filter, ⏎ copies the password (⇧⏎ the username), and it goes
-//! away. It's a second window with its own `App` (its own agent connection;
+//! away. It's a second window with its own `App` (its own daemon connection;
 //! the process's one clipboard), drawn from the vault view's search, rows and
 //! copy.
 //! `window` holds how it opens, closes and is placed. See docs/app.md.
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use rune::{AppSpec, Key, KeyEvent, Tx, Waker};
 
-use crate::agent::{Agent, Job};
+use crate::daemon::{Daemon, Job};
 use crate::model::{App, Screen};
 
 /// The window: the card plus room for its shadow.
@@ -50,7 +50,7 @@ pub fn spec() -> AppSpec<App> {
         title: "Deadbolt",
         size: SIZE,
         min_size: Some((0.0, 0.0)),
-        init: || App::panel(Agent::offline()),
+        init: || App::panel(Daemon::offline()),
         view: view::panel,
         scenes: crate::PANEL_SCENES,
         fonts: rune_theme_opencode::FONTS,
@@ -61,16 +61,16 @@ pub fn spec() -> AppSpec<App> {
     }
 }
 
-/// The panel follows the agent through its watch stream and only asks it to
+/// The panel follows the daemon through its watch stream and only asks it to
 /// start when summoned, so it never races the main window to start one.
 fn setup(s: &mut App, waker: Waker) {
-    s.agent.set_waker(waker);
+    s.daemon.set_waker(waker);
 }
 
 impl App {
     /// An `App` for the panel window.
-    pub fn panel(agent: Agent) -> App {
-        let mut app = App::new(agent);
+    pub fn panel(daemon: Daemon) -> App {
+        let mut app = App::new(daemon);
         app.panel = Some(Panel {
             phase: Phase::Open,
             opens: 0,
@@ -89,7 +89,7 @@ impl App {
     }
 
     /// Summoned: open fresh and at rest, with no animation: check on the
-    /// agent and fetch the list again (empty search, the first item selected).
+    /// daemon and fetch the list again (empty search, the first item selected).
     pub fn summon(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
         panel.phase = Phase::Open;
@@ -110,7 +110,7 @@ impl App {
             self.touch_id_prompted = false;
         }
         self.passphrase.focused = self.screen == Screen::Locked;
-        self.agent.send(Job::Connect);
+        self.daemon.send(Job::Connect);
         if self.screen == Screen::Vault {
             self.list();
         } else if self.should_auto_prompt_touch_id() {
@@ -249,7 +249,7 @@ impl App {
         if let Some(windows) = &self.windows {
             windows.hide_panel();
         }
-        for done in self.agent.drain(self.clock) {
+        for done in self.daemon.drain(self.clock) {
             self.apply(done, tx);
         }
         self.forget_items();

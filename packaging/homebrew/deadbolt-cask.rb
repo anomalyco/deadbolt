@@ -18,7 +18,7 @@ cask "deadbolt" do
   depends_on macos: :monterey
 
   app "Deadbolt.app"
-  # The app's own CLI, the same build as the agent the app starts. It and the
+  # The app's own CLI, the same build as the daemon the app starts. It and the
   # formula anomalyco/tap/deadbolt both own bin/deadbolt, so brew installs one.
   binary "#{appdir}/Deadbolt.app/Contents/Helpers/deadbolt"
 

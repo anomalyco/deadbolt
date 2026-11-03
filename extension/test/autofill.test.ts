@@ -377,13 +377,13 @@ describe("generated passwords", () => {
     expect(await autofill.menuGenerate(token!, menuSender())).toEqual({ ok: true })
     expect(host.requests.filter((r) => r.type === "generate")).toEqual([{ type: "generate", origin: "https://www.example.com", rules: "minlength: 12;", maxLength: 16 }])
     expect(delivered("db:fill")).toMatchObject([{ message: { values: { newPassword: "generated 1" }, approval: "fixed", generated: "g1" } }])
-    // In the page, so the agent holds it as pending, and then the page names it by id.
+    // In the page, so the daemon holds it as pending, and then the page names it by id.
     expect(host.requests.at(-1)).toEqual({ type: "generate-keep", origin: "https://www.example.com", generated: "g1" })
     expect(delivered("db:generated")).toMatchObject([{ message: { type: "db:generated", generated: "g1" } }])
     expect(await autofill.menuGenerate(token!, menuSender())).toMatchObject({ ok: false })
   })
 
-  test("if the agent can't keep it, the page isn't told its id, so a submit sends it as typed", async () => {
+  test("if the daemon can't keep it, the page isn't told its id, so a submit sends it as typed", async () => {
     approve()
     const send = host.host.send.bind(host.host)
     for (const err of [new HostError("locked", "Locked."), new HostError("not_found", "Gone."), new Error("Disconnected.")]) {
@@ -1048,8 +1048,8 @@ describe("a sign-in session across steps", () => {
     expect(Object.keys(fake.session)).toEqual(["session:1"])
   })
 
-  test("a sibling subdomain the agent lists the login for, but no saved URL names, gets nothing", async () => {
-    // The agent lists a login on every subdomain of its site; the session holds to exact hosts.
+  test("a sibling subdomain the daemon lists the login for, but no saved URL names, gets nothing", async () => {
+    // The daemon lists a login on every subdomain of its site; the session holds to exact hosts.
     withUrls(["https://www.example.com/login"])
     await pick()
     await autofill.page(at("https://user-content.example.com/phish", "uc-doc"), "login", ["password"], 1)

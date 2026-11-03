@@ -103,7 +103,7 @@ jobs:
   # distribution with glibc 2.28 or newer (Debian 10, Ubuntu 18.10, RHEL 8 and
   # later); a runner's own Ubuntu 24.04 would need 2.39. Rune loads Wayland,
   # X11 and the GPU drivers when a window opens, so the binary links only
-  # libc, libm and libgcc_s, and the CLI and agent run on a box with no
+  # libc, libm and libgcc_s, and the CLI and daemon run on a box with no
   # display or desktop libraries (checked in AlmaLinux 8 minimal). Building
   # links libxkbcommon, which --as-needed drops again since nothing calls it.
   build-linux-x64:
@@ -154,7 +154,7 @@ jobs:
             echo "::error::deadbolt needs $newest, newer than glibc 2.28."
             exit 1
           fi
-          # The CLI and the agent on a glibc 2.28 box with no display and no
+          # The CLI and the daemon on a glibc 2.28 box with no display and no
           # desktop libraries; `app` says there's no graphical session.
           docker run --rm -v "$check:/check:ro" -e DEADBOLT_VERSION "$RUNNER" bash -euo pipefail -c '
             if ls /usr/lib64/libwayland-client.so* /usr/lib64/libX11.so* /usr/lib64/libxkbcommon.so* 2> /dev/null; then
@@ -165,12 +165,12 @@ jobs:
             /check/deadbolt --version | grep -qF "deadbolt $DEADBOLT_VERSION"
             /check/deadbolt --help > /dev/null
             DEADBOLT_PASSPHRASE="release check" /check/deadbolt init --device-name release < /dev/null
-            /check/deadbolt agent status | grep -qx unlocked
+            /check/deadbolt debug daemon status | grep -qx unlocked
             /check/deadbolt new login --name Example username=release password=release-check-password < /dev/null
             /check/deadbolt ls < /dev/null | grep -q Example
             if /check/deadbolt app 2> "$HOME/app.err"; then echo "app opened without a display" >&2; exit 1; fi
             grep -q "no graphical session" "$HOME/app.err"
-            /check/deadbolt agent stop'
+            /check/deadbolt debug daemon stop'
       - id: upload
         uses: ./.github/release/upload
         with:

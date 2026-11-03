@@ -126,8 +126,8 @@ describe("first run", () => {
     await flush()
     expect(commands().at(-1)).toEqual({ type: "device-join-start" })
     expect(app().querySelector("#join-code")!.textContent).toBe(CODE)
-    expect(app().textContent).toContain("On a device that has your vault, run deadbolt pair with this code, or choose Pair in the Deadbolt app.")
-    expect(app().querySelector("code")!.textContent).toBe("deadbolt pair")
+    expect(app().textContent).toContain("On a device that has your vault, run deadbolt approve with this code, or choose Approve in the Deadbolt app.")
+    expect(app().querySelector("code")!.textContent).toBe("deadbolt approve")
     expect(buttons()).toEqual(["Back", "Copy code", "Copy command", "Cancel"])
 
     const writes: string[] = []
@@ -138,7 +138,7 @@ describe("first run", () => {
     expect(buttons()).toEqual(["Back", "Copied", "Copy command", "Cancel"])
     buttonNamed("Copy command").click()
     await flush()
-    expect(writes).toEqual([CODE, `deadbolt pair ${CODE}`])
+    expect(writes).toEqual([CODE, `deadbolt approve ${CODE}`])
   })
 
   test("a poll that changes nothing redraws nothing; admission asks this browser's passphrase", async () => {

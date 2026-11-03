@@ -40,12 +40,12 @@ private final class SystemExtensionCompleter: ExtensionContextCompleting {
 
 public final class CredentialProviderViewController: ASCredentialProviderViewController {
     private lazy var completer = SystemExtensionCompleter(controller: self)
-    private lazy var client = UnixSocketAgentClient.live()
+    private lazy var client = UnixSocketDaemonClient.live()
     private lazy var syncer = IdentitySyncer()
     private lazy var model: AutoFillControllerModel = {
         let m = AutoFillControllerModel(
             client: client,
-            launcher: WorkspaceAgentLauncher(),
+            launcher: WorkspaceDaemonLauncher(),
             identitySyncer: syncer,
             completer: completer
         )

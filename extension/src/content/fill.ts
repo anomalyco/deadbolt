@@ -379,12 +379,12 @@ const within = (r: Box, x: number, y: number, by = 0) => x >= r.left - by && x <
 /**
  * Whether a box with this style paints over what's under it at the point
  * (x, y) inside its border box: a background colour that isn't (nearly)
- * transparent, a background image, a backdrop filter, an inset shadow, or a
- * border the point is on.
+ * transparent, a background image, a backdrop filter, an inset shadow that
+ * reaches the point, or a border the point is on.
  */
-function opaqueStyle(style: CSSStyleDeclaration, at?: { r: DOMRect; x: number; y: number }): boolean {
+function opaqueStyle(style: CSSStyleDeclaration, at?: { el: Element; r: DOMRect; x: number; y: number }): boolean {
   if (alpha(style.backgroundColor) >= 0.1 || (style.backgroundImage || "none") !== "none") return true
-  if ((style.getPropertyValue("backdrop-filter") || "none") !== "none" || /\binset\b/.test(style.boxShadow || "")) return true
+  if ((style.getPropertyValue("backdrop-filter") || "none") !== "none" || insetShadowAt(style, at)) return true
   if ((style.getPropertyValue("border-image-source") || "none") !== "none") return true
   const sides = (["top", "right", "bottom", "left"] as const).map((s) => ({
     width: parseFloat(style.getPropertyValue(`border-${s}-width`)) || 0,
@@ -396,6 +396,35 @@ function opaqueStyle(style: CSSStyleDeclaration, at?: { r: DOMRect; x: number; y
   const { r, x, y } = at
   const [t, ri, b, l] = sides.map((s) => (s.shown ? s.width : 0))
   return y < r.top + t || x > r.right - ri || y > r.bottom - b || x < r.left + l
+}
+
+/**
+ * Whether an inset box-shadow draws at (x, y). One is drawn inward from the
+ * box's edges, as far as its offset, spread, blur and rounded corners
+ * reach (past the blur radius its fade has under 3% left): past that,
+ * nothing. A full-window vignette, an edge glow, leaves the middle alone.
+ * Without the point, or on a box that doesn't sit as laid out (scaled,
+ * rotated or skewed, by itself or an ancestor), any inset shadow counts.
+ */
+function insetShadowAt(style: CSSStyleDeclaration, at?: { el: Element; r: DOMRect; x: number; y: number }): boolean {
+  const inset = shadows(style.boxShadow).filter((s) => s.inset)
+  if (!inset.length) return false
+  if (!at || !(at.el instanceof HTMLElement)) return true
+  const { el, r, x, y } = at
+  if (Math.abs(r.width - el.offsetWidth) > 1 || Math.abs(r.height - el.offsetHeight) > 1) return true
+  const zoom = (el as HTMLElement & { currentCSSZoom?: number }).currentCSSZoom ?? 1
+  const border = Math.max(...["top", "right", "bottom", "left"].map((s) => parseFloat(style.getPropertyValue(`border-${s}-width`)) || 0))
+  const corner = Math.max(
+    ...["top-left", "top-right", "bottom-right", "bottom-left"].flatMap((c) =>
+      (style.getPropertyValue(`border-${c}-radius`) || "0").split(/\s+/).map((v) => (v.endsWith("%") ? (parseFloat(v) / 100) * Math.max(r.width, r.height) : parseFloat(v) || 0)),
+    ),
+  )
+  const depth = Math.min(x - r.left, r.right - x, y - r.top, r.bottom - y)
+  return inset.some((s) => {
+    if (s.alpha < 0.1) return false
+    const [ox = 0, oy = 0, blur = 0, spread = 0] = s.lengths
+    return depth < (border + corner + Math.abs(ox) + Math.abs(oy) + Math.max(0, spread) + Math.max(0, blur)) * zoom
+  })
 }
 
 /** Whether text in this style is drawn: its fill, a stroke or a text-shadow isn't (nearly) transparent. */
@@ -439,7 +468,7 @@ function paints(h: Element, x: number, y: number): boolean {
   const own = getComputedStyle(h)
   if (faded(h, own)) return false
   if (GRAPHIC.has(h.tagName) || h instanceof SVGElement) return true
-  return opaqueStyle(own, { r: h.getBoundingClientRect(), x, y }) || textAt(h, x, y, own) || pseudoPaints(h)
+  return opaqueStyle(own, { el: h, r: h.getBoundingClientRect(), x, y }) || textAt(h, x, y, own) || pseudoPaints(h)
 }
 
 /** Whether a ::before or ::after style draws anything: an image, text that shows, or opaque style. Its box is unknown, so anywhere counts. */
@@ -723,7 +752,7 @@ function paintedOver(el: Element, root: Document | ShadowRoot, x: number, y: num
           if (pseudoPaints(h)) return true
           if (behind(el, h)) {
             const s = getComputedStyle(h)
-            if (!faded(h, s) && (opaqueStyle(s, { r: h.getBoundingClientRect(), x, y }) || textAt(h, x, y, s))) return true
+            if (!faded(h, s) && (opaqueStyle(s, { el: h, r: h.getBoundingClientRect(), x, y }) || textAt(h, x, y, s))) return true
           }
           continue
         }

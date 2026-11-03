@@ -11,7 +11,7 @@ set -eu
 
 [ "$(uname -s)" = Darwin ] || { echo "Building deadbolt-enclave requires macOS." >&2; exit 1; }
 [ $# -eq 1 ] || { echo "Usage: $0 <out>" >&2; exit 1; }
-src=$(cd "$(dirname "$0")/.." && pwd)/src/agent
+src=$(cd "$(dirname "$0")/.." && pwd)/src/daemon
 out=$1
 
 for arch in aarch64 x86_64; do

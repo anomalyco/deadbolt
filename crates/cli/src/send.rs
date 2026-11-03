@@ -1,7 +1,8 @@
-//! `deadbolt send` and `deadbolt sends`: one-time links to files, secrets and
-//! vault items, served live by the agent (see `docs/proposals/send.md`).
+//! `deadbolt send`: one-time links to files, secrets and vault items, served
+//! live by the daemon (see `docs/proposals/send.md`), and its `ls`, `show`
+//! and `revoke` for the links made.
 //!
-//! The client builds and seals the bundle; the agent gets only the sealed
+//! The client builds and seals the bundle; the daemon gets only the sealed
 //! bytes and the access secret, never the content key, which goes straight
 //! into the link.
 
@@ -32,10 +33,11 @@ pub const EXIT_EXPIRED: u8 = 4;
 /// Exit code of `send --wait` when the link was revoked.
 pub const EXIT_REVOKED: u8 = 5;
 
-/// `deadbolt send`'s flags, plus where each input sat on the command line:
-/// inputs go into the bundle in that order, and each `--field` belongs to
-/// the nearest `--item` before it.
+/// `deadbolt send`'s subcommand or flags, plus where each input sat on the
+/// command line: inputs go into the bundle in that order, and each
+/// `--field` belongs to the nearest `--item` before it.
 pub struct SendArgs {
+    command: Option<SendCommand>,
     raw: Raw,
     inputs_at: Vec<usize>,
     items_at: Vec<usize>,
@@ -46,7 +48,8 @@ pub struct SendArgs {
 struct Raw {
     /// Files and folders to send, or `-` for stdin. Each must exist; a
     /// name is never looked up in the vault (use --item). Without any
-    /// input, asks for a secret (hidden).
+    /// input, asks for a secret (hidden). A file named ls, show or revoke
+    /// goes as ./ls.
     #[arg(value_name = "PATH")]
     inputs: Vec<String>,
     /// A vault item to send, by its exact name or ID; repeat for more.
@@ -95,7 +98,14 @@ impl FromArgMatches for SendArgs {
                 .map(Iterator::collect)
                 .unwrap_or_default()
         };
+        let command = match matches.subcommand_name() {
+            Some(name) if SendCommand::has_subcommand(name) => {
+                Some(SendCommand::from_arg_matches(matches)?)
+            }
+            _ => None,
+        };
         Ok(Self {
+            command,
             raw: Raw::from_arg_matches(matches)?,
             inputs_at: at("inputs"),
             items_at: at("items"),
@@ -111,22 +121,20 @@ impl FromArgMatches for SendArgs {
 
 impl Args for SendArgs {
     fn augment_args(cmd: clap::Command) -> clap::Command {
-        Raw::augment_args(cmd)
+        SendCommand::augment_subcommands(Raw::augment_args(cmd))
+            .args_conflicts_with_subcommands(true)
     }
 
     fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
-        Raw::augment_args_for_update(cmd)
+        SendCommand::augment_subcommands_for_update(Raw::augment_args_for_update(cmd))
+            .args_conflicts_with_subcommands(true)
     }
 }
 
-#[derive(Args)]
-pub struct SendsArgs {
-    #[command(subcommand)]
-    command: Option<SendsCommand>,
-}
-
+/// `send ls`, `show` and `revoke`: the links already made. Their names win
+/// over paths, so a file named `ls` goes as `./ls`.
 #[derive(Subcommand)]
-enum SendsCommand {
+enum SendCommand {
     /// List sends: id, state, opens, expiry and what was sent.
     Ls {
         #[arg(long)]
@@ -154,6 +162,11 @@ enum Source {
 }
 
 impl SendArgs {
+    /// Whether this is `send ls`, `show` or `revoke` rather than a new link.
+    pub fn manages(&self) -> bool {
+        self.command.is_some()
+    }
+
     /// The inputs in command-line order, each `--field` bound to the
     /// nearest `--item` before it. Paths must exist.
     fn sources(&self) -> Result<Vec<Source>> {
@@ -252,6 +265,10 @@ pub async fn send(
     vault: Option<String>,
     from_stdin: bool,
 ) -> Result<ExitCode> {
+    if let Some(command) = args.command {
+        manage(paths, command).await?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let sources = args.sources()?;
     let args = args.raw;
     let ttl = match config::parse_timeout(&args.ttl)? {
@@ -405,7 +422,7 @@ pub async fn send(
         println!("{}", *link);
     }
     eprintln!(
-        "send {}: {}, {}, expires {}. Served live from this computer: it ends if the deadbolt agent stops.",
+        "send {}: {}, {}, expires {}. Served live from this computer: it ends if the deadbolt debug daemon stops.",
         send.id,
         send.label,
         opens(send.opens),
@@ -437,10 +454,10 @@ pub async fn send(
     })
 }
 
-pub async fn sends(paths: &Paths, args: SendsArgs) -> Result<()> {
+async fn manage(paths: &Paths, command: SendCommand) -> Result<()> {
     client::ensure_running(paths).await?;
-    match args.command.unwrap_or(SendsCommand::Ls { json: false }) {
-        SendsCommand::Ls { json } => {
+    match command {
+        SendCommand::Ls { json } => {
             let Reply::Sends { sends } = client::call(paths, Command::SendList, no_events).await?
             else {
                 bail!("unexpected reply");
@@ -450,7 +467,7 @@ pub async fn sends(paths: &Paths, args: SendsArgs) -> Result<()> {
                 return Ok(());
             }
             if sends.is_empty() {
-                eprintln!("no sends (they end when the deadbolt agent stops)");
+                eprintln!("no sends (they end when the deadbolt debug daemon stops)");
             }
             for send in &sends {
                 println!(
@@ -464,7 +481,7 @@ pub async fn sends(paths: &Paths, args: SendsArgs) -> Result<()> {
                 );
             }
         }
-        SendsCommand::Show { id, json } => {
+        SendCommand::Show { id, json } => {
             let Reply::Send { send } =
                 client::call(paths, Command::SendShow { id }, no_events).await?
             else {
@@ -488,7 +505,7 @@ pub async fn sends(paths: &Paths, args: SendsArgs) -> Result<()> {
             println!("expires\t{}", expiry(&send));
             println!("size\t{} bytes sealed", send.size);
         }
-        SendsCommand::Revoke { id } => {
+        SendCommand::Revoke { id } => {
             let Reply::Send { send } =
                 client::call(paths, Command::SendRevoke { id }, no_events).await?
             else {
@@ -519,10 +536,10 @@ fn link_base() -> String {
 fn sender_addr(sender: &SenderInfo) -> Result<SenderAddr> {
     let bytes = HEXLOWER
         .decode(sender.id.as_bytes())
-        .context("the agent's send endpoint id is not hex")?;
+        .context("the daemon's send endpoint id is not hex")?;
     let id = bytes
         .try_into()
-        .map_err(|_| anyhow!("the agent's send endpoint id is not 32 bytes"))?;
+        .map_err(|_| anyhow!("the daemon's send endpoint id is not 32 bytes"))?;
     Ok(SenderAddr {
         id,
         relay_url: sender.relay_url.clone(),

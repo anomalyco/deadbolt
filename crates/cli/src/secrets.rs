@@ -1,7 +1,7 @@
 //! `deadbolt run`, `inject` and `read` (`docs/agent-control.md`, "Use,
 //! don't read"): secret references (`deadbolt://[vault/]item/field`)
-//! resolved by the agent, into a command's environment, a 0600 file, or
-//! printed. The agent decides who may have them; this side never logs,
+//! resolved by the daemon, into a command's environment, a 0600 file, or
+//! printed. The daemon decides who may have them; this side never logs,
 //! echoes or passes a value on argv.
 
 use std::collections::HashMap;
@@ -169,7 +169,7 @@ fn environment(args: &RunArgs) -> Result<IndexMap<String, EnvValue>> {
     Ok(vars)
 }
 
-/// The values `refs` name, from the agent, by reference.
+/// The values `refs` name, from the daemon, by reference.
 async fn resolve(
     paths: &Paths,
     refs: Vec<String>,
@@ -192,7 +192,7 @@ async fn resolve(
     };
     if secrets.len() != refs.len() {
         bail!(
-            "the agent answered {} of {} references",
+            "the daemon answered {} of {} references",
             secrets.len(),
             refs.len()
         );

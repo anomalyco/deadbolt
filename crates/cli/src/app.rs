@@ -2,8 +2,8 @@
 //! `deadbolt` started from outside a terminal (docs/app.md, "One command").
 //! The app is built into this binary (the `app` feature, on by default; the
 //! static musl build leaves it out). It runs in its own process, this binary
-//! started again as `deadbolt ui`, a thin client of the agent like any other.
-//! A running app is brought forward through the agent (`app-activate`)
+//! started again as `deadbolt ui`, a thin client of the daemon like any other.
+//! A running app is brought forward through the daemon (`app-activate`)
 //! rather than started again.
 
 use std::ffi::OsString;
@@ -26,7 +26,7 @@ pub const UI: &str = "ui";
 const BUNDLE_ID: &str = "pw.deadbolt.app";
 /// Keeps bare `deadbolt` from ever opening a window (scripts, agents).
 const NO_UI: &str = "DEADBOLT_NO_UI";
-/// The longest `app-activate` may take: the agent holds it while an app
+/// The longest `app-activate` may take: the daemon holds it while an app
 /// another launch is starting gets to its window (`watchers::STARTING`).
 const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Whether this build has the app in it.
@@ -46,13 +46,13 @@ pub fn activation_token(var: impl Fn(&str) -> Option<String>) -> Option<String> 
 }
 
 /// Whether `app-activate`'s outcome means an app came forward, so none is
-/// started: only `activated`. No agent, an agent of another protocol, `no-app`
+/// started: only `activated`. No daemon, a daemon of another protocol, `no-app`
 /// or no answer in time all start one.
 fn came_forward<E>(outcome: Result<Result<Reply, E>, tokio::time::error::Elapsed>) -> bool {
     matches!(outcome, Ok(Ok(Reply::Activated)))
 }
 
-/// Asks the agent, if one runs, to bring a running app forward with this
+/// Asks the daemon, if one runs, to bring a running app forward with this
 /// launch's activation token. False when the caller should start the app.
 async fn activate_running(paths: &Paths) -> bool {
     let token = activation_token(|name| crate::config::env(name).ok());
@@ -94,7 +94,7 @@ pub fn from_terminal() -> bool {
 /// The arguments to run the app with in this process, if this process is
 /// the app: `deadbolt ui [flags]`, or (macOS) Deadbolt.app's own
 /// `Contents/MacOS/Deadbolt` whatever its arguments. That file is this
-/// binary too, signed as the app, so it never runs a CLI command: the agent
+/// binary too, signed as the app, so it never runs a CLI command: the daemon
 /// takes it for the app, and a command run through it would carry the
 /// app's standing.
 pub fn ui_args(args: &[OsString], exe: Option<&Path>, macos: bool) -> Option<Vec<String>> {
@@ -185,7 +185,7 @@ pub fn this_binary() -> Result<PathBuf> {
 /// Opens the app and returns once it's launched, detached from this
 /// process, or once a running one came forward. Deadbolt.app goes through
 /// Launch Services, which brings a running copy to the front. The built-in
-/// app is asked through the agent first (`app-activate`), and only started
+/// app is asked through the daemon first (`app-activate`), and only started
 /// when no app answers.
 pub async fn open(paths: &Paths) -> Result<()> {
     let exe = this_binary()?;
@@ -225,7 +225,7 @@ pub async fn open(paths: &Paths) -> Result<()> {
 
 /// Starts this binary as the app, in its own process group with no stdio.
 /// It inherits the launcher's activation token for its first window (Rune
-/// takes it from the environment), and runs this binary as its agent.
+/// takes it from the environment), and runs this binary as its daemon.
 fn start(exe: &Path) -> Result<()> {
     // Debug builds only: tests stand a script in for the app.
     let program = cfg!(debug_assertions)
@@ -339,7 +339,7 @@ mod tests {
         assert!(came_forward(forward));
         let no_app = tokio::time::timeout(ACTIVATE_TIMEOUT, answered(Reply::NoApp)).await;
         assert!(!came_forward(no_app));
-        // No agent, or one that refused the request.
+        // No daemon, or one that refused the request.
         let failed = tokio::time::timeout(ACTIVATE_TIMEOUT, async { Err::<Reply, _>(()) }).await;
         assert!(!came_forward(failed));
         let stuck = tokio::time::timeout(

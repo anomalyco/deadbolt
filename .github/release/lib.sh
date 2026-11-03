@@ -25,7 +25,7 @@ posix() {
 }
 
 # The code identities a release signs with. The Touch ID helper's identifier
-# comes from its embedded Info.plist (crates/cli/src/agent/enclave-Info.plist);
+# comes from its embedded Info.plist (crates/cli/src/daemon/enclave-Info.plist);
 # the app's from Deadbolt.app's Info.plist (crates/app/scripts/bundle.sh).
 # shellcheck disable=SC2034 # Used by the scripts that source this.
 DEADBOLT_APP_ID=pw.deadbolt.app

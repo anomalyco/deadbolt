@@ -128,10 +128,10 @@ public struct IdentitySyncer: Sendable {
 
     /// Syncs `ASCredentialIdentityStore` from `autofill-identities` when the
     /// store is enabled and `reportedHash` differs from the last synced hash.
-    /// Pass `reportedHash: nil` to force a check against the agent.
+    /// Pass `reportedHash: nil` to force a check against the daemon.
     @discardableResult
     public func syncIfNeeded(
-        client: any AutofillAgentClient,
+        client: any AutofillDaemonClient,
         reportedHash: String? = nil,
         timeout: TimeInterval = 5.0
     ) async -> Bool {

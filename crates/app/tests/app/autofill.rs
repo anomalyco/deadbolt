@@ -1,8 +1,8 @@
 //! Builds `DeadboltAutoFill.appex` and runs the Swift AutoFill extension test
 //! suite (unit, offscreen UI snapshots, socket cancellation, bidirectional
-//! `LOCAL_PEERTOKEN` code-signature verification on both agent and extension,
+//! `LOCAL_PEERTOKEN` code-signature verification on both daemon and extension,
 //! silent fill, interactive passphrase unlock, and searchable picker) against
-//! a real `deadbolt` agent in a staged `Deadbolt.app` bundle.
+//! a real `deadbolt` daemon in a staged `Deadbolt.app` bundle.
 
 #![cfg(all(debug_assertions, target_os = "macos"))]
 
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use deadbolt_client::Paths;
 use deadbolt_client::protocol::{
-    Command as AgentCommand, FieldInput, Message, PROTOCOL_VERSION, Request,
+    Command as DaemonCommand, FieldInput, Message, PROTOCOL_VERSION, Request,
 };
 
 use crate::support::{PASSPHRASE, deadbolt};
@@ -44,7 +44,7 @@ fn plist_value(plist: &Path, key_path: &str) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-struct AutofillAgentHarness {
+struct AutofillDaemonHarness {
     _home_dir: tempfile::TempDir,
     _sock_dir: tempfile::TempDir,
     app_dir: PathBuf,
@@ -54,10 +54,10 @@ struct AutofillAgentHarness {
     control_socket: PathBuf,
     autofill_socket: PathBuf,
     vars: HashMap<&'static str, OsString>,
-    agent_child: Option<Child>,
+    daemon_child: Option<Child>,
 }
 
-impl AutofillAgentHarness {
+impl AutofillDaemonHarness {
     fn new() -> Self {
         let home_dir = tempfile::Builder::new()
             .prefix("dbaf-home-")
@@ -80,7 +80,7 @@ impl AutofillAgentHarness {
         // Stage a real `Deadbolt.app` layout so `deadbolt-enclave identify`
         // classifies `Contents/MacOS/Deadbolt` as `CallerClass::App` and
         // `Contents/PlugIns/DeadboltAutoFill.appex` as `CallerClass::AutoFill`
-        // by kernel audit token + ad-hoc cdhash, and `PeerCheck.verifyAgent`
+        // by kernel audit token + ad-hoc cdhash, and `PeerCheck.verifyDaemon`
         // verifies `Contents/Helpers/deadbolt`.
         let app_dir = home_dir.path().join("Deadbolt.app");
         let macos_dir = app_dir.join("Contents/MacOS");
@@ -158,13 +158,13 @@ impl AutofillAgentHarness {
             control_socket: paths.socket,
             autofill_socket,
             vars,
-            agent_child: None,
+            daemon_child: None,
         }
     }
 
-    fn start_agent(&mut self) {
+    fn start_daemon(&mut self) {
         let child = ProcessCommand::new(&self.bin)
-            .args(["agent"])
+            .args(["daemon"])
             .envs(&self.vars)
             .env_remove("RUST_LOG")
             .env_remove("OPENCODE_SESSION_ID")
@@ -173,8 +173,8 @@ impl AutofillAgentHarness {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn deadbolt agent");
-        self.agent_child = Some(child);
+            .expect("spawn deadbolt daemon");
+        self.daemon_child = Some(child);
 
         let deadline = Instant::now() + Duration::from_secs(10);
         while !self.autofill_socket.exists() || !self.control_socket.exists() {
@@ -189,7 +189,7 @@ impl AutofillAgentHarness {
         }
     }
 
-    fn send_as_app(&self, command: AgentCommand) -> Message {
+    fn send_as_app(&self, command: DaemonCommand) -> Message {
         let mut payload = serde_json::to_string(&Request {
             v: PROTOCOL_VERSION,
             claimed: None,
@@ -218,13 +218,13 @@ impl AutofillAgentHarness {
     }
 }
 
-impl Drop for AutofillAgentHarness {
+impl Drop for AutofillDaemonHarness {
     fn drop(&mut self) {
         if self.control_socket.exists() {
             let mut payload = serde_json::to_string(&Request {
                 v: PROTOCOL_VERSION,
                 claimed: None,
-                command: AgentCommand::Stop,
+                command: DaemonCommand::Stop,
             })
             .unwrap();
             payload.push('\n');
@@ -238,7 +238,7 @@ impl Drop for AutofillAgentHarness {
                     .status(),
             );
         }
-        if let Some(mut child) = self.agent_child.take() {
+        if let Some(mut child) = self.daemon_child.take() {
             drop(child.kill());
             drop(child.wait());
         }
@@ -485,16 +485,16 @@ fn autofill_appex_bundle_is_valid() {
 
 #[test]
 fn autofill_swift_extension_end_to_end() {
-    let mut harness = AutofillAgentHarness::new();
-    harness.start_agent();
-    harness.send_as_app(AgentCommand::Setup {
+    let mut harness = AutofillDaemonHarness::new();
+    harness.start_daemon();
+    harness.send_as_app(DaemonCommand::Setup {
         passphrase: PASSPHRASE.to_string().into(),
         device_name: "Alex's MacBook Pro".into(),
     });
-    harness.send_as_app(AgentCommand::VaultCreate {
+    harness.send_as_app(DaemonCommand::VaultCreate {
         name: "personal".into(),
     });
-    harness.send_as_app(AgentCommand::ItemNew {
+    harness.send_as_app(DaemonCommand::ItemNew {
         vault: None,
         kind: "login".into(),
         name: Some("GitHub".into()),
@@ -518,7 +518,7 @@ fn autofill_swift_extension_end_to_end() {
         favorite: false,
         tags: Vec::new(),
     });
-    harness.send_as_app(AgentCommand::ItemNew {
+    harness.send_as_app(DaemonCommand::ItemNew {
         vault: None,
         kind: "login".into(),
         name: Some("Linear".into()),
@@ -565,7 +565,7 @@ fn autofill_swift_extension_end_to_end() {
     let unlocked = ProcessCommand::new(&harness.runner)
         .arg("--live-socket")
         .arg(&harness.autofill_socket)
-        .arg("--agent-bin")
+        .arg("--daemon-bin")
         .arg(&harness.bin)
         .args(["--passphrase", PASSPHRASE])
         .output()
@@ -584,12 +584,12 @@ fn autofill_swift_extension_end_to_end() {
         .trim()
         .to_string();
 
-    // Phase 2: Lock the agent and verify silent-fill escalation + passphrase unlock + fill.
-    harness.send_as_app(AgentCommand::Lock);
+    // Phase 2: Lock the daemon and verify silent-fill escalation + passphrase unlock + fill.
+    harness.send_as_app(DaemonCommand::Lock);
     let locked = ProcessCommand::new(&harness.runner)
         .arg("--live-socket")
         .arg(&harness.autofill_socket)
-        .arg("--agent-bin")
+        .arg("--daemon-bin")
         .arg(&harness.bin)
         .args(["--passphrase", PASSPHRASE])
         .args(["--locked-record-id", &record_id])

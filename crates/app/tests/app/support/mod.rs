@@ -1,4 +1,4 @@
-//! A real agent in a temporary home for the app's tests, and running the
+//! A real daemon in a temporary home for the app's tests, and running the
 //! headless runtime until something shows.
 
 use std::collections::HashMap;
@@ -91,13 +91,13 @@ impl Device {
             .unwrap()
     }
 
-    /// How the app starts this device's agent: a script that runs `deadbolt`
+    /// How the app starts this device's daemon: a script that runs `deadbolt`
     /// with the device's environment, as the app's own would have. The app
-    /// checks the agent is that `deadbolt` before sending a passphrase, as
-    /// `agent::launch` has it do for the bundle's own.
+    /// checks the daemon is that `deadbolt` before sending a passphrase, as
+    /// `daemon::launch` has it do for the bundle's own.
     pub fn launch(&self) -> Launch {
         let bin = std::fs::canonicalize(&self.bin).unwrap();
-        deadbolt_client::set_agent_check(Box::new(move |socket| {
+        deadbolt_client::set_daemon_check(Box::new(move |socket| {
             let helper = bin.with_file_name("deadbolt-enclave");
             deadbolt_client::peer::check(&socket, &helper, &bin)
         }));
@@ -133,7 +133,7 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         Command::new(&self.bin)
-            .args(["agent", "stop"])
+            .args(["debug", "daemon", "stop"])
             .envs(&self.vars)
             .stdout(Stdio::null())
             .status()

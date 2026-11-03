@@ -1,6 +1,6 @@
 //! Deleting items, remote deletion conflicts, passkeys, menus and 1Password sync.
 
-use deadbolt_app::agent::{Done, Failure, Job};
+use deadbolt_app::daemon::{Done, Failure, Job};
 use deadbolt_app::edit::Conflict;
 use deadbolt_app::model::{App, Screen};
 use deadbolt_client::protocol::{ErrorCode, ItemInfo, MirrorAction, MirrorItem, MirrorReport};
@@ -105,7 +105,7 @@ fn delete_asks_in_place_and_the_next_item_takes_its_place() {
     assert_eq!(id, github.id);
     assert!(r.shows("Deleting…"));
 
-    // Until the agent answers, the selection, the search and the pane hold.
+    // Until the daemon answers, the selection, the search and the pane hold.
     r.tap(Key::Down);
     r.type_text("li");
     r.command('n');

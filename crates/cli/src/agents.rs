@@ -67,7 +67,7 @@ pub enum AgentsCommand {
     /// `deadbolt run` and `deadbolt inject -o FILE` without asking. Using a
     /// value means being able to learn it (a command can print it, a file
     /// can be read): masking guards against accidents only, so allow only
-    /// what you would hand that agent. Printing a value (`deadbolt read`,
+    /// what you would hand that daemon. Printing a value (`deadbolt read`,
     /// `inject` to stdout) still needs Touch ID each time. Asks for Touch
     /// ID or your passphrase; refused to AI agents.
     AllowSecrets {
@@ -262,7 +262,7 @@ pub async fn run(
 }
 
 /// Sends a request that needs the user: with the passphrase from stdin
-/// (`--passphrase-stdin`), else with Touch ID raised by the agent when it is
+/// (`--passphrase-stdin`), else with Touch ID raised by the daemon when it is
 /// on, else with the passphrase typed on the terminal. Never
 /// `DEADBOLT_PASSPHRASE`: an AI's shell inherits it.
 async fn with_proof(

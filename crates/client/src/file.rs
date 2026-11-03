@@ -1,6 +1,6 @@
 //! Files in item fields, for clients. A file field's value is the file's
 //! name, a line break, then its contents in standard base64
-//! (`deadbolt_core::item::file_value`); the agent lists one as its name
+//! (`deadbolt_core::item::file_value`); the daemon lists one as its name
 //! alone unless asked for its contents (`ItemGet` with `files`). Contents
 //! read or decoded here are wiped once dropped.
 
@@ -66,7 +66,7 @@ pub fn value(name: &str, contents: &[u8]) -> Zeroizing<String> {
     value
 }
 
-/// A file field's name, from its value or the name alone the agent lists.
+/// A file field's name, from its value or the name alone the daemon lists.
 pub fn name(value: &str) -> &str {
     value.split_once('\n').map_or(value, |(name, _)| name)
 }

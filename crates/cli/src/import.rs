@@ -1,12 +1,12 @@
 //! Import: maps another password manager's export to deadbolt items. The
-//! agent runs it for `Command::Import`; the format is detected from the
+//! daemon runs it for `Command::Import`; the format is detected from the
 //! text: Bitwarden's JSON, 1Password's 1PUX `export.data` or CSV, Apple
 //! Passwords' CSV, or any CSV with recognizable columns.
 //!
 //! Everything is mapped and validated before anything is written. Nothing
 //! here prints a field value: JSON is parsed untyped so parse errors cannot
 //! quote it, CSV errors name only a position, and problems are only counted.
-//! Duplicates are left to the agent, which knows what the vault holds.
+//! Duplicates are left to the daemon, which knows what the vault holds.
 
 mod bitwarden;
 mod csv;

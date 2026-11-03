@@ -1,5 +1,5 @@
 //! Compiles in the Apple team that signs this build (`DEADBOLT_TEAM_ID`), so
-//! the agent and its clients know Deadbolt's own code by team and identifier.
+//! the daemon and its clients know Deadbolt's own code by team and identifier.
 //! Empty for ad-hoc builds, which know it by path and code hash instead.
 
 #[expect(

@@ -4,7 +4,7 @@
 //! `url`-aware generation and `Copy current password` (`⇧⌘C`), and forgetting
 //! on lock.
 
-use deadbolt_app::agent::{Done, Job};
+use deadbolt_app::daemon::{Done, Job};
 use deadbolt_app::health::Tab;
 use deadbolt_app::model::App;
 use deadbolt_client::protocol::{FindingKind, HealthReport};
