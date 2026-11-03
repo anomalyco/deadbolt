@@ -1,6 +1,6 @@
 // Settings: the vault's devices (pair another, remove one), its passkeys
-// (delete one), the lock preset, sites never offered to save, learning logs
-// and the vault's name.
+// (delete one), the lock preset, Activity, sites never offered to save,
+// learning logs and the vault's name.
 
 import { describePreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { DevicePasskey, LockPreset, VaultDevice } from "../messages"
@@ -13,6 +13,7 @@ import { NEVER_KEY } from "../bg/save"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
 import { enroll, enrollment } from "./biometric"
 import { aboutSection } from "./about"
+import { activitySection } from "./activity"
 import { appearanceRows } from "../ui/appearance"
 import { SIGNIN_SETTING } from "../auth-state"
 
@@ -326,6 +327,8 @@ export function settingsView(app: App): View {
     app.announce(clearing.checked ? "Copied passwords clear after 30 seconds." : "Copied passwords stay until you copy something else.")
   })
 
+  const activity = activitySection(app)
+
   // Passkeys, once the vault has listed them.
   const passkeys = h("div", { class: "rows" })
   const passkeysGroup = h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Passkeys")), passkeys)
@@ -353,6 +356,7 @@ export function settingsView(app: App): View {
       name.value = app.vaultName
       nameChanged()
     }
+    activity.update()
   }
   paintPresets()
   paint()
@@ -373,6 +377,7 @@ export function settingsView(app: App): View {
         clearing,
       ),
     ),
+    activity.el,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")), ...appearanceRows(app.icons, (m) => app.announce(m)), h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks.")),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Saving")), neverRows(app)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Signing in")), signInSetting(app)),

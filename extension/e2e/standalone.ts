@@ -41,7 +41,7 @@ import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthe
 import { copyFile, mkdir, mkdtemp, rm, readdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import type { DeviceCommand, DevicePasskey, DeviceReply, VaultDevice } from "../src/messages"
+import type { ActivityEntry, DeviceCommand, DevicePasskey, DeviceReply, VaultDevice } from "../src/messages"
 import { VAULT_REQUEST, type VaultResponse } from "../src/bg/vault-messages"
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
@@ -1365,6 +1365,150 @@ async function itemTypes(device: Page, worker: Worker) {
   }
   await back()
 }
+/** Settings' Activity, shown: its rows once there are `rows` (or its empty line), with a still in light and dark under --video. */
+async function activityShown(device: Page, shots: string, rows: number) {
+  await device.getByRole("button", { name: "Settings", exact: true }).click()
+  const list = device.locator(".activity-list")
+  await list.waitFor({ state: "attached" })
+  // From Show's click to the rows drawn, timed in the page.
+  const ms = await device.evaluate(async (rows) => {
+    const list = document.querySelector(".activity-list")!
+    const show = [...list.closest(".group")!.querySelectorAll("button")].find((b) => b.textContent === "Show")!
+    const done = () => (rows ? list.querySelectorAll(".vrow.activity").length >= rows : list.textContent === "Nothing yet")
+    const started = performance.now()
+    show.click()
+    await new Promise<void>((resolve) => {
+      if (done()) return resolve()
+      const watch = new MutationObserver(() => done() && (watch.disconnect(), resolve()))
+      watch.observe(list, { childList: true, subtree: true, characterData: true })
+    })
+    await new Promise(requestAnimationFrame)
+    return Math.round(performance.now() - started)
+  }, rows)
+  if (video) {
+    await mkdir(video, { recursive: true })
+    await list.evaluate((el) => el.closest(".group")!.scrollIntoView({ block: "start" }))
+    for (const scheme of ["light", "dark"] as const) {
+      await device.emulateMedia({ colorScheme: scheme })
+      await Bun.sleep(150)
+      await device.screenshot({ path: join(video, `${shots}-${scheme}.png`) })
+    }
+    await device.emulateMedia({ colorScheme: null })
+  }
+  return ms
+}
+/** Back from Settings to the list. */
+const leaveSettings = (device: Page) => device.getByRole("button", { name: "Settings", exact: true }).click()
+
+/** A new vault's Activity is closed until asked for, then says, quietly, there's nothing yet. */
+async function activityEmpty(device: Page) {
+  await activityShown(device, "activity-empty", 0)
+  check(!(await device.locator(".activity-list .vrow.activity").count()), "a new vault's Activity says there's nothing yet")
+  await leaveSettings(device)
+}
+
+/**
+ * Activity: the fill just made through the real inline menu, and a reveal
+ * and a copy on the vault page, are entries naming the login, its fields and
+ * the page, never a value; none reaches IndexedDB (they're sealed in the
+ * vault's OPFS file, checked for plaintext at the lock). With a large log
+ * the view still opens at once, a page at a time, and the vault page's own
+ * list stays quick.
+ */
+async function activityFlows(device: Page, worker: Worker, title: string, password: string) {
+  await context!.grantPermissions(["clipboard-read", "clipboard-write"])
+  // Copying needs the page focused, as a person's click gives it. A fresh
+  // page knows the preset is Comfortable again (Strict would first ask
+  // Chrome for the clipboard permissions, a prompt nobody answers here).
+  await device.bringToFront()
+  await device.reload()
+  await device.getByRole("searchbox", { name: "Search the vault" }).waitFor()
+  await device.locator(".list-view .vrow .title", { hasText: title }).first().click()
+  await device.getByRole("button", { name: "Show password", exact: true }).click()
+  await device.locator(".detail .secret", { hasText: password }).waitFor()
+  await device.getByRole("button", { name: "Copy password", exact: true }).click()
+  await device.locator(".copy-password.confirmed").waitFor()
+  await device.getByRole("button", { name: "Copy username", exact: true }).click()
+  await device.getByRole("button", { name: "Back", exact: true }).click()
+  const read = async () => {
+    const r = await command(device, { type: "device-activity" })
+    return r.ok ? (r.reply.entries as ActivityEntry[]) : []
+  }
+  const entries = await until("the reveal and copies are in Activity", async () => {
+    const got = await read()
+    return got[0]?.command === "copy" && got[0].fields.join() === "username" ? got : null
+  })
+  const named = (command: string, fields: string) => entries.find((e) => e.command === command && e.items[0]?.title === title && e.fields.join() === fields)
+  const fill = named("site-fill", "username,password")
+  check(fill?.caller === "autofill" && fill.site === origin && fill.outcome === "allowed", "a fill through the inline menu is in Activity, naming the login, its fields and the page")
+  check(named("reveal", "password")?.caller === "vault" && named("copy", "password") && named("copy", "username"), "the vault page's reveal and copies are in Activity, naming the field")
+  check(entries[0]!.id > entries.at(-1)!.id && entries.every((e, i) => i === 0 || e.time <= entries[i - 1]!.time), "Activity lists newest first")
+  const secrets = [password, passphrase, browserPassword, cliPassword]
+  check(!secrets.some((secret) => JSON.stringify(entries).includes(secret)), "Activity entries hold no password or passphrase")
+  // Nothing of Activity, and no value, in any IndexedDB this extension keeps.
+  const stored = await device.evaluate(async () => {
+    const dumps: string[] = []
+    for (const info of await indexedDB.databases()) {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const open = indexedDB.open(info.name!)
+        open.onsuccess = () => resolve(open.result)
+        open.onerror = () => reject(open.error)
+      })
+      for (const name of db.objectStoreNames) {
+        const all = await new Promise<unknown[]>((resolve, reject) => {
+          const get = db.transaction(name).objectStore(name).getAll()
+          get.onsuccess = () => resolve(get.result)
+          get.onerror = () => reject(get.error)
+        })
+        dumps.push(JSON.stringify(all))
+      }
+      db.close()
+    }
+    return dumps.join("\n")
+  })
+  check(![...secrets, "site-fill", "\"copy\"", "\"reveal\""].some((marker) => stored.includes(marker)), "IndexedDB holds no Activity and no secret value")
+  await activityShown(device, "activity", 3)
+  const rows = device.locator(".activity-list .vrow.activity")
+  check((await rows.first().locator(".title").innerText()) === "Copied username", "Activity shows the newest entry first, in words")
+  check((await rows.filter({ hasText: "Filled username and password" }).filter({ hasText: new URL(origin).hostname }).count()) >= 1, "Activity shows the fill in words, with its site")
+  check((await rows.filter({ hasText: "Showed password" }).count()) >= 1, "Activity shows the reveal in words")
+  await leaveSettings(device)
+
+  // A large log: 3,000 more entries, straight to the vault.
+  const ref = (await vault(worker, { type: "list", origin })).reply.accounts as Array<{ ref: string; title: string }>
+  const target = ref.find((a) => a.title === title)!.ref
+  const LARGE = 3000
+  const wrote = await worker.evaluate(async ([type, ref, count]) => {
+    const started = performance.now()
+    for (let i = 0; i < count; i += 50) {
+      await Promise.all(Array.from({ length: Math.min(50, count - i) }, (_, j) => chrome.runtime.sendMessage({ type, body: { type: "device-report", action: (i + j) % 2 ? "copy" : "reveal", ref, field: "password" } })))
+    }
+    return performance.now() - started
+  }, [VAULT_REQUEST, target, LARGE] as const)
+  console.log(`MEASURE ${LARGE} Activity entries written: ${wrote.toFixed(0)} ms (${(wrote / LARGE).toFixed(1)} ms each)`)
+  const page = await request(device, { type: "device-activity" })
+  check((page.reply.entries as ActivityEntry[]).length === 50 && page.ms < limit, `a page of a ${LARGE}-entry Activity answers in ${page.ms.toFixed(0)} ms (< ${limit})`)
+  const deep = await request(device, { type: "device-activity", before: (page.reply.entries as ActivityEntry[]).at(-1)!.id - 2500, limit: 1000 })
+  check((deep.reply.entries as ActivityEntry[]).length > 0 && deep.ms < limit, `the largest page, far back, answers in ${deep.ms.toFixed(0)} ms (< ${limit})`)
+  const opened = await activityShown(device, "activity-large", 50)
+  check(opened < limit, `Activity with ${LARGE} entries opens in ${opened} ms (< ${limit})`)
+  // Paging back keeps the page responsive: no long task while it renders.
+  await device.evaluate(() => {
+    const w = window as unknown as { longest: number }
+    w.longest = 0
+    new PerformanceObserver((list) => list.getEntries().forEach((e) => (w.longest = Math.max(w.longest, e.duration)))).observe({ type: "longtask" })
+  })
+  for (let n = 2; n <= 6; n++) {
+    await device.getByRole("button", { name: "Show older", exact: true }).click()
+    await rows.nth(n * 50 - 1).waitFor()
+  }
+  const longest = await device.evaluate(() => (window as unknown as { longest: number }).longest)
+  check(longest < 200, `paging back through Activity keeps the page responsive (longest task ${longest.toFixed(0)} ms < 200)`)
+  await leaveSettings(device)
+  const items = await request(device, { type: "device-items" })
+  check(items.ms < limit, `the vault page's list still answers in ${items.ms.toFixed(0)} ms (< ${limit}) with a large Activity`)
+}
+
 async function unlockOnPage(device: Page) {
   await device.reload()
   await device.getByLabel("Passphrase", { exact: true }).fill(passphrase)
@@ -1710,6 +1854,7 @@ try {
   await device.getByRole("button", { name: "Create vault", exact: true }).click()
   await device.getByRole("searchbox", { name: "Search the vault" }).waitFor({ timeout: 60_000 })
   check(await state(device) === "ready", "extension creates and opens its own vault")
+  await activityEmpty(device)
   await addLogin(device, "From browser", "browser@example.test", browserPassword)
   await shown(device, "From browser")
   check(true, "device page lists the saved login without being asked")
@@ -1720,6 +1865,7 @@ try {
     await quick(worker, "From browser", browserPassword, "with no peers")
     await siteIcon(device)
     await autofill("From browser", "browser@example.test", browserPassword)
+    await activityFlows(device, worker, "From browser", browserPassword)
     await about(device)
   } else {
     await pair(device)
@@ -1747,6 +1893,7 @@ try {
     await shown(device, "From CLI", 90_000)
     check(true, "CLI login written while the extension was locked appears after unlock, by background sync")
     await autofill("From CLI", "cli@example.test", cliPassword)
+    await activityFlows(device, worker, "From CLI", cliPassword)
     await until("synced OTP field fills the current code", async () => {
       const listed = await vault(worker, { type: "list", origin })
       const account = (listed.reply.accounts as Array<{ ref: string; title: string; hasTotp: boolean }>).find(a => a.title === "From CLI")!
@@ -1779,6 +1926,12 @@ try {
     count += await demoFlows(device, worker)
     await formFlows(device, worker, `${origin}/checkout`)
     await formFlows(device, worker, `${DEMO}/checkout`)
+    // As native, every card fill is in Activity, a wrong Strict passphrase's
+    // as refused; an identity's isn't; no entry holds the number or code.
+    const cards = ((await request(device, { type: "device-activity", limit: 1000 })).reply.entries as ActivityEntry[]).filter((e) => e.command === "form-fill")
+    check(cards.length > 0 && cards.every((e) => e.items[0]?.title === "Visa" && e.caller === "autofill"), "card fills are in Activity, naming the card; identity fills aren't")
+    check(cards.some((e) => e.outcome === "refused") && cards.some((e) => e.outcome === "allowed" && e.fields.includes("number")), "a Strict card fill's wrong passphrase is in Activity as refused, the fill as allowed")
+    check(!["4242424242424242", "\"123\"", passphrase].some((value) => JSON.stringify(cards).includes(value)), "card fill entries hold no card number, code or passphrase")
   }
 
   const keptPasskeys = (await devicePasskeys(device)).map((k) => k.credentialId).sort()
