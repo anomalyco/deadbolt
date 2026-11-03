@@ -154,7 +154,7 @@ export type ToBackground =
    * field shows in the frame's viewport, so the menu can open in the top
    * page under it (see Autofill.query).
    */
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box }
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box; asksNew?: boolean }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean; asksNew?: boolean }
@@ -305,7 +305,8 @@ export type ToContent =
   | { type: "db:signin-offer"; token: string }
   | { type: "db:auth-probe"; fresh?: boolean }
   | { type: "db:signin-go"; action: string }
-  | { type: "db:signin-submit"; form: number }
+  /** `first`: an automatic session's first step, held to a sign-in's own (see content.ts). */
+  | { type: "db:signin-submit"; form: number; first?: true }
   // Can the user see a frame's form? (see shownInPage)
   /**
    * To the frame above: where those boxes show in it, through the element

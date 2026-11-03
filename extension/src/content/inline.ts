@@ -32,7 +32,7 @@
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
-import { findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
+import { asksNewPassword, findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
@@ -1031,7 +1031,7 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     const reply =
       rules === null
         ? null
-        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}) })
+        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}), ...(asksNewPassword(state.targets()) ? { asksNew: true } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
     else if (!isTop) {
       framedFor = el
