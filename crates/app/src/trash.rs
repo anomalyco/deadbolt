@@ -10,7 +10,7 @@ use deadbolt_client::protocol::{Command, ItemInfo, Reply};
 use rune::{Color, El, Key, KeyEvent, Transition, Tx, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
-use crate::agent::{Done, Failure, Job, Values};
+use crate::daemon::{Done, Failure, Job, Values};
 use crate::keys::{chord, plain, step};
 use crate::model::{App, Screen, field_words, title_case};
 use crate::view::theme::{FACT, PAGE_W, TITLE, kind_icon, kind_name};
@@ -128,7 +128,7 @@ impl App {
     fn load_trash(&mut self, restore: Option<String>) {
         self.trash.seq += 1;
         self.trash.loading = true;
-        self.agent.send(Job::Trash {
+        self.daemon.send(Job::Trash {
             seq: self.trash.seq,
             restore,
         });
@@ -149,7 +149,7 @@ impl App {
         }
         self.trash.item_seq += 1;
         self.trash.opening = Some(id.to_owned());
-        self.agent.send(Job::TrashItem {
+        self.daemon.send(Job::TrashItem {
             id: id.to_owned(),
             seq: self.trash.item_seq,
         });
@@ -301,7 +301,7 @@ pub(crate) async fn run(paths: &Paths, seq: u64, restore: Option<String>) -> Don
                     vault: None,
                     query: vec![id],
                 };
-                let item = crate::agent::call(paths, command, |r| match r {
+                let item = crate::daemon::call(paths, command, |r| match r {
                     Reply::Item { item } => Some(item),
                     _ => None,
                 })
@@ -318,7 +318,7 @@ pub(crate) async fn run(paths: &Paths, seq: u64, restore: Option<String>) -> Don
             tags: Vec::new(),
             favorites: false,
         };
-        let items = crate::agent::call(paths, command, |r| match r {
+        let items = crate::daemon::call(paths, command, |r| match r {
             Reply::Items { items } => Some(items),
             _ => None,
         })
@@ -339,7 +339,7 @@ pub(crate) async fn item(paths: &Paths, id: String, seq: u64) -> Done {
         files: Vec::new(),
         deleted: true,
     };
-    let result = crate::agent::call(paths, command, |r| match r {
+    let result = crate::daemon::call(paths, command, |r| match r {
         Reply::Item { item } => Some(Values::new(item)),
         _ => None,
     })

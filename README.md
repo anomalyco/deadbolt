@@ -16,6 +16,15 @@ There is no stable release yet, so install the latest build of `dev`:
 curl -fsSL https://deadbolt.pw/install | DEADBOLT_CHANNEL=dev sh
 ```
 
+Or with bun or npm (Node 18+), which on macOS also brings Deadbolt.app (`deadbolt app` opens it and adds it to `~/Applications`):
+
+```sh
+bun add -g @deadbolt/cli@dev  # the latest dev build; @deadbolt/cli once stable releases start
+npm i -g @deadbolt/cli@dev
+```
+
+bun skips the package's install script; the first `deadbolt` run links it instead.
+
 The script installs `deadbolt` to `~/.local/bin` (set `DEADBOLT_INSTALL` to change it) and checks its SHA-256. It works on macOS and Linux, x64 and arm64. On macOS you can get the app instead: [Deadbolt.app (dev)](https://anoma.ly/release/deadbolt/desktop/dev/macos-arm64-dmg), a universal build.
 
 Once stable releases start, the script installs stable by default (`DEADBOLT_VERSION` pins one), and Homebrew and [GitHub releases](https://github.com/anomalyco/deadbolt/releases) get them too:
@@ -41,7 +50,7 @@ To add another device, start on the new one and finish on one that has the vault
 
 ```sh
 deadbolt join          # on the new device: shows a code
-deadbolt pair <code>   # on a device with the vault
+deadbolt approve <code>   # on a device with the vault
 ```
 
 In the app, the new device's **Join from another device** does the same. A code works once, for 5 minutes.
@@ -72,7 +81,7 @@ Then load it:
 
 1. Download [the zip](https://anoma.ly/release/deadbolt/extension/dev/chromium-standalone) and unzip it.
 2. In `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the unzipped folder.
-3. Choose **Pair with an existing device** (then run `deadbolt pair <code>` on a device with your vault) or **Create a new vault**.
+3. Choose **Pair with an existing device** (then run `deadbolt approve <code>` on a device with your vault) or **Create a new vault**.
 
 An unpacked extension can't update itself. To update by hand, download the zip again and put it in place of the old folder. With the CLI installed, let it keep a folder current instead, and load that folder:
 
@@ -91,7 +100,7 @@ Found a problem? In the standalone build, use **Settings → Report an issue**; 
 deadbolt update
 ```
 
-This updates Deadbolt.app or the `deadbolt` it runs from, and every extension folder registered with `deadbolt browser install --extension-dir`. Reload the extension afterwards. Homebrew installs update with `brew upgrade`. Releases: [`docs/releasing.md`](docs/releasing.md).
+This updates Deadbolt.app or the `deadbolt` it runs from (running npm, pnpm, bun, yarn or Homebrew when one of them installed it), and every extension folder registered with `deadbolt browser install --extension-dir`. Reload the extension afterwards. The daemon checks for updates in the background and only tells you (one line at a terminal at most once a day, and in the app's Settings; `deadbolt update --check` asks on the spot); it never installs anything itself. `DEADBOLT_NO_UPDATE_CHECK=1` turns the check off. Releases: [`docs/releasing.md`](docs/releasing.md).
 
 ### Not available yet
 

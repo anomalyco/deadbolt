@@ -1,13 +1,13 @@
 #[cfg(not(unix))]
 compile_error!("deadbolt currently supports Unix platforms only");
 
-mod agent;
 mod agents;
 mod app;
 mod browser;
 mod caller;
 mod client;
 mod config;
+mod daemon;
 mod desktop;
 mod health;
 mod import;
@@ -15,7 +15,6 @@ mod items;
 mod prompt;
 mod secrets;
 mod send;
-mod ssh;
 use deadbolt_core::site;
 mod update;
 use deadbolt_core::webauthn;
@@ -44,7 +43,7 @@ use crate::protocol::{
 flags, env and stdin. The passphrase comes from DEADBOLT_PASSPHRASE or \
 --passphrase-stdin. Only when stdin and stderr are terminals does deadbolt ask for \
 what is missing; otherwise it fails, with exit code 3 if the store is locked and 4 \
-if the agent refused the request."
+if the daemon refused the request."
 )]
 struct Cli {
     /// Read the passphrase from the first line of stdin instead of
@@ -60,7 +59,7 @@ struct Cli {
 
 /// Exit code when the store is locked.
 const EXIT_LOCKED: u8 = 3;
-/// Exit code when the agent refused the request (not granted, forbidden).
+/// Exit code when the daemon refused the request (not granted, forbidden).
 const EXIT_DENIED: u8 = 4;
 
 #[derive(Subcommand)]
@@ -75,7 +74,7 @@ enum Commands {
         device_name: Option<String>,
     },
     /// Join a vault from one of your other devices: shows a code, then
-    /// waits until `deadbolt pair <code>` runs on a device with the vault.
+    /// waits until `deadbolt approve <code>` runs on a device with the vault.
     ///
     /// Codes work once, for 5 minutes. On a device that isn't set up yet,
     /// the passphrase for this device is asked once it has joined (or taken
@@ -86,9 +85,9 @@ enum Commands {
         #[arg(long)]
         device_name: Option<String>,
     },
-    /// Add the device showing a code from `deadbolt join` to a vault (the
-    /// default vault, or --vault).
-    Pair {
+    /// Approve the device showing a code from `deadbolt join`: adds it to a
+    /// vault (the default vault, or --vault).
+    Approve {
         /// The code, such as violin-garden-tiger-lamp-zoo.
         #[arg(required = true, num_args = 1.., value_name = "CODE")]
         code: Vec<String>,
@@ -107,24 +106,13 @@ enum Commands {
     },
     /// Lock the store.
     Lock,
-    /// Show the agent, this device, its vaults and peers.
-    Status,
     /// Sync now with every device (or only the devices in --vault), or
     /// mirror another password manager into --vault.
     Sync {
         #[command(subcommand)]
         command: Option<SyncCommand>,
     },
-    /// Print what changes in the agent as JSON lines: lock state, items,
-    /// vaults and devices, never values. Ends when the agent stops.
-    Watch,
-    /// Show how the agent sees this process: its verified program, terminal
-    /// and parents, and what it claims (DEADBOLT_CALLER, OPENCODE_SESSION_ID).
-    Whoami {
-        #[arg(long)]
-        json: bool,
-    },
-    /// List what callers asked the agent for, and what the app showed or
+    /// List what callers asked Deadbolt for, and what the app showed or
     /// copied, newest first. Names items and fields, never values.
     Activity {
         /// Only entries this recent (30m, 1h, 7d).
@@ -143,25 +131,18 @@ enum Commands {
     /// is in `deadbolt activity`.
     #[command(subcommand)]
     Agents(agents::AgentsCommand),
-    /// Run the background agent in the foreground, or manage it.
-    Agent {
-        #[command(subcommand)]
-        command: Option<AgentCommand>,
-    },
+    /// Run Deadbolt's background daemon in the foreground. Clients start it.
+    #[command(hide = true)]
+    Daemon,
+    /// The daemon under its old name, as an update from an older build
+    /// starts it.
+    #[command(name = "agent", hide = true)]
+    OldDaemon,
     /// Enable, disable or check Touch ID unlock on macOS.
     #[command(name = "touchid", visible_alias = "touch-id")]
     TouchId {
         #[command(subcommand)]
         command: Option<TouchIdCommand>,
-    },
-    /// Manage Deadbolt's SSH agent (`ssh.sock`), generate or import SSH keys,
-    /// and configure Git commit signing.
-    Ssh(ssh::SshArgs),
-    /// Sign or verify SSH signatures (`gpg.ssh.program` for Git).
-    #[command(hide = true)]
-    SshSign {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<std::ffi::OsString>,
     },
     #[command(flatten)]
     Item(items::ItemCommand),
@@ -238,7 +219,7 @@ enum Commands {
     ///
     /// The link is the key: whoever opens it first gets the contents,
     /// decrypted in their browser. Nothing is uploaded anywhere; the
-    /// deadbolt agent on this computer serves the link live until it is
+    /// Deadbolt daemon on this computer serves the link live until it is
     /// opened, expires (default 1h) or is revoked, and only while it runs.
     ///
     ///   deadbolt send ./report.pdf ./keys/          files and folders
@@ -251,11 +232,16 @@ enum Commands {
     /// ever sent with --item, by exact name or ID. Each --field applies to
     /// the nearest --item before it. Shows what will be sent and asks
     /// first; scripts pass --yes (--json and no terminal require it).
-    /// Prints the link; see `deadbolt sends` for what was sent.
+    /// Prints the link.
+    ///
+    ///   deadbolt send ls                            what was sent
+    ///   deadbolt send show <id>                     one send and its opens
+    ///   deadbolt send revoke <id>                   stop a link working
+    ///
+    /// A first argument of ls, show or revoke is the subcommand, never a
+    /// path: send a file named ls as ./ls.
     #[command(verbatim_doc_comment)]
     Send(send::SendArgs),
-    /// List, show or revoke sends.
-    Sends(send::SendsArgs),
     /// Audit saved passwords for weak, reused, and breached credentials, and
     /// sites supporting authenticator codes or passkeys.
     Health(health::HealthArgs),
@@ -277,13 +263,35 @@ enum Commands {
     ///
     /// Downloads are checked against the release's size and SHA-256 and, on
     /// macOS, its code signature before anything is replaced. Installs from
-    /// Homebrew or another package manager get its command instead. The agent
+    /// Homebrew or another package manager get its command instead. The daemon
     /// restarts on the new build, locked. Works while the vault is locked.
     Update(update::UpdateArgs),
+    /// Diagnostics: how the daemon sees you, its live change stream, the
+    /// daemon itself.
+    #[command(subcommand)]
+    Debug(DebugCommand),
     /// Serve the browser extension at ORIGIN over stdin/stdout. Browsers
     /// run this; `deadbolt browser install` sets it up.
     #[command(hide = true)]
     BrowserHost { origin: String },
+}
+
+#[derive(Subcommand)]
+enum DebugCommand {
+    /// Show how the daemon sees this process: its verified program, terminal
+    /// and parents, and what it claims (DEADBOLT_CALLER, OPENCODE_SESSION_ID).
+    Whoami {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print what changes in the daemon as JSON lines: lock state, items,
+    /// vaults and devices, never values. Ends when the daemon stops.
+    Watch,
+    /// Show whether the background daemon is running and locked, or stop it.
+    Daemon {
+        #[command(subcommand)]
+        command: Option<DaemonCommand>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -399,11 +407,11 @@ enum SyncCommand {
 }
 
 #[derive(Subcommand)]
-enum AgentCommand {
-    /// Stop the agent (locks the store).
-    Stop,
-    /// Show whether the agent is running.
+enum DaemonCommand {
+    /// Show whether the daemon is running, and whether it's locked.
     Status,
+    /// Stop the daemon (locks the store).
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -431,12 +439,6 @@ fn main() -> ExitCode {
             .is_some_and(|a| a.starts_with("chrome-extension://"))
     {
         args.insert(1, "browser-host".into());
-    } else if args
-        .get(1)
-        .and_then(|a| a.to_str())
-        .is_some_and(|a| a.starts_with("-Y") || a == "-U")
-    {
-        args.insert(1, "ssh-sign".into());
     }
     // Bare `deadbolt` from an app launcher opens the app; from a terminal,
     // or when the app can't be opened, it prints usage as before.
@@ -449,18 +451,21 @@ fn main() -> ExitCode {
     {
         return ExitCode::SUCCESS;
     }
+    let json = args.iter().any(|a| a == "--json");
     let cli = Cli::parse_from(args);
-    let agent = matches!(cli.command, Commands::Agent { command: None });
-    // Commands die quietly when piped into `head`. The agent and the browser
+    let daemon = matches!(cli.command, Commands::Daemon | Commands::OldDaemon);
+    // The daemon's update notice: only to a person at a terminal.
+    let notice = !json && notices_updates(&cli.command) && prompt::interactive();
+    // Commands die quietly when piped into `head`. The daemon and the browser
     // host keep Rust's ignored SIGPIPE: a client hanging up mid-reply must
     // not kill them before they clean up.
-    if !agent && !matches!(cli.command, Commands::BrowserHost { .. }) {
+    if !daemon && !matches!(cli.command, Commands::BrowserHost { .. }) {
         sigpipe::reset();
     }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| if agent { "warn,deadbolt=info" } else { "warn" }.into()),
+                .unwrap_or_else(|_| if daemon { "warn,deadbolt=info" } else { "warn" }.into()),
         )
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -472,7 +477,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(cli)) {
+    let result = runtime.block_on(async {
+        let result = run(cli).await;
+        if notice {
+            update::notice(&Paths::get()).await;
+        }
+        result
+    });
+    match result {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -483,6 +495,22 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Whether `command` may end with the daemon's update notice: not the
+/// daemon, hosts and helpers other programs run, `update` (which says it
+/// itself), `debug watch`, the app, or `run`, whose output is its program's.
+fn notices_updates(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Daemon
+            | Commands::OldDaemon
+            | Commands::BrowserHost { .. }
+            | Commands::Update(_)
+            | Commands::Debug(DebugCommand::Watch)
+            | Commands::App
+            | Commands::Run(_)
+    )
 }
 
 /// The extension build `--standalone` picks (else the native one).
@@ -507,19 +535,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let from_stdin = cli.passphrase_stdin;
     let vault = cli.vault;
     if vault.is_some()
-        && matches!(
+        && (matches!(
             cli.command,
             Commands::Init { .. }
                 | Commands::Join { .. }
                 | Commands::Unlock { .. }
                 | Commands::Lock
-                | Commands::Status
-                | Commands::Watch
-                | Commands::Whoami { .. }
+                | Commands::Debug(_)
                 | Commands::Activity { .. }
-                | Commands::Agent { .. }
+                | Commands::Daemon
+                | Commands::OldDaemon
                 | Commands::TouchId { .. }
-                | Commands::SshSign { .. }
                 | Commands::Run(_)
                 | Commands::Inject(_)
                 | Commands::Read(_)
@@ -529,15 +555,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Browser(_)
                 | Commands::BrowserHost { .. }
                 | Commands::Update(_)
-                | Commands::Sends(_)
-        )
+        ) || matches!(&cli.command, Commands::Send(args) if args.manages()))
     {
         bail!("--vault does not apply to this command");
     }
     caller::install();
     match cli.command {
         Commands::Send(args) => return send::send(&paths, args, vault, from_stdin).await,
-        Commands::Sends(args) => send::sends(&paths, args).await?,
         Commands::Item(command) => {
             client::ensure_running(&paths).await?;
             items::run(&paths, command, vault, from_stdin).await?;
@@ -569,7 +593,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 println!("{line}");
             }
         }
-        Commands::Agent { command: None } => agent::serve(paths).await?,
+        Commands::Daemon => daemon::serve(paths, false).await?,
+        Commands::OldDaemon => daemon::serve(paths, true).await?,
         Commands::Agents(command) => agents::run(&paths, command, vault, from_stdin).await?,
         Commands::Run(args) => return secrets::run(&paths, args, from_stdin).await,
         Commands::Inject(args) => secrets::inject(&paths, args, from_stdin).await?,
@@ -612,23 +637,26 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             extension_dir: Some(dir),
         }) => browser::unregister_extension_dir(&dir, &paths.config)?,
         Commands::BrowserHost { origin } => browser::host::run(paths, &origin).await?,
-        Commands::Agent {
-            command: Some(AgentCommand::Stop),
-        } => {
+        Commands::Debug(DebugCommand::Daemon {
+            command: Some(DaemonCommand::Stop),
+        }) => {
             let stopped = client::stop(&paths).await?;
             println!("{}", if stopped { "stopped" } else { "not running" });
         }
-        Commands::Agent {
-            command: Some(AgentCommand::Status),
-        } => match client::running(&paths).await {
-            Some(agent) => println!("running pid {} version {}", agent.pid, agent.version),
+        Commands::Debug(DebugCommand::Daemon {
+            command: None | Some(DaemonCommand::Status),
+        }) => match client::running(&paths).await {
+            Some(daemon) => {
+                println!("running pid {} version {}", daemon.pid, daemon.version);
+                if let Some(status) = client::status(&paths).await {
+                    println!("{}", lock_state(&status));
+                }
+            }
             None => {
                 println!("not running");
                 return Ok(ExitCode::FAILURE);
             }
         },
-        Commands::Ssh(args) => ssh::run(&paths, args, vault, from_stdin).await?,
-        Commands::SshSign { args } => return ssh::ssh_sign(&paths, args, from_stdin).await,
         Commands::TouchId { command } => {
             let status = client::ensure_running(&paths).await?;
             match command.unwrap_or(TouchIdCommand::Status) {
@@ -702,7 +730,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 bail!("unexpected reply");
             };
         }
-        Commands::Pair { code } => {
+        Commands::Approve { code } => {
             let code = code.join(" ");
             code.parse::<PairingCode>()?;
             client::ensure_running(&paths).await?;
@@ -801,15 +829,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             client::simple(&paths, Command::Lock).await?;
             println!("locked");
         }
-        Commands::Status => {
-            let status = client::ensure_running(&paths).await?;
-            print_status(&status);
-        }
-        Commands::Whoami { json } => caller::whoami(&paths, json).await?,
+        Commands::Debug(DebugCommand::Whoami { json }) => caller::whoami(&paths, json).await?,
         Commands::Activity { since, limit, json } => {
             caller::activity(&paths, since, limit, json, from_stdin).await?;
         }
-        Commands::Watch => {
+        Commands::Debug(DebugCommand::Watch) => {
             client::ensure_running(&paths).await?;
             let mut changes = deadbolt_client::watch(&paths, false).await?;
             while let Some(change) = changes.next().await? {
@@ -969,7 +993,7 @@ async fn join(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply
         Ok(match event {
             Event::Code { code } => {
                 println!("Code: {code}");
-                eprintln!("On a device with your vault, run: deadbolt pair {code}");
+                eprintln!("On a device with your vault, run: deadbolt approve {code}");
                 eprintln!("waiting…");
                 None
             }
@@ -991,7 +1015,7 @@ async fn join(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply
     .await
 }
 
-/// The vault `pair` adds to when `--vault` isn't given: the only one, else
+/// The vault `approve` adds to when `--vault` isn't given: the only one, else
 /// asked on a terminal (the default first), else an error.
 async fn choose_vault(paths: &Paths, from_stdin: bool) -> Result<Option<String>> {
     let Reply::Vaults { vaults } = request(paths, Command::VaultList, from_stdin).await? else {
@@ -1063,31 +1087,14 @@ fn vault_line(vault: &VaultInfo) -> String {
     line
 }
 
-fn print_status(status: &Status) {
-    println!(
-        "agent\trunning pid {} version {}",
-        status.pid, status.version
-    );
-    let state = if !status.initialized {
-        "not set up".to_string()
+fn lock_state(status: &Status) -> String {
+    if !status.initialized {
+        "not set up".into()
     } else if !status.unlocked {
-        "locked".to_string()
+        "locked".into()
     } else if let Some(secs) = status.locks_in_secs {
         format!("unlocked (locks in {secs}s)")
     } else {
-        "unlocked".to_string()
-    };
-    println!("state\t{state}");
-    if let Some(device) = &status.device {
-        println!("device\t{} {}", device_name(device), short(&device.id));
-    }
-    if status.unlocked {
-        let vaults: Vec<String> = status
-            .vaults
-            .iter()
-            .map(|v| format!("{}{}", v.name, if v.default { "*" } else { "" }))
-            .collect();
-        println!("vaults\t{}", vaults.join(" "));
-        println!("peers\t{}/{} online", status.peers_online, status.peers);
+        "unlocked".into()
     }
 }

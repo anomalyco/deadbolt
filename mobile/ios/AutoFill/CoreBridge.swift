@@ -95,15 +95,15 @@ extension InProcessProviderClient {
                 } catch let failure as EnclaveFailure {
                     switch failure {
                     case .cancelled:
-                        throw AgentCallError.cancelled
+                        throw DaemonCallError.cancelled
                     case .invalidated, .unavailable, .malformed:
                         // The slot can't open any more: the passphrase it is.
-                        throw AgentCallError.agentError(
+                        throw DaemonCallError.daemonError(
                             code: .locked,
                             message: failure.errorDescription ?? "Enter your passphrase."
                         )
                     default:
-                        throw AgentCallError.agentError(
+                        throw DaemonCallError.daemonError(
                             code: .failed,
                             message: failure.errorDescription ?? "Face ID didn't unlock Deadbolt."
                         )

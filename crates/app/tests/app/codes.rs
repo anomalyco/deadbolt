@@ -1,13 +1,13 @@
-//! One-time codes: the agent computes each, the detail shows it with a
+//! One-time codes: the daemon computes each, the detail shows it with a
 //! countdown, the app asks for the next once per period and never holds the
 //! secret, ⌥⏎ copies it, and locking drops it. Headless, against the scenes'
-//! fixed code (RFC 6238's secret, 18 s of 30 left) or a real agent.
+//! fixed code (RFC 6238's secret, 18 s of 30 left) or a real daemon.
 
-// The agent reads the test switches these set (`DEADBOLT_NET`,
+// The daemon reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
 #![cfg(debug_assertions)]
 
-use deadbolt_app::agent::{Agent, Done, Job, Values, Window};
+use deadbolt_app::daemon::{Daemon, Done, Job, Values, Window};
 use deadbolt_app::model::{App, CODE_SLACK, Screen};
 use deadbolt_app::panel::{self, Phase};
 use deadbolt_client::protocol::{Change, Code, FieldInfo};
@@ -58,15 +58,15 @@ fn panel_scene(name: &str) -> Runtime<App> {
     rt
 }
 
-/// The vault scene with an agent the test answers for.
+/// The vault scene with a daemon the test answers for.
 fn scripted() -> (Runtime<App>, Receiver<Job>, Sender<Done>, MemoryClipboard) {
     script(scene("vault"))
 }
 
-/// `rt` with an agent the test answers for, and a clipboard.
+/// `rt` with a daemon the test answers for, and a clipboard.
 fn script(mut rt: Runtime<App>) -> (Runtime<App>, Receiver<Job>, Sender<Done>, MemoryClipboard) {
-    let (agent, jobs, replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     let board = rune::clipboard::memory();
     rt.use_clipboard(&board);
     rt.frame(FRAME);
@@ -430,9 +430,9 @@ fn an_item_without_an_otp_has_no_code() {
     assert!(shows(&rt, "Actions"));
 }
 
-/// Against a real agent: the item's reply carries the code, not the secret.
+/// Against a real daemon: the item's reply carries the code, not the secret.
 #[test]
-fn the_agent_computes_the_code() {
+fn the_daemon_computes_the_code() {
     let device = Device::new();
     device.run(&["init"]);
     device.run(&[
@@ -442,9 +442,9 @@ fn the_agent_computes_the_code() {
         "password=pw",
         "otp=otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
     ]);
-    let agent = Agent::spawn(device.paths(), device.launch(), Window::Main);
+    let daemon = Daemon::spawn(device.paths(), device.launch(), Window::Main);
     let mut rt = Runtime::new(
-        App::new(agent),
+        App::new(daemon),
         deadbolt_app::view::app,
         (820.0, 540.0),
         Env {
@@ -454,7 +454,7 @@ fn the_agent_computes_the_code() {
     );
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
-    rt.state.agent.send(Job::Connect);
+    rt.state.daemon.send(Job::Connect);
     // The clock when it came: `until` draws another frame after, which can
     // be past the end of a code that came with less than a frame left.
     let came = std::cell::Cell::new(0.0);
@@ -469,5 +469,5 @@ fn the_agent_computes_the_code() {
     assert!(otp.until > came && otp.until <= came + 30.0);
     let detail = rt.state.detail.as_ref().unwrap();
     let field = detail.fields.iter().find(|f| f.name == "otp").unwrap();
-    assert!(field.value.is_empty(), "the agent left the secret out");
+    assert!(field.value.is_empty(), "the daemon left the secret out");
 }

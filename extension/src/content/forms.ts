@@ -226,6 +226,8 @@ export function scanForms(roots = openRoots()): FormField[] {
     if (el instanceof HTMLInputElement && el.type === "month" && role?.startsWith("cc-exp")) role = "cc-exp"
     if (el instanceof HTMLInputElement && el.type === "email" && !role) role = "email"
     if (el instanceof HTMLInputElement && el.type === "tel" && !role) role = "tel"
+    // A phone box that opens a list of choices is the calling code beside the number.
+    if ((role === "tel" || role === "tel-national") && el.getAttribute("role") === "combobox") role = "tel-country-code"
     found.push({ el, role, display, code, maxLength: el instanceof HTMLInputElement && el.maxLength > 0 ? el.maxLength : 0 })
   }
   splitCardBoxes(found)

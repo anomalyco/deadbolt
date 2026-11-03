@@ -161,7 +161,7 @@ fn list(s: &App, k: &Kit) -> El {
             k,
             "loading",
             "Checking passwords…",
-            "Scoring passwords and checking directories in the agent.",
+            "Scoring passwords and checking directories in the daemon.",
         );
     }
     let rows = s.health.rows();

@@ -10,15 +10,15 @@ DEADBOLT_FAKE_SIGNIN adds "Sign in with Google" logins, and
 DEADBOLT_FAKE_GOOGLE lists three Google logins instead of its own, and
 DEADBOLT_FAKE_KEYLOGIN adds a login with no username. Saves
 are checked against the spec's title and URL rules. Generated passwords are held per
-origin, as the agent holds them: candidates until generate-keep, then
+origin, as the daemon holds them: candidates until generate-keep, then
 pending, and check and save resolve only pending ones. Fields that allow
-under 60 bits are weak, as the agent's floor.
+under 60 bits are weak, as the daemon's floor.
 
 `learn` answers `learned` (the log has each line), locked or not.
 
 `forms` lists two identities and a card, and `fill-form` answers with only
 the fields asked for. DEADBOLT_FAKE_TOUCHID=deny answers a fill-form that
-asks for a card's number or code with `failed`, as the agent does when
+asks for a card's number or code with `failed`, as the daemon does when
 Touch ID is turned down; DEADBOLT_FAKE_FILL_DELAY holds fill-form too.
 """
 import json, math, os, secrets, string, struct, sys, time
@@ -122,7 +122,7 @@ CLASSES = {"digit": string.digits, "upper": string.ascii_uppercase, "lower": str
 
 
 def required(rules):
-    """The character sets passwordrules' `required:` entries ask one of each of: named classes and [custom] sets, as the agent reads them."""
+    """The character sets passwordrules' `required:` entries ask one of each of: named classes and [custom] sets, as the daemon reads them."""
     needs = []
     for part in rules.split(";"):
         name, _, value = part.partition(":")
@@ -144,7 +144,7 @@ def generate(req):
     lo = req.get("minLength") or 0
     rules = req.get("rules") or ""
     needs = required(rules)
-    # With required classes and no `allowed:`, a password uses only those, as the agent's does.
+    # With required classes and no `allowed:`, a password uses only those, as the daemon's does.
     alphabet = req.get("allowed") or ("".join(needs) if needs and "allowed:" not in rules else DEFAULT_ALPHABET)
     while True:
         password = "".join(secrets.choice(alphabet) for _ in range(max(hi, lo)))
@@ -179,7 +179,7 @@ while True:
             f.write(json.dumps(req) + "\n")
     rid, kind = req.get("id"), req.get("type")
     if kind == "generate-check":
-        # The agent answers it locked or not.
+        # The daemon answers it locked or not.
         why = refusal(req)
         write({"id": rid, "type": "error", "code": why, "message": "No strong password fits."} if why else {"id": rid, "type": "generate-check"})
     elif kind == "hello":

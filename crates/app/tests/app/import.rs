@@ -1,14 +1,14 @@
-//! Importing in the app against a real agent: an export dropped on the
+//! Importing in the app against a real daemon: an export dropped on the
 //! window or picked with Choose File… is previewed, then imported, cancelled,
 //! or forgotten on locking. The exports are made up.
 
-// The agent reads the test switches these set (`DEADBOLT_NET`,
+// The daemon reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
 #![cfg(debug_assertions)]
 
 use std::path::PathBuf;
 
-use deadbolt_app::agent::{Agent, Job, Window};
+use deadbolt_app::daemon::{Daemon, Job, Window};
 use deadbolt_app::import::Phase;
 use deadbolt_app::install::Installer;
 use deadbolt_app::model::{App, Screen};
@@ -85,7 +85,7 @@ const UNSUPPORTED_ONLY: &str = r#"{
 /// The app for a set-up `device`, unlocked in its vault.
 fn vault(device: &Device) -> Runtime<App> {
     let mut rt = Runtime::new(
-        App::new(Agent::spawn(device.paths(), device.launch(), Window::Main)),
+        App::new(Daemon::spawn(device.paths(), device.launch(), Window::Main)),
         deadbolt_app::view::app,
         (820.0, 540.0),
         Env {
@@ -95,7 +95,7 @@ fn vault(device: &Device) -> Runtime<App> {
     );
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
-    rt.state.agent.send(Job::Connect);
+    rt.state.daemon.send(Job::Connect);
     until(&mut rt, "the vault or the lock", |s| {
         matches!(s.screen, Screen::Vault | Screen::Locked)
     });
@@ -122,7 +122,7 @@ fn device() -> Device {
 }
 
 /// Two frames per step: Rune holds a drag for one frame's build when the
-/// state changed that frame, as a change from the agent's watch can.
+/// state changed that frame, as a change from the daemon's watch can.
 fn drop_file(rt: &mut Runtime<App>, path: PathBuf) {
     rt.drag_files(vec![path.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);

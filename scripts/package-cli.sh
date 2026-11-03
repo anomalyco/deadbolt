@@ -1,7 +1,7 @@
 #!/bin/sh
 # Packs one platform's CLI release tarball, deadbolt-<version>-<platform>.tar.gz,
 # from a Cargo release directory: `deadbolt` at the root, and on macOS the
-# Touch ID helper `deadbolt-enclave` beside it (the agent looks for it next to
+# Touch ID helper `deadbolt-enclave` beside it (the daemon looks for it next to
 # its own executable; docs/touch-id.md). The install script and the Homebrew
 # formula install both files into one directory.
 #

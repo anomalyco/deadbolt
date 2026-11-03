@@ -76,9 +76,9 @@ Deny is verified; fresh-biometric Allow is deferred to physical-device testing.
 ## Model
 
 The iOS and Android applications are independent Deadbolt devices, not clients of
-the Mac agent. Each owns an Ed25519 device key and encrypted redb store, has its
+the Mac daemon. Each owns an Ed25519 device key and encrypted redb store, has its
 own local passphrase, and joins the existing vault through pairing v3. The phone
-shows the five-word code; an unlocked member runs `deadbolt pair <code>`. Device
+shows the five-word code; an unlocked member runs `deadbolt approve <code>`. Device
 admission is the existing signed consent/membership protocol, not a mobile API.
 
 `crates/mobile-core` is the native composition root exposed through UniFFI.
@@ -245,11 +245,11 @@ Reuse `crates/app/autofill/{CredentialProviderViewController,IdentitySync,
 AutoFillView,ControllerModel,Protocol}.swift` in one source tree. Platform view
 and lifecycle differences belong behind `#if os(iOS)`, not in copied files.
 `SocketClient.swift` and `PeerCheck.swift` remain macOS-only. The iOS client calls
-the Rust mobile core in-process, against the App Group store, with no agent
+the Rust mobile core in-process, against the App Group store, with no daemon
 process and no network needed to fill.
 
 The provider must share Rust service-identifier resolution, domain matching,
-TOTP generation and WebAuthn signing/registration policy with the macOS agent.
+TOTP generation and WebAuthn signing/registration policy with the macOS daemon.
 OS-provided service identifiers are authority; identity-store entries are only
 hints and must be rechecked against the current item. The app publishes only
 non-secret domain/account/record metadata to `ASCredentialIdentityStore` for
@@ -419,7 +419,7 @@ workspace/platform runs):
   Clippy passed. These were isolated from concurrently changing mobile code.
 - macOS provider baseline: Swift 6 unit/wire/cancellation/offscreen checks passed;
   `cargo test -p deadbolt-app --test app autofill:: --locked` passed both the
-  bundle validation and real-agent Swift end-to-end test.
+  bundle validation and real-daemon Swift end-to-end test.
 - Android native tests after the UI-owner search/lifecycle batch: 47 passed.
   The final Gradle build reused that cached result with unchanged compiled inputs;
   it did not re-execute the tests.

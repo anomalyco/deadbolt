@@ -1,10 +1,10 @@
 // Wire types of the Deadbolt credential provider, shared by macOS and iOS.
 // On macOS, `DeadboltAutoFill.appex` sends `AutofillCommand` lines to
-// `deadbolt agent` over the App Group Unix socket
+// `deadbolt daemon` over the App Group Unix socket
 // (`~/Library/Group Containers/<TEAM>.pw.deadbolt/s`, SocketClient.swift),
 // mirroring `crates/client/src/protocol.rs` (`generatedProtocolVersion` is
 // stamped from `PROTOCOL_VERSION` at build time). On iOS there is no socket
-// and no agent: mobile/ios/AutoFill/ProviderClient.swift maps the same
+// and no daemon: mobile/ios/AutoFill/ProviderClient.swift maps the same
 // commands onto the Rust core's in-process `MobileCredentialProvider`
 // (crates/mobile-core/src/provider.rs), whose request is `ProviderRequest`.
 
@@ -22,7 +22,7 @@ public enum AutofillWire {
     public static let iosAppGroup: String = "group.pw.deadbolt"
     public static let appBundleID: String = "pw.deadbolt.app"
     public static let autofillBundleID: String = "pw.deadbolt.app.autofill"
-    public static let agentSigningIDs: Set<String> = ["pw.deadbolt.cli", "deadbolt"]
+    public static let daemonSigningIDs: Set<String> = ["pw.deadbolt.cli", "deadbolt"]
 }
 
 public enum AutofillServiceKind: String, Codable, Equatable, Sendable {
@@ -212,7 +212,7 @@ public struct SiteLogin: Codable, Equatable, Sendable {
     public let urls: [String]
     public let signIn: SignInInfo?
     /// The OS service this login was matched for (the core's `Pick.service`,
-    /// as the request named it); `nil` when unassociated or from an agent
+    /// as the request named it); `nil` when unassociated or from a daemon
     /// that doesn't report it.
     public let service: AutofillService?
 
@@ -592,7 +592,7 @@ public struct AutofillPasskeyCreatedReply: Codable, Equatable, Sendable {
     public let authenticatorData: String
     public let publicKey: String
     public let verified: Bool
-    /// Sent by `deadbolt agent`; the iOS core leaves it out.
+    /// Sent by `deadbolt daemon`; the iOS core leaves it out.
     public let identitiesHash: String?
 
     enum CodingKeys: String, CodingKey {
@@ -635,7 +635,7 @@ public struct AutofillPasskeyAssertionReply: Codable, Equatable, Sendable {
     public let signature: String
     public let userHandle: String
     public let verified: Bool
-    /// Sent by `deadbolt agent`; the iOS core leaves it out.
+    /// Sent by `deadbolt daemon`; the iOS core leaves it out.
     public let identitiesHash: String?
 
     enum CodingKeys: String, CodingKey {
@@ -696,7 +696,7 @@ public struct PasskeyAssertion: Equatable, Sendable {
               let authenticatorData = Base64URL.decode(reply.authenticatorData),
               let credentialID = Base64URL.decode(reply.credentialId)
         else {
-            throw AgentCallError.invalidResponse("malformed passkey assertion from Deadbolt")
+            throw DaemonCallError.invalidResponse("malformed passkey assertion from Deadbolt")
         }
         self.userHandle = userHandle
         self.relyingParty = rpId
@@ -719,7 +719,7 @@ public struct PasskeyRegistration: Equatable, Sendable {
               let credentialID = Base64URL.decode(reply.credentialId),
               let attestationObject = Base64URL.decode(reply.attestationObject)
         else {
-            throw AgentCallError.invalidResponse("malformed passkey registration from Deadbolt")
+            throw DaemonCallError.invalidResponse("malformed passkey registration from Deadbolt")
         }
         self.relyingParty = rpId
         self.clientDataHash = clientDataHash
@@ -755,7 +755,7 @@ public enum Base64URL {
     }
 }
 
-public enum AgentErrorCode: String, Equatable, Sendable {
+public enum DaemonErrorCode: String, Equatable, Sendable {
     case locked
     case notInitialized = "not-initialized"
     case notFound = "not-found"
@@ -775,23 +775,23 @@ public enum AgentErrorCode: String, Equatable, Sendable {
     case unknown
 }
 
-public enum AgentCallError: Error, Equatable, Sendable {
-    case agentUnavailable(String)
+public enum DaemonCallError: Error, Equatable, Sendable {
+    case daemonUnavailable(String)
     case timedOut
     case cancelled
     case peerRejected(String)
     case invalidResponse(String)
-    case agentError(code: AgentErrorCode, message: String)
+    case daemonError(code: DaemonErrorCode, message: String)
 
     public var extensionErrorCodeForSilentRequest: ASExtensionError.Code {
         switch self {
-        case .agentUnavailable, .timedOut:
+        case .daemonUnavailable, .timedOut:
             return .userInteractionRequired
         case .cancelled:
             return .userCanceled
         case .peerRejected, .invalidResponse:
             return .failed
-        case let .agentError(code, _):
+        case let .daemonError(code, _):
             switch code {
             case .locked, .interactionRequired, .notInitialized, .busy:
                 return .userInteractionRequired
@@ -809,7 +809,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
         switch self {
         case .cancelled:
             return .userCanceled
-        case let .agentError(code, _):
+        case let .daemonError(code, _):
             switch code {
             case .notFound, .domainMismatch:
                 return .credentialIdentityNotFound
@@ -827,7 +827,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
         switch self {
         case .cancelled:
             return true
-        case let .agentError(code, message):
+        case let .daemonError(code, message):
             return code == .cancelled || message.localizedCaseInsensitiveContains("cancelled")
         default:
             return false
@@ -836,7 +836,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
 
     public var userFacingUnlockMessage: String {
         switch self {
-        case let .agentError(code, message):
+        case let .daemonError(code, message):
             if code == .rateLimited {
                 return message
             }
@@ -848,7 +848,7 @@ public enum AgentCallError: Error, Equatable, Sendable {
             return message
         case let .peerRejected(reason):
             return reason
-        case let .agentUnavailable(reason):
+        case let .daemonUnavailable(reason):
             return reason
         case .timedOut:
             return "Deadbolt took too long to respond."
@@ -882,16 +882,16 @@ public enum WireDecoder {
         do {
             env = try decoder.decode(Envelope.self, from: line)
         } catch {
-            throw AgentCallError.invalidResponse("malformed JSON from agent: \(error.localizedDescription)")
+            throw DaemonCallError.invalidResponse("malformed JSON from daemon: \(error.localizedDescription)")
         }
         switch env.type {
         case "error":
-            let code = env.code.flatMap(AgentErrorCode.init(rawValue:)) ?? .unknown
-            let msg = env.message ?? "agent request failed"
-            throw AgentCallError.agentError(code: code, message: msg)
+            let code = env.code.flatMap(DaemonErrorCode.init(rawValue:)) ?? .unknown
+            let msg = env.message ?? "daemon request failed"
+            throw DaemonCallError.daemonError(code: code, message: msg)
         case "ok":
             guard let tag = env.reply?.reply else {
-                throw AgentCallError.invalidResponse("missing reply tag from agent")
+                throw DaemonCallError.invalidResponse("missing reply tag from daemon")
             }
             switch tag {
             case "done":
@@ -918,7 +918,7 @@ public enum WireDecoder {
                 return .other(tag)
             }
         default:
-            throw AgentCallError.invalidResponse("unexpected message type '\(env.type)'")
+            throw DaemonCallError.invalidResponse("unexpected message type '\(env.type)'")
         }
     }
 }
@@ -928,7 +928,7 @@ public enum WireDecoder {
 /// Thread-safe cancellation of one in-flight request. `cancel()` (for example
 /// from `viewWillDisappear`) runs the client's cancel action at once. On
 /// macOS it shuts the socket down, waking `poll()` and dismissing an open
-/// Touch ID sheet in `deadbolt agent`. On iOS nothing can interrupt a running
+/// Touch ID sheet in `deadbolt daemon`. On iOS nothing can interrupt a running
 /// core call or an open biometric sheet: the client discards that call's
 /// result, and `endRequest()` revokes the request in the core so it can't
 /// publish.
@@ -977,7 +977,7 @@ public final class AutofillCallHandle: @unchecked Sendable {
     }
 }
 
-public protocol AutofillAgentClient: Sendable {
+public protocol AutofillDaemonClient: Sendable {
     func send(
         _ command: AutofillCommand,
         timeout: TimeInterval,
@@ -986,7 +986,7 @@ public protocol AutofillAgentClient: Sendable {
 
     /// A new extension request starts, carrying the OS-supplied service,
     /// relying party and hash data. The iOS client binds it to the core
-    /// (`MobileCredentialProvider.begin`) before any prompt; the macOS agent
+    /// (`MobileCredentialProvider.begin`) before any prompt; the macOS daemon
     /// takes them per command instead.
     func beginRequest(_ request: ProviderRequest)
 
@@ -996,7 +996,7 @@ public protocol AutofillAgentClient: Sendable {
     func endRequest()
 }
 
-extension AutofillAgentClient {
+extension AutofillDaemonClient {
     public func beginRequest(_ request: ProviderRequest) {}
     public func endRequest() {}
 }
@@ -1072,7 +1072,7 @@ public enum ProviderRequest: Equatable, Sendable, Encodable {
     }
 }
 
-public protocol AgentLaunching: Sendable {
+public protocol DaemonLaunching: Sendable {
     func startInBackground() async -> Bool
     func openContainingApp() async -> Bool
 }

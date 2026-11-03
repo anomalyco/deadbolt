@@ -1,7 +1,7 @@
 //! The native messaging host's passkey messages (see docs/autofill.md).
 //! A registration or sign-in waits on Touch ID, so it runs beside other
 //! requests and answers when done; `passkey-cancel` (the page navigated or
-//! aborted) stops it, which hangs up on the agent and dismisses the prompt.
+//! aborted) stops it, which hangs up on the daemon and dismisses the prompt.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

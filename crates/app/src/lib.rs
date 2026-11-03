@@ -1,11 +1,11 @@
-//! Deadbolt's desktop app: a thin Rune client of the running agent, over
+//! Deadbolt's desktop app: a thin Rune client of the running daemon, over
 //! the same socket protocol as the CLI. See docs/app.md.
 
 pub mod activity;
-pub mod agent;
 pub mod agents;
 pub mod binary;
 pub mod cache;
+pub mod daemon;
 pub mod edit;
 mod enclave;
 pub mod health;
@@ -33,7 +33,7 @@ pub(crate) use scenes::{PANEL_SCENES, SCENES};
 use deadbolt_client::Paths;
 use rune::{AppSpec, KeyEvent, Tx, Waker};
 
-use agent::{Agent, Job};
+use daemon::{Daemon, Job};
 use model::App;
 use onboarding::worker::Worker;
 
@@ -46,7 +46,7 @@ pub fn spec() -> AppSpec<App> {
         title: "Deadbolt",
         size: (820.0, 540.0),
         min_size: Some((640.0, 420.0)),
-        init: || App::new(Agent::offline()),
+        init: || App::new(Daemon::offline()),
         view: view::app,
         scenes: SCENES,
         fonts: rune_theme_opencode::FONTS,
@@ -60,13 +60,13 @@ pub fn spec() -> AppSpec<App> {
 /// What the `deadbolt` binary the app is built into hands it.
 pub struct Host {
     /// The SHA-256 of the `deadbolt-enclave` that binary pinned (macOS),
-    /// which the app checks before trusting it about the agent.
+    /// which the app checks before trusting it about the daemon.
     pub enclave_sha256: &'static str,
 }
 
-/// Runs the app against this user's agent and clipboard, unless `args`
+/// Runs the app against this user's daemon and clipboard, unless `args`
 /// (without the program name) ask for Rune's tooling (`--snap`, `--tree`, `--script`, `--scene`, …): those
-/// runs get no agent (and Rune keeps headless runs off the clipboard), so a
+/// runs get no daemon (and Rune keeps headless runs off the clipboard), so a
 /// snapshot or tree dump can never hold real vault data.
 ///
 /// Two windows: the main one (`--window main` for tooling) and the quick
@@ -114,11 +114,11 @@ pub fn run(argv: Vec<String>, host: Host) {
             .init(move || {
                 let mut app = if live {
                     let paths = Paths::get();
-                    let launch = agent::launch();
-                    let mut app = App::new(Agent::spawn(
+                    let launch = daemon::launch();
+                    let mut app = App::new(Daemon::spawn(
                         paths.clone(),
                         launch.clone(),
-                        agent::Window::Main,
+                        daemon::Window::Main,
                     ));
                     app.onboarding.worker = Worker::new(paths.clone(), launch);
                     app.installer = install::Installer::from_env(&paths);
@@ -127,7 +127,7 @@ pub fn run(argv: Vec<String>, host: Host) {
                     }
                     app
                 } else {
-                    App::new(Agent::offline())
+                    App::new(Daemon::offline())
                 };
                 if wired {
                     app.windows = Some(main_windows);
@@ -147,13 +147,13 @@ pub fn run(argv: Vec<String>, host: Host) {
         let mut quick = quick
             .init(move || {
                 let mut app = if live {
-                    App::panel(Agent::spawn(
+                    App::panel(Daemon::spawn(
                         Paths::get(),
-                        agent::launch(),
-                        agent::Window::Panel,
+                        daemon::launch(),
+                        daemon::Window::Panel,
                     ))
                 } else {
-                    App::panel(Agent::offline())
+                    App::panel(Daemon::offline())
                 };
                 if wired {
                     app.windows = Some(panel_windows);
@@ -190,8 +190,8 @@ fn setup(s: &mut App, waker: Waker) {
     if let Some(installer) = &s.installer {
         installer.set_waker(waker.clone());
     }
-    s.agent.set_waker(waker);
-    s.agent.send(Job::Connect);
+    s.daemon.set_waker(waker);
+    s.daemon.send(Job::Connect);
 }
 
 #[cfg(test)]
@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn tooling_runs_never_reach_the_agent() {
+    fn tooling_runs_never_reach_the_daemon() {
         for argv in [
             &["--snap", "out.png"][..],
             &["--tree", "tree.json"],
@@ -220,7 +220,7 @@ mod tests {
             &["--scene", "vault"],
             &["--theme", "light", "--snap", "out.png"],
         ] {
-            assert!(!live(argv), "{argv:?} would connect to the agent");
+            assert!(!live(argv), "{argv:?} would connect to the daemon");
         }
         assert!(live(&[]));
         assert!(live(&["--reduced-motion"]));

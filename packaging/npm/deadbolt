@@ -1,0 +1,27 @@
+#!/bin/sh
+# @deadbolt/cli's postinstall replaces this with a link to this platform's
+# deadbolt (postinstall.mjs). When the package manager skipped install
+# scripts (pnpm, bun, npm with scripts disallowed), or the postinstall
+# couldn't link (npm didn't serve this platform's package yet), the first run
+# links it here, then runs it. It never deletes anything.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case "$link" in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+package=$(cd "$(dirname "$self")/.." && pwd)
+if ! command -v node > /dev/null 2>&1; then
+  echo "Error: @deadbolt/cli isn't fully installed, and finishing that needs node on PATH." >&2
+  echo "Run \`node $package/postinstall.mjs\`, or reinstall @deadbolt/cli." >&2
+  exit 1
+fi
+node "$package/postinstall.mjs" >&2
+if [ -L "$package/bin/deadbolt" ]; then
+  exec "$package/bin/deadbolt" "$@"
+fi
+echo "Error: @deadbolt/cli isn't fully installed: this platform's package couldn't be installed (above)." >&2
+echo "If @deadbolt/cli was just released, npm may not serve it yet; run deadbolt again in a few minutes." >&2
+exit 1

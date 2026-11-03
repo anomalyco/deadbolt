@@ -2,7 +2,7 @@
 //! Settings. It registers on the panel's `App`, so pressing it toggles the
 //! panel directly (`App::toggle_panel`); the main window owns the choice, the
 //! recorder in Settings and the notice when the shortcut couldn't be
-//! registered. The choice is kept in `app-shortcut`, beside the agent's config.
+//! registered. The choice is kept in `app-shortcut`, beside the daemon's config.
 
 use std::fs;
 use std::path::{Path, PathBuf};

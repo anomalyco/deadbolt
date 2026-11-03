@@ -1,5 +1,5 @@
 # Hostless lifecycle tests intentionally need neither UniFFI nor the Rust build.
-# The provider tests drive ControllerModel through a fake AutofillAgentClient.
+# The provider tests drive ControllerModel through a fake AutofillDaemonClient.
 name: DeadboltLifecycle
 options:
   deploymentTarget:

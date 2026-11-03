@@ -1,13 +1,13 @@
 // macOS only: cancellation-safe POSIX `AF_UNIX` client and `NSWorkspace`
-// agent launcher for `DeadboltAutoFill.appex`. The client seam it implements
-// (`AutofillAgentClient`, `AutofillCallHandle`, `AgentLaunching`) is in
+// daemon launcher for `DeadboltAutoFill.appex`. The client seam it implements
+// (`AutofillDaemonClient`, `AutofillCallHandle`, `DaemonLaunching`) is in
 // Protocol.swift; iOS uses the in-process core instead and never builds this.
 
 import AppKit
 import Darwin
 import Foundation
 
-public struct WorkspaceAgentLauncher: AgentLaunching {
+public struct WorkspaceDaemonLauncher: DaemonLaunching {
     public let bundle: ContainingBundle?
 
     public init(bundle: ContainingBundle? = ContainingBundle.locate()) {
@@ -40,7 +40,7 @@ public struct WorkspaceAgentLauncher: AgentLaunching {
     }
 }
 
-public struct UnixSocketAgentClient: AutofillAgentClient {
+public struct UnixSocketDaemonClient: AutofillDaemonClient {
     public typealias PeerVerifyFn = @Sendable (Int32) throws -> Void
 
     public let socketPathProvider: @Sendable () -> String?
@@ -62,22 +62,22 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         self.peerVerifier = peerVerifier
     }
 
-    public static func live() -> UnixSocketAgentClient {
+    public static func live() -> UnixSocketDaemonClient {
         let bundle = ContainingBundle.locate()
         let resolvedGroup = AppGroupContainer.resolve()
         let verifier: PeerVerifyFn? = { fd in
-            guard let expectedAgent = bundle?.agentBinaryURL else {
-                throw AgentCallError.peerRejected(
+            guard let expectedDaemon = bundle?.daemonBinaryURL else {
+                throw DaemonCallError.peerRejected(
                     "DeadboltAutoFill is not running inside Deadbolt.app"
                 )
             }
-            try PeerCheck.verifyAgent(
+            try PeerCheck.verifyDaemon(
                 socketFD: fd,
-                expectedAgentURL: expectedAgent,
+                expectedDaemonURL: expectedDaemon,
                 requiredTeamID: resolvedGroup.teamID
             )
         }
-        return UnixSocketAgentClient(
+        return UnixSocketDaemonClient(
             socketPathProvider: {
                 if let url = resolvedGroup.socketURL {
                     return url.path
@@ -94,7 +94,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         handle: AutofillCallHandle? = nil
     ) async throws -> AutofillReply {
         guard let socketPath = socketPathProvider(), !socketPath.isEmpty else {
-            throw AgentCallError.agentUnavailable(
+            throw DaemonCallError.daemonUnavailable(
                 "Deadbolt's macOS AutoFill App Group container is unavailable on an unsigned build."
             )
         }
@@ -125,12 +125,12 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         peerVerifier: PeerVerifyFn? = nil
     ) throws -> AutofillReply {
         if handle?.isCancelled == true {
-            throw AgentCallError.cancelled
+            throw DaemonCallError.cancelled
         }
 
         let pathBytes = Array(socketPath.utf8)
         guard !pathBytes.isEmpty, pathBytes.count <= AutofillWire.sunPathMax else {
-            throw AgentCallError.agentUnavailable("AutoFill socket path exceeds sun_path limit")
+            throw DaemonCallError.daemonUnavailable("AutoFill socket path exceeds sun_path limit")
         }
 
         let deadlineNanos: UInt64 = {
@@ -141,7 +141,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
 
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
-            throw AgentCallError.agentUnavailable("could not create Unix socket")
+            throw DaemonCallError.daemonUnavailable("could not create Unix socket")
         }
         defer {
             // Cleared under the handle's lock before close, so a late cancel
@@ -160,7 +160,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
 
         let attached = handle?.onCancel { _ = Darwin.shutdown(fd, SHUT_RDWR) } ?? true
         guard attached else {
-            throw AgentCallError.cancelled
+            throw DaemonCallError.cancelled
         }
 
         var addr = sockaddr_un()
@@ -186,17 +186,17 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
                 var sockErr: Int32 = 0
                 var len = socklen_t(MemoryLayout<Int32>.size)
                 if getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockErr, &len) != 0 || sockErr != 0 {
-                    throw AgentCallError.agentUnavailable("Deadbolt's agent is not running")
+                    throw DaemonCallError.daemonUnavailable("Deadbolt's daemon is not running")
                 }
             } else {
-                throw AgentCallError.agentUnavailable("Deadbolt's agent is not running")
+                throw DaemonCallError.daemonUnavailable("Deadbolt's daemon is not running")
             }
         }
 
         if command.carriesPassphrase {
             guard let peerVerifier else {
-                throw AgentCallError.peerRejected(
-                    "refusing to send passphrase without verifying Deadbolt's agent signature"
+                throw DaemonCallError.peerRejected(
+                    "refusing to send passphrase without verifying Deadbolt's daemon signature"
                 )
             }
             try peerVerifier(fd)
@@ -229,7 +229,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
     private static func remainingPollMillis(deadlineNanos: UInt64) throws -> Int32 {
         let now = DispatchTime.now().uptimeNanoseconds
         guard now < deadlineNanos else {
-            throw AgentCallError.timedOut
+            throw DaemonCallError.timedOut
         }
         let millis = (deadlineNanos - now) / 1_000_000
         return Int32(min(max(1, millis), UInt64(Int32.max)))
@@ -243,27 +243,27 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
     ) throws {
         while true {
             if handle?.isCancelled == true {
-                throw AgentCallError.cancelled
+                throw DaemonCallError.cancelled
             }
             let timeoutMS = try remainingPollMillis(deadlineNanos: deadlineNanos)
             var pfd = pollfd(fd: fd, events: events, revents: 0)
             let rc = Darwin.poll(&pfd, 1, timeoutMS)
             if handle?.isCancelled == true {
-                throw AgentCallError.cancelled
+                throw DaemonCallError.cancelled
             }
             if rc > 0 {
                 if (pfd.revents & Int16(POLLNVAL)) != 0 {
-                    throw AgentCallError.agentUnavailable("AutoFill socket closed")
+                    throw DaemonCallError.daemonUnavailable("AutoFill socket closed")
                 }
                 return
             }
             if rc == 0 {
-                throw AgentCallError.timedOut
+                throw DaemonCallError.timedOut
             }
             if errno == EINTR {
                 continue
             }
-            throw AgentCallError.agentUnavailable("waiting on AutoFill socket failed")
+            throw DaemonCallError.daemonUnavailable("waiting on AutoFill socket failed")
         }
     }
 
@@ -276,7 +276,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         var offset = 0
         while offset < data.count {
             if handle?.isCancelled == true {
-                throw AgentCallError.cancelled
+                throw DaemonCallError.cancelled
             }
             let written: Int = data.withUnsafeBytes { raw in
                 guard let base = raw.baseAddress else { return 0 }
@@ -302,9 +302,9 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
                 }
             }
             if handle?.isCancelled == true {
-                throw AgentCallError.cancelled
+                throw DaemonCallError.cancelled
             }
-            throw AgentCallError.agentUnavailable("writing to Deadbolt's agent failed")
+            throw DaemonCallError.daemonUnavailable("writing to Deadbolt's daemon failed")
         }
     }
 
@@ -328,7 +328,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
                 if !buffer.isEmpty {
                     buffer.resetBytes(in: 0 ..< buffer.count)
                 }
-                throw AgentCallError.cancelled
+                throw DaemonCallError.cancelled
             }
             let n = Darwin.read(fd, &scratch, scratch.count)
             if n > 0 {
@@ -337,7 +337,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
                         if !buffer.isEmpty {
                             buffer.resetBytes(in: 0 ..< buffer.count)
                         }
-                        throw AgentCallError.invalidResponse("agent reply exceeded max line size")
+                        throw DaemonCallError.invalidResponse("daemon reply exceeded max line size")
                     }
                     buffer.append(contentsOf: scratch[0 ..< newline])
                     return buffer
@@ -346,7 +346,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
                     if !buffer.isEmpty {
                         buffer.resetBytes(in: 0 ..< buffer.count)
                     }
-                    throw AgentCallError.invalidResponse("agent reply exceeded max line size")
+                    throw DaemonCallError.invalidResponse("daemon reply exceeded max line size")
                 }
                 buffer.append(contentsOf: scratch[0 ..< n])
                 continue
@@ -356,12 +356,12 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
                     if !buffer.isEmpty {
                         buffer.resetBytes(in: 0 ..< buffer.count)
                     }
-                    throw AgentCallError.cancelled
+                    throw DaemonCallError.cancelled
                 }
                 if !buffer.isEmpty {
                     return buffer
                 }
-                throw AgentCallError.agentUnavailable("Deadbolt's agent closed the connection")
+                throw DaemonCallError.daemonUnavailable("Deadbolt's daemon closed the connection")
             }
             let err = errno
             if err == EINTR {
@@ -380,9 +380,9 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
                 buffer.resetBytes(in: 0 ..< buffer.count)
             }
             if handle?.isCancelled == true {
-                throw AgentCallError.cancelled
+                throw DaemonCallError.cancelled
             }
-            throw AgentCallError.agentUnavailable("reading from Deadbolt's agent failed")
+            throw DaemonCallError.daemonUnavailable("reading from Deadbolt's daemon failed")
         }
     }
 }

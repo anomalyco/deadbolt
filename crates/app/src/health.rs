@@ -1,6 +1,6 @@
 //! Password health state, Security view navigation, and Fix flow transitions.
 //! The app holds only finding flags, counts, and item references; secret values
-//! and password hashes never leave the agent.
+//! and password hashes never leave the daemon.
 
 pub mod view;
 
@@ -10,7 +10,7 @@ use deadbolt_client::protocol::{
 };
 use rune::{Key, KeyEvent, Tx};
 
-use crate::agent::{Done, Failure, Job};
+use crate::daemon::{Done, Failure, Job};
 use crate::keys::{plain, step};
 use crate::model::{App, Screen};
 
@@ -261,7 +261,7 @@ impl App {
             self.health.checking = true;
             self.health.error = None;
         }
-        self.agent.send(Job::Health {
+        self.daemon.send(Job::Health {
             seq: self.health.seq,
             online,
         });
@@ -284,7 +284,7 @@ impl App {
             r.breach_checks_enabled = next;
         }
         self.health.seq += 1;
-        self.agent.send(Job::BreachChecksSet {
+        self.daemon.send(Job::BreachChecksSet {
             enabled: next,
             seq: self.health.seq,
         });
@@ -293,7 +293,7 @@ impl App {
     pub fn set_health_ignored(&mut self, id: &str, kind: FindingKind, ignored: bool) {
         self.health.seq += 1;
         self.health.error = None;
-        self.agent.send(Job::HealthIgnore {
+        self.daemon.send(Job::HealthIgnore {
             id: id.to_owned(),
             kind,
             ignored,
@@ -567,7 +567,7 @@ pub(crate) async fn load(paths: &Paths, seq: u64, online: bool) -> Done {
         vault: None,
         online,
     };
-    let result = crate::agent::call(paths, command, |r| match r {
+    let result = crate::daemon::call(paths, command, |r| match r {
         Reply::Health { report } => Some(report),
         _ => None,
     })
@@ -588,7 +588,7 @@ pub(crate) async fn set_ignored(
         kind,
         ignored,
     };
-    let result = crate::agent::call(paths, command, |r| match r {
+    let result = crate::daemon::call(paths, command, |r| match r {
         Reply::Health { report } => Some(report),
         _ => None,
     })

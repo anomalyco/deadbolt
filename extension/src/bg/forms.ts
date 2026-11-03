@@ -235,7 +235,7 @@ export class Forms {
    * The user picked an identity or card: every frame it goes to fixes which
    * of its fields may be filled (a frame below the top page only if they all
    * show through every frame above), the host is asked once for just the
-   * values those fields need (a card's number or code make the agent ask
+   * values those fields need (a card's number or code make the daemon ask
    * for Touch ID), frames below are checked again once the values are in
    * hand, and each frame gets the values for its own fields.
    */
@@ -376,7 +376,7 @@ export function reauthError(err: unknown): string {
 }
 
 /**
- * Touch ID turned down (the agent answers a card fill whose prompt didn't
+ * Touch ID turned down (the daemon answers a card fill whose prompt didn't
  * go through with `failed`), or the item isn't there: say so plainly.
  */
 export function formsError(err: unknown, verify = false): string {

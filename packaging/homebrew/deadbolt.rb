@@ -26,7 +26,7 @@ class Deadbolt < Formula
 
   def install
     bin.install "deadbolt"
-    # The Touch ID helper; the agent runs it only from beside its own executable.
+    # The Touch ID helper; the daemon runs it only from beside its own executable.
     bin.install "deadbolt-enclave" if OS.mac?
   end
 

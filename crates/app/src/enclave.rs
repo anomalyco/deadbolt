@@ -1,7 +1,7 @@
-//! The `deadbolt-enclave` beside the agent, checked against the SHA-256 the
+//! The `deadbolt-enclave` beside the daemon, checked against the SHA-256 the
 //! `deadbolt` binary this app is built into pinned (its `build.rs`, handed
 //! over through [`crate::Host`]) before the app trusts what it says about the
-//! agent, as `deadbolt` checks it before every use (docs/touch-id.md). A
+//! daemon, as `deadbolt` checks it before every use (docs/touch-id.md). A
 //! universal helper matches by the slice for this Mac's architecture.
 
 use std::path::Path;
@@ -42,7 +42,7 @@ pub fn verify(helper: &Path) -> Result<(), String> {
 fn verify_at(helper: &Path, expected: &str, cpu: u32) -> Result<(), String> {
     if expected.len() != 64 {
         return Err(format!(
-            "this build of Deadbolt has no pinned {}, so it can't check its agent. \
+            "this build of Deadbolt has no pinned {}, so it can't check its daemon. \
              Reinstall Deadbolt",
             helper.display()
         ));

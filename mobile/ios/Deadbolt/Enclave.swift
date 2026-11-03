@@ -8,7 +8,7 @@
 // key itself is unreachable without the match.
 //
 // The token is the same `DBSE` envelope as the macOS helper
-// (crates/cli/src/agent/enclave.swift), header included, with the header as
+// (crates/cli/src/daemon/enclave.swift), header included, with the header as
 // the external AAD:
 //
 //   "DBSE" | version 1 | flags (bit 0 = biometryCurrentSet) | created_at u64 LE

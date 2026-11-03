@@ -1,7 +1,7 @@
 // iOS credential provider: the in-process client to the Rust core's
 // `MobileCredentialProvider` (crates/mobile-core/src/provider.rs). It
-// implements the same `AutofillAgentClient` seam as macOS's socket client,
-// so the shared ControllerModel drives both; there is no socket, no agent
+// implements the same `AutofillDaemonClient` seam as macOS's socket client,
+// so the shared ControllerModel drives both; there is no socket, no daemon
 // and no network.
 //
 // Every extension request is bound to the core with the OS-supplied
@@ -66,9 +66,9 @@ public protocol ProviderCore: AnyObject, Sendable {
     func cancel(_ requestId: UInt64)
 }
 
-public final class InProcessProviderClient: AutofillAgentClient, @unchecked Sendable {
+public final class InProcessProviderClient: AutofillDaemonClient, @unchecked Sendable {
     /// Opens a biometric envelope with a fresh system biometric prompt,
-    /// returning the slot key or throwing an `AgentCallError`.
+    /// returning the slot key or throwing an `DaemonCallError`.
     public typealias Unseal = @Sendable (_ token: Data) throws -> Data
 
     private let core: any ProviderCore
@@ -85,7 +85,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
 
     private struct RequestState {
         /// The core's id for this request, or why `begin` refused it.
-        var begun: Result<UInt64, AgentCallError>?
+        var begun: Result<UInt64, DaemonCallError>?
         var unlock: Unlock?
         var biometricEnrolled = false
     }
@@ -120,7 +120,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
             if case let .success(id)? = previous {
                 core.cancel(id)
             }
-            let begun: Result<UInt64, AgentCallError>
+            let begun: Result<UInt64, DaemonCallError>
             do {
                 begun = .success(try core.begin(line))
             } catch {
@@ -160,7 +160,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         // The core can't be interrupted mid-call: a cancelled task or handle
         // discards the result, and `endRequest()` revokes the core request.
         if Task.isCancelled || handle?.isCancelled == true {
-            throw AgentCallError.cancelled
+            throw DaemonCallError.cancelled
         }
         let reply: AutofillReply = try await withCheckedThrowingContinuation { continuation in
             queue.async {
@@ -171,7 +171,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         // that ended or was replaced meanwhile.
         let stale = currentGeneration() != current
         if Task.isCancelled || stale || handle?.isCancelled == true {
-            throw AgentCallError.cancelled
+            throw DaemonCallError.cancelled
         }
         return reply
     }
@@ -188,7 +188,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
             return .done
         case .unlockBiometric:
             guard biometricAvailable() else {
-                throw AgentCallError.agentError(code: .failed, message: "Biometric unlock isn't available on this iPhone.")
+                throw DaemonCallError.daemonError(code: .failed, message: "Biometric unlock isn't available on this iPhone.")
             }
             // The prompt comes with the call that needs the key.
             update(current) { $0.unlock = .biometric }
@@ -208,7 +208,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
             return .autofillPasskeyCreated(try Self.decode(AutofillPasskeyCreatedReply.self, line))
         case .status, .autofillIdentities:
             // The iOS app publishes identities; the provider never does.
-            throw AgentCallError.agentError(code: .forbidden, message: "Not available in the iOS provider.")
+            throw DaemonCallError.daemonError(code: .forbidden, message: "Not available in the iOS provider.")
         }
     }
 
@@ -264,7 +264,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
                 // reason) stops being offered, so the passphrase is.
                 update(current) {
                     $0.unlock = nil
-                    if case let AgentCallError.agentError(code, _) = error, code == .locked {
+                    if case let DaemonCallError.daemonError(code, _) = error, code == .locked {
                         $0.biometricEnrolled = false
                     }
                 }
@@ -289,7 +289,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         lock.lock()
         defer { lock.unlock() }
         guard generation == current else {
-            throw AgentCallError.cancelled
+            throw DaemonCallError.cancelled
         }
         switch state.begun {
         case let .success(id)?:
@@ -298,7 +298,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
             throw error
         case nil:
             // Ended (or never begun): nothing may run for it.
-            throw AgentCallError.cancelled
+            throw DaemonCallError.cancelled
         }
     }
 
@@ -306,10 +306,10 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         lock.lock()
         defer { lock.unlock() }
         guard generation == current else {
-            throw AgentCallError.cancelled
+            throw DaemonCallError.cancelled
         }
         guard let unlock = state.unlock else {
-            throw AgentCallError.agentError(code: .locked, message: "")
+            throw DaemonCallError.daemonError(code: .locked, message: "")
         }
         return unlock
     }
@@ -341,39 +341,39 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         }
     }
 
-    static func map(_ error: Error, biometricReady: Bool) -> AgentCallError {
-        if let error = error as? AgentCallError {
+    static func map(_ error: Error, biometricReady: Bool) -> DaemonCallError {
+        if let error = error as? DaemonCallError {
             return error
         }
         guard let error = error as? ProviderCoreError else {
-            return .agentError(code: .failed, message: error.localizedDescription)
+            return .daemonError(code: .failed, message: error.localizedDescription)
         }
         switch error.kind {
         case .inUse, .busy:
             // The app (or a previous request still finishing its replay) holds
             // the store: recoverable, offered as "Try again".
-            return .agentError(code: .busy, message: error.message)
+            return .daemonError(code: .busy, message: error.message)
         case .cancelled:
             return .cancelled
         case .authentication:
-            return .agentError(code: .locked, message: "That didn't unlock Deadbolt. Try again.")
+            return .daemonError(code: .locked, message: "That didn't unlock Deadbolt. Try again.")
         case .domainMismatch:
-            return .agentError(code: .domainMismatch, message: error.message)
+            return .daemonError(code: .domainMismatch, message: error.message)
         case .notFound:
-            return .agentError(code: .notFound, message: error.message)
+            return .daemonError(code: .notFound, message: error.message)
         case .interactionRequired:
-            return .agentError(code: .interactionRequired, message: error.message)
+            return .daemonError(code: .interactionRequired, message: error.message)
         case .verificationRequired:
             // Only a fresh biometric unlock verifies a passkey ceremony.
             return biometricReady
-                ? .agentError(code: .interactionRequired, message: error.message)
-                : .agentError(code: .failed, message: "This site needs Face ID or Touch ID. Turn it on in Deadbolt.")
+                ? .daemonError(code: .interactionRequired, message: error.message)
+                : .daemonError(code: .failed, message: "This site needs Face ID or Touch ID. Turn it on in Deadbolt.")
         case .alreadyExists:
-            return .agentError(code: .exists, message: error.message)
+            return .daemonError(code: .exists, message: error.message)
         case .notInitialized:
-            return .agentError(code: .notInitialized, message: error.message)
+            return .daemonError(code: .notInitialized, message: error.message)
         case .invalidRequest, .storage, .invalidVault, .unconfirmedWrite, .internal:
-            return .agentError(code: .failed, message: error.message)
+            return .daemonError(code: .failed, message: error.message)
         }
     }
 
@@ -412,7 +412,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         do {
             return try JSONDecoder().decode(type, from: Data(line.utf8))
         } catch {
-            throw AgentCallError.invalidResponse("Deadbolt sent a reply it couldn't read.")
+            throw DaemonCallError.invalidResponse("Deadbolt sent a reply it couldn't read.")
         }
     }
 }

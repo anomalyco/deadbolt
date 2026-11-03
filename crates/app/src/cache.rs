@@ -8,7 +8,7 @@
 //! for the selected item's own values (`App::detail`). What it keeps, the
 //! page shows anyway: names, usernames, URLs, notes, and a one-time code
 //! until its period ends. Every value is wiped as it leaves: evicted,
-//! replaced, or cleared on a lock, the agent stopping, the panel hiding and
+//! replaced, or cleared on a lock, the daemon stopping, the panel hiding and
 //! any change to the vault (`App::refresh`).
 
 use std::collections::VecDeque;

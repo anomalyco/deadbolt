@@ -25,11 +25,11 @@
 // card into it (seedVault), and the host log is what the service worker
 // sent the vault. The fake host's other knobs have counterparts there (a
 // locked vault, one never set up, slow or rate-limited answers from the
-// worker's side). Native-agent passkey and Touch ID scenarios are skipped
+// worker's side). Native-daemon passkey and Touch ID scenarios are skipped
 // by name; e2e/standalone.ts covers real standalone passkeys and Strict reauth.
 //
 // `--deadbolt <path to the deadbolt binary>` adds the passkey run, which
-// needs a real agent to sign: it makes a throwaway store (fast KDF, local
+// needs a real daemon to sign: it makes a throwaway store (fast KDF, local
 // network only) in the run's temporary directory, runs that binary as the
 // host, and checks each credential with @simplewebauthn/server.
 //
@@ -188,6 +188,13 @@ const HIDDEN: Record<string, string> = {
   "text-cover": hiddenForm(coverField("pointer-events:none;overflow:hidden;font:120px/38px sans-serif;color:#f4f4f5;white-space:nowrap").replace("></div></div>", ">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</div></div>")),
   "shadow-spread-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;box-shadow:0 0 0 400px #f4f4f5")),
   "outline-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;outline:400px solid #f4f4f5")),
+  // Not hidden: a click-through glow around the window's edges, in a closed shadow root (a browser automation
+  // extension's while it hands the page to the user), with the form clear of the glow's reach.
+  "edge-glow": hiddenForm(passwordField, `<span id="g"></span><style>body { margin: 160px }</style><script>document.getElementById("g").attachShadow({ mode: "closed" }).innerHTML = '<div style="position:fixed;inset:0;z-index:2147483647;pointer-events:none;box-shadow:inset 0 0 0 2px rgba(76,141,255,.55),inset 0 0 80px rgba(76,141,255,.1)"></div>'</script>`),
+  // Hidden: an inset shadow's spread fills a click-through box over it.
+  "inset-shadow-cover": hiddenForm(coverField("pointer-events:none;box-shadow:inset 0 0 0 40px #f4f4f5")),
+  // Hidden: the same in an 8 px box its wrapper scales up over the field: its shadow reaches as far as it's scaled.
+  "scaled-inset-shadow-cover": hiddenForm(`<div style="position:relative">${passwordField}<div style="position:absolute;left:50%;top:50%;z-index:1;pointer-events:none;transform:scale(40)"><div style="width:8px;height:8px;margin:-4px;box-shadow:inset 0 0 0 4px #f4f4f5"></div></div></div>`),
   // Not hidden: Dark Reader's filter mode on the whole page.
   "dark-reader": hiddenForm(passwordField, `<style>html { filter: invert(1) hue-rotate(180deg) !important }</style>`),
   // Transparent glyphs drawn by an opaque text-shadow, in a box or a ::after.
@@ -1699,7 +1706,7 @@ async function generateIn(run: Run, page: Page, name?: string): Promise<string |
   })
 }
 
-/** The generator: a sign-up fills every new-password box, nothing is saved before a successful submit, and the agent's id stands in for the password. */
+/** The generator: a sign-up fills every new-password box, nothing is saved before a successful submit, and the daemon's id stands in for the password. */
 async function generator(scheme: Scheme) {
   const run = await launch({ scheme })
   const page = await run.context.newPage()
@@ -1711,7 +1718,7 @@ async function generator(scheme: Scheme) {
     const asked = (await hostLog(run)).find((r) => r.type === "generate")
     check(asked?.origin === site && asked.maxLength === 16 && asked.rules === "minlength: 12; required: digit; required: upper;", "the host is asked with the field's rules")
     check(!(await hostLog(run)).some((r) => r.type === "save" || r.type === "check"), "nothing is checked or saved before the submit")
-    check(!!(await until("the agent is told to keep it", async () => (await hostLog(run)).some((r) => r.type === "generate-keep" && r.origin === site))), "once it's in the page, the agent is told to keep it")
+    check(!!(await until("the daemon is told to keep it", async () => (await hostLog(run)).some((r) => r.type === "generate-keep" && r.origin === site))), "once it's in the page, the daemon is told to keep it")
     // The page names it by id once the keep's answer is back; a person takes longer than that to submit.
     await until("the page is told the kept id", () => run.worker.evaluate(() => (globalThis as unknown as { __answered: string[] }).__answered.includes("db:generated")))
     await page.click("button[type=submit]")
@@ -1772,7 +1779,7 @@ async function generator(scheme: Scheme) {
       await Bun.sleep(2000)
       const asked = (await hostLog(run)).slice(before).map((r) => r.type)
       check(!extensionFrame(page, "menu.html") && !asked.includes("generate"), `no generator row when ${why} (${asked.join(", ")})`)
-      if (path === "weak") check(asked.includes("generate-check"), "the agent is asked how strong a password the field allows")
+      if (path === "weak") check(asked.includes("generate-check"), "the daemon is asked how strong a password the field allows")
       else check(!asked.includes("generate-check"), "a pattern outside the subset isn't sent anywhere")
     }
 
@@ -2103,7 +2110,7 @@ async function rateLimited() {
     check((await page.inputValue("#password")) === "", "and fills nothing")
     await p.close()
 
-    // The agent doesn't keep a generated password: the page never names its
+    // The daemon doesn't keep a generated password: the page never names its
     // id, and a sign-up that goes through is offered with it as typed.
     await page.goto(`${site}/signup`)
     await type(run, page, "#email", "unkept@acme.test")
@@ -2113,7 +2120,7 @@ async function rateLimited() {
       await page.waitForURL("**/home")
       if (await offered(run, "a sign-up with an unkept generated password badges the toolbar button")) {
         const checked = (await hostLog(run)).find((r) => r.type === "check")
-        check(checked?.password === value && !("generated" in checked), "its check sends the password as typed, not an id the agent can't resolve")
+        check(checked?.password === value && !("generated" in checked), "its check sends the password as typed, not an id the daemon can't resolve")
         const offer = await offerIn(run)
         check(offer.title === "Save login for localhost?", `the popup offers to save it (${offer.title})`)
         await offer.p.click(".offer button.primary")
@@ -2241,7 +2248,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader" || name === "shadow-owl") check(password === "correct horse", `a visible password field fills (${name})`)
+      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader" || name === "shadow-owl" || name === "edge-glow") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 
@@ -3471,7 +3478,7 @@ async function signInSessions() {
     check(!!(await until("↓ still brings the full list", () => extensionFrame(page, "menu.html"))), "↓ still brings the list")
     await page.keyboard.press("Escape")
 
-    // (h) A sibling host the agent would list the login on, but no saved URL names: nothing.
+    // (h) A sibling host the daemon would list the login on, but no saved URL names: nothing.
     await page.goto(`http://www.acme.test:${server.port}/flow/nav?to=user-content`)
     await pickLogin("kit@acme.test")
     await page.click("#go")
@@ -4015,9 +4022,9 @@ async function backForward() {
   }
 }
 
-// ---- Passkeys (a real agent signs) ------------------------------------------------
+// ---- Passkeys (a real daemon signs) ------------------------------------------------
 
-/** The agent's AAGUID (crates/cli/src/webauthn.rs): a credential with it is Deadbolt's. */
+/** The daemon's AAGUID (crates/cli/src/webauthn.rs): a credential with it is Deadbolt's. */
 const DEADBOLT_AAGUID = "3a31ecda-fefc-f251-1f3e-a11bfdc1de5f"
 
 type Outcome = { ok: boolean; value: any }
@@ -4127,7 +4134,7 @@ async function conditionalHeld() {
       check(framed.under && framed.secure, `the frame's spy sits under the hook, in a secure context (${JSON.stringify(framed)})`)
       check(!!menu && menu.parentFrame() === page.mainFrame(), "Apple's frame's conditional get leaves Deadbolt's menu to open in the top page")
       check(framed.gets.length === 0, `and the browser's get is never called (${framed.gets})`)
-      check(((await menu?.locator(".row .sub").allTextContents()) ?? []).every((s) => !s.startsWith("Passkey")), "with logins only: the agent's client data couldn't say cross-origin")
+      check(((await menu?.locator(".row .sub").allTextContents()) ?? []).every((s) => !s.startsWith("Passkey")), "with logins only: the daemon's client data couldn't say cross-origin")
       if (menu) {
         await settled(menu)
         await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
@@ -4155,7 +4162,7 @@ async function conditionalHeld() {
 
 /** A throwaway Deadbolt store and the environment that points the binary at it. */
 async function deadboltStore() {
-  // Short: the agent's socket path must fit in a sockaddr (104 bytes on macOS).
+  // Short: the daemon's socket path must fit in a sockaddr (104 bytes on macOS).
   const dir = await mkdtemp(process.platform === "darwin" ? "/tmp/dbpk-" : join(tmpdir(), "dbpk-"))
   const env = {
     DEADBOLT_HOME: join(dir, "home"),
@@ -4199,7 +4206,7 @@ async function passkeys() {
     await page.goto(`${site}/passkey`)
     await formFound(page)
 
-    // Registration, asked in the popup and signed by the agent.
+    // Registration, asked in the popup and signed by the daemon.
     const reg = await generateRegistrationOptions({
       rpName: "Acme",
       rpID,
@@ -4222,7 +4229,7 @@ async function passkeys() {
         })
         if (v && check(v.verified, "@simplewebauthn/server verifies the registration")) {
           const info = v.registrationInfo!
-          check(info.aaguid === DEADBOLT_AAGUID, `the agent made it (AAGUID ${info.aaguid})`)
+          check(info.aaguid === DEADBOLT_AAGUID, `the daemon made it (AAGUID ${info.aaguid})`)
           check(info.fmt === "none" && info.credentialType === "public-key", "with none attestation")
           check(info.credentialDeviceType === "multiDevice" && info.credentialBackedUp, "flagged as a synced (backed-up) passkey")
           check(!info.userVerified, "and not user-verified: no Touch ID here")
@@ -4489,7 +4496,7 @@ async function passkeys() {
     await diagnose(run, page, "passkeys")
   } finally {
     await close(run)
-    store.cli("agent", "stop")
+    store.cli("debug", "daemon", "stop")
     await rm(store.dir, { recursive: true, force: true })
   }
 }
@@ -4694,7 +4701,7 @@ async function formsFrames() {
   }
 }
 
-/** A card's number waits on Touch ID: it fills once the agent answers, and nothing fills when Touch ID is turned down. */
+/** A card's number waits on Touch ID: it fills once the daemon answers, and nothing fills when Touch ID is turned down. */
 async function formsTouchId() {
   const slow = await launch({ fillDelay: 1.5 })
   const page = await slow.context.newPage()
@@ -4703,7 +4710,7 @@ async function formsTouchId() {
     const menu = await formsMenu(slow, page, "#cc", "/forms/card-single")
     if (menu) {
       await menu.locator("button.row").first().click()
-      check(!!(await until("the pill waits while Touch ID is asked", async () => (await menu.locator(".pill:not(.ok):not(.failed)").count().catch(() => 0)) > 0 && (await page.inputValue("#cc")) === "", 3000)), "the pill says Filling… while the agent asks for Touch ID")
+      check(!!(await until("the pill waits while Touch ID is asked", async () => (await menu.locator(".pill:not(.ok):not(.failed)").count().catch(() => 0)) > 0 && (await page.inputValue("#cc")) === "", 3000)), "the pill says Filling… while the daemon asks for Touch ID")
       check(!!(await until("the card fills once verified", async () => (await page.inputValue("#cc")) !== "", 8000)), "the card fills once Touch ID is answered")
     }
   } catch (err) {
@@ -5196,7 +5203,7 @@ const cost: Record<string, number> = {
   escInDialog: 6,
   ...gauntletRun.cost,
 }
-/** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
+/** Scenarios tied to the native daemon; standalone passkeys/Strict are in standalone.ts. */
 const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])
 const units = [
   ...(["light", "dark"] as const).flatMap((scheme) =>

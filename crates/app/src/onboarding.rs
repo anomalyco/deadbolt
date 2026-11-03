@@ -1,6 +1,6 @@
 //! First run: create a vault on this device, or join one from another device.
 //! The state and what each input and reply does to it; `onboarding/view.rs`
-//! draws it and `onboarding/worker.rs` talks to the agent.
+//! draws it and `onboarding/worker.rs` talks to the daemon.
 //!
 //! A device can be set up (it has a key and a passphrase) and still hold no
 //! vault, after a cancelled join for example. Onboarding then skips the
@@ -16,7 +16,7 @@ use deadbolt_client::protocol::VaultInfo;
 use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::Zeroizing;
 
-use crate::agent::{Failure, Job};
+use crate::daemon::{Failure, Job};
 use crate::model::{App, Screen};
 use crate::view::{Notice, Severity};
 use worker::{NewDevice, Progress, Stage, Worker};
@@ -108,7 +108,7 @@ pub struct Onboarding {
     /// The pairing code: until it's used or expires, whoever types it first
     /// pairs with this device, so it's wiped when dropped.
     pub code: Option<Zeroizing<String>>,
-    /// The copied `deadbolt pair` command, while it's still on the clipboard.
+    /// The copied `deadbolt approve` command, while it's still on the clipboard.
     pub copied: Option<SecretCopy>,
     /// A command copied from the empty vault's guide, and when.
     pub copied_command: Option<(&'static str, Option<f64>)>,
@@ -211,7 +211,7 @@ impl Onboarding {
             .then_some("Name this device so your other devices can tell it apart.")
     }
 
-    /// What's wrong with the vault name, if anything (the agent's rule).
+    /// What's wrong with the vault name, if anything (the daemon's rule).
     pub fn vault_problem(&self) -> Option<&'static str> {
         let name = self.vault.text.trim();
         if name.is_empty() {
@@ -456,12 +456,12 @@ impl App {
         o.worker.cancel();
     }
 
-    /// Copies `deadbolt pair <code>`, the command to run on the other device.
+    /// Copies `deadbolt approve <code>`, the command to run on the other device.
     pub fn copy_code(&mut self, tx: &mut Tx) {
         let Some(code) = &self.onboarding.code else {
             return;
         };
-        let command = format!("deadbolt pair {}", code.as_str());
+        let command = format!("deadbolt approve {}", code.as_str());
         self.onboarding.notice = None;
         self.onboarding.copied = Some(tx.copy_secret(command, CODE_LIFETIME));
     }
@@ -600,7 +600,7 @@ impl App {
 
     fn open_vault(&mut self, tx: &mut Tx) {
         self.reset_onboarding(true);
-        self.agent.send(Job::Status);
+        self.daemon.send(Job::Status);
         self.list();
         self.enter_vault(tx);
     }
@@ -631,11 +631,11 @@ impl App {
             o.vault.focused = true;
         }
         // Setup may have finished before the failure: ask whether the device is set up now.
-        self.agent.send(Job::Status);
+        self.daemon.send(Job::Status);
     }
 }
 
-/// What a failed request means for the person, from the agent's message.
+/// What a failed request means for the person, from the daemon's message.
 fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
     let message = failure.message.as_str();
     let (severity, title, body) = if message.contains(worker::ALREADY_SET_UP) {
@@ -673,7 +673,7 @@ fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
         };
         let detail = sentence(message);
         let detail = if detail.is_empty() {
-            "The agent failed."
+            "The daemon failed."
         } else {
             detail.as_str()
         };
@@ -744,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn vault_names_follow_the_agents_rule() {
+    fn vault_names_follow_the_daemons_rule() {
         let mut o = Onboarding::new(Worker::offline());
         for (name, ok) in [
             ("personal", true),

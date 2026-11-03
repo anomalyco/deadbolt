@@ -1,4 +1,4 @@
-//! Browser message adapters for the native agent's shared generation policy.
+//! Browser message adapters for the native daemon's shared generation policy.
 
 use std::time::Duration;
 

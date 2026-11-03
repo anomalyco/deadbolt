@@ -44,7 +44,7 @@ describe("rpIdFor", () => {
 })
 
 describe("parseOptions", () => {
-  test("keeps what the agent needs and refuses what the browser should", () => {
+  test("keeps what the daemon needs and refuses what the browser should", () => {
     expect(parseOptions("get", { challenge: CHALLENGE, allow: ["AQ"], userVerification: "nonsense", timeout: 1 })).toEqual({
       kind: "get",
       challenge: CHALLENGE,
@@ -79,7 +79,7 @@ describe("parseOptions", () => {
 })
 
 const b64 = (text: string) => btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-/** Client data as the agent builds it (crates/cli/src/webauthn.rs). */
+/** Client data as the daemon builds it (crates/cli/src/webauthn.rs). */
 const clientData = (type: string, origin: string, crossOrigin = false) => b64(JSON.stringify({ type, challenge: CHALLENGE, origin, crossOrigin }))
 const GET_DATA = clientData("webauthn.get", "https://www.example.com")
 
@@ -235,8 +235,8 @@ describe("rpId", () => {
     expect(passkeys.prompt(1)).toBeUndefined()
   })
 
-  test("the agent's refusal is a SecurityError too", async () => {
-    // A rule the extension's copy might miss still stops at the agent.
+  test("the daemon's refusal is a SecurityError too", async () => {
+    // A rule the extension's copy might miss still stops at the daemon.
     fake.frames["1:0"] = { url: "https://www.elsewhere.com/", documentId: "top-doc" }
     const sender = pageSender({ url: "https://www.elsewhere.com/", origin: "https://www.elsewhere.com" })
     expect(await call("get", sender, 1, get({ rpId: "elsewhere.com" }))).toEqual({ error: { name: "SecurityError", message: expect.any(String) } })
@@ -358,7 +358,7 @@ describe("aborts", () => {
     expect(passkeys.prompt(1)).toBeUndefined()
   })
 
-  test("an abort during Touch ID cancels the agent's ceremony", async () => {
+  test("an abort during Touch ID cancels the daemon's ceremony", async () => {
     h.hold()
     const reply = call("get", pageSender(), 9, get())
     passkeys.choose(1, (await prompted()).id, { action: "use", ref: REF })
@@ -477,7 +477,7 @@ describe("a ceremony waiting on a reconnect", () => {
     ["create", "navigation"],
     ["get", "abort"],
   ] as const)
-    test(`${kind}: ${end} while the host reconnects, and the agent never hears of it`, async () => {
+    test(`${kind}: ${end} while the host reconnects, and the daemon never hears of it`, async () => {
       const ports: NativePort[] = []
       const host = new Host(() => {
         const port = new NativePort(ports.length > 0)
@@ -602,7 +602,7 @@ describe("autofill sign-in (conditional mediation)", () => {
       await settle()
       expect(seen.reply).toEqual(expected === "held" ? null : { fallback: true })
       expect(passkeys.prompt(1)).toBeUndefined()
-      // Only a frame on one origin all the way up lists passkeys: elsewhere the agent's client data wouldn't be true.
+      // Only a frame on one origin all the way up lists passkeys: elsewhere the daemon's client data wouldn't be true.
       if (sender.origin !== "https://www.example.com") expect(kinds()).not.toContain("passkey-list")
     })
 
@@ -670,7 +670,7 @@ describe("autofill sign-in (conditional mediation)", () => {
 })
 
 describe("user verification", () => {
-  test("the prompt says Touch ID comes next only when the agent will ask", async () => {
+  test("the prompt says Touch ID comes next only when the daemon will ask", async () => {
     h = passkeyHost(true)
     passkeys = new Passkeys(h.host, { openPopup: async () => {} })
     const discouraged = call("create", pageSender(), 1, create({ userVerification: "discouraged" }))
@@ -701,7 +701,7 @@ describe("user verification", () => {
     return ended
   }
 
-  test("a provider chain signs without a prompt only where the agent verifies the person", async () => {
+  test("a provider chain signs without a prompt only where the daemon verifies the person", async () => {
     const ended = chained(true)
     expect(await call("get", pageSender(), 1, get({ userVerification: "preferred" }))).toMatchObject({ credential: { credentialId: "Y3JlZA" } })
     expect(ended).toEqual([])

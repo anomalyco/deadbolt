@@ -1,5 +1,5 @@
 //! Stamps a build id into the binary so the CLI can tell when a running
-//! agent comes from a different build, even if the crate version is the same,
+//! daemon comes from a different build, even if the crate version is the same,
 //! stamps the release channel it was built for (`DEADBOLT_BUILD_CHANNEL`), and
 //! compiles the macOS Secure Enclave helper (`deadbolt-enclave`), or takes a
 //! prebuilt, already-signed one from `DEADBOLT_ENCLAVE_PREBUILT` (release
@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src");
-    println!("cargo:rerun-if-changed=src/agent/enclave-Info.plist");
+    println!("cargo:rerun-if-changed=src/daemon/enclave-Info.plist");
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_TEAM_ID");
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_SIGNING_IDENTITY");
     println!("cargo:rerun-if-env-changed=DEADBOLT_ENCLAVE_PREBUILT");
@@ -82,11 +82,11 @@ fn emit_empty_enclave_env() {
 )]
 fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
     let swift_srcs = [
-        PathBuf::from("src/agent/enclave.swift"),
-        PathBuf::from("src/agent/identify.swift"),
+        PathBuf::from("src/daemon/enclave.swift"),
+        PathBuf::from("src/daemon/identify.swift"),
     ];
     let build_rs = PathBuf::from("build.rs");
-    let plist_path = PathBuf::from("src/agent/enclave-Info.plist");
+    let plist_path = PathBuf::from("src/daemon/enclave-Info.plist");
     let out_dir =
         PathBuf::from(std::env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR is not set".to_string())?);
 

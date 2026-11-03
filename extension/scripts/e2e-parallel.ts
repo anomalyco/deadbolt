@@ -7,7 +7,7 @@
 //
 // Alongside the shards, once per run: universal sign-in through a provider
 // (e2e/universal-providers.ts) on the same build. The native build needs a
-// real agent for it (--deadbolt); without one it's skipped and says so.
+// real daemon for it (--deadbolt); without one it's skipped and says so.
 
 import { mkdtemp, rm } from "node:fs/promises"
 import { availableParallelism, tmpdir } from "node:os"

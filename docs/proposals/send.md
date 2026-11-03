@@ -1,16 +1,16 @@
 # Deadbolt Send
 
-2026-10-27. One-time links that hand files, secrets or vault items to someone who doesn't use Deadbolt. Built in `crates/send` (protocol and crypto, native and WebAssembly), `crates/send-web` (the browser wrapper), the agent (`crates/cli/src/agent/send.rs`), the CLI (`crates/cli/src/send.rs`) and the site's receive page (`site/r.html`, `site/src/receive/`).
+2026-10-27. One-time links that hand files, secrets or vault items to someone who doesn't use Deadbolt. Built in `crates/send` (protocol and crypto, native and WebAssembly), `crates/send-web` (the browser wrapper), the daemon (`crates/cli/src/daemon/send.rs`), the CLI (`crates/cli/src/send.rs`) and the site's receive page (`site/r.html`, `site/src/receive/`).
 
 ## Model
 
 - **The recipient needs only a browser.** They open `https://deadbolt.pw/r#<ticket>`. The page fetches the share straight from the sender's computer and decrypts it locally.
-- **Live, peer to peer, nothing stored.** The sender's agent serves the share over iroh on ALPN `deadbolt/send/1` until it is picked up, expires or is revoked. The browser runs iroh compiled to WebAssembly, which can only use relays, so it reaches the sender through the n0 relay named in the link. No server of ours, or anyone's, keeps a copy; the relay only forwards end-to-end encrypted QUIC.
+- **Live, peer to peer, nothing stored.** The sender's daemon serves the share over iroh on ALPN `deadbolt/send/1` until it is picked up, expires or is revoked. The browser runs iroh compiled to WebAssembly, which can only use relays, so it reaches the sender through the n0 relay named in the link. No server of ours, or anyone's, keeps a copy; the relay only forwards end-to-end encrypted QUIC.
 - **The link is the key.** The ticket (`SendTicket`, unpadded base64url after `#`):
   `version(1) || sender endpoint id(32) || access secret(32) || content key(32) || relay_len(1) || relay url || addr_count(1) || addrs`.
   Browsers never send a fragment to a server. Direct addresses go in only when there is no relay (local networks and tests); with one, they'd only lengthen the link and tell its holder the sender's network addresses.
-- **A send endpoint of its own.** The agent serves sends from a second iroh endpoint with a random key per agent run, not the device key: a link doesn't identify the device, and it stops working when the agent stops. Sends need no vault and no unlock (the agent holds only sealed bytes), so they keep working while the store is locked and on a device that isn't set up.
-- **The agent never sees the content key.** The CLI builds the bundle, seals it, and sends the agent only the sealed bytes and the access secret (`send-create`); the key goes straight from the CLI into the link. So `deadbolt sends` can't show a link again.
+- **A send endpoint of its own.** The daemon serves sends from a second iroh endpoint with a random key per daemon run, not the device key: a link doesn't identify the device, and it stops working when the daemon stops. Sends need no vault and no unlock (the daemon holds only sealed bytes), so they keep working while the store is locked and on a device that isn't set up.
+- **The daemon never sees the content key.** The CLI builds the bundle, seals it, and sends the daemon only the sealed bytes and the access secret (`send-create`); the key goes straight from the CLI into the link. So `deadbolt send ls` can't show a link again.
 - **Bundle.** Minimal and general: `Bundle { title?, note?, entries: [Entry | Group] }`, `Entry { name, data, mime?, sensitive }`, `Group { name?, entries }`. Names and types are inside the encryption. Files are entries, folders groups, a vault item a group of its fields (secret and otp fields sensitive). At most 32 MiB sealed.
 - **Sealing.** Chunked XChaCha20-Poly1305 (STREAM): 64 KiB chunks, nonce `prefix(15) || last(1) || index(8)`, key `BLAKE3 derive_key("deadbolt send 2026-10 bundle", content key)`. Truncation, reordering and extension fail.
 
@@ -30,17 +30,17 @@ The secret is proved, never sent, and the proof is bound to the connection, so i
 
 - Single use by default (`--opens N` for more, up to 100); expires after **1 hour** by default (`--ttl`, up to 7 days).
 - An open is reserved when a receiver proves the secret, and counted once the whole sealed bundle has been written to the connection, acknowledged or not (the receiver may have it). A receiver that fails before then gives its open back. While one is downloading, a second receiver of a single-use link is refused as "used": first opener wins.
-- Revoking stops further opens; one already under way may finish. Once a share can't be opened again the agent drops its bundle from memory; finished shares stay listed until a day after they would have expired.
-- Shares live in the agent's memory. **They end when the agent stops** (a `send --wait` then fails); the CLI says so when it prints a link.
+- Revoking stops further opens; one already under way may finish. Once a share can't be opened again the daemon drops its bundle from memory; finished shares stay listed until a day after they would have expired.
+- Shares live in the daemon's memory. **They end when the daemon stops** (a `send --wait` then fails); the CLI says so when it prints a link.
 
 ## Threat model
 
-- **Whoever holds the link is the recipient.** Anyone who sees it (a chat log, a shoulder, a link scanner) can open it instead. Single use plus "picked up" make that visible: if the intended recipient finds the link already used, the sender's `deadbolt sends show` says when it was opened, and they should treat the contents as exposed.
-- **The sender must be online.** Their computer must be awake with the agent running until the link is opened. Nothing waits on a server.
+- **Whoever holds the link is the recipient.** Anyone who sees it (a chat log, a shoulder, a link scanner) can open it instead. Single use plus "picked up" make that visible: if the intended recipient finds the link already used, the sender's `deadbolt send show` says when it was opened, and they should treat the contents as exposed.
+- **The sender must be online.** Their computer must be awake with the daemon running until the link is opened. Nothing waits on a server.
 - **Link scanners.** The receive page only connects when the recipient presses "Receive", so a mail or chat scanner that runs scripts doesn't spend a one-time link. Previews that don't run scripts never see the fragment at all.
 - **The page.** It reads the fragment once, removes it from the address bar and history (`history.replaceState`), keeps it only in memory, and never logs or sends it. It sets `Referrer-Policy: no-referrer` (also as a meta tag), loads nothing from third parties (CSP allows connections only to the site, and to https/wss for the relays), has no analytics and can't be framed. Trust in the page is trust in deadbolt.pw serving honest code, as with any web client; the page is static and built from this repository.
 - **The relay** sees that a browser connected to an endpoint id, when, and how many bytes went through; not the content, the secret or the key.
-- **The agent** holds the sealed bundle and the access secret in memory until the share ends, never the content key. A process that can read the agent's memory can already read the unlocked vault.
+- **The daemon** holds the sealed bundle and the access secret in memory until the share ends, never the content key. A process that can read the daemon's memory can already read the unlocked vault.
 - **Not in scope:** a recipient keeping what they received, a compromised recipient browser, metadata (sizes, timing) visible to the relay.
 
 ## CLI
@@ -48,8 +48,10 @@ The secret is proved, never sent, and the proof is bound to the connection, so i
 ```text
 deadbolt send [PATH|-]... [--item NAME|ID [--field NAME]]... [--title T] [--note N]
               [--sensitive] [--opens N] [--ttl 1h] [--qr] [--yes] [--json] [--wait]
-deadbolt sends [ls [--json] | show <id> [--json] | revoke <id>]
+deadbolt send ls [--json] | show <id> [--json] | revoke <id>
 ```
+
+`ls`, `show` and `revoke` are subcommands when they come first, never paths: a file named `ls` goes as `./ls`.
 
 - `deadbolt send ./file ./folder/` sends files (media type sniffed) and folders (as groups). Arguments are always paths and must exist: `deadbolt send ./prod.env.typo` fails with "./prod.env.typo: no such file" and never looks in the vault.
 - `deadbolt send` with no arguments asks for a secret with hidden input.
@@ -57,7 +59,7 @@ deadbolt sends [ls [--json] | show <id> [--json] | revoke <id>]
 - `deadbolt send --item "Stripe"` sends a vault item as a group of its fields, keeping secret and otp fields hidden. `--item` takes an item's exact name or ID (full or the short ID `ls` shows), nothing looser: with no exact match it fails with close names as suggestions (`no item named "stripe". Did you mean: "Stripe", "Stripe (test)"?`) but never picks one, and when several items share the name it lists them with their IDs. `--item` repeats.
 - `--field NAME` sends only that field of the nearest `--item` before it (`--item A --field x --item B` sends A's field x and all of B). A `--field` before any `--item`, or two for one `--item`, is an error; repeat `--item` to send two fields of one item.
 - Inputs mix freely and go into the bundle in command-line order. `--title` and `--note` are shown to the recipient (the note is never hidden). `--sensitive` hides files and stdin behind "reveal" too; key-like files (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `.env`, `id_*` private keys, ...) always are.
-- **Preview and confirm.** Before anything is sealed or handed to the agent, `send` lists every entry (kind `file`/`folder`/`item`/`field`/`secret`/`stdin`, name, size, sensitive), the opens and the expiry, and asks `Create link? [y/N]` (default no; declining exits 1 with "not sent"):
+- **Preview and confirm.** Before anything is sealed or handed to the daemon, `send` lists every entry (kind `file`/`folder`/`item`/`field`/`secret`/`stdin`, name, size, sensitive), the opens and the expiry, and asks `Create link? [y/N]` (default no; declining exits 1 with "not sent"):
 
   ```text
   About to send (single use, expires in 1h):
@@ -81,6 +83,6 @@ deadbolt sends [ls [--json] | show <id> [--json] | revoke <id>]
 
 ## Later
 
-- Shares that survive an agent restart (persist the sealed bundle and the endpoint key, encrypted at rest).
+- Shares that survive a daemon restart (persist the sealed bundle and the endpoint key, encrypted at rest).
 - Sending from the desktop app; receiving into a vault with Deadbolt.
 - An offline mailbox for when the sender can't stay online, which changes the "nothing stored" model and would be a separate decision.

@@ -761,14 +761,14 @@ final class LifecycleTests: XCTestCase {
 
 /// A fake in-process provider client: unlocked, two synthetic logins, and a
 /// record of every command each extension request sent.
-private final class FakeProviderClient: AutofillAgentClient, @unchecked Sendable {
+private final class FakeProviderClient: AutofillDaemonClient, @unchecked Sendable {
     private let lock = NSLock()
     private var request = 0
     private var sent: [(request: Int, command: AutofillCommand)] = []
 
     /// Scripted refusals: the next fill, or the next status, fails with this.
-    var fillError: AgentCallError?
-    var statusError: AgentCallError?
+    var fillError: DaemonCallError?
+    var statusError: DaemonCallError?
     /// Runs just before a successful fill reply is returned.
     var beforeFillReply: (@Sendable () async -> Void)?
 
@@ -789,7 +789,7 @@ private final class FakeProviderClient: AutofillAgentClient, @unchecked Sendable
     func endRequest() {}
 
     func send(_ command: AutofillCommand, timeout: TimeInterval, handle: AutofillCallHandle?) async throws -> AutofillReply {
-        let (fillError, statusError) = lock.withLock { () -> (AgentCallError?, AgentCallError?) in
+        let (fillError, statusError) = lock.withLock { () -> (DaemonCallError?, DaemonCallError?) in
             sent.append((request, command))
             return (self.fillError, self.statusError)
         }
@@ -835,7 +835,7 @@ private final class RecordingCompleter: ExtensionContextCompleting {
     func completePasskeyRegistration(_ registration: PasskeyRegistration) {}
 }
 
-private struct NoLauncher: AgentLaunching {
+private struct NoLauncher: DaemonLaunching {
     func startInBackground() async -> Bool { false }
     func openContainingApp() async -> Bool { false }
 }
@@ -921,11 +921,11 @@ final class ProviderPickerTests: XCTestCase {
         let client = FakeProviderClient()
         let completer = RecordingCompleter()
         let model = AutoFillControllerModel(client: client, launcher: NoLauncher(), identitySyncer: nil, completer: completer)
-        client.statusError = .agentError(code: .busy, message: "The app still has the vault open.")
+        client.statusError = .daemonError(code: .busy, message: "The app still has the vault open.")
         model.beginCredentialList(services: [AutofillService(identifier: "site-00042.example.test", kind: .domain)])
         try? await Task.sleep(for: .milliseconds(200))
         XCTAssertTrue(model.failureIsBusy)
-        client.statusError = .agentError(code: .failed, message: "Something else went wrong.")
+        client.statusError = .daemonError(code: .failed, message: "Something else went wrong.")
         model.retryConnection()
         try? await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(model.screen, .failed("Something else went wrong."))

@@ -4,7 +4,7 @@
 //! shares one clipboard with the main window, and its global shortcut brings
 //! it up from anywhere.
 
-use deadbolt_app::agent::{Agent, Done, Job, Values};
+use deadbolt_app::daemon::{Daemon, Done, Job, Values};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::panel::window::Windows;
 use deadbolt_app::panel::{self, Phase};
@@ -84,7 +84,7 @@ fn alone(rt: &mut Runtime<App>) {
     rt.state.panel.as_mut().unwrap().opens = 1;
 }
 
-/// The agent's answer to the list a summon asks for (the tests' agent is offline).
+/// The daemon's answer to the list a summon asks for (the tests' daemon is offline).
 fn answer_list(rt: &mut Runtime<App>, items: &[ItemInfo]) {
     let items = items.to_vec();
     rt.update(move |s, tx| {
@@ -693,8 +693,8 @@ fn a_paste_during_the_confirmation_does_nothing() {
 #[test]
 fn the_list_holds_still_during_the_confirmation() {
     let mut rt = runtime("empty", true);
-    let (agent, jobs, replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     frames(&mut rt, 10);
     let items = rt.state.items.clone();
     let selected = rt.state.selected.clone();
@@ -1132,8 +1132,8 @@ fn closing_its_window_cleans_up_like_the_main_one() {
 #[test]
 fn a_hidden_panel_fetches_and_holds_nothing() {
     let mut rt = runtime("empty", true);
-    let (agent, jobs, replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     let items = rt.state.items.clone();
     let item = rt.state.detail.clone().expect("an item's values show");
     let status = rt.state.status.clone().expect("a status");
@@ -1193,8 +1193,8 @@ fn command_l_locks_only_while_open() {
         },
     };
     let mut rt = runtime("empty", true);
-    let (agent, jobs, _replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, _replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     frames(&mut rt, 2);
     for phase in [
         Phase::Copied { until: None },
@@ -1527,7 +1527,7 @@ fn panel_item_masks_empty_secrets_shows_code_errors_and_uses_cached_pages() {
         s.apply(
             Done::Code {
                 seq,
-                result: Err(deadbolt_app::agent::Failure {
+                result: Err(deadbolt_app::daemon::Failure {
                     code: None,
                     message: "invalid secret".into(),
                 }),

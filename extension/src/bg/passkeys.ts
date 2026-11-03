@@ -5,7 +5,7 @@
 // (github.com/R44VC0RP/foyer, src/autofill/vault.ts, by Ryan Vogel).
 //
 // The page supplies only its options. The origin is the browser's record of
-// the sender, and the agent builds the client data from it and checks the
+// the sender, and the daemon builds the client data from it and checks the
 // rpId again (docs/autofill.md). The user answers in browser UI the page
 // can't reach: the toolbar popup for a modal call, the inline menu for an
 // autofill one.
@@ -18,10 +18,10 @@ import { HostError, type VaultBackend, type ReauthBody } from "./backend"
 import { openPopupFor } from "./save"
 import { fillableOrigin, senderOrigin, siteOf } from "./site"
 
-/** ES256, the only algorithm the agent signs with. */
+/** ES256, the only algorithm the daemon signs with. */
 const ES256 = -7
 const TIMEOUT = { default: 5 * 60_000, min: 60_000, max: 10 * 60_000 }
-/** A ceremony waits on Touch ID in the agent. */
+/** A ceremony waits on Touch ID in the daemon. */
 const CEREMONY_MS = 5 * 60_000
 /** Calls waiting at once in a tab, counted from the moment one arrives. */
 const MAX_PER_TAB = 8
@@ -66,7 +66,7 @@ interface CreateOptions {
 /** A page's call, from the moment it arrives until it's answered. */
 interface Pending extends FrameTarget {
   key: string
-  /** The relying party, once the agent has said. */
+  /** The relying party, once the daemon has said. */
   rpId: string
   resolve: (reply: HookReply) => void
   done: boolean
@@ -93,7 +93,7 @@ const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a
 /**
  * The relying party id a page at `page` may use: its host, or a parent of it
  * on the same site (registrable domain under the full Public Suffix List),
- * never a public suffix or an IP address. The agent checks again with the
+ * never a public suffix or an IP address. The daemon checks again with the
  * same rule (crates/cli/src/site.rs); this one only saves asking the user.
  */
 export function rpIdFor(page: URL, rpId?: string): string | null {
@@ -260,7 +260,7 @@ export class Passkeys {
     p.framed = !same
     if (!rpIdFor(new URL(p.origin), options.rpId)) return fail("SecurityError", "This relying party ID isn't this site's.")
     if (options.kind === "create") {
-      // The agent makes ES256 passkeys only, and is a platform authenticator.
+      // The daemon makes ES256 passkeys only, and is a platform authenticator.
       if ((options.algorithms.length && !options.algorithms.includes(ES256)) || options.attachment === "cross-platform") return FALLBACK
     } else if (options.mediation === "silent") return FALLBACK
 
@@ -272,7 +272,7 @@ export class Passkeys {
     if (!this.host.capabilities.includes("passkeys")) return FALLBACK
     const listed = await this.passkeysFor(p, options.rpId)
     if (!("passkeys" in listed)) return listed
-    // Without Touch ID the agent can't verify the user; the browser may.
+    // Without Touch ID the daemon can't verify the user; the browser may.
     if (options.userVerification === "required" && !listed.canVerify) {
       // A chain must hand off, not open an unsolicited browser-device fallback.
       if (options.kind === "get" && await this.automatic?.(p, []) !== undefined) return fail("NotAllowedError")
@@ -318,7 +318,7 @@ export class Passkeys {
    * has no passkey for it (docs/autofill.md, Passkeys).
    *
    * In a login frame on another origin of the site (Apple's sign-in frame
-   * in App Store Connect), the client data the agent signs, never
+   * in App Store Connect), the client data the daemon signs, never
    * crossOrigin, wouldn't be true: the call is held for the logins alone.
    */
   private async conditional(p: Pending, o: GetOptions): Promise<HookReply> {
@@ -329,7 +329,7 @@ export class Passkeys {
       if (!("passkeys" in listed)) return listed
       p.rpId = listed.rpId
       canVerify = listed.canVerify
-      // Without Touch ID the agent can't verify the user. A nonempty allow list names the only passkeys the site takes.
+      // Without Touch ID the daemon can't verify the user. A nonempty allow list names the only passkeys the site takes.
       if (o.userVerification !== "required" || listed.canVerify) passkeys = o.allow.length ? listed.passkeys.filter((k) => o.allow.includes(k.credentialId)) : listed.passkeys
     }
     const automatic = await this.automaticGet(p, passkeys, o, canVerify, true)
@@ -379,7 +379,7 @@ export class Passkeys {
     if (p.done) throw GONE
   }
 
-  /** Before asking the user or the agent: the call is still live, in the same document, on the same origin all the way up. */
+  /** Before asking the user or the daemon: the call is still live, in the same document, on the same origin all the way up. */
   private async ready(p: Pending) {
     this.live(p)
     const same = await this.sameOrigin(p)
@@ -431,7 +431,7 @@ export class Passkeys {
     return { credential: { credentialId, clientDataJSON, authenticatorData, signature, userHandle } }
   }
 
-  /** The native agent verifies there; standalone Strict asks in extension UI. */
+  /** The native daemon verifies there; standalone Strict asks in extension UI. */
   private async ceremony<T extends "passkey-create" | "passkey-get">(p: Pending, body: Extract<ReauthBody, { type: T }>, title: string): Promise<ReplyFor[T]> {
     try {
       return await this.host.send(body, { timeout: CEREMONY_MS, onId: (id) => (p.hostId = id), signal: p.stop.signal })
@@ -469,7 +469,7 @@ export class Passkeys {
   }
 
   /**
-   * Answers the page with what the agent made, if the call is still live in
+   * Answers the page with what the daemon made, if the call is still live in
    * the same document and the client data is what was asked for: this
    * origin, never cross-origin. Whether the credential went.
    */
@@ -557,7 +557,7 @@ export class Passkeys {
 
   /**
    * Reuses all existing RP, allow-list, UV and Strict ceremony checks. A
-   * chain's assertion still needs the person: only where the agent verifies
+   * chain's assertion still needs the person: only where the daemon verifies
    * them (`canVerify`, and the site doesn't discourage it) does it sign
    * without a prompt. Otherwise a modal call ends the chain quietly and goes
    * on as an ordinary call, to the usual passkey prompt.

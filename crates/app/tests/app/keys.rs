@@ -2,7 +2,7 @@
 //! is, a clicked row hands focus back to the search, ⌘F goes to the search,
 //! and esc clears it. `keymap.rs` has the rest of the keyboard.
 
-use deadbolt_app::agent::Done;
+use deadbolt_app::daemon::Done;
 use deadbolt_app::import::Phase;
 use deadbolt_app::model::{App, Screen};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
@@ -101,7 +101,7 @@ fn vault_keys_work_with_nothing_focused() {
         ids.iter().position(|i| *i == id).unwrap()
     };
     blur(&mut rt);
-    // The scene holds the selected item's values; moving would wait on the agent.
+    // The scene holds the selected item's values; moving would wait on the daemon.
     press(
         &mut rt,
         Key::Enter,
@@ -122,8 +122,8 @@ fn vault_keys_work_with_nothing_focused() {
     assert!(!rt.state.search.focused, "nothing took focus");
 
     // Modified chords (⌃L, ⇧⌘L) don't fire ⌘L, and ⌘↑ in the search doesn't move the list.
-    let (agent, jobs, _) = deadbolt_app::agent::Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, _) = deadbolt_app::daemon::Daemon::scripted();
+    rt.state.daemon = daemon;
     press(
         &mut rt,
         Key::Command('l'),
@@ -144,7 +144,7 @@ fn vault_keys_work_with_nothing_focused() {
     assert!(
         !jobs
             .try_iter()
-            .any(|j| matches!(j, deadbolt_app::agent::Job::Lock))
+            .any(|j| matches!(j, deadbolt_app::daemon::Job::Lock))
     );
     command(&mut rt, 'f');
     tap(&mut rt, Key::Down);

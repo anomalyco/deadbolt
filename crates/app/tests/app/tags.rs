@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use deadbolt_app::agent::{Agent, Done, Job};
+use deadbolt_app::daemon::{Daemon, Done, Job};
 use deadbolt_app::model::App;
 use deadbolt_app::palette::{self, Action};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
@@ -29,8 +29,8 @@ fn rig(scene: &str) -> Rig {
     );
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
-    let (agent, jobs, replies) = Agent::scripted();
-    rt.state.agent = agent;
+    let (daemon, jobs, replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
     for _ in 0..30 {
         rt.frame(FRAME);
     }

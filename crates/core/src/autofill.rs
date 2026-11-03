@@ -1,4 +1,4 @@
-//! Shared login fields and comparison rules for the native agent and browser device.
+//! Shared login fields and comparison rules for the native daemon and browser device.
 
 use std::cmp::Reverse;
 

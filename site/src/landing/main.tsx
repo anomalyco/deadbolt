@@ -42,7 +42,7 @@ function Landing() {
 
       <section>
         <h2>cli</h2>
-        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on a new phone\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt pair DBPAIRAGMRLX…\n`}{out("code 411308: adding device phone\nconfirm code 411308 matches the other device? [y/N] y\nadded phone to personal")}</pre>
+        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on a new phone\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt approve DBPAIRAGMRLX…\n`}{out("code 411308: adding device phone\nconfirm code 411308 matches the other device? [y/N] y\nadded phone to personal")}</pre>
       </section>
 
       <section>
@@ -62,7 +62,7 @@ function Landing() {
         <dl className="facts">
           <div><dt>no recovery</dt><Justified as="dd" text="lose every device and the vault is gone. there is no server holding a copy and no reset email. pair a second device early." /></div>
           <div><dt>removal is a promise about the future</dt><Justified as="dd" text="a removed device can't sync anything new, but it keeps what it already had. rotate the passwords it could see." /></div>
-          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background agent, pairing, sync and a bitwarden import. no apps or browser extension yet." /></div>
+          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background daemon, pairing, sync and a bitwarden import. no apps or browser extension yet." /></div>
         </dl>
       </section>
 

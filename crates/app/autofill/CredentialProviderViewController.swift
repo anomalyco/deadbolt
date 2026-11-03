@@ -83,12 +83,12 @@ private final class SystemExtensionCompleter: ExtensionContextCompleting {
 #if os(macOS)
 public final class CredentialProviderViewController: ASCredentialProviderViewController {
     private lazy var completer = SystemExtensionCompleter(controller: self)
-    private lazy var client = UnixSocketAgentClient.live()
+    private lazy var client = UnixSocketDaemonClient.live()
     private lazy var syncer = IdentitySyncer()
     private lazy var model: AutoFillControllerModel = {
         let m = AutoFillControllerModel(
             client: client,
-            launcher: WorkspaceAgentLauncher(),
+            launcher: WorkspaceDaemonLauncher(),
             identitySyncer: syncer,
             completer: completer
         )
@@ -208,7 +208,7 @@ public final class CredentialProviderViewController: ASCredentialProviderViewCon
     private lazy var model: AutoFillControllerModel = {
         let m = AutoFillControllerModel(
             client: client,
-            launcher: NoAgentLauncher(),
+            launcher: NoDaemonLauncher(),
             identitySyncer: IdentitySyncer(),
             completer: completer
         )
@@ -376,8 +376,8 @@ public final class CredentialProviderViewController: ASCredentialProviderViewCon
     }
 }
 
-/// iOS has no agent to start or app to open from the provider.
-struct NoAgentLauncher: AgentLaunching {
+/// iOS has no daemon to start or app to open from the provider.
+struct NoDaemonLauncher: DaemonLaunching {
     func startInBackground() async -> Bool { false }
     func openContainingApp() async -> Bool { false }
 }

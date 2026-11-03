@@ -157,8 +157,8 @@ How concurrent cases resolve:
    - Multi-device random DAGs mixing `Create` (with and without `favorite`/`tags`), `Favorite`, `TagAdd`, `TagRemove`, `Set`, `Remove`, `Name`, `Delete`, and device `Remove` cutoffs, replayed across random topological sorts (`assert_order_independent`) to check that both `Vault::items` and `Vault::history` match in every order.
    - Canonical encode/decode round-trips and rejection of non-canonical `Create` (`0x03` with `favorite = false` and empty `tags`, unsorted or duplicate tags, invalid `fav` byte).
    - Hierarchy matching (`work` vs. `work/aws` vs. `network`) and case-folded deduplication (`Work/AWS` + `work/aws`).
-2. **Four-device deterministic simulator (`crates/cli/src/agent/sim/mod.rs`)**:
-   - Add `Action::Favorite(usize, bool)`, `Action::Tag(usize, u64)`, and `Action::Untag(usize, u64)` driving `agent::items::set`.
+2. **Four-device deterministic simulator (`crates/cli/src/daemon/sim/mod.rs`)**:
+   - Add `Action::Favorite(usize, bool)`, `Action::Tag(usize, u64)`, and `Action::Untag(usize, u64)` driving `daemon::items::set`.
    - `Action::Tag` formats nested tags containing `SECRET_MARKER` (`format!("work/{SECRET_MARKER}{value:016x}")`).
    - `World::check()` and `World::converge()` then verify across crashes, locks, partitions, half-open stream cuts, injected write failures, and mid-sync device removals:
      - **Encrypted disk:** no file in `d.dir` ever contains `SECRET_MARKER` in plaintext.
@@ -173,9 +173,9 @@ How concurrent cases resolve:
 Tag names and favorite flags have the same confidentiality boundary as item names and secret values:
 
 - **At rest (`crates/store` and OPFS):** `Unlocked::append_batch` seals each encoded `Entry` as one `XChaCha20-Poly1305` ciphertext in `store.redb`'s `LOG` table (`vault.redb` on OPFS) under `keys.data`. No secondary redb table or metadata key indexes tags or favorites; filtering scans the unlocked `Vault`'s in-memory items. Nothing on disk reveals tag names, how many tags exist, or which items are starred.
-- **In memory and on lock:** `Entry::encode()` returns `Zeroizing<Vec<u8>>`. Locking the agent drops `Loaded` (and every `Vault` and `Item`); in the desktop app and quick panel, `App::forget_items` clears `items`, `detail`, `cache`, `edit`, and `search` on lock or close.
+- **In memory and on lock:** `Entry::encode()` returns `Zeroizing<Vec<u8>>`. Locking the daemon drops `Loaded` (and every `Vault` and `Item`); in the desktop app and quick panel, `App::forget_items` clears `items`, `detail`, `cache`, `edit`, and `search` on lock or close.
 - **In transit (`crates/net`):** entries move only over iroh QUIC connections authenticated to current members' Ed25519 keys after the membership gate passes.
-- **Browser autofill boundary (`SiteLogins`, `FormItems`, `PasskeyList`, `AgentLogins`):** web-page autofill and paired AI-agent login listings never receive `tags`. Ranking uses `item.favorite` inside the Rust agent (`deadbolt-core`), returning candidates already ordered without exposing organizational tags to the browser host or AI callers.
+- **Browser autofill boundary (`SiteLogins`, `FormItems`, `PasskeyList`, `AgentLogins`):** web-page autofill and paired AI-agent login listings never receive `tags`. Ranking uses `item.favorite` inside the Rust daemon (`deadbolt-core`), returning candidates already ordered without exposing organizational tags to the browser host or AI callers.
 - **Activity log and errors:** `deadbolt activity` records command tiers (`item-list`, `item-set`) and item titles/fields as today (sealed in `store.redb`), never tag query strings in unencrypted logs; import and parse errors never quote raw export lines.
 
 ---
@@ -196,9 +196,9 @@ Each raw tag or folder name passes through `deadbolt_core::tag::normalize_tag`. 
 
 ### Deduplication on `deadbolt import`
 
-`agent/items.rs::key` deduplicates re-imports by item content (login host/username/password, card number, SSH private key, or whole fields). `favorite` and `tags` stay **out** of `Key` so re-importing an export after tagging or starring items in Deadbolt still skips existing items rather than creating duplicates.
+`daemon/items.rs::key` deduplicates re-imports by item content (login host/username/password, card number, SSH private key, or whole fields). `favorite` and `tags` stay **out** of `Key` so re-importing an export after tagging or starring items in Deadbolt still skips existing items rather than creating duplicates.
 
-### `deadbolt sync 1password` (`crates/cli/src/agent/mirror.rs`)
+### `deadbolt sync 1password` (`crates/cli/src/daemon/mirror.rs`)
 
 `docs/sync-1password.md` makes 1Password the one-way source of truth for mirrored items while preserving Deadbolt-only additions on items the sync adopted:
 
@@ -241,7 +241,7 @@ deadbolt tags                       # prints `<tag>\t<count>` for every tag and 
 
 ### Control protocol (`PROTOCOL_VERSION = 22`)
 
-Bump `PROTOCOL_VERSION` from `21` to `22` in `crates/client/src/protocol.rs`. `status` and `stop` stay version-independent, so `ensure_running` stops an older `v21` agent cleanly and starts `v22`.
+Bump `PROTOCOL_VERSION` from `21` to `22` in `crates/client/src/protocol.rs`. `status` and `stop` stay version-independent, so `ensure_running` stops an older `v21` daemon cleanly and starts `v22`.
 
 - **`ItemInfo`** (in `protocol/items.rs`):
   - `pub favorite: bool`
@@ -300,7 +300,7 @@ Checked against every shortcut in `keys::SHORTCUTS`, `edit.rs`, `import.rs`, `pa
 - **Autofill ranking in `deadbolt-core` (shared by native host and standalone wasm):**
   - `crates/core/src/autofill.rs`: `Rank` becomes `(Closeness, Reverse<bool>, Reverse<u64>, String, Option<String>)` (`closeness`, then `favorite`, then `used`, then `title`, then `username`). Site closeness still comes first so `staging.example.com` never loses to a starred login on `app.example.com`; at equal closeness, a starred login beats unstarred ones, placing it first in the inline menu and giving it the primary `Fill` button in `extension/src/popup.ts`.
   - `crates/core/src/forms.rs`: `forms::list` sorts identities and cards by `(!item.favorite, title.to_lowercase(), item.id)`, putting starred cards and identities at the top of checkout and address menus.
-  - `crates/cli/src/agent/passkeys.rs` and `crates/ext-core/src/device/passkeys.rs`: sort passkeys for an RP by `(!item.favorite, username, vault, id)`.
+  - `crates/cli/src/daemon/passkeys.rs` and `crates/ext-core/src/device/passkeys.rs`: sort passkeys for an RP by `(!item.favorite, username, vault, id)`.
 - **Standalone extension vault UI (`crates/ext-core/src/device/items.rs`, `extension/src/vault/`):**
   - Include `favorite` and `tags` on `device-items`, `device-item`, `device-item-save`, and `device-save`.
   - Sort favorites first within both "This site" and "Everything else" / "All items", parse `#tag` and `is:favorite` in the vault search box, and add star toggle + tag chips/editor in `extension/src/vault/tags.ts`.
@@ -321,7 +321,7 @@ New code goes into focused capability modules with **no `mod.rs`**, keeping touc
 | `crates/core/src/autofill.rs`, `forms.rs` | 144, 250 | 3-line `favorite` rank key in each |
 | `crates/client/src/protocol/reports.rs`, `protocol/tests.rs` | 0 -> ~670 | Extract import/mirror report structs and protocol tests out of `protocol.rs`; add `favorite`, `tags`, `TagCount` |
 | `crates/cli/src/import/tags.rs` *(new)* | 0 -> ~40 | Rename `import/mod.rs` -> `import.rs` (no `mod.rs`), then add shared tag/folder cleanup for `onepassword.rs`, `bitwarden.rs`, `csv.rs`, and `op.rs` |
-| `crates/cli/src/agent/items.rs` | 592 / 1,317 | Split inline `mod tests` to `agent/items_tests.rs`; add tag/favorite list, filter, and set logic (~765 lines) |
+| `crates/cli/src/daemon/items.rs` | 592 / 1,317 | Split inline `mod tests` to `daemon/items_tests.rs`; add tag/favorite list, filter, and set logic (~765 lines) |
 | `crates/app/src/vault/mod.rs` | 427 / 427 | Add quiet star glyph on favorite rows (~441 lines; kept in `vault/mod.rs` to avoid rename conflict with `recently-deleted`) |
 | `crates/app/src/model/favorite.rs` *(new)* | 0 -> ~90 | `App::toggle_favorite`, optimistic list resort, `App::filter_by_tag` (keeps `model.rs` at 650 lines and `edit.rs` at 909 lines untouched by star logic) |
 | `crates/app/src/edit/tags.rs` *(new)* | 0 -> ~220 | Tag chip editor, input, and existing-tag autocomplete `Popover` (keeps `edit/view.rs` at ~755 lines and `edit.rs` from growing) |
@@ -339,10 +339,10 @@ New code goes into focused capability modules with **no `mod.rs`**, keeping touc
    - Land `tag.rs`, `tag_tests.rs`, `entry.rs` (`Create` `0x03`, `Change` `0x05..=0x07`), `data.rs` (`favorite` register + `tags` add-wins OR-Set + `history`), `item.rs` errors, and `autofill.rs` / `forms.rs` favorite ranking.
    - Gate: `cargo test -p deadbolt-core` (including `PROPTEST_CASES=500`). Zero wire change for entries without stars or tags.
 
-2. **PR 2: Protocol 20 split, agent, CLI, and simulator (`crates/client`, `crates/cli`).**
-   - Commit 1 (pure move): extract `crates/client/src/protocol/items.rs` + `protocol_tests.rs` and `crates/cli/src/agent/items_tests.rs`.
-   - Commit 2: bump `PROTOCOL_VERSION = 20`; wire `ItemNew`, `ItemSet`, `ItemList`, `TagList`, `passkeys::list` favorite sort, CLI flags (`new`, `set`, `ls` / `items`, `show`, `tags`), and `agent::sim` `Favorite` / `Tag` / `Untag` actions with `SECRET_MARKER`.
-   - Gate: `cargo test -p deadbolt-client -p deadbolt-cli` and `DEADBOLT_SIM_SEEDS=1000 cargo test -p deadbolt-cli --bin deadbolt agent::sim::exploration`.
+2. **PR 2: Protocol 20 split, daemon, CLI, and simulator (`crates/client`, `crates/cli`).**
+   - Commit 1 (pure move): extract `crates/client/src/protocol/items.rs` + `protocol_tests.rs` and `crates/cli/src/daemon/items_tests.rs`.
+   - Commit 2: bump `PROTOCOL_VERSION = 20`; wire `ItemNew`, `ItemSet`, `ItemList`, `TagList`, `passkeys::list` favorite sort, CLI flags (`new`, `set`, `ls` / `items`, `show`, `tags`), and `daemon::sim` `Favorite` / `Tag` / `Untag` actions with `SECRET_MARKER`.
+   - Gate: `cargo test -p deadbolt-client -p deadbolt-cli` and `DEADBOLT_SIM_SEEDS=1000 cargo test -p deadbolt-cli --bin deadbolt daemon::sim::exploration`.
 
 3. **PR 3: 1Password (`.1pux`, CSV, `sync 1password`) and Bitwarden imports (`crates/cli`).**
    - Land `import/tags.rs`, carry over favorites and tags/folders in `onepassword.rs`, `op.rs`, `csv.rs`, and `bitwarden.rs`, drop `FAVORITE` / `TAG` / `FOLDER` from dropped tallies, update `MirrorVersion` to digest `v2` with adopted-tag preservation in `mirror.rs`, and update `docs/design.md` and `docs/sync-1password.md`.
@@ -363,4 +363,4 @@ New code goes into focused capability modules with **no `mod.rs`**, keeping touc
 - **One-time `sync 1password` backfill prompt:** moving `MirrorVersion` to digest `v2` invalidates cached digests once on existing mirrored vaults so `op item get -` can backfill 1Password favorites and tags. That triggers a single 1Password approval prompt on the first sync after upgrading, then settles.
 - **`MirrorVersion` 2,048-character cap on adopted items:** an item with dozens of long tags could push `:adopted:fields:tags` past `valid_source`'s 2,048-character limit. Apply the same fallback `op.rs` uses for `fields`: if the formatted `Source` exceeds 2,048 characters, omit the tracked tag removal list rather than failing `valid_source`.
 - **Typing `#` in search:** a naive `#tag` filter would match zero items the instant `#` is typed, flashing an empty state before the first letter of the tag. Treating a trailing bare `#` as "items with any tag" (or keeping all items when none have tags) keeps the list steady on every keystroke.
-- **Optimistic `⌘D` race with background sync:** if the user toggles `⌘D` while the store locks or another write lands, `Done::Saved` / `Change::Items` reconciles from the agent's authoritative list, and `Locked` errors transition cleanly via `on_locked`.
+- **Optimistic `⌘D` race with background sync:** if the user toggles `⌘D` while the store locks or another write lands, `Done::Saved` / `Change::Items` reconciles from the daemon's authoritative list, and `Locked` errors transition cleanly via `on_locked`.

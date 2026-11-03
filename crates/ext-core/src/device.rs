@@ -404,7 +404,7 @@ async fn sync_round() -> Result<()> {
     deadbolt_net::application::sync_round(&node, &state).await
 }
 
-/// Parse the page using the same public-suffix policy as the native agent.
+/// Parse the page using the same public-suffix policy as the native daemon.
 fn site(raw: &str) -> Result<Site> {
     Site::from_origin(raw).map_err(Error::Protocol)
 }

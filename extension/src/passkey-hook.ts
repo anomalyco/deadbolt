@@ -5,7 +5,7 @@
 //
 // The request goes to the extension, which checks the frame by the origin the
 // browser reports, asks the user in the toolbar popup or the inline menu, and
-// has the agent sign. Private keys never enter the browser. When Deadbolt has
+// has the daemon sign. Private keys never enter the browser. When Deadbolt has
 // no passkey for the site, can't make one the site accepts, or the user
 // prefers, the browser's own WebAuthn runs instead.
 //

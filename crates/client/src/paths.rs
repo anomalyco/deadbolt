@@ -3,19 +3,22 @@
 //! ```text
 //! $DEADBOLT_HOME or $XDG_DATA_HOME/deadbolt       the encrypted store (store.redb)
 //! $XDG_CONFIG_HOME/deadbolt/config.toml           settings (see config.rs)
-//! $XDG_STATE_HOME/deadbolt<suffix>/agent.log      agent log
-//! $XDG_RUNTIME_DIR/deadbolt<suffix>/agent.sock    control socket (0600, dir 0700)
-//! $XDG_RUNTIME_DIR/deadbolt<suffix>/agent.lock    single-instance lock
+//! $XDG_STATE_HOME/deadbolt<suffix>/daemon.log     daemon log
+//! $XDG_RUNTIME_DIR/deadbolt<suffix>/daemon.sock   control socket (0600, dir 0700)
+//! $XDG_RUNTIME_DIR/deadbolt<suffix>/daemon.lock   single-instance lock
 //! ```
+//!
+//! Older builds named these `agent.*`; the daemon stops a process still on
+//! `agent.sock` when it starts (`daemon/legacy.rs` in the CLI).
 //!
 //! Without `XDG_RUNTIME_DIR` (e.g. a non-login ssh session) the runtime dir is
 //! `/run/user/<uid>/deadbolt<suffix>` if that directory exists, so every
-//! session of the same user finds the same agent; otherwise
+//! session of the same user finds the same daemon; otherwise
 //! `$TMPDIR/deadbolt<suffix>-<uid>`.
 //! `<suffix>` is empty by default and `-<hash of DEADBOLT_HOME>` when
-//! `DEADBOLT_HOME` is set, so every store gets its own agent.
+//! `DEADBOLT_HOME` is set, so every store gets its own daemon.
 //!
-//! The agent takes the runtime dir only if it is a directory of this user's,
+//! The daemon takes the runtime dir only if it is a directory of this user's,
 //! not a symlink, and makes it 0700 ([`secure_dir`]): the fallback in a shared
 //! `$TMPDIR` could have been made by someone else first.
 
@@ -31,7 +34,6 @@ pub struct Paths {
     pub socket: PathBuf,
     pub lock: PathBuf,
     pub log: PathBuf,
-    pub ssh_link: Option<PathBuf>,
 }
 
 impl Paths {
@@ -40,34 +42,13 @@ impl Paths {
     }
 
     /// Where the browser extension's "Learn this site" sessions are logged,
-    /// one JSON-lines file per session, beside the agent's log.
+    /// one JSON-lines file per session, beside the daemon's log.
     pub fn learn_dir(&self) -> PathBuf {
         self.log.with_file_name("learn")
     }
 
-    /// Where the SSH agent listens inside the agent's `0700` runtime directory.
-    pub fn ssh_socket(&self) -> PathBuf {
-        self.socket.with_file_name("ssh.sock")
-    }
-
-    /// Optional local SSH key selection rules (`$XDG_CONFIG_HOME/deadbolt/ssh.toml`).
-    pub fn ssh_config(&self) -> PathBuf {
-        self.config.with_file_name("ssh.toml")
-    }
-
-    /// Stable `~/.deadbolt/ssh.sock` symlink for the default store, omitted
-    /// whenever `DEADBOLT_HOME` or a test runtime socket is in use.
-    pub fn ssh_link(&self) -> Option<PathBuf> {
-        self.ssh_link.clone()
-    }
-
-    /// The path SSH clients (`IdentityAgent`, `SSH_AUTH_SOCK`) should connect to.
-    pub fn ssh_client_socket(&self) -> PathBuf {
-        self.ssh_link().unwrap_or_else(|| self.ssh_socket())
-    }
-
     /// The paths for an environment given by `vars` instead of the process's
-    /// own (`$TMPDIR` aside), e.g. for a test that starts its own agent.
+    /// own (`$TMPDIR` aside), e.g. for a test that starts its own daemon.
     pub fn from_vars(vars: impl Fn(&str) -> Option<OsString>) -> Self {
         let var = |name: &str| vars(name).filter(|v| !v.is_empty()).map(PathBuf::from);
         let home = vars("HOME")
@@ -95,17 +76,14 @@ impl Paths {
             None => env::temp_dir().join(format!("deadbolt{suffix}-{uid}")),
         };
         let state = xdg("XDG_STATE_HOME", &[".local", "state"]).join(format!("deadbolt{suffix}"));
-        let ssh_link = (var("DEADBOLT_HOME").is_none() && var("HOME").is_some())
-            .then(|| home.join(".deadbolt").join("ssh.sock"));
         Self {
             data,
             config: xdg("XDG_CONFIG_HOME", &[".config"])
                 .join("deadbolt")
                 .join("config.toml"),
-            socket: runtime.join("agent.sock"),
-            lock: runtime.join("agent.lock"),
-            log: state.join("agent.log"),
-            ssh_link,
+            socket: runtime.join("daemon.sock"),
+            lock: runtime.join("daemon.lock"),
+            log: state.join("daemon.log"),
         }
     }
 }
