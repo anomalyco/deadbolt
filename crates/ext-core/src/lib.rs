@@ -8,4 +8,6 @@ pub mod policy;
 mod device;
 
 #[cfg(any(test, all(target_family = "wasm", target_os = "unknown")))]
+mod activity;
+#[cfg(any(test, all(target_family = "wasm", target_os = "unknown")))]
 mod history;

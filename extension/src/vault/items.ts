@@ -209,6 +209,8 @@ export function itemDetailView(app: App, ref: string): View {
       return s.message ?? "That passphrase isn't right."
     }
     asking = null
+    // A download is a reveal, as the native app reports a file it saves.
+    if (action !== "copy") app.report("reveal", ref, field)
     if (action === "download") {
       download(s.value)
       paint()
@@ -223,7 +225,10 @@ export function itemDetailView(app: App, ref: string): View {
     } else {
       paint()
       const target = b?.isConnected ? b : el.querySelector<HTMLElement>(`[data-copy="${field}"]`)
-      if (target && (await copied(target, s.value))) say(await app.copiedSecret(s.value))
+      if (target && (await copied(target, s.value))) {
+        app.report("copy", ref, field)
+        say(await app.copiedSecret(s.value))
+      }
       else say("Couldn't copy.")
     }
     return null
@@ -249,7 +254,9 @@ export function itemDetailView(app: App, ref: string): View {
     } else {
       // A card's expiry as cards and checkouts write it (MM/YY), as its summary says it.
       const value = card && f.name === "expiry" ? cardExpiry(f.value ?? "") : (f.value ?? "")
-      const actions: Node[] = [iconButton(icon("copy"), `Copy ${label}`, (b) => void copied(b, value, say, `Copied the ${label.toLowerCase()}`))]
+      const actions: Node[] = [iconButton(icon("copy"), `Copy ${label}`, async (b) => {
+        if (await copied(b, value, say, `Copied the ${label.toLowerCase()}`)) app.report("copy", ref, f.name)
+      })]
       if (f.type === "url" && /^https?:\/\//.test(value)) actions.push(iconButton(glyph("open"), "Open", () => void chrome.tabs.create({ url: value })))
       out.push(wrap(h("span", {}, value), ...actions))
     }
@@ -273,7 +280,10 @@ export function itemDetailView(app: App, ref: string): View {
           h("span", { class: "value" }, h("span", { class: "totp" }, h("span", { class: "mono code-value" }, t.code), secs, h("span", { class: "sr-only" }, " seconds left"))),
           h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy one-time code", async (b) => {
             await app.offerClearing()
-            if (await copied(b, t.code)) say(await app.copiedSecret(t.code))
+            if (await copied(b, t.code)) {
+              app.report("copy", ref, d.fields.find((f) => f.type === "otp")?.name ?? "otp")
+              say(await app.copiedSecret(t.code))
+            }
           })),
         ),
       )

@@ -585,6 +585,14 @@ export type DeviceCommand =
    * never the value.
    */
   | { type: "device-copied"; salt: string; hash: string }
+  /**
+   * Activity, newest first (docs/extension-device.md, "Activity"): `limit`
+   * entries (50 unless asked, at most 1,000) with ids before `before`, the
+   * page back from the last one shown. `{ type: "device-activity", now, entries: ActivityEntry[] }`.
+   */
+  | { type: "device-activity"; before?: number; limit?: number }
+  /** The page showed or copied `field` of `ref`, which only it sees: an Activity entry, never the value. */
+  | { type: "device-report"; action: "reveal" | "copy"; ref: string; field: string }
   /** The fill waiting on the passphrase, if any: `{ type: "device-reauth", reauth: Reauth | null }`. */
   | { type: "device-reauth" }
   /** The passphrase for fill `id`, once: the background runs that fill with it and forgets it. */
@@ -613,6 +621,25 @@ export interface Reauth {
   /** "Visa •••• 4242"; for a passkey, its username (or "Passkey"). */
   title: string
   site: string
+}
+
+/**
+ * An Activity entry, as the vault keeps it: what was filled, saved, made,
+ * signed, shown or copied, naming the item, its fields and the page, never a
+ * value. `caller`: a page through autofill, the vault page, or Deadbolt
+ * itself (`more-past-budget`, counting the `more` entries that went to stay
+ * within the log's budget). `time`: unix seconds.
+ */
+export interface ActivityEntry {
+  id: number
+  time: number
+  caller: "autofill" | "vault" | "deadbolt"
+  command: string
+  items: Array<{ id?: string; title: string }>
+  fields: string[]
+  site?: string
+  outcome: "allowed" | "refused" | "failed"
+  more: number
 }
 
 /** A passkey in the vault, as device-passkeys lists it: never its private key. `created`: ISO date. */

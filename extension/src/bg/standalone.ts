@@ -145,13 +145,14 @@ const PAGE_READS = new Set<string>([
   "device-copied",
   "device-reauth",
   "device-reauth-cancel",
+  "device-activity",
 ])
 /**
  * Commands that change nothing hello would report. Until a join finishes,
  * nothing is persisted and hello stays not-set-up, so starting and polling
  * one don't ask it again.
  */
-const QUIET = new Set<string>(["device-items", "device-kinds", "device-devices", "device-item", "device-secret", "device-generate", "device-join-start", "device-join-status"])
+const QUIET = new Set<string>(["device-items", "device-kinds", "device-devices", "device-item", "device-secret", "device-generate", "device-join-start", "device-join-status", "device-activity", "device-report"])
 /** Commands that name this browser to the vault's other devices. */
 const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-start", "device-join-finish"])
 /** Commands that open the vault: the worker is told the lock preset with them, and keeps Strict itself. */
@@ -945,6 +946,14 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
       return c.wait === true ? { type: "device-sync", wait: true } : { type: "device-sync" }
     case "device-item":
       return text(c.ref, 200) && c.ref ? { type: "device-item", ref: c.ref } : null
+    case "device-activity": {
+      const count = (v: unknown, max: number) => v === undefined || (Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= max)
+      if (!count(c.before, Number.MAX_SAFE_INTEGER) || !count(c.limit, 1000)) return null
+      return { type: "device-activity", ...(c.before === undefined ? {} : { before: c.before as number }), ...(c.limit === undefined ? {} : { limit: c.limit as number }) }
+    }
+    case "device-report":
+      if ((c.action !== "reveal" && c.action !== "copy") || !text(c.ref, 200) || !c.ref || !fieldName(c.field)) return null
+      return { type: "device-report", action: c.action, ref: c.ref, field: c.field }
     case "device-delete":
       if (!text(c.ref, 200) || !c.ref) return null
       if (c.passphrase === undefined) return { type: "device-delete", ref: c.ref }
