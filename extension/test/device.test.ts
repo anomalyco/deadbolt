@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test"
-import type { DeviceReply, Status } from "../src/messages"
+import type { ActivityEntry, DeviceReply, Status } from "../src/messages"
+import { activityDetail, activitySection, activityWords } from "../src/vault/activity"
+import type { App } from "../src/vault/app"
 import { installChrome, type FakeChrome } from "./chrome"
 
 // device.html's first run (src/vault, as the popup shows it too): choosing
@@ -17,6 +19,9 @@ let phase: Record<string, unknown>
 /** Holds the next answer to a command type until the returned function is called. */
 let held: Record<string, Promise<void>>
 let loads = 0
+/** The vault's Activity, newest first, as device-activity pages it. */
+let activity: ActivityEntry[]
+const NOW = 1_800_000_000
 
 const ok = (reply: Record<string, unknown>): DeviceReply => ({ ok: true, reply, ms: 1, status })
 
@@ -41,6 +46,11 @@ async function answer(c: Command): Promise<DeviceReply> {
       return ok({ type: "device-items", items: [] })
     case "device-devices":
       return ok({ type: "device-devices", devices: [{ id: "d".repeat(64), name: "Chrome on macOS", current: true }] })
+    case "device-activity": {
+      const before = typeof c.before === "number" ? c.before : Infinity
+      const entries = activity.filter((e) => e.id < before).slice(0, typeof c.limit === "number" ? c.limit : 50)
+      return ok({ type: "device-activity", now: NOW, entries })
+    }
   }
   return ok({ type: c.type, ok: true })
 }
@@ -94,6 +104,7 @@ beforeEach(() => {
   status = { state: "not-set-up" }
   phase = { phase: "idle" }
   held = {}
+  activity = []
   fake.runtimeAnswer = (m) => ((m as { type: string }).type === "db:device" ? answer((m as { command: Command }).command) : undefined)
   logs = (["log", "info", "debug", "warn", "error"] as const).map((k) => spyOn(console, k))
 })
@@ -341,5 +352,66 @@ describe("reload", () => {
     jest.advanceTimersByTime(POLL_MS * 4)
     await flush()
     expect(sentTypes()).toHaveLength(sent)
+  })
+})
+
+describe("activity", () => {
+  const fill = (id: number): ActivityEntry => ({ id, time: NOW - id * 60, caller: "autofill", command: "site-fill", items: [{ id: "v:i", title: "GitHub" }], fields: ["username", "password"], site: "https://github.com", outcome: "allowed", more: 0 })
+
+  /** Settings' Activity section on its own, asking the fake vault. */
+  async function section() {
+    status = { state: "ready", version: "test" }
+    const asked: Command[] = []
+    const { el } = activitySection({ ask: (c: Command) => (asked.push(c), answer(c)) } as unknown as App)
+    document.body.replaceChildren(el)
+    const named = (name: string) => [...el.querySelectorAll("button")].find((b) => b.textContent === name)!
+    const rows = () => [...el.querySelectorAll<HTMLElement>(".vrow.activity")]
+    const olderShown = () => !named("Show older").closest<HTMLElement>(".buttons")!.hidden
+    await flush()
+    // Closed until asked for, as in the native app: the vault page reads none of it.
+    expect(asked).toHaveLength(0)
+    named("Show").click()
+    await flush()
+    return { el, asked, named, rows, olderShown }
+  }
+
+  test("lists what happened in plain words, newest first, a page at a time", async () => {
+    activity = Array.from({ length: 120 }, (_, i) => fill(120 - i))
+    const { asked, named, rows, olderShown } = await section()
+    expect(rows()).toHaveLength(50)
+    expect(rows()[0]!.querySelector(".title")!.textContent).toBe("Filled username and password")
+    expect(rows()[0]!.querySelector(".sub")!.textContent).toBe("GitHub · github.com · 2 h ago")
+    named("Show older").click()
+    await flush()
+    expect(asked.at(-1)).toEqual({ type: "device-activity", before: 71, limit: 50 })
+    expect(rows()).toHaveLength(100)
+    named("Show older").click()
+    await flush()
+    // The oldest page is short: nothing older to ask for.
+    expect(rows().map((r) => Number(r.dataset.id))).toEqual(activity.map((e) => e.id))
+    expect(olderShown()).toBe(false)
+    named("Hide").click()
+    await flush()
+    expect(rows()).toHaveLength(0)
+  })
+
+  test("an empty log says so quietly", async () => {
+    const { el, rows, olderShown } = await section()
+    expect(rows()).toHaveLength(0)
+    expect(el.querySelector(".activity-list")!.textContent).toBe("Nothing yet")
+    expect(olderShown()).toBe(false)
+  })
+
+  test("names fields, copies, reveals and what went to keep the log small in words", () => {
+    const base = fill(1)
+    expect(activityWords({ ...base, fields: ["username", "password", "otp"] })).toBe("Filled username, password and one-time code")
+    expect(activityWords({ ...base, command: "form-fill", items: [{ title: "Visa •••• 4242" }], fields: ["number", "cvv"] })).toBe("Filled card number and security code")
+    expect(activityWords({ ...base, command: "form-fill", fields: ["number"], outcome: "refused" })).toBe("Filled card number: refused")
+    const copy: ActivityEntry = { ...base, caller: "vault", command: "copy", fields: ["private-key"], site: undefined }
+    expect(activityWords(copy)).toBe("Copied private key")
+    expect(activityDetail(copy, NOW)).toBe("GitHub · in this vault · 1 min ago")
+    expect(activityWords({ ...base, command: "reveal", fields: ["password"] })).toBe("Showed password")
+    expect(activityWords({ ...base, command: "site-save", fields: ["password"] })).toBe("Updated a password")
+    expect(activityWords({ ...base, command: "more-past-budget", caller: "deadbolt", items: [], fields: [], more: 12 })).toBe("12 older entries removed to keep the log small")
   })
 })

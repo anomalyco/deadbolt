@@ -193,7 +193,7 @@ let reported = ""
 /** Tells the parent the size this mode needs, whenever it changes. */
 function report(grow = 0) {
   if (!token) return
-  const height = Math.ceil(mode === "pill" ? 32 : mode === "save" ? offerSize().height : surface.getBoundingClientRect().height)
+  const height = Math.ceil(mode === "pill" ? 32 : mode === "save" ? offerSize().height : surface.offsetHeight || surface.getBoundingClientRect().height)
   const pill = document.querySelector<HTMLElement>(".pill")
   // The pill hugs its content: it is the whole pill, padding included.
   const offer = mode === "save" ? offerSize() : null
@@ -454,6 +454,7 @@ function press(el: HTMLElement) {
   relax()
   // Nothing in the frame animates while the press is checked: running
   // animations pause the visibility readings the check relies on.
+  for (const a of surface.getAnimations()) a.cancel()
   document.body.classList.add("held")
   el.classList.add("pressed")
   if (el.classList.contains("row")) {
@@ -1342,10 +1343,25 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
   if (channel) {
     port = channel
     channel.onmessage = (e: MessageEvent<{ type?: unknown }>) => {
-      const data = e.data as { type?: unknown; query?: unknown; near?: unknown; geometry?: typeof geometry; check?: number; ok?: boolean }
+      const data = e.data as { type?: unknown; query?: unknown; near?: unknown; origin?: unknown; geometry?: typeof geometry; check?: number; ok?: boolean }
       if (data?.type === "db:menu-checked" && typeof data.check === "number") placementChecks.get(data.check)?.(data.ok === true)
       else if (data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
-      else if (data?.type === "db:menu-geometry" && data.geometry) {
+      else if (data?.type === "db:reveal") {
+        const origin = typeof data.origin === "string" ? data.origin : "top left"
+        for (const el of [surface, ...Array.from(document.querySelectorAll<HTMLElement>(".pill"))]) {
+          el.style.transformOrigin = origin
+          el.animate(
+            reducedMotion()
+              ? [{ opacity: 0 }, { opacity: 1 }]
+              : [
+                  { opacity: 0, transform: "scale(0.96)" },
+                  { opacity: 1, transform: "none" },
+                ],
+            timing(0.25),
+          )
+        }
+        watchVisibility(dwell, performance.now() + 60)
+      } else if (data?.type === "db:menu-geometry" && data.geometry) {
         const was = geometry
         const now = data.geometry
         geometry = now

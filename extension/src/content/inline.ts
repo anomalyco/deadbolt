@@ -200,7 +200,7 @@ let near = false
 
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
-let lastRect = ""
+let lastRect: Rect | null = null
 let lastGeometry = ""
 let scaleVisible = false
 let scaleObserver: ResizeObserver | null = null
@@ -597,10 +597,13 @@ function position() {
     // This layout read also syncs the child viewport. Its scale observers
     // rely on seeing restored layout as well as a page's later scaled paint.
     const f = frame.getBoundingClientRect()
-    const rect = [f.left, f.top, f.width, f.height].map(Math.round).join()
-    if (rect !== lastRect && !followedResize(lastRect, rect)) tellMoved()
+    const now = { left: f.left, top: f.top, width: f.width, height: f.height }
+    const moved = !lastRect || (["left", "top", "width", "height"] as const).some((k) => Math.abs(now[k] - lastRect![k]) > 1)
+    if (moved) {
+      if (lastRect && !followedResize(lastRect, now)) tellMoved()
+      lastRect = now
+    }
     resized = null
-    lastRect = rect
   }
   // While it fades out it lets clicks through (and anything under it would
   // read as a cover): only a surface still in use goes back on top.
@@ -640,11 +643,9 @@ function unzoom(el: Element): number {
  * set). A centred login form moves by half an infobar when one comes or goes;
  * that isn't the page moving the menu, so the dwell isn't restarted for it.
  */
-function followedResize(from: string, to: string): boolean {
-  if (!resized || !from || !window.toolbar.visible) return false
-  const [fl, ft, fw, fh] = from.split(",").map(Number)
-  const [tl, tt, tw, th] = to.split(",").map(Number)
-  return fw === tw && fh === th && Math.abs(tl - fl) <= Math.abs(resized.dw) && Math.abs(tt - ft) <= Math.abs(resized.dh)
+function followedResize(from: Rect, to: Rect): boolean {
+  if (!resized || !window.toolbar.visible) return false
+  return Math.abs(to.width - from.width) <= 1 && Math.abs(to.height - from.height) <= 1 && Math.abs(to.left - from.left) <= Math.abs(resized.dw) + 1 && Math.abs(to.top - from.top) <= Math.abs(resized.dh) + 1
 }
 
 function onResize(event: Event) {
@@ -655,7 +656,7 @@ function onResize(event: Event) {
 }
 
 function frameStyle(radius: number) {
-  return `all:initial;width:100%;height:100%;border:0;border-radius:${radius}px;box-shadow:${SHADOW()};background:transparent;color-scheme:normal;`
+  return `all:initial;position:relative;width:100%;height:100%;border:0;border-radius:${radius}px;box-shadow:${SHADOW()};background:transparent;color-scheme:normal;`
 }
 
 /**
@@ -750,14 +751,22 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     reveal = null
     clearTimeout(revealTimer)
     if (frame !== f) return
+    cancelAnimationFrame(raf)
+    lastRect = null
+    position()
+    if (frame !== f) return
     f.style.opacity = ""
-    // Scale .96 → 1 from the edge that faces the field. Only while it opens:
-    // the menu's visibility guard refuses picks while it's scaled or
-    // see-through, so they wait until it's at rest.
+    // Scale .96 → 1 from the edge that faces the field, inside the frame and
+    // on a temporary shadow layer so the frame itself stays opaque and still
+    // while the visibility dwell runs.
     const r = anchor ? anchor.getBoundingClientRect() : boxNow()
-    const below = !r || (lastTarget?.top ?? r.bottom) >= r.bottom
-    f.style.transformOrigin = below ? "top left" : "bottom left"
-    f.animate(
+    const origin = !r || (lastTarget?.top ?? r.bottom) >= r.bottom ? "top left" : "bottom left"
+    port?.postMessage({ type: "db:reveal", origin })
+    const shadow = document.createElement("div")
+    shadow.style.cssText = `all:initial;position:absolute;inset:0;border-radius:${RADIUS}px;box-shadow:${SHADOW()};pointer-events:none;transform-origin:${origin};`
+    root.insertBefore(shadow, f)
+    f.style.boxShadow = "none"
+    const anim = shadow.animate(
       reducedMotion()
         ? [{ opacity: 0 }, { opacity: 1 }]
         : [
@@ -766,11 +775,19 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
           ],
       timing(0.25),
     )
+    const restore = () => {
+      revealAnim = null
+      shadow.remove()
+      if (frame === f) f.style.boxShadow = SHADOW()
+    }
+    revealAnim = anim
+    anim.finished.then(restore, restore)
   }
 }
 
 /** Plays the open surface's grow-in, while its frame hasn't shown yet (see openMenu). */
 let reveal: (() => void) | null = null
+let revealAnim: Animation | null = null
 let revealTimer: ReturnType<typeof setTimeout> | undefined
 /** A frame that never says its size grows in anyway after this long. */
 const REVEAL_LATEST_MS = 500
@@ -829,6 +846,7 @@ function leave(travel = false) {
   if (closing) return
   if (!host || !frame) return closeMenu()
   closing = true
+  revealAnim?.cancel()
   const f = frame
   const done = () => {
     if (frame === f) closeMenu()
@@ -898,6 +916,7 @@ export function closeMenu(refocus = false, dismissed = false) {
   scaleVisible = false
   scaleKnown = false
   reveal = null
+  revealAnim = null
   clearTimeout(revealTimer)
   if (token) void send({ type: "db:menu-close", token, dismissed })
   port?.close()
@@ -916,7 +935,8 @@ export function closeMenu(refocus = false, dismissed = false) {
   near = false
   for (const t of saveTimers) clearTimeout(t)
   saveTimers = []
-  menuOrigin = lastRect = lastGeometry = ""
+  menuOrigin = lastGeometry = ""
+  lastRect = null
   if (refocus) field?.focus({ preventScroll: true })
 }
 
@@ -1396,6 +1416,7 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   // The frame's own word that its pill or offer is done, over the channel only it and this script hold.
   port.onmessage = onPortMessage
   tellGeometry()
+  if (!reveal && mode === "accounts") port.postMessage({ type: "db:reveal" })
   // Typed before the frame was ready: narrow it now.
   const typed = anchor && mode === "accounts" && anchor.value && typedSinceOpen ? anchor.value : ""
   if (typed) port.postMessage({ type: "db:filter", query: typed.slice(0, 200) })

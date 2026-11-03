@@ -127,8 +127,8 @@ starts, so a slow KDF is not mistaken for an unanswered prompt; cancellation,
 locking and replacement still end the fill. Only `device-preset` and opening
 commands may change the worker’s preset; extra `preset` fields on ordinary
 requests cannot weaken it. Comfortable and Relaxed
-follow the native Touch-ID-off rule: the explicit menu pick is sufficient. There
-is no standalone Activity log, so card fills are **not** recorded as Activity.
+follow the native Touch-ID-off rule: the explicit menu pick is sufficient. As
+native, every card fill is an [Activity](#activity) entry; an identity's isn't.
 Its website input uses the same site policy too: public suffixes and
 single-label intranet hosts cannot be saved by hand. Synced OTP fields use
 core's current-code generator.
@@ -546,7 +546,7 @@ scenario named.
 | Several vaults, switching | Missing: one vault per browser |
 | Import from other password managers | Missing: import on a native device and sync |
 | Export | Neither build has one |
-| Activity | Missing: no standalone Activity log |
+| Activity | Same entries and limits, in Settings › Activity; see "Activity" below |
 
 ### Learning logs
 
@@ -562,6 +562,52 @@ every session as one JSONL file, each line with its `session`, for
 `bun corpus/learned.ts --file <download>`, or deletes them. Settings › Saving
 lists the sites "Never for this site" turned off (the same
 `chrome.storage.local` preference as the native build), each with Turn on.
+
+### Activity
+
+The standalone device keeps Activity as the native daemon does
+([agent-control.md](agent-control.md#lock-limits-activity)), and Settings ›
+Activity shows it as the native app's Settings does: closed until Show, then
+the newest 50, newest first, in plain words ("Filled username and password",
+"From browser · github.com · 4 min ago"). Show older reads the 50 before the
+last one shown, so a large log costs a page at a time and the vault page and
+its item list read none of it. An open list reads its newest page again when
+the page comes back to the front or the vault changes.
+
+What's recorded is what native records for the browser host and the app.
+The worker writes an entry for a page's `fill`, `save`, `generate`,
+`generate-keep`, `passkey-create` and `passkey-get` (a Strict ceremony's
+when its authorization is spent), and for `fill-form` when the item is a
+card. Each entry names the item (its reference and label; a passkey's
+account), the fields and the page's origin, with the outcome: allowed,
+refused (a wrong passphrase, another site) or failed. A request that only
+asked for the passphrase isn't an entry; its retry is. Look-ups that come
+with every page (`list`, `check`, `forms`, `passkey-list`, `generate-check`,
+`generate-drop`) aren't entries. Neither are the vault page's own reads and
+edits, as the app's aren't. The vault page reports what it shows, copies or
+downloads (`device-report {action, ref, field}`, a download as a reveal), as
+the app reports with `ActivityReport`; the worker records a report only for
+a field the item has, and titles it from the vault, not the page.
+`device-activity {before?, limit?}` lists entries, 50 unless asked, at most
+1,000.
+
+No entry holds a value: never a password, code, card number or passphrase.
+Entries are sealed in the vault's own redb store, in the same Activity table
+and with the same rules as the CLI's `store.redb`. That's on this browser
+only, encrypted with the vault's data key, never in the signed log and never
+synced. They are kept 90 days and within 100,000 entries or 64 MiB. Past
+that the oldest go, and the page that reaches the oldest kept ends with one
+entry counting them. Each string keeps at most 256 bytes and each list 16
+items. Nothing goes to IndexedDB or extension storage, unlike the learning
+logs, which hold no vault data.
+
+It differs from native in three ways. Locked, the worker has no store, so a
+request refused before it reaches the vault (locked, or over the service
+worker's rate limits) isn't recorded; native holds such entries in memory
+until unlock. There's no per-caller folding past 60 a minute: every caller
+here is this browser, and the store's budget still bounds the table. And
+entries say "in this vault" or the page's site rather than a verified
+process, since there are no other callers.
 
 ### The parity run
 
@@ -617,7 +663,11 @@ locks, checks OPFS holds no plaintext markers, rejects reads while locked and a
 wrong passphrase, unlocks with the real KDF, and restarts Chrome to check the
 vault persists and starts locked. It also fills a login saved for `acme.test` on
 `accounts.acme.test`, rejects lookalike sites, and exercises save/update offers
-and generated passwords on signup and password-change forms. Submit flows use
+and generated passwords on signup and password-change forms. It checks
+Activity: empty on a new vault, then the inline-menu fill and the vault page's
+reveal and copies as entries with no value in them or in IndexedDB, and with
+3,000 more entries a page answering and the view opening and paging back
+within the latency limit and without long tasks. Submit flows use
 trusted localhost: HTTP `.test` pages lack Web Crypto, so the shared content
 script cannot track typed password values there.
 
@@ -663,10 +713,13 @@ Both online runs also exercise signup, generated password changes and two-step
 sign-in on `https://acme-demo.i.vogel.dev`, plus synced identities and cards on
 localhost and the demo checkout. Strict card fills reject a wrong passphrase and
 require the right one for every fill; Comfortable and Relaxed fill on the explicit
-menu pick, following the native Touch-ID-off rule. The demo keeps its password
+menu pick, following the native Touch-ID-off rule. The create run then checks
+every card fill is in Activity (a wrong passphrase's as refused) and no
+identity fill is, with no card number or code in any entry. The demo keeps its password
 change form visible after success; if the shared save heuristic does not offer an
 update there, the test verifies the update at the next successful sign-in.
-`--video <dir>` saves headless WebM recordings of these synthetic flows.
+`--video <dir>` saves headless WebM recordings of these synthetic flows, and
+stills of Settings › Activity in light and dark.
 
 All runs trap native messaging, use a profile with no native host manifest, and
 use only synthetic credentials; the profile and CLI store are deleted at the end.
@@ -870,7 +923,8 @@ name "this Mac" grants nothing: it only changes the wording.
   use the browser, not a false claim that the local passphrase performed Touch ID.
   As native, passkeys are ES256 with `none` attestation only, with no editing,
   import/export, PRF or largeBlob support.
-- No standalone Activity log.
+- Activity records nothing while locked (native holds such entries until
+  unlock) and doesn't fold a caller's entries past a rate; see "Activity".
 - No automatic save/update offers for identities or cards. Item-to-item links
   (a card's billing identity, a login's sign-in account) are kept but not
   edited on the vault page.

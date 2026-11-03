@@ -176,15 +176,22 @@ export async function confirmPick(
   return (await fresh()) && dwell.version === version
 }
 
+const visibilityObservers = new WeakMap<Dwell, IntersectionObserver>()
+
 /** Feeds `dwell` Intersection Observer v2 readings of this page for as long as it's open. Without v2, it never settles. */
-export function watchVisibility(dwell: Dwell) {
+export function watchVisibility(dwell: Dwell, retryUntil = 0) {
+  visibilityObservers.get(dwell)?.disconnect()
   try {
-    new IntersectionObserver(
+    const observer = new IntersectionObserver(
       (entries) => {
         for (const e of entries) dwell.seen(fullyVisible(e), e.time)
+        if (!dwell.visible && performance.now() < retryUntil && visibilityObservers.get(dwell) === observer)
+          requestAnimationFrame(() => !dwell.visible && watchVisibility(dwell, retryUntil))
       },
       { threshold: [0, 0.5, 0.9, 1], trackVisibility: true, delay: 100 } as IntersectionObserverInit,
-    ).observe(document.body)
+    )
+    visibilityObservers.set(dwell, observer)
+    observer.observe(document.body)
   } catch {}
 }
 

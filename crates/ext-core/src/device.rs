@@ -1,6 +1,7 @@
 //! Phase-one standalone device, hosted only in an extension-owned worker.
 //! JavaScript routes messages; core owns signatures, membership and secrets.
 
+mod activity;
 mod forms;
 mod generate;
 mod items;
@@ -969,7 +970,18 @@ async fn wait_ready() -> Result<()> {
     .map_err(|_| Error::Protocol(CATCHING_UP))?
 }
 
-async fn dispatch(mut body: Value) -> Result<Value> {
+/// Answers `body`, recording its Activity entry, if it has one, before the
+/// reply goes.
+async fn dispatch(body: Value) -> Result<Value> {
+    let draft = activity::draft(&body);
+    let reply = answer(body).await;
+    if let Some(draft) = draft {
+        draft.record(&reply);
+    }
+    reply
+}
+
+async fn answer(mut body: Value) -> Result<Value> {
     // Apply trusted preset changes only after the command succeeds.
     let preset = policy::accepts_preset(text(&body, "type")?)
         .then(|| {
@@ -1091,6 +1103,8 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "device-item-save" => items::save(&body),
         "device-item-delete" => items::delete(&mut body),
         "device-kinds" => Ok(items::kinds()),
+        "device-activity" => activity::list(&body),
+        "device-report" => activity::report(&body),
         "device-save" => edit_login(&body),
         "device-remove" => remove_device(&body),
         "device-rename" => rename_vault(&body),

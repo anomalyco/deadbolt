@@ -255,6 +255,16 @@ export class App {
     return r.ok && r.reply.clears === true ? "Copied. It clears in 30 seconds." : "Copied."
   }
 
+  /**
+   * Tells the vault this page showed or copied `field` of `ref`, for
+   * Activity, as the native app reports its own: every reveal and copy goes
+   * through here. Never the value; a report the vault missed isn't the
+   * user's problem.
+   */
+  report(action: "reveal" | "copy", ref: string, field: string) {
+    void this.ask({ type: "device-report", action, ref, field })
+  }
+
   /** Asks whether a page's fill waits on the passphrase, and shows its prompt (or stops showing it). */
   async loadReauth() {
     if (this.status.state !== "ready") return
