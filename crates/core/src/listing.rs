@@ -50,6 +50,53 @@ pub fn sign_in_provider(text: &str) -> Option<String> {
     (!line.is_empty()).then(|| line.to_string())
 }
 
+/// The hosts of each known provider's own sign-in pages, as the browser
+/// extension knows them (`extension/src/signin.ts`). A provider with none
+/// (Okta) is a company's own sign-in, never a provider account to link.
+pub const SIGN_IN_HOSTS: [(&str, &[&str]); 11] = [
+    ("google", &["accounts.google.com"]),
+    ("apple", &["appleid.apple.com", "idmsa.apple.com"]),
+    ("github", &["github.com"]),
+    (
+        "microsoft",
+        &["login.microsoftonline.com", "login.live.com"],
+    ),
+    ("facebook", &["www.facebook.com", "m.facebook.com"]),
+    ("x", &["x.com", "twitter.com", "api.twitter.com"]),
+    ("amazon", &["www.amazon.com"]),
+    ("discord", &["discord.com"]),
+    ("slack", &["slack.com"]),
+    ("linkedin", &["www.linkedin.com"]),
+    ("gitlab", &["gitlab.com"]),
+];
+
+/// Whether `url` is on one of `provider`'s own sign-in hosts exactly: https,
+/// no port. With `test_hosts` (end-to-end tests only), also their `.test`
+/// stand-ins for `.com` over http, as the extension's e2e build reads them.
+pub fn saved_at_provider(provider: &str, url: &str, test_hosts: bool) -> bool {
+    let Some((_, hosts)) = SIGN_IN_HOSTS.iter().find(|(id, _)| *id == provider) else {
+        return false;
+    };
+    let raw = url.trim();
+    let parsed = if raw.contains("://") {
+        url::Url::parse(raw)
+    } else {
+        url::Url::parse(&format!("https://{raw}"))
+    };
+    let Ok(u) = parsed else { return false };
+    let Some(host) = u.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if u.scheme() == "https" && u.port().is_none() && hosts.contains(&host.as_str()) {
+        return true;
+    }
+    test_hosts
+        && matches!(u.scheme(), "http" | "https")
+        && host
+            .strip_suffix(".test")
+            .is_some_and(|h| hosts.contains(&format!("{h}.com").as_str()))
+}
+
 /// What a provider is called: "Google" for `google`; one this version
 /// doesn't know by its value.
 pub fn sign_in_name(provider: &str) -> &str {

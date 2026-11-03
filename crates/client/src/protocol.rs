@@ -64,7 +64,7 @@ pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// The longest line the daemon reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;

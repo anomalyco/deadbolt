@@ -2158,7 +2158,7 @@ impl Daemon {
                 provider,
                 account,
             } => {
-                let login = self.with(|s| {
+                let (login, created) = self.with(|s| {
                     autofill::link(
                         s,
                         autofill::Link {
@@ -2170,11 +2170,10 @@ impl Daemon {
                         },
                     )
                 })?;
-                self.sync_now.notify_one();
-                Ok(Reply::SiteSaved {
-                    login,
-                    created: true,
-                })
+                if created {
+                    self.sync_now.notify_one();
+                }
+                Ok(Reply::SiteSaved { login, created })
             }
             Command::FormItems { origin, kinds } => self.form_items(&origin, &kinds),
             Command::FormFill {

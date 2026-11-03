@@ -118,7 +118,7 @@ function askAboutSignIn() {
   if (signal === signalSent && Date.now() < signalRetryAt) return
   signalSent = signal
   signalRetryAt = Infinity
-  void send<string>({ type: "db:signin-check" }).then((reply) => {
+  void send<string>({ type: "db:signin-check", signal, ...(provider ? { provider: true } : {}) }).then((reply) => {
     if (reply === "retry" && signalSent === signal) signalRetryAt = Date.now() + RETRY_SIGNAL_MS
   })
   if (!chain) void send({ type: "db:provider-check" })

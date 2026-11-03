@@ -11,6 +11,7 @@ mod wire;
 
 use crate::policy::{self, Preset};
 use deadbolt_core::autofill::{self, Status, item_name, login_title, otp, urls, value};
+use deadbolt_core::listing::{SIGN_IN_HOSTS, sign_in_provider};
 use deadbolt_core::site::{Site, page_url};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{
@@ -696,29 +697,50 @@ fn link_login(
             "A sign-in link is a new login with no username or password",
         ));
     }
-    let provider = text(link, "provider")?.trim();
-    if provider.is_empty() || provider.chars().count() > 64 {
-        return Err(Error::Protocol("A provider is 1 to 64 characters"));
-    }
-    let reply = state().with(|s| {
+    // Only a provider Deadbolt knows the sign-in hosts of, by its id. (The
+    // extension checked the account is saved at one of them; this vault
+    // lives inside it, so no other caller can ask.)
+    let provider = sign_in_provider(text(link, "provider")?)
+        .filter(|p| SIGN_IN_HOSTS.iter().any(|(id, _)| id == p))
+        .ok_or(Error::Protocol("Not a provider Deadbolt links"))?;
+    let (reply, created) = state().with(|s| {
         let account = item_ref(&s.vault, text(link, "account")?)?;
         s.vault
             .item(&account)
             .filter(|i| !i.deleted && i.kind == "login")
             .ok_or(Error::NotFound)?;
+        let account = account.to_string();
+        // One already links the site to it: that's the link.
+        if let Some(item) = s.vault.site_logins(page).find(|item| {
+            value(item, "sign-in-with") == Some(provider.as_str())
+                && value(item, "sign-in-account") == Some(account.as_str())
+        }) {
+            return Ok((
+                json!({"type": "save", "ref": reference(&s.vault, item.id), "created": false}),
+                false,
+            ));
+        }
         let fields = vec![
             ("url".into(), Field::new(FieldType::Url, url)),
-            ("sign-in-with".into(), Field::new(FieldType::Text, provider)),
+            (
+                "sign-in-with".into(),
+                Field::new(FieldType::Text, &provider),
+            ),
             (
                 "sign-in-account".into(),
-                Field::new(FieldType::Text, account.to_string()),
+                Field::new(FieldType::Text, &account),
             ),
         ];
         let name = Some(item_name(title)).filter(|t| !t.is_empty() && *t != page.domain);
         let id = s.mutate(|v, key| Ok(v.create_item(key, "login", name, fields)?.0))?;
-        Ok(json!({"type": "save", "ref": reference(&s.vault, id), "created": true}))
+        Ok((
+            json!({"type": "save", "ref": reference(&s.vault, id), "created": true}),
+            true,
+        ))
     })?;
-    request_sync();
+    if created {
+        request_sync();
+    }
     Ok(reply)
 }
 

@@ -124,7 +124,8 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
   const go = (path: string, as?: string) => Response.redirect(`${url.origin}${step(path, as)}`, 303)
   const form = (path: string, fields: string, button = "Next", extra = "<span></span>") =>
     `<form method="post" action="${step(path)}">${fields}<div class="row">${extra}<button type="submit">${button}</button></div></form>`
-  const chip = `<p><span class="chip" data-profile-identifier="" translate="no">${who}</span></p>`
+  // `chip=other`: the page shows another account than the one chosen (a login_hint the site picked).
+  const chip = `<p><span class="chip" data-profile-identifier="" translate="no">${q.get("chip") === "other" ? GOOGLE_OTHER : who}</span></p>`
   const password = (as = who) => go(q.get("pk") === "1" ? "/v3/signin/challenge/pk" : "/v3/signin/challenge/pwd", as)
   const done = () => {
     const back = new URL(q.get("redirect_uri") ?? "http://acme.test/")

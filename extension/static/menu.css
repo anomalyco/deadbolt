@@ -526,9 +526,11 @@ body[data-offer="dot"] .offer {
   }
 }
 /* The proactive offer uses the existing surface, pinned to the corner by
-   inline.ts. Compact until there is more than one account to choose from. */
+   inline.ts. Its top account's row; the others list below it on hover. */
 .universal { border-radius: 18px; padding-right: 26px; }
-.universal:not(.expanded) .row { height: 36px; min-height: 36px; }
-.universal:not(.expanded) .sub { display: none; }
+/* Listed, one fixed height whatever the count (it scrolls inside), so the
+   frame's size says nothing of how many accounts there are. */
+.universal.expanded .list { height: 150px; max-height: none; }
+.universal .row .more { display: grid; place-items: center; margin-left: auto; flex: none; color: var(--text-faint); }
 .universal .signin-dismiss { position: absolute; right: 4px; top: 4px; width: 28px; height: 28px; border: 0; border-radius: 50%; background: transparent; color: inherit; font-size: 20px; cursor: pointer; }
 .universal .signin-dismiss:hover { background: light-dark(#00000012, #ffffff18); }

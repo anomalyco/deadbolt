@@ -14,7 +14,7 @@ import type { SignInWith } from "./signinwith"
 export const PROVIDER_CHAIN_TTL_MS = 120_000
 export const PROVIDER_CHAIN_ACTIONS = 8
 const UNRELATED = new Set(["typed", "auto_bookmark", "generated", "keyword", "keyword_generated", "reload", "start_page", "auto_toplevel"])
-const NEEDS = { consent: "Review access", phone: "Approve on your phone", sms: "Enter your code", "security-key": "Use your security key", captcha: "Complete the verification", unknown: "" }
+const NEEDS = { consent: "Review access", phone: "Approve on your phone", sms: "Enter your code", "security-key": "Use your security key", captcha: "Complete the verification", unknown: "", choose: "Choose your account" }
 
 interface Chain {
   id: string
@@ -28,8 +28,28 @@ interface Chain {
   provider: Provider
   username: string
   ref?: string
-  /** Picked as one of the person's provider accounts, not a site login: once signed in, the site is linked to it (see link). */
+  /**
+   * Picked as one of the person's provider accounts on a site with no login
+   * for it (an unlinked chain): held to stricter rules (see step, the
+   * probe's `home`), and once signed in the site is linked to it (see link).
+   */
   link?: string
+  /**
+   * Where an unlinked chain's provider pages may send the person back: the
+   * home host, and any host of the home's site the chain itself saw the
+   * site's own navigation or popup pass through on the way to the provider.
+   */
+  hosts: Set<string>
+  /** Actions taken on the provider's own pages (chooser, form, passkey): a link needs one. */
+  providerActions: number
+  /** The provider sign-in page the chain's tab last committed. */
+  lastProviderUrl?: string
+  /** The home tab came back from a provider page whose return URL led home, after a provider action: only then is a sign-in linked. */
+  returnedHome?: boolean
+  /** The chooser document waiting for the person to pick their own tile (an unlinked site's sharing notice). */
+  choosing?: string
+  /** The person picked on the chooser: the next form must show the account picked, never ask for it. */
+  chose?: boolean
   phase: "entry" | "provider" | "return"
   until: number
   actions: number
@@ -69,8 +89,15 @@ export class ProviderChain {
     return this.live(s) && await signInEnabled() && this.live(s)
   }
   private allowed(s: Chain, origin: string) { return origin === s.home.origin || isProviderPage(s.provider, origin) }
-  /** A provider page the chain may act on: a sign-in or OAuth path whose return URLs, if any, lead to the home site. */
-  private step(s: Chain, url: string) { return isSignInPage(s.provider, url) && returnsTo(s.provider, url, s.site) !== "foreign" }
+  /**
+   * A provider page the chain may act on: a sign-in or OAuth path whose
+   * return URLs, if any, lead to the home site. An unlinked chain needs
+   * one that leads to its home's exact host.
+   */
+  private step(s: Chain, url: string) {
+    if (!isSignInPage(s.provider, url)) return false
+    return s.link ? returnsTo(s.provider, url, s.site, [...s.hosts]) === "home" : returnsTo(s.provider, url, s.site) !== "foreign"
+  }
   private consume(s: Chain) {
     if (!this.live(s) || s.actions >= PROVIDER_CHAIN_ACTIONS) { this.end(s); return false }
     s.actions++
@@ -91,7 +118,8 @@ export class ProviderChain {
     s.stop.abort()
     this.linked.end(s.home.tabId)
     if (s.popup !== undefined) this.linked.end(s.popup)
-    if (label === "Signed in" && s.link) void this.link(s, s.link).catch(() => {})
+    // Linked only after a sign-in that went through the provider and came back home from it.
+    if (label === "Signed in" && s.link && s.returnedHome) void this.link(s, s.link).catch(() => {})
     for (const tab of new Set([s.home.tabId, s.tab])) void topTarget(tab).then(({ target }) => {
       if (target && this.allowed(s, target.origin)) void sendToFrame(target, { type: "db:provider-status", session: s.id, label, done: true })
     })
@@ -114,11 +142,13 @@ export class ProviderChain {
     const username = account.signIn?.account
     const site = siteOf(new URL(target.origin).hostname)
     const saved = unlinked ? !!p && account.urls.some((u) => savedAtProvider(p, u)) : account.urls.some((u) => exactSignInOrigin(u, target.origin))
-    if (!p?.hosts.length || !username || !site || target.frameId !== 0 || !saved ||
+    // A provider account never signs in to a site of the provider's own (gist.github.com, sites.google.com): those pages are the provider's.
+    const ownSite = unlinked && !!p && p.hosts.some((h) => siteOf(h) === site)
+    if (!p?.hosts.length || !username || !site || target.frameId !== 0 || !saved || ownSite ||
         this.host.status.state !== "ready" || !(await signInEnabled())) return { ok: true }
     if (generation !== this.generations.get(target.tabId) || this.host.status.state !== "ready") return { ok: true }
-    const s: Chain = { id: crypto.randomUUID(), home: target, site, tab: target.tabId, provider: p, username,
-      phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, busy: false, again: false,
+    const s: Chain = { id: crypto.randomUUID(), home: target, site, hosts: new Set([new URL(target.origin).hostname]), tab: target.tabId, provider: p, username,
+      phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, providerActions: 0, busy: false, again: false,
       used: new Set(), filled: new Set(), stop: new AbortController(), ...(unlinked ? { ref: account.ref, link: account.ref } : {}) }
     this.chains.add(s)
     s.timer = setTimeout(() => this.end(s), PROVIDER_CHAIN_TTL_MS)
@@ -147,6 +177,8 @@ export class ProviderChain {
       if (!await this.ready(s) || target.tabId !== s.tab || !this.allowed(s, target.origin)) return this.end(s)
       if (s.phase === "entry" && (target.origin !== s.home.origin || target.documentId !== s.home.documentId)) return this.end(s)
       if (s.phase === "provider" && !isProviderPage(s.provider, target.origin)) return this.end(s)
+      // Waiting on the person's own pick in this chooser: nothing more to do here.
+      if (s.choosing === target.documentId) return
       if (s.phase === "return") {
         if (target.origin !== s.home.origin) return this.end(s)
         await sendToFrame(target, { type: "db:provider-status", session: s.id, label: `Signing in with ${s.provider.name}…` })
@@ -158,12 +190,20 @@ export class ProviderChain {
       await sendToFrame(target, { type: "db:provider-status", session: s.id, label: `Signing in with ${s.provider.name}…` })
       if (!await this.ready(s)) return this.end(s)
       const report = await sendToFrame<ProviderReport>(target, { type: "db:provider-probe", session: s.id, provider: s.provider.id, site: s.site,
-        ...(s.phase === "entry" ? { entry: true } : { account: s.username }) })
+        ...(s.phase === "entry" ? { entry: true } : { account: s.username }), ...(s.link ? { home: [...s.hosts] } : {}) })
       if (!this.live(s)) return
       // An acknowledged click can unload its document before a queued scan's
       // probe answers. It grants no further action; the next committed page
       // must supply its own report. Explicit unknown/consent still ends now.
       if (!report && [...s.used].some((key) => key.startsWith(`${target.documentId}:`))) return
+      // An unlinked site's chooser asks the person to share their account
+      // with it: that's theirs to agree to. Deadbolt waits for their own
+      // pick of a tile and goes on from the page it leads to.
+      if (report?.kind === "stop" && report.reason === "choose" && s.link && s.phase === "provider") {
+        s.choosing = target.documentId
+        s.chose = true
+        return void (await sendToFrame(target, { type: "db:provider-status", session: s.id, label: NEEDS.choose, hold: true }))
+      }
       if (!report || report.kind === "stop") return this.end(s, NEEDS[report?.reason ?? "unknown"])
       if (report.kind === "success") { if (target.origin === s.home.origin) this.end(s, "Signed in"); return }
       if (!report.action) return this.end(s)
@@ -175,6 +215,8 @@ export class ProviderChain {
       if (report.kind === "form") {
         if (s.phase !== "provider") return this.end(s)
         const roles = report.roles ?? []
+        // After the person's own pick, the account comes from the provider's page: a form asking for it again is someone else's.
+        if (s.chose && roles.some((r) => IDENTIFIER_ROLES.includes(r))) return this.end(s)
         if (!roles.length || roles.some((r) => ![...IDENTIFIER_ROLES, "password", "otp"].includes(r)) ||
             roles.some((r) => s.filled.has(r) && (!IDENTIFIER_ROLES.includes(r) || s.filled.has("password")))) return this.end(s)
         const accounts = (await this.host.send({ type: "list", origin: target.origin })).accounts
@@ -200,6 +242,7 @@ export class ProviderChain {
       const acted = await sendToFrame<boolean>(target, { type: "db:provider-act", session: s.id, action: report.action, ...(values ? { values } : {}) })
       if (!this.live(s)) return
       if (!acted) return this.end(s)
+      if (s.phase === "provider") s.providerActions++
       for (const role of report.roles ?? []) s.filled.add(role)
     } catch { this.end(s) }
     finally {
@@ -238,6 +281,7 @@ export class ProviderChain {
     if (!report || !["form", "passkey"].includes(report.kind) || matches.length !== 1 || !await this.ready(s)) { this.end(s); return null }
     if (s.passkeyDocument === target.documentId) return null
     if (s.filling || !this.consume(s)) { this.end(s); return null }
+    s.providerActions++
     s.passkeyDocument = target.documentId
     return { ref: matches[0].ref, signal: s.stop.signal }
   }
@@ -257,6 +301,7 @@ export class ProviderChain {
     const current = await topTarget(d.tabId)
     if (current.target && (!isProviderPage(s.provider, current.target.origin) || !current.url || !this.step(s, current.url.href))) return this.end(s)
     s.documentId = current.target?.documentId
+    s.lastProviderUrl = current.url?.href
     // A content-script scan / DOMContentLoaded drives the first action, not an about:blank popup.
   }
 
@@ -275,8 +320,16 @@ export class ProviderChain {
       if (!this.step(s, d.url)) return this.end(s)
       s.phase = "provider"
       s.documentId = d.documentId
+      s.lastProviderUrl = d.url
+      s.choosing = undefined
     }
-    else if (s.phase === "provider" && origin === s.home.origin) s.phase = "return"
+    else if (s.phase === "provider" && origin === s.home.origin) {
+      s.phase = "return"
+      // Home again in the chain's own tab, by a navigation off a provider
+      // page that sent it here (not a popup coming back or closing).
+      const back = s.lastProviderUrl ? returnsTo(s.provider, s.lastProviderUrl, s.site, s.link ? [...s.hosts] : undefined) : "none"
+      s.returnedHome = d.tabId === s.home.tabId && s.providerActions > 0 && back === "home"
+    }
     else if (s.phase === "entry") this.end(s)
   }
 

@@ -275,6 +275,20 @@ function chipAccount(account: string | undefined): string | undefined {
   return want && chips.length && chips.every((c) => c.innerText.trim().toLowerCase() === want) ? account : undefined
 }
 
+/**
+ * The accounts a provider's password step says it's for, lowercased: its
+ * visible account chips, and any username the page put in the step's own
+ * or hidden boxes (Google's `identifier`). Values typed by nobody are read
+ * only to compare, never sent.
+ */
+function shownAccounts(plan: FormPlan): string[] {
+  const chips = deepQueryAll<HTMLElement>("[data-profile-identifier]", openRoots()).filter(isVisible).map((c) => c.innerText)
+  const boxes = queryIn(plan.scope.root, "input[name=identifier], input#identifierId, input#hiddenEmail, input[type=email]")
+    .filter((el): el is HTMLInputElement => el instanceof HTMLInputElement && !plan.fields.some((f) => f.el === el))
+    .map((el) => el.value)
+  return [...new Set([...chips, ...boxes].map((v) => v.trim().toLowerCase()).filter(Boolean))]
+}
+
 function inspectForm(account?: string): FormPlan | { stop: Reason } | "wait" | null {
   const kind = page.kind()
   const fields = page.targets()
@@ -317,8 +331,11 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   if (!onProvider) return stop("unknown")
   // Only the provider's own sign-in and OAuth pages, sending the person back to the site picked on.
   if (!isSignInPage(p, location.href)) return stop("unknown")
-  const back = returnsTo(p, location.href, message.site)
-  if (back === "foreign") return stop("unknown")
+  // A chain for a site the person hasn't linked yet (`home`): every page must lead back to exactly that host.
+  const hosts = Array.isArray(message.home) ? message.home.filter((h): h is string => typeof h === "string" && !!h).slice(0, 8) : []
+  const strict = hosts.length > 0
+  const back = returnsTo(p, location.href, message.site, strict ? hosts : undefined)
+  if (strict ? back !== "home" : back === "foreign") return stop("unknown")
   if (deepQueryAll(CAPTCHA, openRoots()).some(isVisible)) return stop("captcha")
   const text = pageWords()
   if (text === null) return stop("unknown")
@@ -326,11 +343,21 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   const account = message.account
   const tile = account ? tileFor(p, account) : null
   if (tile && account) {
+    // Sharing the account with a site for the first time is the person's
+    // decision: on an unlinked site, they click their own tile.
+    if (strict && any(text, SHARES)) return stop("choose")
     if (back !== "home" && any(text, SHARES)) return stop("consent")
     return { kind: "chooser", action: mint({ kind: "click", ...base, provider: true, el: tile, find: () => tileFor(p, account) }) }
   }
   const form = inspectForm(account)
   if (form && form !== "wait" && "stop" in form) return stop(form.stop)
+  // A password step for another account than the one picked (a login_hint
+  // the site chose, say): never. On an unlinked site the page must show it.
+  if (form && form !== "wait" && account && form.fields.some((f) => f.role === "password")) {
+    const shown = shownAccounts(form)
+    if (shown.some((a) => a !== account.trim().toLowerCase())) return stop("unknown")
+    if (strict && !shown.length && !form.fields.some((f) => IDENTIFIER_ROLES.includes(f.role))) return stop("unknown")
+  }
   if (form && form !== "wait") {
     const roles = [...new Set(form.fields.map((f) => f.role))].sort()
     return { kind: "form", form: page.form(), roles, action: mint({ kind: "form", ...base, provider: true, form: page.form(), plan: form, ...(account ? { account } : {}) }) }
@@ -494,6 +521,8 @@ let label: HTMLElement | null = null
 let fadeTimer: ReturnType<typeof setTimeout> | undefined
 /** The pill is on its way out: a new status makes a new one rather than revive it. */
 let fading = false
+/** The chain waits on the person here (see db:provider-status `hold`): their own clicks don't stop it. */
+let holding = false
 
 const STYLE = `
 .pill{position:fixed;top:${INSET}px;right:${INSET}px;display:flex;align-items:center;gap:6px;height:28px;padding:0 4px 0 10px;border-radius:14px;font:500 12px/16px "Inter",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;white-space:nowrap;pointer-events:auto;user-select:none;background:#fff;color:#161616;box-shadow:0 0 0 0.5px rgb(0 0 0 / 12%),0 4px 12px rgb(0 0 0 / 12%)}
@@ -583,7 +612,10 @@ function status(message: Status): boolean {
     handles.clear()
   }
   active = true
+  holding = message.hold === true
   showPill(message.label, false)
+  // Said, then out of the way: the person goes on by hand.
+  if (holding) fadePill(DONE_HOLD_MS)
   return true
 }
 
@@ -611,6 +643,8 @@ function onGesture(event: Event) {
   if (event instanceof KeyboardEvent && event.key !== "Escape") return
   const top = window === window.top
   if (top ? !hooks.enabled() : !frameOffer) return
+  // Waiting on the person's own pick: only Escape stops it.
+  if (top && active && session && holding && !(event instanceof KeyboardEvent)) return
   if (top && active && session) return stopHere(false)
   if (performance.now() - stopSentAt < STOP_EVERY_MS) return
   stopSentAt = performance.now()

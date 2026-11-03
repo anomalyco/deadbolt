@@ -156,7 +156,7 @@ const REOPEN_SETTLES_MS = 500
 const REPLAY_MS = 150
 /** The pill and the dot cross-fade over this long (menu.css). */
 const CROSSFADE_MS = 260
-/** The pointer resting this long on "Sign in with Deadbolt" lists the accounts: passing over it doesn't. */
+/** The pointer moving onto the corner offer's top account this long lists the others: passing over it doesn't. */
 const EXPAND_AFTER_MS = 150
 /** How long a pill says how it went before it goes. */
 const FILLED_STAYS_MS = 900
@@ -530,7 +530,6 @@ function showStatus(status: Status) {
  * the check.
  */
 async function pick(i: number) {
-  if (universal && accounts.length > 1 && !universalExpanded) return expandUniversal()
   const a = accounts[i]
   if (!a || busy || mode !== "accounts" || !matches(a, query)) return
   if (!pressedScale || !dwell.settled(pressedAt)) {
@@ -806,7 +805,7 @@ document.addEventListener("keydown", (e) => {
   }
   const rows = visible()
   if (!rows.length || mode !== "accounts") return
-  // ↓ or ↑ on "Sign in with Deadbolt" lists the accounts; the next ↓ moves in them.
+  // ↓ or ↑ on the corner offer's top account lists the others; the next ↓ moves in them.
   if (universal && !universalExpanded && accounts.length > 1 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
     e.preventDefault()
     return expandUniversal()
@@ -856,7 +855,8 @@ function show(reply: MenuLoadReply) {
   }
   listbox(reply.kind === "generate" ? "Passwords" : "Logins")
   siteIcons = reply.kind === "accounts" ? (reply.icons ?? null) : null
-  bare = reply.kind === "accounts" && !siteIcons
+  // The corner offer always shows each account's mark: the provider's, or the site's tile.
+  bare = reply.kind === "accounts" && !siteIcons && !universal
   rowsEl.classList.toggle("bare", bare)
   revealable = new Set(reply.kind === "accounts" ? (reply.reveal ?? []) : [])
   listedAt = performance.now()
@@ -874,12 +874,13 @@ function show(reply: MenuLoadReply) {
 }
 
 /**
- * The corner offer's accounts, listed from "Sign in with Deadbolt". Listing
- * picks nothing, and the surface grows: as after any move, a pick waits out
- * the dwell again (see pick).
+ * The corner offer's other accounts, listed from its top one. Listing picks
+ * nothing, and the surface grows: as after any move, a pick waits out the
+ * dwell again (see pick). The list is one fixed height, scrolling inside,
+ * so the frame's size doesn't tell the page how many accounts there are.
  */
 function expandUniversal() {
-  if (universalExpanded || mode !== "accounts") return
+  if (universalExpanded || mode !== "accounts" || accounts.length < 2) return
   universalExpanded = true
   surface.classList.add("expanded")
   rowsEl.replaceChildren(...accounts.map(row))
@@ -888,7 +889,7 @@ function expandUniversal() {
   report()
 }
 
-/** Back to the one "Sign in with Deadbolt" row: the pointer left the list and nothing was picked. */
+/** Back to the top account alone: the pointer left the list and nothing was picked. */
 function collapseUniversal() {
   if (!universalExpanded || busy || mode !== "accounts" || surface.matches(":hover, :focus-within")) return
   universalExpanded = false
@@ -906,36 +907,53 @@ surface.addEventListener("pointerleave", (e) => {
   collapsing = setTimeout(collapseUniversal, COLLAPSE_GRACE_MS)
 })
 surface.addEventListener("pointerenter", () => clearTimeout(collapsing))
+// Keyboard focus coming into the list (Tab) lists the accounts too; a press takes none (see the mousedown handler).
+rowsEl.addEventListener("focus", (e) => e.isTrusted && universal && expandUniversal())
 
+/**
+ * The person's own pointer moving, not the browser replaying where it was
+ * after the frame changed size, nor a pointer resting where the offer came
+ * in (see the save offer's real()).
+ */
+const moving = (e: PointerEvent) => e.isTrusted && (e.movementX !== 0 || e.movementY !== 0) && e.timeStamp - resizedAt > REPLAY_MS
+
+const CHEVRON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+
+/**
+ * The corner offer, collapsed: its top account's own row (the site's first
+ * login, else the first provider account), which one click picks with every
+ * check a pick has. With more accounts a quiet chevron says so, and the
+ * pointer moving onto the row for a moment, focus or ↓ lists them.
+ */
 function showUniversal() {
-  if (accounts.length > 1 && !universalExpanded) {
-    const choose = h("button", { class: "row", type: "button" }, h("span", { class: "title" }, "Sign in with Deadbolt"))
-    choose.addEventListener("click", (e) => { if (e.isTrusted) expandUniversal() })
-    // Resting the pointer on it, or keyboard focus (a press takes none, see
-    // the mousedown handler), lists the accounts too. Only the person's own
-    // pointer or keyboard: a page's events never reach this frame trusted.
-    let resting: ReturnType<typeof setTimeout> | undefined
-    let inside = false
-    const rest = (e: PointerEvent) => {
-      if (!e.isTrusted) return
-      inside = true
-      if (resting === undefined) resting = setTimeout(() => {
+  if (!universalExpanded && accounts.length) {
+    active = 0
+    const top = row(accounts[0], 0)
+    if (accounts.length > 1) {
+      const more = h("span", { class: "more", "aria-hidden": "true" })
+      more.innerHTML = CHEVRON
+      top.append(more)
+      top.setAttribute("aria-description", "More accounts: press ↓")
+      let resting: ReturnType<typeof setTimeout> | undefined
+      let inside = false
+      top.addEventListener("pointermove", (e) => {
+        if (!moving(e)) return
+        inside = true
+        if (resting === undefined) resting = setTimeout(() => {
+          resting = undefined
+          if (inside && !busy) expandUniversal()
+        }, EXPAND_AFTER_MS)
+      })
+      top.addEventListener("pointerleave", () => {
+        inside = false
+        clearTimeout(resting)
         resting = undefined
-        if (inside) expandUniversal()
-      }, EXPAND_AFTER_MS)
+      })
     }
-    choose.addEventListener("pointerenter", rest)
-    choose.addEventListener("pointermove", rest)
-    choose.addEventListener("pointerleave", () => {
-      inside = false
-      clearTimeout(resting)
-      resting = undefined
-    })
-    choose.addEventListener("focus", (e) => e.isTrusted && expandUniversal())
-    rowsEl.replaceChildren(choose)
+    rowsEl.replaceChildren(top)
+    // Quiet until the pointer is on it (the row's own pointermove lights it).
     highlightEl.hidden = true
-  }
-  surface.querySelector(".signin-dismiss")?.remove()
+  }  surface.querySelector(".signin-dismiss")?.remove()
   const dismiss = h("button", { class: "signin-dismiss", type: "button", title: "Not now for this site (30 minutes)", "aria-label": "Not now for this site" }, "×")
   dismiss.addEventListener("click", async (e) => {
     if (!e.isTrusted || (e.detail === 0 && !entry.entered) || busy || !pressedScale || !dwell.settled(pressedAt)) return

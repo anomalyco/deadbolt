@@ -67,8 +67,10 @@ const SIGN_IN_PATHS: Record<string, RegExp> = {
 }
 /** Re-authentication, sudo and settings pages: never a sign-in step, even under an allowed prefix. */
 const DENIED_PATH = /\/(?:settings|sudo|reauth|re-auth|confirm[-_]?access|security|myaccount|tokens?|personal_access_tokens|billing|password[-_]?(?:reset|change))(?:[/.]|$)/i
-/** Query parameters that name where a provider sends the person back. */
-const RETURN_PARAMS = ["redirect_uri", "redirect_url", "return_to", "returnTo", "return_url", "returnUrl", "continue", "followup", "next", "session_redirect", "openid.return_to"]
+/** Query parameters that name where a provider sends the person back, compared without case. */
+const RETURN_PARAMS = new Set(["redirect_uri", "redirect_url", "return_to", "returnto", "return_url", "returnurl", "continue", "followup", "next", "session_redirect", "openid.return_to"])
+/** OAuth's space-separated scopes are often URLs (Google's), never a place to go. */
+const NOT_RETURN = new Set(["scope"])
 
 /** Whether `url` is one of the provider's own sign-in or OAuth pages: its host (isProviderPage) and an allowed path. */
 export function isSignInPage(p: Provider, url: string): boolean {
@@ -80,12 +82,15 @@ export function isSignInPage(p: Provider, url: string): boolean {
 
 /**
  * Where a provider page sends the person back, judged against `site`, the
- * chain's home (a registrable domain): "home" when every return URL it
- * carries resolves to that site, directly or through another of the
- * provider's own sign-in pages that does; "none" when it carries none;
- * otherwise "foreign".
+ * chain's home (a registrable domain), or with `hosts`, exactly one of those:
+ * "home" when every return URL it carries resolves there, directly or
+ * through another of the provider's own sign-in pages that does; "none"
+ * when it carries none; otherwise "foreign". A return URL is a parameter
+ * named like one (any case; relative ones resolve against the page), or any
+ * other whose value is an absolute http(s) URL, whatever it's called
+ * (`wreply`, `redir`), except OAuth's `scope`.
  */
-export function returnsTo(p: Provider, url: string, site: string, depth = 0): "home" | "none" | "foreign" {
+export function returnsTo(p: Provider, url: string, site: string, hosts?: readonly string[], depth = 0): "home" | "none" | "foreign" {
   let u: URL
   try {
     u = new URL(url)
@@ -93,17 +98,21 @@ export function returnsTo(p: Provider, url: string, site: string, depth = 0): "h
     return "foreign"
   }
   let found = false
-  for (const name of RETURN_PARAMS) for (const value of u.searchParams.getAll(name)) {
+  for (const [name, value] of u.searchParams) {
+    const key = name.toLowerCase()
+    if (NOT_RETURN.has(key)) continue
+    const named = RETURN_PARAMS.has(key)
+    if (!named && !/^\s*https?:\/\//i.test(value)) continue
     found = true
     let back: URL
     try {
-      back = new URL(value, u)
+      back = named ? new URL(value, u) : new URL(value.trim())
     } catch {
       return "foreign"
     }
-    const host = back.hostname.toLowerCase()
-    if (site && secure(back) && (host === site || host.endsWith(`.${site}`))) continue
-    if (depth < 3 && isSignInPage(p, back.href) && returnsTo(p, back.href, site, depth + 1) === "home") continue
+    const at = back.hostname.toLowerCase()
+    if (site && secure(back) && (hosts ? hosts.some((h) => at === h.toLowerCase()) : at === site || at.endsWith(`.${site}`))) continue
+    if (depth < 3 && isSignInPage(p, back.href) && returnsTo(p, back.href, site, hosts, depth + 1) === "home") continue
     return "foreign"
   }
   return found ? "home" : "none"

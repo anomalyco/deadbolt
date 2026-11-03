@@ -294,8 +294,17 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
                 .unwrap_or_else(|| named(&None, std::slice::from_ref(title))),
             vec!["username".into(), "password".into()],
         ),
-        Command::SiteLink { title, .. } => (
-            named(&None, std::slice::from_ref(title)),
+        // The new login, then the provider login it signs in with.
+        Command::SiteLink {
+            title,
+            provider,
+            account,
+            ..
+        } => (
+            named(&None, std::slice::from_ref(title))
+                .into_iter()
+                .chain(login(&account.vault, &account.item, provider))
+                .collect(),
             vec!["sign-in-with".into()],
         ),
         Command::PasskeyGet {
@@ -518,7 +527,10 @@ impl Draft {
                     .first()
                     .map(|i| i.title.clone())
                     .unwrap_or_default();
+                // The saved login takes the first place; any login it names (a link's account) stays.
+                let rest = self.items.split_off(self.items.len().min(1));
                 self.items = login(&saved.vault, &saved.item, &title);
+                self.items.extend(rest);
             }
             // Which card, on which page: "Visa •••• 4242 · https://shop.com".
             Reply::FormFill { title, .. } => {
