@@ -274,6 +274,8 @@ async function launch() {
   context.setDefaultTimeout(15_000)
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker")
   check(worker.url().startsWith(`chrome-extension://${ID}/`), "loaded standalone extension")
+  // These runs check filling: "Offer to sign in" (on unless turned off) would submit each pick (see e2e/run.ts pickSignsIn).
+  await worker.evaluate(() => chrome.storage.local.set({ offerToSignIn: false }))
   await worker.evaluate(() => {
     const global = globalThis as unknown as { nativeCalls: number }
     global.nativeCalls = 0

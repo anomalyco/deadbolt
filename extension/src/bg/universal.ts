@@ -1,4 +1,4 @@
-import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, type AuthReport } from "../auth-state"
+import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, signInOn, type AuthReport } from "../auth-state"
 import { provider as providerOf } from "../signin"
 import type { ProviderChain } from "./provider-chain"
 import type { MenuLoadReply, PickReply, SignInReply } from "../messages"
@@ -18,7 +18,7 @@ interface Offer extends FrameTarget {
 }
 interface Memory { signedIn?: number; quietUntil?: number }
 
-/** Opt-in offers only. Ordinary menu and Browse fills never enter this path. */
+/** The corner offer, with "Offer to sign in" on. Browse fills never enter this path. */
 export class UniversalSignIn {
   private offers = new Map<string, Offer>()
   private checking = new Set<number>()
@@ -29,17 +29,28 @@ export class UniversalSignIn {
     chrome.storage.onChanged?.addListener((changes, area) => {
       if (area !== "local" || !(SIGNIN_SETTING in changes)) return
       this.on = undefined
-      if (changes[SIGNIN_SETTING].newValue !== true) void this.closeAll()
+      if (!signInOn(changes[SIGNIN_SETTING].newValue)) void this.closeAll()
     })
   }
 
   /** Memoized until the setting changes; a failed read is retried next time. */
   private enabled() {
-    const on = this.on ??= chrome.storage.local.get(SIGNIN_SETTING).then((s) => s[SIGNIN_SETTING] === true)
+    const on = this.on ??= chrome.storage.local.get(SIGNIN_SETTING).then((s) => signInOn(s[SIGNIN_SETTING]))
     on.catch(() => { if (this.on === on) this.on = undefined })
     return on.catch(() => false)
   }
-  private async key(origin: string) { return `signin-memory:${await hostHash(origin)}` }
+  /** Each origin's memory key, hashed once (see hostHash). */
+  private keys = new Map<string, Promise<string>>()
+  private key(origin: string) {
+    let key = this.keys.get(origin)
+    if (!key) {
+      if (this.keys.size >= 100) this.keys.delete(this.keys.keys().next().value!)
+      key = hostHash(origin).then((h) => `signin-memory:${h}`)
+      key.catch(() => this.keys.delete(origin))
+      this.keys.set(origin, key)
+    }
+    return key
+  }
   private async memory(origin: string): Promise<Memory> {
     const key = await this.key(origin)
     return (await chrome.storage.session.get(key))[key] ?? {}
@@ -54,6 +65,18 @@ export class UniversalSignIn {
     if (old.length) await chrome.storage.session.remove(old)
   }
 
+  /**
+   * For a pick that would sign in (Autofill.signedOut): a fresh probe of the
+   * top page finds it signed out, and no sign-in is remembered there lately.
+   */
+  async signedOutNow(target: FrameTarget): Promise<boolean> {
+    if (target.frameId !== 0) return false
+    const facts = await this.probe(target, true)
+    if (!facts) return false
+    const memory = await this.memory(target.origin)
+    return authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) === "signed-out"
+  }
+
   /** The existing save/outcome judge confirmed a sign-in; no new heuristic. */
   async signedIn(tabId: number) {
     if (!await this.enabled()) return
@@ -66,9 +89,10 @@ export class UniversalSignIn {
     if (target?.frameId === 0) await this.remember(target.origin, { signedIn: 0 })
   }
 
+  /** A site with none keeps its empty list until the vault changes (see the constructor); others for five seconds. */
   private async accounts(origin: string, fresh = false): Promise<Account[]> {
     const cached = this.lists.get(origin)
-    if (!fresh && cached && Date.now() - cached.at < 5000) return cached.accounts
+    if (!fresh && cached && (!cached.accounts.length || Date.now() - cached.at < 5000)) return cached.accounts
     const list = await this.host.send({ type: "list", origin })
     const accounts = list.accounts.filter((a) => (a.hasPassword || a.signIn) && a.urls.some((u) => exactSignInOrigin(u, origin)))
     if (this.lists.size >= 100) this.lists.delete(this.lists.keys().next().value!)
@@ -85,15 +109,22 @@ export class UniversalSignIn {
     return Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS || Date.now() < (memory.quietUntil ?? 0)
   }
 
-  async check(sender: chrome.runtime.MessageSender) {
+  /**
+   * A page that shows something of a sign-in asks once per change (see
+   * content.ts askAboutSignIn). "retry": nothing could be decided yet
+   * (Deadbolt locked or busy, a check or a sign-in under way), so it asks
+   * again in a few seconds.
+   */
+  async check(sender: chrome.runtime.MessageSender): Promise<"retry" | undefined> {
     const target = await targetFor(sender)
     // Cheapest first. An open offer stays until navigation, pick, dismissal,
     // lock or the setting going off; it is never re-probed.
-    if (!target || target.frameId !== 0 || this.checking.has(target.tabId) || this.open(target.tabId)) return
-    if (this.host.status.state !== "ready" || this.occupied(target.tabId) || this.providers.active(target.tabId)) return
+    if (!target || target.frameId !== 0 || this.open(target.tabId)) return
+    if (this.checking.has(target.tabId) || this.host.status.state !== "ready" || this.occupied(target.tabId) || this.providers.active(target.tabId)) return "retry"
     this.checking.add(target.tabId)
     try {
-      if (!await this.enabled() || this.quiet(await this.memory(target.origin)) || await this.autofill.signingIn(target.tabId)) return
+      if (!await this.enabled() || this.quiet(await this.memory(target.origin))) return
+      if (await this.autofill.signingIn(target.tabId)) return "retry"
       const accounts = await this.accounts(target.origin)
       if (!accounts.length || accounts.length > 50) return
       const facts = await this.probe(target)

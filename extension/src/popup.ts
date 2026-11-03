@@ -13,6 +13,7 @@ import { learnLine, learningCard, savingOffLine } from "./ui/site-notes"
 import { mountVault } from "./vault/app"
 import { animateTo, reducedMotion, ROLL_CSS, timing } from "./ui/motion"
 import { appearanceRows } from "./ui/appearance"
+import { signInRow } from "./ui/signin-setting"
 import { iconSettings, onIconSettings, type IconSettings } from "./ui/icon-store"
 import { siteTile } from "./ui/site-icon"
 import { glyph } from "./vault/kit"
@@ -46,7 +47,7 @@ function tileFor(a: Account, index: number): HTMLElement {
   return siteTile(a.title, url, { reveal: true, once: url, delay: Math.min(index, 8) * 28 })
 }
 
-/** The popup's settings: Appearance, and a way back. */
+/** The popup's settings: signing in, Appearance, and a way back. */
 function settingsBody(): HTMLElement {
   const done = h("button", { class: "btn", type: "button" }, "Done")
   done.addEventListener("click", () => {
@@ -57,6 +58,8 @@ function settingsBody(): HTMLElement {
   return h(
     "section",
     { class: "site settings" },
+    h("div", { class: "section-head" }, h("span", { class: "label" }, "Signing in")),
+    signInRow(announce),
     h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")),
     ...appearanceRows(icons, announce),
     h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks."),

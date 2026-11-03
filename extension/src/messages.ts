@@ -154,7 +154,7 @@ export type ToBackground =
    * field shows in the frame's viewport, so the menu can open in the top
    * page under it (see Autofill.query).
    */
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box }
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box; asksNew?: boolean }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean; asksNew?: boolean }
@@ -305,7 +305,8 @@ export type ToContent =
   | { type: "db:signin-offer"; token: string }
   | { type: "db:auth-probe"; fresh?: boolean }
   | { type: "db:signin-go"; action: string }
-  | { type: "db:signin-submit"; form: number }
+  /** `first`: an automatic session's first step, held to a sign-in's own (see content.ts). */
+  | { type: "db:signin-submit"; form: number; first?: true }
   // Can the user see a frame's form? (see shownInPage)
   /**
    * To the frame above: where those boxes show in it, through the element
@@ -409,13 +410,14 @@ export interface QueryReply {
 export type MenuLoadReply =
   /** `passkeys`: for a sign-in waiting on a passkey pick (conditional mediation). */
   /** `continueAs`: the site signs in identifier first and has one login: say "Continue as …". */
+  /** `signsIn`: the logins a pick here signs in with ("Offer to sign in", see Autofill.startAutomatic), not only fills. */
   /**
    * `icons`: with "Site icons in the fill menu" on, the site icons kept for
    * the logins' hosts (null: none kept), from the background, which alone
    * opens the icon store from here (see ui/icon-store.ts). Off, rows show no icon.
    * `reveal`: those hosts whose icon no menu has dithered in yet this browser session.
    */
-  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; universal?: boolean; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
+  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; universal?: boolean; signsIn?: string[]; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
   | { kind: "generate"; site: string }
   /**
    * An identity or card field's menu: the identities or cards to pick from.
@@ -431,7 +433,8 @@ export type MenuLoadReply =
   /** The save offer's surface: what it may show. Never the password. */
   | { kind: "offer"; site: string; username: string; update: boolean }
 
-export type PickReply = { ok: true } | { ok: false; message: string }
+/** `submitted`: the pick signed in (see Autofill.startAutomatic) and its form went on, beyond a fill. */
+export type PickReply = { ok: true; submitted?: boolean } | { ok: false; message: string }
 
 /** The answer to a "Sign in with …" pick: whether the site's button was found and is being pointed at. */
 export type SignInReply = { ok: true; found: boolean; provider: string } | { ok: false; message: string }

@@ -26,11 +26,12 @@ const saver = new Saver(host)
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
 const signInWith = new SignInWith(host)
 const providers = new ProviderChain(host, passkeys, signInWith)
-const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
+const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith, providers)
 const learner = new Learner(host)
 const forms = new Forms(host)
 const siteIcons = new SiteIcons(host)
 const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(tabId) !== undefined, providers)
+autofill.signedOut = (target) => universal.signedOutNow(target)
 /**
  * The device.html tab the inline menu's locked row opened. Memory only, like
  * Autofill's return target: a restarted worker returns nowhere. A later click
@@ -41,6 +42,7 @@ let unlockTab: number | undefined
 let openingUnlock: Promise<void> | null = null
 saver.signedIn = (tabId, site) => {
   void providers.signedIn(tabId)
+  void autofill.signedIn(tabId)
   void universal.signedIn(tabId)
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
@@ -86,7 +88,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return
     case "db:query":
       if (sender.tab?.id !== undefined && providers.active(sender.tab.id)) return { rows: 0 }
-      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount, message.box)
+      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount, message.box, message.asksNew)
     case "db:page":
       if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true, message.idEmpty === true, message.asksNew === true)
