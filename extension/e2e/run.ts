@@ -847,6 +847,34 @@ const server = Bun.serve({
       // A login form that posts to another origin (here, the same server as 127.0.0.1).
       case "/flow/cross":
         return html("Sign in to Acme", loginForm(`http://127.0.0.1:${url.port}/flow/done`))
+      // Sign-in forms Deadbolt fills but never submits itself (see pickSignsIn): one that opens a new tab (<base target>), one sent by GET,
+      // and a "Continue" whose password box asks for a new password.
+      case "/flow/base-target":
+        return html("Sign in to Acme", `<base target="_blank">${loginForm("/flow/done")}`)
+      case "/flow/get":
+        return html("Sign in to Acme", loginForm("/flow/done").replace('method="post"', 'method="get"'))
+      case "/flow/new-continue":
+        return html("Sign in to Acme", loginForm("/flow/done").replace('autocomplete="current-password"', 'autocomplete="new-password"').replace(">Sign in<", ">Continue<"))
+      // Forms that ask for a password, or a code, to confirm something other than a sign-in.
+      case "/flow/confirm": {
+        const password = `<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">`
+        const email = `<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">`
+        const code = `<label for="code">Authenticator code</label><input id="code" name="code" autocomplete="one-time-code" inputmode="numeric">`
+        const forms: Record<string, [string, string, string]> = {
+          sudo: ["Confirm access", `<p>Signed in as <strong>kit</strong></p>`, `${password}<button type="submit">Confirm</button>`],
+          delete: ["Delete your account", "<p>This can't be undone. Enter your email and password to continue.</p>", `${email}${password}<button type="submit">Continue</button>`],
+          withdraw: ["Withdraw BTC", "<p>Send to an external address.</p>", `<label for="amount">Amount</label><input id="amount" name="amount" inputmode="decimal">${email}${password}${code}<button type="submit">Confirm</button>`],
+          "disable-2fa": ["Turn off two-factor authentication", "", `${email}${password}${code}<button type="submit">Continue</button>`],
+        }
+        const [title, intro, fields] = forms[url.searchParams.get("form") ?? ""] ?? forms.sudo
+        return html(title, `<h1>${title}</h1>${intro}<form method="post" action="/flow/done" novalidate>${fields}</form>`)
+      }
+      // A single-page app that never stops changing (a live feed), with ?signin a "Sign in" link too.
+      case "/busy":
+        return html("Acme live", `<h1>Live</h1>${url.searchParams.has("signin") ? '<a href="/login">Sign in</a>' : ""}<ul id="feed"></ul><script>
+          let n = 0
+          setInterval(() => { const li = document.createElement("li"); li.textContent = "Update " + ++n; const feed = document.getElementById("feed"); feed.prepend(li); while (feed.children.length > 20) feed.lastChild.remove() }, 100)
+        </script>`)
       case "/flow/spa/done":
         return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</strong>.</p>`)
       // A site's sign-in page with a "Continue with Google" button, and a fake
@@ -3556,8 +3584,8 @@ async function pickSignsIn() {
     if (clip) clips.push({ page, name: clip })
     await page.goto(`${site}${path}`)
   }
-  const pick = async () => {
-    const menu = await menuOn(page)
+  const pick = async (selector = "#email") => {
+    const menu = await menuOn(page, selector)
     if (!menu) throw new Error(`no menu on ${page.url()}`)
     await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
   }
@@ -3630,8 +3658,30 @@ async function pickSignsIn() {
     check(!!menu && (await page.inputValue("#email")) === "" && (await fillCount(run)) === fills && !flowPosts.slice(before).length, "a page's synthetic events and messages pick nothing and submit nothing")
     check(await run.worker.evaluate(async () => !Object.keys(await chrome.storage.session.get(null)).some((k) => k.startsWith("session:"))), "and start no sign-in session")
 
-    // Turned off: a pick only fills, and the next step fills only after the person's own submit.
-    await run.worker.evaluate(() => chrome.storage.local.set({ offerToSignIn: false }))
+    // Picks on forms that aren't a sign-in's first step, or that wouldn't stay in this tab as a POST, fill and never submit.
+    for (const path of ["/flow/confirm?form=sudo", "/flow/confirm?form=delete", "/flow/confirm?form=withdraw", "/flow/confirm?form=disable-2fa", "/flow/base-target", "/flow/get", "/flow/new-continue"]) {
+      before = flowPosts.length
+      const pages = run.context.pages().length
+      await open(path)
+      await pick(path.includes("sudo") ? "#password" : "#email")
+      const sudo = path.includes("sudo")
+      await until(`${path} fills`, async () => (await page.inputValue(sudo ? "#password" : "#email")) === (sudo ? "correct horse" : "kit@acme.test"), 6000)
+      await Bun.sleep(2000)
+      const at = new URL(page.url())
+      check(`${at.pathname}${at.search}` === path && !flowPosts.slice(before).length && run.context.pages().length === pages, `${path}: a pick fills and doesn't submit`)
+    }
+
+    // Turned off in the toolbar popup's Settings: a pick only fills, and the next step fills only after the person's own submit.
+    {
+      const p = await popup(run, site)
+      await p.getByRole("button", { name: "Settings", exact: true }).click()
+      const toggle = p.getByRole("switch", { name: "Offer to sign in" })
+      // The switch takes its state from storage as it opens.
+      check(!!(await until("the popup's switch reads on", () => toggle.isChecked(), 4000)), "the popup's Settings show Offer to sign in, on")
+      await toggle.uncheck()
+      check(await run.worker.evaluate(async () => (await chrome.storage.local.get("offerToSignIn")).offerToSignIn === false), "the popup's switch turns it off")
+      await p.close()
+    }
     before = flowPosts.length
     await open("/flow/nav", "pick-fill-only")
     await pick()
@@ -3655,6 +3705,48 @@ async function pickSignsIn() {
       for (const { name, path } of saved) if (path) await rename(path, join(video, `${name}.webm`)).catch((err) => check(false, `couldn't keep ${name}: ${err}`))
       for (const path of others) if (path && !saved.some((s) => s.path === path)) await rm(path, { force: true })
     }
+  }
+}
+
+/**
+ * A busy single-page app keeps changing its DOM. With "Offer to sign in" on
+ * (the default), a page that shows nothing of a sign-in sends the service
+ * worker nothing about it, and one with a "Sign in" link asks once, not on
+ * every scan. QUIET_MS sets how long each page is watched (20 s here; a
+ * longer run measures messages per minute and the longest quiet stretch).
+ */
+async function quietPages() {
+  const run = await launch({ universal: true, offerToSignIn: "default" })
+  const page = await run.context.newPage()
+  const watch = Number(process.env.QUIET_MS) || 20_000
+  try {
+    await run.worker.evaluate(() => {
+      const times: Array<{ type: string; at: number; path: string }> = []
+      ;(globalThis as unknown as { __times: typeof times }).__times = times
+      chrome.runtime.onMessage.addListener((m: { type?: string }, s) => {
+        if (s.tab && s.url) times.push({ type: String(m?.type), at: Date.now(), path: new URL(s.url).pathname + new URL(s.url).search })
+      })
+    })
+    for (const path of ["/busy", "/busy?signin"]) {
+      await page.goto(`${site}${path}`)
+      await Bun.sleep(2000)
+      const lists = (await hostLog(run)).filter((r) => r.type === "list").length
+      const from = Date.now()
+      await Bun.sleep(watch)
+      const seen = (await run.worker.evaluate(() => (globalThis as unknown as { __times: Array<{ type: string; at: number; path: string }> }).__times)).filter((t) => t.at >= from && t.path === path)
+      const checks = seen.filter((t) => t.type === "db:signin-check" || t.type === "db:provider-check").length
+      const listed = (await hostLog(run)).filter((r) => r.type === "list").length - lists
+      const stamps = [from, ...seen.map((t) => t.at), from + watch]
+      const gap = Math.max(...stamps.slice(1).map((t, i) => t - stamps[i]))
+      const perMinute = (n: number) => Math.round((n * 60_000) / watch)
+      console.log(`  ${path}: ${perMinute(seen.length)} messages/min to the worker (${perMinute(checks)} sign-in/provider checks), ${perMinute(listed)} vault lists/min, longest quiet ${(gap / 1000).toFixed(1)} s`)
+      if (path === "/busy") check(checks === 0 && listed === 0, `a busy page that shows nothing of a sign-in sends no sign-in checks (${checks}) and lists nothing (${listed})`)
+      else check(checks <= 4, `a busy page with a Sign in link asks about it once per change, not each scan (${checks} in ${watch / 1000} s)`)
+    }
+  } catch (err) {
+    check(false, `quiet pages threw: ${(err as Error).message.split("\n")[0]}`)
+  } finally {
+    await close(run)
   }
 }
 
@@ -5291,6 +5383,7 @@ const once: Record<string, () => Promise<void>> = {
   corner,
   signInSessions,
   pickSignsIn,
+  quietPages,
   signUpStep,
   frameLogins,
   frameMoves,
@@ -5333,7 +5426,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 40, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
+  detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
   formsSurface: 7, formsShapes: 14, formsFrames: 16, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,

@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, test } from "bun:test"
-import { Autofill, FLOWS_KEY, menuAccounts, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
+import { beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { AUTOMATIC_STEP_MS, Autofill, FLOWS_KEY, menuAccounts, signsIn, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
 import { HostError } from "../src/bg/backend"
 import { SIGNIN_SETTING } from "../src/auth-state"
 import { SignInWith } from "../src/bg/signinwith"
@@ -25,10 +25,12 @@ describe("automatic sign-in session", () => {
   beforeEach(() => {
     const send = host.host.send.bind(host.host)
     host.host.send = (async (req) => req.type === "list" ? { type: "list", site: "example.com", accounts: [account, linked] } : send(req as never)) as typeof host.host.send
+    // The page looks signed out to a fresh probe (bg/universal.ts signedOutNow).
+    autofill.signedOut = async () => true
   })
   /** The inline menu on a login form's field, loaded by its menu frame. */
-  async function loginMenu(form = 1, roles: string[] = ["email", "password"], kind = "login") {
-    const token = (await autofill.query(pageSender(), roles, "email", form, false, undefined, false, kind)).token!
+  async function loginMenu(form = 1, roles: string[] = ["email", "password"], kind = "login", asksNew = false) {
+    const token = (await autofill.query(pageSender(), roles, roles[0], form, false, undefined, false, kind, undefined, undefined, undefined, asksNew)).token!
     expect(token).toBeString()
     loaded = await autofill.menuLoad(token, menuSender(), SITE)
     return token
@@ -81,6 +83,59 @@ describe("automatic sign-in session", () => {
     expect(await autofill.popupFill(1, account.ref)).toEqual({ ok: true })
     expect(delivered("db:signin-submit")).toHaveLength(1)
   })
+  test("only a sign-in's first step signs in: not a password or code box alone, a new-password box, or a page that doesn't look signed out", async () => {
+    expect(signsIn("login", ["email", "password"])).toBe(true)
+    expect(signsIn("login", ["email"])).toBe(true)
+    // Confirm access, turning two-factor off, a withdrawal's code: no username box.
+    expect(signsIn("login", ["password"])).toBe(false)
+    expect(signsIn("login", ["password", "otp"])).toBe(false)
+    expect(signsIn("mfa", ["otp"])).toBe(false)
+    expect(signsIn("login", ["email", "password"], true)).toBe(false)
+    expect(signsIn("signup", ["email", "new-password"])).toBe(false)
+    const sudo = await loginMenu(1, ["password"])
+    expect(await autofill.menuPick(sudo, account.ref, menuSender())).toEqual({ ok: true })
+    // A "Continue" step whose password box asks for a new password (a sign-up the detector took for a login).
+    const fresh = await loginMenu(2, ["email", "password"], "login", true)
+    expect(await autofill.menuPick(fresh, account.ref, menuSender())).toEqual({ ok: true })
+    // Signed in already (the probe sees a Sign out, or a sign-in is remembered): it only fills.
+    autofill.signedOut = async () => false
+    const signedIn = await loginMenu(3)
+    expect(await autofill.menuPick(signedIn, account.ref, menuSender())).toEqual({ ok: true })
+    expect(delivered("db:signin-submit")).toHaveLength(0)
+    expect(delivered("db:fill").every((d) => !d.message.automatic)).toBe(true)
+  })
+  test("a code prompt after the session's 20 seconds, or after a confirmed sign-in, gets nothing", async () => {
+    await autofill.page(pageSender(), "login", ["email", "password"], 1)
+    await autofill.page(pageSender(), "mfa", ["otp"], 2)
+    await autofill.learnFlow(1, "example.com")
+    for (const end of ["late", "signed-in"]) {
+      fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "top-doc", parentFrameId: -1 }
+      const before = { fills: fills().length, submits: delivered("db:signin-submit").length }
+      expect(await autofill.menuPick(await loginMenu(3), account.ref, menuSender())).toEqual({ ok: true, submitted: true })
+      expect(delivered("db:signin-submit").map((d) => d.message.first)).toContain(true)
+      fake.fillAck = () => ({ filled: ["otp"] })
+      if (end === "signed-in") await autofill.signedIn(1)
+      const now = Date.now()
+      const clock = end === "late" ? spyOn(Date, "now").mockReturnValue(now + AUTOMATIC_STEP_MS + 1000) : null
+      try {
+        // A code box shown later, on the same origin (a script of the site's own, say).
+        await autofill.page(next(`code-${end}`), "mfa", ["otp"], 4)
+      } finally { clock?.mockRestore() }
+      expect(fills().length - before.fills).toBe(1)
+      expect(delivered("db:signin-submit").length - before.submits).toBe(1)
+      fake.fillAck = () => ({ filled: ["email", "password"] })
+    }
+  })
+  test("a provider row on a sign-up form, or on a signed-in page, starts no chain", async () => {
+    const started: string[] = []
+    autofill = new Autofill(host.host, undefined, undefined, undefined, { start: async (_: unknown, a: { ref: string }) => (started.push(a.ref), { ok: true as const }), active: () => started.length > 0 })
+    autofill.signedOut = async () => true
+    expect(await autofill.menuSignIn(await loginMenu(1, ["email", "password"], "signup"), linked.ref, menuSender())).toMatchObject({ ok: true, provider: "google" })
+    autofill.signedOut = async () => false
+    expect(await autofill.menuSignIn(await loginMenu(2), linked.ref, menuSender())).toMatchObject({ ok: true, provider: "google" })
+    expect(started).toEqual([])
+    expect(delivered("db:point")).toHaveLength(2)
+  })
   test("a pick on a sign-up form, or with no saved URL naming the exact origin, only fills", async () => {
     const signup = await loginMenu(1, ["email", "password"], "signup")
     expect(await autofill.menuPick(signup, account.ref, menuSender())).toEqual({ ok: true })
@@ -115,6 +170,7 @@ describe("automatic sign-in session", () => {
     const started: string[] = []
     const providers = { start: async (_: unknown, a: { ref: string }) => (started.push(a.ref), { ok: true as const }), active: () => started.length > 0 }
     autofill = new Autofill(host.host, undefined, undefined, undefined, providers)
+    autofill.signedOut = async () => true
     const token = await loginMenu()
     expect(await autofill.menuSignIn(token, linked.ref, menuSender())).toEqual({ ok: true, found: true, provider: "google" })
     expect(started).toEqual(on ? [linked.ref] : [])

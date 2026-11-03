@@ -112,7 +112,7 @@ corner status never takes focus and disappears within 1.5 seconds of success or
 handoff. Ambiguity ends the chain rather than guessing. An unsupported step stays
 as the provider left it; Deadbolt must not leave a half-filled form.
 
-**Default on.** “Offer to sign in” (Settings) makes a trusted account pick
+**Default on.** “Offer to sign in” (Settings, in the toolbar popup or the browser vault) makes a trusted account pick
 sign in rather than only fill: the corner offer's pick, an inline menu pick on
 a login or code step in the top page, and the toolbar popup's Fill for a login
 on the current site all start the automatic session below. It fills, submits
@@ -124,7 +124,14 @@ Page arrival and detector confidence never authorize a fill. The existing
 500 ms visible dwell and fresh 400 ms post-pick visibility check remain
 mandatory for menu picks (the popup is the browser's own surface). A sign-up
 or change-password form, a frame's field and a login with no saved URL naming
-the page's exact origin only fill; Browse-agent fills keep manual submit.
+the page's exact origin only fill (see the first-step rules below);
+Browse-agent fills keep manual submit. A top page asks the service worker
+about an offer or a provider chain only when it shows something of a
+sign-in (a login form, a sign-in path, a provider, “Sign in” or “Sign out”
+button), and
+only when that changes, so a busy page that shows none of it leaves the
+worker asleep; a site with no logins is remembered as such until the vault
+changes.
 
 The automatic session is bound to the selected account, exact saved origin
 (scheme, host and port), top frame and current document/form snapshots. Its
@@ -133,8 +140,22 @@ It permits at most four automatic submit requests. Once a password has filled,
 the identifier re-fill exemption is removed. Escape, lock, setting-off and
 unrelated navigation cancel it, including pending backend calls.
 
-A TOTP can fill without another pick, but Deadbolt submits a code step only
-when the site's learned `Flow.code` is true. A current SMS/email-looking prompt
+A pick signs in only on a sign-in's first step: a login form with a
+username box, whose password box (if any) doesn't ask for a new password,
+on a top page a fresh auth probe finds signed out, with no sign-in
+remembered there lately (5 minutes). Its submit button must read Sign in,
+Log in, Continue or Next, and neither the form nor the page's title and
+headings may speak of re-authentication or another action (Confirm access,
+delete, withdraw, transfer, turn off, and the like). A password or code box
+on its own, a Confirm access page, a withdrawal or a two-factor setting
+only fills. Every submit also needs a POST that stays in the tab (no
+`target`, `formtarget` or `<base target>` other than `_self`).
+
+Each later automatic step must show within 20 seconds of the last automatic
+submit, and the outcome judge confirming a sign-in ends the session. A TOTP
+can fill without another pick, but Deadbolt submits a code step only when
+the site's learned `Flow.code` is true, and only within those 20 seconds of
+the session's password step being submitted (by Deadbolt or the person). A current SMS/email-looking prompt
 vetoes that submission even with a learned flow. Site scripts can submit on fill;
 Deadbolt does not duplicate an observed trusted submit event or mint a user-gesture timestamp.
 Every explicit submit rechecks visible fields, the button's form ownership and
@@ -1721,6 +1742,12 @@ other build defines that branch away.
   ends the session, and an empty username step ("Use a different account")
   does too, so a different person's sign-in never gets the first login's
   password. The pill on the field is an extension frame, as for any fill.
+  An automatic session (see Universal sign-in) submits each step itself
+  instead of waiting for the user's: its next step must show within 20
+  seconds of its last submit, and a confirmed sign-in ends it, so a code box
+  a page shows later gets nothing. Deadbolt's submit is a script's click,
+  not a trusted one: a page can tell that Deadbolt submitted, and so that the
+  person uses it.
 - **Pages can't steer fills.** A fill needs the user's pick in a menu the
   page can't script or see into, or a click in the popup. It goes only to the
   document and form that asked, only into fields the user can see that were

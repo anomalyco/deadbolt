@@ -116,6 +116,8 @@ let generation = 0
 const handles = new Map<string, Handle>()
 
 const live = (id: string) => active && id === session && !cancelled.has(id) && hooks.enabled() && !document.hidden
+/** A chain is serving this document (its status shows): each scan asks it for the next step (see content.ts). */
+export const chainActive = () => active
 
 function mint(h: Handle): string {
   const id = crypto.randomUUID()

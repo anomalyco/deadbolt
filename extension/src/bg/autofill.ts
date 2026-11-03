@@ -23,6 +23,8 @@ const LIST_TTL_MS = 30_000
 export const SESSION_TTL_MS = 3 * 60_000
 /** A home/modal entry must reach its first login step promptly, not arm a later task. */
 export const AUTOMATIC_ENTRY_MS = 20_000
+/** An automatic session's next step must show this soon after its last automatic submit. */
+export const AUTOMATIC_STEP_MS = 20_000
 const MAX_AUTOMATIC_SUBMITS = 4
 /** On a site whose steps come by navigation (see Flow), this much longer, for a slow page. */
 const SESSION_GRACE_MS = 60_000
@@ -43,8 +45,10 @@ interface MenuToken extends FrameTarget {
   focused: FieldRole
   /** The form snapshot the menu opened on. */
   form: number
-  /** A login or code step, as the content script took the form: only such a pick may sign in (see signsIn). */
-  kind?: "login" | "mfa"
+  /** A login form, as the content script took it: only a pick on one may sign in (see signsIn). */
+  kind?: "login"
+  /** Its password box asks for a new password by autocomplete: no pick on it signs in. */
+  asksNew?: boolean
   createdAt: number
   /** The menu document that first loaded the token; only it may use it after. */
   menuDocumentId?: string
@@ -78,6 +82,8 @@ interface Session {
   automatic?: boolean
   /** Submit calls made by this automatic session, carried across its steps. */
   automaticSubmits?: number
+  /** When a password step of this automatic session was last submitted (by it or the user): a code step may be submitted only soon after. */
+  passwordSubmittedAt?: number
   ref: string
   /** The site (registrable domain): leaving it ends the session. */
   site: string
@@ -126,7 +132,11 @@ interface PageReport extends FrameTarget {
   kind: SurfaceKind | null
   roles: FieldRole[]
   form: number
+  asksNew: boolean
 }
+
+/** What a first step's fill needs of the session it starts (see fillStep). */
+type SessionStart = Pick<Session, "ref" | "origin" | "filled" | "startedAt" | "automatic" | "automaticSubmits">
 
 export function wantFor(roles: FieldRole[], account: Pick<Account, "hasPassword" | "hasTotp">): Want[] {
   const want: Want[] = []
@@ -204,12 +214,15 @@ export function sessionStep(kind: SurfaceKind | null, roles: FieldRole[], asksNe
 }
 
 /**
- * Whether a pick on this form may sign in rather than only fill: a login or
- * code step, never a sign-up or change-password form, or a form with a
- * new-password box (see sessionStep).
+ * Whether a pick on this form may sign in rather than only fill: a login
+ * form with a username box (a first step), never a code step on its own, a
+ * sign-up or change-password form, or one whose password box asks for a new
+ * password (see sessionStep). A password or code box alone is more often a
+ * re-authentication (Confirm access, a withdrawal, turning 2FA off) than a
+ * sign-in. The pick also needs the page to look signed out (see startAutomatic).
  */
-export const signsIn = (kind: SurfaceKind | null | undefined, roles: FieldRole[]) =>
-  (kind === "login" || kind === "mfa") && !roles.includes("new-password")
+export const signsIn = (kind: SurfaceKind | null | undefined, roles: FieldRole[], asksNew = false) =>
+  kind === "login" && !asksNew && !roles.includes("new-password") && roles.some((r) => IDENTIFIER_ROLES.includes(r))
 
 /** The pill's word for a step: what it filled that matters most. */
 export function stepLabel(filled: FieldRole[]): string {
@@ -249,6 +262,12 @@ export class Autofill {
   private lastState: string
   /** A picked login was filled in `tabId` on `site` (bg/site-icons.ts reads the site's icon then). */
   filled?: (tabId: number, site: string) => void
+  /**
+   * Whether the top page in `target` looks signed out now: a fresh probe,
+   * and no sign-in remembered there lately (bg/universal.ts). Unset, no
+   * pick signs in.
+   */
+  signedOut?: (target: FrameTarget) => Promise<boolean>
   /** The document whose locked row was clicked last, to focus again once unlocked. Memory only: a restarted worker returns nowhere. */
   private unlockReturn: MenuToken | null = null
 
@@ -346,6 +365,7 @@ export class Autofill {
     rules?: unknown,
     pageAccount?: unknown,
     box?: unknown,
+    asksNew?: unknown,
   ): Promise<QueryReply> {
     const target = await targetFor(sender)
     const clean = sanitizeRoles(roles)
@@ -416,7 +436,7 @@ export class Autofill {
     if (!rows) return { rows: 0 }
     this.sweep()
     const token = newToken()
-    const step = kind === "login" || kind === "mfa" ? { kind: kind as "login" | "mfa" } : {}
+    const step = kind === "login" ? { kind: "login" as const, ...(asksNew === true ? { asksNew: true } : {}) } : {}
     this.tokens.set(token, { ...target, ...(owner ? { owner } : {}), roles: clean, focused: focused as FieldRole, form: form as number, ...step, createdAt: Date.now(), ...(generate ? { generate } : {}), ...(only ? { only } : {}) })
     if (!owner || !at) return { token, rows }
     const opened = await sendToFrame<boolean>(owner, { type: "db:open-at", token, rows, box: at })
@@ -439,7 +459,7 @@ export class Autofill {
       const icons = (await iconSettings()).menu ? await menuIcons(accounts) : undefined
       const reveal = icons ? await firstReveals(Object.keys(icons)) : []
       // The picks that sign in, so their pill says "Signing in…" (the pick itself decides again).
-      const signing = !t.owner && signsIn(t.kind, t.roles) ? await Promise.all(accounts.map((a) => (!a.signIn || a.hasPassword) && this.signInAllowed(t, a))) : []
+      const signing = (await this.signsInHere(t)) ? await Promise.all(accounts.map((a) => (!a.signIn || a.hasPassword) && this.signInAllowed(t, a))) : []
       const signsInRefs = accounts.filter((_, i) => signing[i]).map((a) => a.ref)
       return { kind: "accounts", site: reply.site, accounts, focused: t.focused, ...(passkeys?.length ? { passkeys } : {}), ...(flow?.identifierFirst ? { continueAs: true } : {}), ...(signsInRefs.length ? { signsIn: signsInRefs } : {}), ...(icons ? { icons, reveal } : {}) }
     } catch {
@@ -468,7 +488,7 @@ export class Autofill {
     // the corner offer's guarded session (see startAutomatic). The token is
     // bound to the extension's own menu document (see token), which sends a
     // pick only after its dwell and fresh visibility check.
-    if (!t.owner && signsIn(t.kind, t.roles) && (await this.signInAllowed(t, account))) return this.startAutomatic(t, account, { form: t.form, roles: t.roles })
+    if ((await this.signInAllowed(t, account)) && (await this.signsInHere(t))) return this.startAutomatic(t, account, { form: t.form, roles: t.roles })
     if (!t.owner) return this.fillAndArm(t, account, t.roles, t.form)
     // A frame's fields: only those that show through every frame above, checked now and again once the values are in hand.
     const framed = await this.measured(t.tabId, () => shownInPage(t, t.form, true), null)
@@ -532,7 +552,7 @@ export class Autofill {
     // provider whose sign-in hosts Deadbolt knows follows it through the
     // provider (see ProviderChain), as the corner offer's pick does. The menu
     // goes first: it mustn't sit over the site's provider button.
-    if (this.providers && !t.owner && account.signIn.account && providerOf(account.signIn.provider).hosts.length && (await this.signInAllowed(t, account))) {
+    if (this.providers && account.signIn.account && providerOf(account.signIn.provider).hosts.length && (await this.signInAllowed(t, account)) && (await this.signsInHere(t))) {
       await this.cancel(t.tabId)
       this.tokens.delete(token)
       const starting = this.providers.start(t, account)
@@ -726,7 +746,7 @@ export class Autofill {
     form: number,
     generation: number,
     framed?: Approved,
-    session?: Session,
+    session?: SessionStart,
     /** A step's own pill on the field (a pick has the menu's). */
     notice = !!session,
   ): Promise<{ reply: PickReply; next?: Session | null }> {
@@ -811,6 +831,15 @@ export class Autofill {
   }
 
   /**
+   * Whether a pick on this form in the top page may sign in: a first sign-in
+   * step (see signsIn), on a page a fresh probe finds signed out, with no
+   * sign-in remembered there lately. Anything else only fills.
+   */
+  private async signsInHere(t: { frameId: number; owner?: FrameTarget; kind?: SurfaceKind | null; roles: FieldRole[]; asksNew?: boolean } & FrameTarget): Promise<boolean> {
+    return t.frameId === 0 && !t.owner && signsIn(t.kind, t.roles, t.asksNew) && !!this.signedOut && (await this.signedOut(t).catch(() => false))
+  }
+
+  /**
    * The one way into an automatic sign-in session: a guarded pick in an
    * extension-owned surface (the corner offer's opaque `entry` action, or
    * the inline menu's pick on the form it opened on, `entry.form`) or the
@@ -852,13 +881,12 @@ export class Autofill {
    */
   private async pickSignIn(target: FrameTarget, account: Account, form: number, roles: FieldRole[], site: string, generation: number): Promise<PickReply> {
     if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return { ok: false, message: "Sign-in stopped." }
-    const now = Date.now()
-    const s: Session = { ref: account.ref, site, origin: target.origin, documentId: target.documentId, filled: [], filledAt: now, startedAt: now, until: now + AUTOMATIC_ENTRY_MS, automatic: true, automaticSubmits: 0 }
+    const s = { ref: account.ref, site, origin: target.origin, filled: [], startedAt: Date.now(), automatic: true, automaticSubmits: 0 }
     const { reply, next } = await this.fillStep(target, account, roles, form, generation, undefined, s, false)
     if (!reply.ok) return reply
     this.filled?.(target.tabId, site)
     if (generation !== this.generation(target.tabId)) return reply
-    return { ok: true, submitted: await this.submitStep(target, s, roles, form, generation, next) }
+    return { ok: true, submitted: await this.submitStep(target, s, roles, form, generation, next, true) }
   }
 
   /**
@@ -869,10 +897,13 @@ export class Autofill {
    * At most four submits a session. True if the content script submitted.
    * Call inside `serial`.
    */
-  private async submitStep(target: FrameTarget, s: Session, roles: FieldRole[], form: number, generation: number, next: Session | null | undefined): Promise<boolean> {
-    // A saved TOTP can fill an unfamiliar code step, but only a learned
-    // code flow authorizes submitting it. Content also vetoes SMS/email prompts.
-    const submit = !roles.includes("otp") || (await flowFor(s.site))?.code === true
+  private async submitStep(target: FrameTarget, s: Pick<Session, "site" | "automaticSubmits" | "passwordSubmittedAt">, roles: FieldRole[], form: number, generation: number, next: Session | null | undefined, first = false): Promise<boolean> {
+    // A saved TOTP can fill an unfamiliar code step, but only a learned code
+    // flow authorizes submitting it, and only right after this session's
+    // password step went (a code box shown later, by anyone, isn't that
+    // step). Content also vetoes SMS/email prompts.
+    const now = Date.now()
+    const submit = !roles.includes("otp") || ((await flowFor(s.site))?.code === true && now - (s.passwordSubmittedAt ?? -Infinity) <= AUTOMATIC_STEP_MS)
     if (generation !== this.generation(target.tabId)) return false
     if (!(await signInEnabled())) {
       await this.endSession(target.tabId)
@@ -880,10 +911,12 @@ export class Autofill {
     }
     if (generation !== this.generation(target.tabId)) return false
     const automaticSubmits = (s.automaticSubmits ?? 0) + (submit ? 1 : 0)
-    if (next !== undefined) await this.arm(target.tabId, generation, next && submit ? { ...next, automaticSubmits } : next)
+    // Submitted, the next step has to show promptly; a password step submitted lets a code step follow it.
+    const stepped = (n: Session): Session => ({ ...n, automaticSubmits, until: Math.min(n.until, now + AUTOMATIC_STEP_MS), ...(roles.includes("password") ? { passwordSubmittedAt: now } : {}) })
+    if (next !== undefined) await this.arm(target.tabId, generation, next && submit ? stepped(next) : next)
     if (!submit || generation !== this.generation(target.tabId)) return false
-    this.submits.set(target.tabId, { documentId: target.documentId, at: Date.now() })
-    const submitted = await sendToFrame(target, { type: "db:signin-submit", form })
+    this.submits.set(target.tabId, { documentId: target.documentId, at: now })
+    const submitted = await sendToFrame(target, { type: "db:signin-submit", form, ...(first ? { first: true as const } : {}) })
     if (generation !== this.generation(target.tabId)) return false
     // Four attempts are enough: leave any further step to a fresh user pick.
     if (!submitted || automaticSubmits >= MAX_AUTOMATIC_SUBMITS) await this.endSession(target.tabId)
@@ -926,7 +959,19 @@ export class Autofill {
    */
   async submitted(sender: chrome.runtime.MessageSender) {
     const target = await targetFor(sender)
-    if (target && (target.frameId === 0 || (await sameSiteTop(target)))) this.submits.set(target.tabId, { documentId: target.documentId, at: Date.now() })
+    if (!target || !(target.frameId === 0 || (await sameSiteTop(target)))) return
+    const at = Date.now()
+    this.submits.set(target.tabId, { documentId: target.documentId, at })
+    // The user's own submit of an automatic session's password step lets its code step follow, as an automatic one does.
+    await this.serial(target.tabId, async () => {
+      const s = await this.session(target.tabId)
+      if (s?.automatic && s.documentId === target.documentId && s.filled.includes("password")) await this.setSession(target.tabId, { ...s, passwordSubmittedAt: at })
+    })
+  }
+
+  /** The outcome judge confirmed a sign-in in `tabId` (bg/save.ts): an automatic session there is over, whatever step it waited for. */
+  async signedIn(tabId: number) {
+    await this.stopAutomatic(tabId)
   }
 
   /** What the top page (or its same-site login frame) shows of the sign-in, step by step, to learn the site's Flow from. */
@@ -987,7 +1032,7 @@ export class Autofill {
     const frames = this.pages.get(target.tabId) ?? new Map<number, PageReport>()
     // No form (any more): forget the frame's, so the popup looks elsewhere.
     if (!kind) frames.delete(target.frameId)
-    else frames.set(target.frameId, { ...target, kind, roles: clean, form: form as number })
+    else frames.set(target.frameId, { ...target, kind, roles: clean, form: form as number, asksNew })
     this.pages.set(target.tabId, frames)
     if (!kind) return
     // Only frames that may have the inline menu go on with a session (see sameSiteTop).
@@ -1009,7 +1054,7 @@ export class Autofill {
       // filled, after it filled.
       const sub = this.submits.get(target.tabId)
       const first = s.automatic && s.filled.length === 0
-      if (first && kind !== "login") return this.endSession(target.tabId)
+      if (first && !signsIn(kind, clean, asksNew)) return this.endSession(target.tabId)
       if (!first && (target.documentId === s.documentId ? !stepped : !sub || sub.documentId !== s.documentId || sub.at < s.filledAt)) return
       // A session fills sign-in steps only (see sessionStep). An address the
       // site doesn't know often gets "Create your account" instead of a
@@ -1044,7 +1089,7 @@ export class Autofill {
       if (generation !== this.generation(target.tabId)) return
       if (!s.automatic) return void (next !== undefined && (await this.arm(target.tabId, generation, next)))
       if (!filled.ok) return this.endSession(target.tabId)
-      await this.submitStep(target, s, clean, form as number, generation, next)
+      await this.submitStep(target, s, clean, form as number, generation, next, first)
     })
   }
 
@@ -1127,7 +1172,7 @@ export class Autofill {
     // A login that signs in with a provider and has no password is never a fill.
     if (account.signIn && !account.hasPassword) return { ok: false, message: "This login signs in with another account." }
     // The toolbar popup is the browser's own surface, out of the page's reach: its Fill signs in as a menu pick does.
-    if (!framed && signsIn(page.kind, page.roles) && (await this.signInAllowed(page, account))) return this.startAutomatic(page, account, { form: page.form, roles: page.roles })
+    if (!framed && (await this.signInAllowed(page, account)) && (await this.signsInHere(page))) return this.startAutomatic(page, account, { form: page.form, roles: page.roles })
     return this.fillAndArm(page, account, page.roles, page.form, framed)
   }
 }

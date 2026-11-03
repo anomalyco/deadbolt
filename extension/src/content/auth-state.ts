@@ -64,6 +64,36 @@ function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement } {
 }
 
 /**
+ * What of a sign-in the page shows, cheaply, for whether to ask the
+ * background about an offer at all (see content.ts): its login or code
+ * form (by snapshot), a sign-in path, a provider button, or else a visible
+ * "Sign in" or "Sign out" control. Empty when it shows none of them.
+ */
+export function signInSignal(state: PageState, provider: boolean, roots: Array<Document | ShadowRoot>): string {
+  const parts: string[] = []
+  if (state.kind()) parts.push(`${state.kind()}:${state.form()}`)
+  if (LOGIN_URL.test(location.pathname)) parts.push("path")
+  if (provider) parts.push("provider")
+  if (!parts.length) {
+    const deadline = performance.now() + 10
+    for (const el of deepQueryAll("a, button, [role=button]", roots).slice(0, 400)) {
+      if (performance.now() > deadline) break
+      const text = controlText(el).trim()
+      if (ENTRY.test(text) && safeEntry(el)) {
+        parts.push("entry")
+        break
+      }
+      // A visible Sign out: the background remembers the origin as signed in, so a later sign-in page there stays quiet.
+      if (SIGN_OUT.test(text) && shown(el)) {
+        parts.push("signout")
+        break
+      }
+    }
+  }
+  return parts.length ? `${location.href}|${parts.join(",")}` : ""
+}
+
+/**
  * Positive signed-in evidence (a visible sign-out control) with no login
  * form, challenge or uncertainty, from a fresh scan. An account menu is
  * uncertainty, not success.
