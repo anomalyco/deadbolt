@@ -156,6 +156,8 @@ const REOPEN_SETTLES_MS = 500
 const REPLAY_MS = 150
 /** The pill and the dot cross-fade over this long (menu.css). */
 const CROSSFADE_MS = 260
+/** The pointer resting this long on "Sign in with Deadbolt" lists the accounts: passing over it doesn't. */
+const EXPAND_AFTER_MS = 150
 /** How long a pill says how it went before it goes. */
 const FILLED_STAYS_MS = 900
 const FAILED_STAYS_MS = 1800
@@ -804,6 +806,11 @@ document.addEventListener("keydown", (e) => {
   }
   const rows = visible()
   if (!rows.length || mode !== "accounts") return
+  // ↓ or ↑ on "Sign in with Deadbolt" lists the accounts; the next ↓ moves in them.
+  if (universal && !universalExpanded && accounts.length > 1 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault()
+    return expandUniversal()
+  }
   const at = Math.max(0, rows.indexOf(active))
   if (e.key === "ArrowDown") active = rows[Math.min(at + 1, rows.length - 1)]
   else if (e.key === "ArrowUp") active = rows[Math.max(at - 1, 0)]
@@ -866,18 +873,65 @@ function show(reply: MenuLoadReply) {
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
 }
 
+/**
+ * The corner offer's accounts, listed from "Sign in with Deadbolt". Listing
+ * picks nothing, and the surface grows: as after any move, a pick waits out
+ * the dwell again (see pick).
+ */
 function expandUniversal() {
+  if (universalExpanded || mode !== "accounts") return
   universalExpanded = true
   surface.classList.add("expanded")
   rowsEl.replaceChildren(...accounts.map(row))
   highlight(false)
+  dwell.moved(performance.now())
   report()
 }
+
+/** Back to the one "Sign in with Deadbolt" row: the pointer left the list and nothing was picked. */
+function collapseUniversal() {
+  if (!universalExpanded || busy || mode !== "accounts" || surface.matches(":hover, :focus-within")) return
+  universalExpanded = false
+  surface.classList.remove("expanded")
+  showUniversal()
+  dwell.moved(performance.now())
+  report()
+}
+
+let collapsing: ReturnType<typeof setTimeout> | undefined
+// Leaving the listed accounts folds them back after a moment's grace; coming back keeps them.
+surface.addEventListener("pointerleave", (e) => {
+  if (!e.isTrusted || !universal || !universalExpanded) return
+  clearTimeout(collapsing)
+  collapsing = setTimeout(collapseUniversal, COLLAPSE_GRACE_MS)
+})
+surface.addEventListener("pointerenter", () => clearTimeout(collapsing))
 
 function showUniversal() {
   if (accounts.length > 1 && !universalExpanded) {
     const choose = h("button", { class: "row", type: "button" }, h("span", { class: "title" }, "Sign in with Deadbolt"))
     choose.addEventListener("click", (e) => { if (e.isTrusted) expandUniversal() })
+    // Resting the pointer on it, or keyboard focus (a press takes none, see
+    // the mousedown handler), lists the accounts too. Only the person's own
+    // pointer or keyboard: a page's events never reach this frame trusted.
+    let resting: ReturnType<typeof setTimeout> | undefined
+    let inside = false
+    const rest = (e: PointerEvent) => {
+      if (!e.isTrusted) return
+      inside = true
+      if (resting === undefined) resting = setTimeout(() => {
+        resting = undefined
+        if (inside) expandUniversal()
+      }, EXPAND_AFTER_MS)
+    }
+    choose.addEventListener("pointerenter", rest)
+    choose.addEventListener("pointermove", rest)
+    choose.addEventListener("pointerleave", () => {
+      inside = false
+      clearTimeout(resting)
+      resting = undefined
+    })
+    choose.addEventListener("focus", (e) => e.isTrusted && expandUniversal())
     rowsEl.replaceChildren(choose)
     highlightEl.hidden = true
   }

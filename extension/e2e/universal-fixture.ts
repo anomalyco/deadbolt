@@ -85,6 +85,9 @@ export async function universalFixture(req: Request): Promise<Response> {
 export const GOOGLE_USER = "universal.google@example.test"
 export const GOOGLE_OTHER = "someone.else@example.test"
 export const GOOGLE_PASSWORD = "synthetic-google-password-51027"
+export const GOOGLE_OTHER_PASSWORD = "synthetic-google-password-90314"
+/** The fake Google's accounts and their passwords. */
+const GOOGLE_ACCOUNTS: Record<string, string> = { [GOOGLE_USER]: GOOGLE_PASSWORD, [GOOGLE_OTHER]: GOOGLE_OTHER_PASSWORD }
 export interface ProviderHit { host: string; path: string; method: string; flow: string; frame: boolean; value?: string }
 export const providerLog: ProviderHit[] = []
 /**
@@ -109,20 +112,23 @@ function google(title: string, body: string) {
 async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<Response> {
   const q = url.searchParams
   const data = req.method === "POST" && !url.pathname.startsWith("/pk/") ? await req.formData() : null
-  const step = (path: string) => {
+  // The account chosen on an earlier step (`as`), carried along in the query.
+  const who = q.get("as") && GOOGLE_ACCOUNTS[q.get("as")!] ? q.get("as")! : GOOGLE_USER
+  const step = (path: string, as?: string) => {
     const s = new URLSearchParams(q)
     s.delete("id")
     s.delete("another")
+    if (as) s.set("as", as)
     return `${path}?${s}`
   }
-  const go = (path: string) => Response.redirect(`${url.origin}${step(path)}`, 303)
+  const go = (path: string, as?: string) => Response.redirect(`${url.origin}${step(path, as)}`, 303)
   const form = (path: string, fields: string, button = "Next", extra = "<span></span>") =>
     `<form method="post" action="${step(path)}">${fields}<div class="row">${extra}<button type="submit">${button}</button></div></form>`
-  const chip = `<p><span class="chip" data-profile-identifier="" translate="no">${GOOGLE_USER}</span></p>`
-  const password = () => go(q.get("pk") === "1" ? "/v3/signin/challenge/pk" : "/v3/signin/challenge/pwd")
+  const chip = `<p><span class="chip" data-profile-identifier="" translate="no">${who}</span></p>`
+  const password = (as = who) => go(q.get("pk") === "1" ? "/v3/signin/challenge/pk" : "/v3/signin/challenge/pwd", as)
   const done = () => {
     const back = new URL(q.get("redirect_uri") ?? "http://acme.test/")
-    back.searchParams.set("as", GOOGLE_USER)
+    back.searchParams.set("as", who)
     return Response.redirect(back.href, 303)
   }
   const chooser = () =>
@@ -139,11 +145,11 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
       await Bun.sleep(Math.min(Number(q.get("delay")) || 0, 150_000))
       if (q.get("loop") === "1") return chooser()
       if (q.has("another")) return go("/v3/signin/identifier")
-      return q.get("id") === GOOGLE_USER ? password() : google("Sign in - Google Accounts", "<h1>This account isn't available</h1>")
+      return GOOGLE_ACCOUNTS[q.get("id") ?? ""] ? password(q.get("id")!) : google("Sign in - Google Accounts", "<h1>This account isn't available</h1>")
     case "/v3/signin/identifier":
       if (data) {
         hit.value = String(data.get("identifier") ?? "")
-        return hit.value === GOOGLE_USER ? password() : google("Sign in - Google Accounts", "<h1>Couldn't find your Google Account</h1>")
+        return GOOGLE_ACCOUNTS[hit.value] ? password(hit.value) : google("Sign in - Google Accounts", "<h1>Couldn't find your Google Account</h1>")
       }
       return google("Sign in - Google Accounts", `<h1>Sign in</h1><p>to continue to Acme</p>${form("/v3/signin/identifier", '<input type="email" name="identifier" id="identifierId" autocomplete="username" aria-label="Email or phone">', "Next", '<button class="text" type="button">Create account</button>')}`)
     case "/v3/signin/challenge/pk":
@@ -214,7 +220,7 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
     case "/v3/signin/challenge/selection":
       return google("Sign in - Google Accounts", "<h1>Choose how you want to sign in</h1>")
     case "/v3/signin/challenge/pwd":
-      if (data) return data.get("Passwd") === GOOGLE_PASSWORD ? go(q.get("phone") === "1" ? "/v3/signin/challenge/ipp" : "/v3/signin/challenge/totp") : google("Sign in - Google Accounts", "<h1>Wrong password</h1>")
+      if (data) return data.get("Passwd") === GOOGLE_ACCOUNTS[who] ? go(q.get("phone") === "1" ? "/v3/signin/challenge/ipp" : "/v3/signin/challenge/totp") : google("Sign in - Google Accounts", "<h1>Wrong password</h1>")
       return google("Sign in - Google Accounts", `<h1>Welcome</h1>${chip}<p>To continue, first verify it's you</p>${form("/v3/signin/challenge/pwd", '<input type="password" name="Passwd" autocomplete="current-password" aria-label="Enter your password">', "Next", `<button class="text" id="passkey" type="button" onclick='location.assign(${JSON.stringify(step("/v3/signin/challenge/pk/start"))})'>Use your passkey</button>`)}${FOOTER}`)
     case "/v3/signin/challenge/ipp":
       if (data) return google("Sign in - Google Accounts", "<h1>Code sent</h1>")
@@ -281,7 +287,8 @@ function acmeFixture(req: Request, url: URL): Response {
 async function providerFixture(req: Request, url: URL): Promise<Response> {
   const hit: ProviderHit = { host: url.hostname, path: url.pathname, method: req.method, flow: url.searchParams.get("flow") ?? "", frame: url.searchParams.get("frame") === "1" }
   providerLog.push(hit)
-  if (url.hostname === "acme.test") return acmeFixture(req, url)
+  // shop.test: another site with the same pages, where nothing is saved.
+  if (url.hostname === "acme.test" || url.hostname === "shop.test") return acmeFixture(req, url)
   if (url.hostname.startsWith("accounts.")) return googleFixture(req, url, hit)
   return new Response("Not found", { status: 404 })
 }

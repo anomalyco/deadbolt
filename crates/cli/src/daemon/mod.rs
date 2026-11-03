@@ -2151,6 +2151,31 @@ impl Daemon {
                 self.sync_now.notify_one();
                 Ok(Reply::SiteSaved { login, created })
             }
+            Command::SiteLink {
+                origin,
+                title,
+                url,
+                provider,
+                account,
+            } => {
+                let login = self.with(|s| {
+                    autofill::link(
+                        s,
+                        autofill::Link {
+                            origin: &origin,
+                            title: &title,
+                            url: &url,
+                            provider: &provider,
+                            account: &account,
+                        },
+                    )
+                })?;
+                self.sync_now.notify_one();
+                Ok(Reply::SiteSaved {
+                    login,
+                    created: true,
+                })
+            }
             Command::FormItems { origin, kinds } => self.form_items(&origin, &kinds),
             Command::FormFill {
                 origin,

@@ -159,6 +159,32 @@ describe("provider chain authority", () => {
     await chain.check(commit(GOOGLE, "password-doc"))
     expect(fills()).toHaveLength(1)
   })
+  test.each([false, true])("one of the person's provider accounts: saved at the provider's own host, only that login fills, and the site is linked once signed in (already linked: %s)", async (already) => {
+    const own = { ...providerAccount, signIn: { provider: "google", account: providerAccount.username! } }
+    // Saved for the site, or at a lookalike host, it isn't a provider account.
+    await chain.start(home, { ...own, urls: [SITE] }, true)
+    await chain.start(home, { ...own, urls: ["https://accounts.google.com.evil.test"] }, true)
+    expect(chain.active(1)).toBe(false)
+    const other = { ...providerAccount, ref: `${"c".repeat(64)}:${"3".repeat(32)}` }
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req) => req.type === "list"
+      ? { type: "list", site: "example.com", accounts: (req as { origin: string }).origin === SITE ? (already ? [{ ...linked, signIn: { provider: "google", account: providerAccount.username } }] : []) : [other, providerAccount] }
+      : send(req as never)) as typeof host.host.send
+    await chain.start(home, own, true)
+    expect(chain.active(1)).toBe(true)
+    report = { kind: "form", form: 1, roles: ["password"], action: "password" }
+    // Two logins of that username at the provider: only the one picked fills.
+    await chain.check(commit())
+    expect(fills().map((r) => (r as { ref: string }).ref)).toEqual([own.ref])
+    const sender = commit(SITE, "returned")
+    const answer = fake.answer
+    fake.answer = (m, doc) => m.type === "db:auth-probe" ? { signOut: true, loginForm: false, uncertain: false, challenge: false } : answer(m, doc)
+    await chain.check(sender)
+    await until(() => !chain.active(1))
+    await Bun.sleep(5)
+    const saves = host.requests.filter((r) => r.type === "save")
+    expect(saves).toEqual(already ? [] : [expect.objectContaining({ origin: SITE, entry: { title: "www.example.com", url: SITE, signIn: { provider: "google", account: own.ref } } })])
+  })
   test("the return document receives a status before the confirmed success", async () => {
     await chain.start(home, linked)
     commit()

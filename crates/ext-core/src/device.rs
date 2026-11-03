@@ -634,13 +634,21 @@ fn save_login(body: &Value) -> Result<Value> {
     let page = site(origin)?;
     let input = body.get("entry").ok_or(Error::Protocol("Missing login"))?;
     let url = page_url(text(input, "url")?).map_err(Error::Protocol)?;
-    let username = text(input, "username")?.trim();
+    let link = input.get("signIn");
+    // A provider link has no username of its own (see link_login).
+    let username = match link {
+        Some(_) if input.get("username").is_none() => "",
+        _ => text(input, "username")?.trim(),
+    };
     let title = text(input, "title")?;
     if url.len() > 2048 || username.chars().count() > 500 {
         return Err(Error::Protocol("The login is too long"));
     }
     if !page.matches_url(url) {
         return Err(Error::DomainMismatch);
+    }
+    if let Some(link) = link {
+        return link_login(body, input, link, url, &page, title, username);
     }
     let reply = state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, input)?;
@@ -662,6 +670,53 @@ fn save_login(body: &Value) -> Result<Value> {
         };
         generate::saved(&mut s.generated, input);
         Ok(json!({"type": "save", "ref": reference(&s.vault, id), "created": created}))
+    })?;
+    request_sync();
+    Ok(reply)
+}
+
+/// A save of a provider link (`entry.signIn`): a new login for the page's
+/// site that signs in with a provider login here, with no password of its
+/// own (docs/autofill.md, "Your provider accounts").
+fn link_login(
+    body: &Value,
+    input: &Value,
+    link: &Value,
+    url: &str,
+    page: &Site,
+    title: &str,
+    username: &str,
+) -> Result<Value> {
+    if body.get("ref").is_some()
+        || input.get("password").is_some()
+        || input.get("generated").is_some()
+        || !username.is_empty()
+    {
+        return Err(Error::Protocol(
+            "A sign-in link is a new login with no username or password",
+        ));
+    }
+    let provider = text(link, "provider")?.trim();
+    if provider.is_empty() || provider.chars().count() > 64 {
+        return Err(Error::Protocol("A provider is 1 to 64 characters"));
+    }
+    let reply = state().with(|s| {
+        let account = item_ref(&s.vault, text(link, "account")?)?;
+        s.vault
+            .item(&account)
+            .filter(|i| !i.deleted && i.kind == "login")
+            .ok_or(Error::NotFound)?;
+        let fields = vec![
+            ("url".into(), Field::new(FieldType::Url, url)),
+            ("sign-in-with".into(), Field::new(FieldType::Text, provider)),
+            (
+                "sign-in-account".into(),
+                Field::new(FieldType::Text, account.to_string()),
+            ),
+        ];
+        let name = Some(item_name(title)).filter(|t| !t.is_empty() && *t != page.domain);
+        let id = s.mutate(|v, key| Ok(v.create_item(key, "login", name, fields)?.0))?;
+        Ok(json!({"type": "save", "ref": reference(&s.vault, id), "created": true}))
     })?;
     request_sync();
     Ok(reply)

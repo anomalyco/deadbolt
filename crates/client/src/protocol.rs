@@ -351,6 +351,18 @@ pub enum Command {
         username: String,
         password: PagePassword,
     },
+    /// Browser autofill: links the site at `origin` to `account`, a provider
+    /// login it just signed in with: a new login in the default vault at
+    /// `url` (on its site) that signs in with `provider` through `account`,
+    /// with no password of its own. Refused unless `account` is a login here.
+    /// Replies `site-saved`.
+    SiteLink {
+        origin: String,
+        title: String,
+        url: String,
+        provider: String,
+        account: LoginRef,
+    },
     /// Passkeys: those in every vault for the relying party `rp_id` (the
     /// host of the page at `origin` when `None`), refused unless it is that
     /// host or a parent of it on the same site. Says whether a sign-in or

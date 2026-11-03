@@ -1,5 +1,5 @@
 import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, signInOn, type AuthReport } from "../auth-state"
-import { provider as providerOf } from "../signin"
+import { provider as providerOf, providerOrigins, savedAtProvider } from "../signin"
 import type { ProviderChain } from "./provider-chain"
 import type { MenuLoadReply, PickReply, SignInReply } from "../messages"
 import type { Account } from "../protocol"
@@ -11,6 +11,8 @@ import { hostHash } from "./site-icons"
 interface Offer extends FrameTarget {
   at: number
   accounts: Account[]
+  /** The known providers whose buttons the page showed (see providerAccounts). */
+  providers: string[]
   menuDocumentId?: string
   picked?: boolean
   picking?: boolean
@@ -75,6 +77,34 @@ export class UniversalSignIn {
     this.lists.set(origin, { at: Date.now(), accounts })
     return accounts
   }
+  /**
+   * The person's own accounts at the providers whose "Sign in with …"
+   * buttons the page shows: logins saved at a provider's own sign-in host
+   * (savedAtProvider), each offered as "Sign in with Google · <account>",
+   * a pick of which starts the provider chain for it (see pick). Not one a
+   * site login already links to. Most used first, as the vault lists them.
+   */
+  private async providerAccounts(ids: string[], site: Account[], fresh = false): Promise<Account[]> {
+    const linked = (p: string, username: string) => site.some((a) => a.signIn?.provider === p && a.signIn.account?.trim().toLowerCase() === username.trim().toLowerCase())
+    const found: Account[] = []
+    for (const id of ids) {
+      const p = providerOf(id)
+      for (const origin of providerOrigins(p)) {
+        // Kept apart from the site lists (see accounts), which are filtered.
+        const key = `provider:${origin}`
+        const cached = this.lists.get(key)
+        const listed = !fresh && cached && Date.now() - cached.at < 5000 ? cached.accounts : (await this.host.send({ type: "list", origin }).catch(() => null))?.accounts ?? []
+        if (this.lists.size >= 100) this.lists.delete(this.lists.keys().next().value!)
+        this.lists.set(key, { at: Date.now(), accounts: listed })
+        for (const a of listed) {
+          const username = a.username?.trim()
+          if (!username || !a.hasPassword || a.signIn || !a.urls.some((u) => savedAtProvider(p, u)) || linked(p.id, username) || found.some((f) => f.ref === a.ref)) continue
+          found.push({ ...a, title: p.name, hasPassword: false, hasTotp: false, signIn: { provider: p.id, account: username } })
+        }
+      }
+    }
+    return found
+  }
   /** `fresh` skips the page's short report cache, for the guarded pick. */
   private probe(target: FrameTarget, fresh = false) {
     return sendToFrame<AuthReport>(target, { type: "db:auth-probe", ...(fresh ? { fresh } : {}) })
@@ -94,15 +124,19 @@ export class UniversalSignIn {
     this.checking.add(target.tabId)
     try {
       if (!await this.enabled() || this.quiet(await this.memory(target.origin)) || await this.autofill.signingIn(target.tabId)) return
-      const accounts = await this.accounts(target.origin)
-      if (!accounts.length || accounts.length > 50) return
+      const own = await this.accounts(target.origin)
+      if (own.length > 50) return
       const facts = await this.probe(target)
       if (!facts) return
       if (facts.signOut) await this.remember(target.origin, { signedIn: Date.now() })
       if (authState(facts) !== "signed-out" || !facts.action || this.open(target.tabId)) return
+      // The site's own logins first, then the person's provider accounts for its provider buttons; at most 50.
+      const providers = cleanProviders(facts.providers)
+      const accounts = [...own, ...(await this.providerAccounts(providers, own))].slice(0, 50)
+      if (!accounts.length || this.open(target.tabId)) return
       if (!await this.enabled() || this.host.status.state !== "ready" || this.quiet(await this.memory(target.origin))) return
       const token = crypto.randomUUID()
-      this.offers.set(token, { ...target, at: Date.now(), accounts })
+      this.offers.set(token, { ...target, at: Date.now(), accounts, providers })
       if (await sendToFrame(target, { type: "db:signin-offer", token }))
         await this.remember(target.origin, { quietUntil: Date.now() + SIGNIN_QUIET_MS })
       else this.offers.delete(token)
@@ -133,7 +167,11 @@ export class UniversalSignIn {
     // frame says "Continuing sign-in", so Escape there still cancels.
     o.picked = o.picking = true
     try {
-      const account = (await this.accounts(o.origin, true)).find((a) => a.ref === ref && o.accounts.some((saved) => saved.ref === ref))
+      const own = await this.accounts(o.origin, true)
+      const fresh = [...own, ...(await this.providerAccounts(o.providers, own, true))]
+      const account = fresh.find((a) => a.ref === ref && o.accounts.some((saved) => saved.ref === ref))
+      // One of the person's provider accounts, not a login saved for the site (see providerAccounts).
+      const unlinked = !!account && !own.some((a) => a.ref === ref)
       const facts = account && await this.probe(o, true)
       const memory = await this.memory(o.origin)
       if (o.cancelled || !account || !facts?.action || authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) !== "signed-out")
@@ -148,10 +186,11 @@ export class UniversalSignIn {
       if (chain) {
         await this.autofill.stopAutomatic(o.tabId)
         if (o.cancelled) return { ok: true }
-        const starting = this.providers.start(o, account)
+        const starting = this.providers.start(o, account, unlinked)
         await this.closeTab(o.tabId)
         reply = await starting
-      } else reply = await this.autofill.startAutomatic(o, account, facts.action, provider)
+      } else if (unlinked) return { ok: false, message: "The page changed. Nothing was filled." }
+      else reply = await this.autofill.startAutomatic(o, account, facts.action, provider)
       if (o.cancelled) {
         this.providers.stop(o.tabId)
         await this.autofill.stopAutomatic(o.tabId)
@@ -202,4 +241,9 @@ export class UniversalSignIn {
       await this.closeTab(o.tabId)
     }
   }
+}
+
+/** A content script's provider ids, kept to known providers with sign-in hosts. */
+function cleanProviders(raw: unknown): string[] {
+  return Array.isArray(raw) ? [...new Set(raw.filter((p): p is string => typeof p === "string" && p.length <= 64 && providerOf(p).hosts.length > 0))].slice(0, 12) : []
 }

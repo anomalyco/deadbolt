@@ -28,6 +28,8 @@ export interface AuthSignals {
 export interface AuthReport extends AuthSignals {
   /** Opaque content-script handle, not a selector the page can redirect. */
   action?: string
+  /** Known providers (ids) whose "Sign in with …" button shows in the page: no account, no text. */
+  providers?: string[]
 }
 
 export function authState(s: AuthSignals, remembered = false): "signed-in" | "signed-out" | "unknown" {

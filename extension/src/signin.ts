@@ -157,3 +157,22 @@ export function pageAccountOf(raw: unknown): string | undefined {
   const v = raw.trim()
   return /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/.test(v) || /^[\w.+-]{1,64}$/.test(v) ? v : undefined
 }
+
+/**
+ * Whether a saved URL names one of the provider's own sign-in hosts exactly
+ * (isProviderPage: https, no port): a login saved there is an account at
+ * the provider itself, which a site's "Sign in with …" can use.
+ */
+export function savedAtProvider(p: Provider, saved: string): boolean {
+  try {
+    return isProviderPage(p, new URL(saved.includes("://") ? saved : `https://${saved}`).href)
+  } catch {
+    return false
+  }
+}
+
+/** Where the provider's own logins are listed from: its hosts over https (an e2e build also asks for their http `.test` stand-ins). */
+export function providerOrigins(p: Provider): string[] {
+  const e2e = typeof DEADBOLT_E2E !== "undefined" && DEADBOLT_E2E === true
+  return p.hosts.flatMap((h) => [`https://${h}`, ...(e2e && h.endsWith(".com") ? [`http://${h.slice(0, -4)}.test`] : [])])
+}

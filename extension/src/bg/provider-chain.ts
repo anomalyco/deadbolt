@@ -3,7 +3,7 @@
 import { authState, exactSignInOrigin, SIGNIN_SETTING, signInEnabled, signInOn, type AuthReport } from "../auth-state"
 import { IDENTIFIER_ROLES, type FillValues, type PickReply, type ProviderReport } from "../messages"
 import type { Account, Passkey } from "../protocol"
-import { isProviderPage, isSignInPage, provider, returnsTo, type Provider } from "../signin"
+import { isProviderPage, isSignInPage, provider, returnsTo, savedAtProvider, type Provider } from "../signin"
 import { flowFor, namedBy, wantFor } from "./autofill"
 import type { VaultBackend } from "./backend"
 import { sendToFrame, targetFor, topTarget, type FrameTarget } from "./frames"
@@ -28,6 +28,8 @@ interface Chain {
   provider: Provider
   username: string
   ref?: string
+  /** Picked as one of the person's provider accounts, not a site login: once signed in, the site is linked to it (see link). */
+  link?: string
   phase: "entry" | "provider" | "return"
   until: number
   actions: number
@@ -89,6 +91,7 @@ export class ProviderChain {
     s.stop.abort()
     this.linked.end(s.home.tabId)
     if (s.popup !== undefined) this.linked.end(s.popup)
+    if (label === "Signed in" && s.link) void this.link(s, s.link).catch(() => {})
     for (const tab of new Set([s.home.tabId, s.tab])) void topTarget(tab).then(({ target }) => {
       if (target && this.allowed(s, target.origin)) void sendToFrame(target, { type: "db:provider-status", session: s.id, label, done: true })
     })
@@ -98,19 +101,25 @@ export class ProviderChain {
    * Called only for a guarded pick of a login linked to a provider with known
    * sign-in hosts, after the menu frame's dwell and confirmPick: the corner
    * offer's (UniversalSignIn) or the inline menu's (Autofill.menuSignIn).
+   * `unlinked`: the corner offer's pick of one of the person's provider
+   * accounts on a site with no login for it. That account (`account.ref`,
+   * the provider login itself) must then be saved at the provider's own
+   * sign-in host instead of the site's exact origin; the chain's home is
+   * still the page's exact origin, and the provider steps fill only that login.
    */
-  async start(target: FrameTarget, account: Account): Promise<PickReply> {
+  async start(target: FrameTarget, account: Account, unlinked = false): Promise<PickReply> {
     this.stop(target.tabId)
     const generation = this.generations.get(target.tabId)
     const p = account.signIn ? provider(account.signIn.provider) : undefined
     const username = account.signIn?.account
     const site = siteOf(new URL(target.origin).hostname)
-    if (!p?.hosts.length || !username || !site || target.frameId !== 0 || !account.urls.some((u) => exactSignInOrigin(u, target.origin)) ||
+    const saved = unlinked ? !!p && account.urls.some((u) => savedAtProvider(p, u)) : account.urls.some((u) => exactSignInOrigin(u, target.origin))
+    if (!p?.hosts.length || !username || !site || target.frameId !== 0 || !saved ||
         this.host.status.state !== "ready" || !(await signInEnabled())) return { ok: true }
     if (generation !== this.generations.get(target.tabId) || this.host.status.state !== "ready") return { ok: true }
     const s: Chain = { id: crypto.randomUUID(), home: target, site, tab: target.tabId, provider: p, username,
       phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, busy: false, again: false,
-      used: new Set(), filled: new Set(), stop: new AbortController() }
+      used: new Set(), filled: new Set(), stop: new AbortController(), ...(unlinked ? { ref: account.ref, link: account.ref } : {}) }
     this.chains.add(s)
     s.timer = setTimeout(() => this.end(s), PROVIDER_CHAIN_TTL_MS)
     this.linked.start(target.tabId, { provider: p.id, account: username }, site)
@@ -198,6 +207,18 @@ export class ProviderChain {
       s.busy = false
       if (s.again && this.live(s)) { s.again = false; void this.checkTop(s) }
     }
+  }
+
+  /**
+   * The site's sign-in through one of the person's provider accounts worked:
+   * save a login for the site that signs in with it (`signIn`, no password),
+   * so the site lists it as its own next time. Not if one already does.
+   */
+  private async link(s: Chain, ref: string) {
+    const origin = s.home.origin
+    const listed = (await this.host.send({ type: "list", origin })).accounts
+    if (listed.some((a) => a.signIn?.provider === s.provider.id && this.sameAccount(a.signIn.account, s.username))) return
+    await this.host.send({ type: "save", origin, entry: { title: new URL(origin).hostname, url: origin, signIn: { provider: s.provider.id, account: ref } } })
   }
 
   private sameAccount(a: string | undefined, b: string) { return !!a && a.trim().toLowerCase() === b.trim().toLowerCase() }

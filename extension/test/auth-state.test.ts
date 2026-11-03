@@ -42,6 +42,14 @@ describe("auth state (suppression, not an authentication oracle)", () => {
     expect(facts.entry).toBe(false)
     expect(authState(facts)).toBe("signed-in")
   })
+  test("names the known providers whose buttons show, not on a signed-in page", () => {
+    document.body.innerHTML = '<h1>Welcome</h1><button>Continue with Google</button><button>Sign in with GitHub</button><button>Continue with Okta</button>'
+    const facts = authReport(state, true)
+    expect(facts.providers).toEqual(["github", "google"])
+    expect(authState(facts)).toBe("signed-out")
+    document.body.innerHTML = '<button>Continue with Google</button><button>Sign out</button>'
+    expect(authReport(state, true).providers).toBeUndefined()
+  })
   test("vault usernames shown on the page are not consulted", () => {
     document.body.innerHTML = '<p>kit@example.com</p><img alt="kit@example.com" title="kit@example.com"><button>Sign in</button>'
     expect(authState(authReport(state, true))).toBe("signed-out")

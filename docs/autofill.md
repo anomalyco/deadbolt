@@ -153,7 +153,8 @@ bounds reduce probing; surface presence is not invisible to the page.
 
 #### One pick through a provider
 
-A corner or inline-menu pick of a site's linked provider account may activate its uniquely
+A corner or inline-menu pick of a site's linked provider account (or, in the
+corner, of one of your provider accounts, below) may activate its uniquely
 identified “Sign in with Google” control, then complete the provider's chooser,
 identifier, password and learned authenticator-code steps. Only such a pick,
 with the linked account and the provider's sign-in hosts known, starts a chain:
@@ -203,6 +204,36 @@ checks, not a second account prompt or weakened verification. It signs without
 a prompt only when the daemon verifies the person (Touch ID on, and the site
 doesn't discourage verification); otherwise the chain ends and the usual
 passkey prompt asks, so no assertion is made without the person present.
+
+#### Choosing an account
+
+With more than one account, the corner offer is one “Sign in with Deadbolt”
+row. Resting the pointer on it for 150 ms, a click, keyboard focus or ↓/↑
+lists the accounts: the site's own logins first, then the provider accounts
+below, each group most used first, at most 50 in all. Listing picks nothing,
+and it grows the surface, so a pick waits out the 500 ms dwell again from
+there, as after any move, and passes the fresh 400 ms check. The pointer
+leaving the list folds it back after 300 ms unless something was picked.
+Only the person's own pointer or keyboard in the extension's frame lists it;
+a page's events and messages don't reach it.
+
+#### Your provider accounts
+
+When the page shows a known provider's “Sign in with …” button (the probe
+reports which providers, by id only), the offer also lists the person's
+accounts at that provider: logins saved at one of the provider's own sign-in
+hosts exactly (https, no port, `savedAtProvider` in `signin.ts`), with a
+username and a password, that no login of the site already links to. So a
+site with no saved login can get an offer from its Google button alone. Each
+shows as “Sign in with Google · <account>”. Picking one starts the provider
+chain above for that very login: every rule of One pick through a provider
+holds, the chain's home is the page's exact origin, and the provider's form
+steps fill only the login picked, never another of that username. Once the
+outcome is confirmed back on the site (the chain's “Signed in”), Deadbolt
+saves a login for the site's origin that signs in with it (`save` with
+`signIn`, no password of its own), unless one already does; next time the
+site lists it as its own. A provider with no known hosts (Okta) never gets
+such rows.
 
 ### Host connection
 
@@ -1940,7 +1971,11 @@ to 4096 characters and the username at most 500.
 ```
 
 `entry` takes `"generated": "<id>"` in place of `password`; saving it lets the
-daemon forget it.
+daemon forget it. A provider link (see Your provider accounts) takes
+`"signIn": { "provider": "google", "account": "<ref>" }` instead, with no
+username, password or `ref`: it creates a login at `url` with `sign-in-with`
+and `sign-in-account` (the provider login `account` names, which must be a
+login here) and nothing else.
 
 - **Without `ref`:** creates a login in the default vault with `url`,
   `username` (when not blank) and `password`, named `title` unless that is

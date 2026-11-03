@@ -20,7 +20,7 @@ import { mkdtemp, mkdir, copyFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { getDomain } from "tldts"
-import { universalFixture, providerLog, googlePasskey, GOOGLE_USER, GOOGLE_PASSWORD, OTP } from "./universal-fixture"
+import { universalFixture, providerLog, googlePasskey, GOOGLE_OTHER, GOOGLE_OTHER_PASSWORD, GOOGLE_USER, GOOGLE_PASSWORD, OTP } from "./universal-fixture"
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const dist = resolve(arg("--dist") ?? "dist")
@@ -61,7 +61,7 @@ const context = await chromium.launchPersistentContext(join(root, "profile"), {
   channel: "chromium", headless: true, viewport: { width: 1440, height: 900 },
   args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP acme.test 127.0.0.1, MAP *.test 127.0.0.1",
     // Real sites and providers are https: give the http fixtures a secure context (crypto.randomUUID and the like).
-    `--unsafely-treat-insecure-origin-as-secure=${["acme.test", "accounts.google.test", ...LOOKALIKES].map((h) => `http://${h}:${port}`).join(",")}`,
+    `--unsafely-treat-insecure-origin-as-secure=${["acme.test", "shop.test", "accounts.google.test", ...LOOKALIKES].map((h) => `http://${h}:${port}`).join(",")}`,
     // The toolbar popup (passkey save prompt) is an extension target Playwright doesn't list: reach it over DevTools.
     "--remote-debugging-port=0"],
   // A real browser blocks a popup no person opened: keep that on.
@@ -237,6 +237,12 @@ async function hostRequest(body: Record<string, unknown>) {
     port.onDisconnect.addListener(() => reject(new Error(chrome.runtime.lastError?.message ?? "the host went away")))
     port.postMessage({ type: "hello", id: 1 })
   }), body)
+}
+
+/** The logins the vault lists for `origin` (with what they sign in with), as the extension sees them. */
+async function listAt(origin: string): Promise<Array<{ ref: string; signIn?: { provider: string; account?: string } }>> {
+  const reply = native ? await hostRequest({ type: "list", origin }) as { accounts?: [] } : (await command({ type: "list", origin })).reply as { accounts?: [] }
+  return reply?.accounts ?? []
 }
 
 /** The browser's DevTools targets and a minimal connection to one (as e2e/standalone.ts drives its toolbar popup). */
@@ -686,6 +692,83 @@ try {
     check(Date.now() - picked >= 120_000, "the password step arrives after the chain's two-minute lifetime")
     await p.waitForTimeout(3000)
     check(await p.inputValue('input[name="Passwd"]') === "" && posts(flow, "/v3/signin/challenge/pwd") === 0, "after two minutes the chain is over: nothing is filled")
+    await p.close()
+  }
+
+  // A second Google account, saved only at Google: the corner offer lists it
+  // for Acme's Google button, and for a site with no saved login at all.
+  if (native) cli("new", "login", "--name", "Google", `url=${googleOrigin}`, `username=${GOOGLE_OTHER}`, `password=${GOOGLE_OTHER_PASSWORD}`, `otp=${OTP}`)
+  else await command({ type: "device-item-save", kind: "login", name: "Google", fields: [{ name: "url", value: googleOrigin }, { name: "username", value: GOOGLE_OTHER }, { name: "password", value: GOOGLE_OTHER_PASSWORD }, { name: "otp", value: OTP }] })
+  await Bun.sleep(5500)
+  const linkedTo = async (origin: string, account: string) => (await listAt(origin)).some((a) => a.signIn?.provider === "google" && a.signIn.account === account)
+
+  // Hovering "Sign in with Deadbolt" lists the accounts: Acme's own first,
+  // then the provider accounts. Listing picks nothing, and a pick right as
+  // the list grows waits out the dwell. The second Gmail signs in.
+  await fresh()
+  {
+    const flow = "choose-hover"
+    const p = await open(flow, {})
+    const f = await offer(p)
+    await p.waitForTimeout(1400)
+    const choose = f.locator("button.row", { hasText: "Sign in with Deadbolt" })
+    check(await choose.count() === 1, "several accounts: the offer is one Sign in with Deadbolt row")
+    // A page can't list them or pick: synthetic events at the surface's host, and messages to every frame.
+    await p.evaluate(() => {
+      const host = document.querySelector<HTMLElement>("html > [popover]")
+      for (const type of ["pointerover", "pointerenter", "pointermove", "mouseover", "mousemove", "pointerdown", "click"]) host?.dispatchEvent(new MouseEvent(type, { bubbles: true, composed: true }))
+      host?.dispatchEvent(new FocusEvent("focus"))
+      for (let i = 0; i < frames.length; i++) for (const type of ["db:menu-enter", "db:menu-moved"]) frames[i].postMessage({ type }, "*")
+    })
+    await p.waitForTimeout(800)
+    check(await choose.count() === 1 && !hits(flow, google).length, "a page's events neither list the accounts nor pick one")
+    const box = (await choose.boundingBox())!
+    await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 })
+    const second = f.locator("button.row", { hasText: GOOGLE_OTHER })
+    await until("hovering lists the accounts", async () => await second.count() > 0, 3000)
+    check(!hits(flow, google).length && new URL(p.url()).pathname === "/signin", "hovering lists the accounts and picks nothing")
+    const rows = await f.locator("button.row").allTextContents()
+    check(rows.findIndex((t) => t.includes(GOOGLE_USER)) >= 0 && rows.findIndex((t) => t.includes(GOOGLE_USER)) < rows.findIndex((t) => t.includes(GOOGLE_OTHER)), `the site's own logins come first, then the provider accounts (${JSON.stringify(rows)})`)
+    await second.click()
+    await p.waitForTimeout(1200)
+    check(!hits(flow, google).length, "a pick right as the list grew is refused until it has sat still")
+    await p.waitForTimeout(400)
+    const target = await second.boundingBox()
+    const recording = recordings.find((r) => r.page === p)
+    if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
+    await second.click()
+    await p.waitForURL(`${site}/account*`)
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google`, "then the second Gmail signs in to Acme")
+    check(hits(flow, (h) => google(h) && h.path === "/signin/select").map((h) => h.value).join() === GOOGLE_OTHER && posts(flow, "/v3/signin/challenge/pwd") === 1, "with that account's tile and password only")
+    check(!!await until("Acme is linked to the second Gmail", () => linkedTo(site, GOOGLE_OTHER), 5000), "Acme now has a login that signs in with the second Gmail")
+    await p.close()
+  }
+
+  // A first visit to a site with no saved login: its Google button is enough
+  // to offer both Gmails. Picking the second signs in and links the site.
+  await fresh()
+  {
+    const flow = "first-visit"
+    const shop = `http://shop.test:${port}`
+    check(!(await listAt(shop)).length, "shop.test has no saved login")
+    const p = await context.newPage()
+    record(p, flow)
+    await p.goto(`${shop}/signin?flow=${flow}`)
+    const f = await offer(p)
+    await p.waitForTimeout(1400)
+    const box = (await f.locator("button.row", { hasText: "Sign in with Deadbolt" }).boundingBox())!
+    await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 })
+    const second = f.locator("button.row", { hasText: GOOGLE_OTHER })
+    await until("hovering lists both Gmails", async () => await second.count() > 0 && await f.locator("button.row", { hasText: GOOGLE_USER }).count() > 0, 3000)
+    check((await f.locator("button.row").allTextContents()).every((t) => t.startsWith("Sign in with Google")), "a site with no saved login offers the provider accounts for its Google button")
+    await p.waitForTimeout(1400)
+    const target = await second.boundingBox()
+    const recording = recordings.find((r) => r.page === p)
+    if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
+    await second.click()
+    await p.waitForURL(`${shop}/account*`)
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google`, "first visit: the picked Gmail signs in")
+    check(!!await until("shop.test is linked", () => linkedTo(shop, GOOGLE_OTHER), 5000) && (await listAt(shop)).length === 1, "and shop.test gets one login that signs in with it")
     await p.close()
   }
   console.log(`PASS universal sign-in with a provider (${mode})`)

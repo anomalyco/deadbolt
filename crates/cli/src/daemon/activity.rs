@@ -79,6 +79,7 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::SiteGenerateDrop { .. } => (T::Browser, "site-generate-drop"),
         C::SiteCheck { .. } => (T::Browser, "site-check"),
         C::SiteSave { .. } => (T::Browser, "site-save"),
+        C::SiteLink { .. } => (T::Browser, "site-link"),
         C::FormItems { .. } => (T::Browser, "form-items"),
         C::FormFill { .. } => (T::Browser, "form-fill"),
         C::PasskeyList { .. } => (T::Browser, "passkey-list"),
@@ -292,6 +293,10 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
                 .map(|t| login(&t.vault, &t.item, title))
                 .unwrap_or_else(|| named(&None, std::slice::from_ref(title))),
             vec!["username".into(), "password".into()],
+        ),
+        Command::SiteLink { title, .. } => (
+            named(&None, std::slice::from_ref(title)),
+            vec!["sign-in-with".into()],
         ),
         Command::PasskeyGet {
             origin, passkey, ..

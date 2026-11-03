@@ -235,6 +235,60 @@ pub fn save(s: &mut Loaded, save: Save) -> Result<(LoginRef, bool)> {
     ))
 }
 
+/// What a provider link saves (see link).
+pub struct Link<'a> {
+    pub origin: &'a str,
+    pub title: &'a str,
+    pub url: &'a str,
+    pub provider: &'a str,
+    pub account: &'a LoginRef,
+}
+
+/// Saves a new login in the default vault for the site of `link.origin`
+/// that signs in with `link.provider` through `link.account`, the provider
+/// login a sign-in just went through (docs/autofill.md, "Your provider
+/// accounts"). It holds no password of its own. Returns the new login.
+pub fn link(s: &mut Loaded, link: Link) -> Result<LoginRef> {
+    let site = site(link.origin)?;
+    let url = page_url(link.url).map_err(|reason| anyhow!("{reason}"))?;
+    if !site.matches_url(url) {
+        return Err(fail(
+            ErrorCode::DomainMismatch,
+            format!("{url} isn't on {}", site.domain),
+        ));
+    }
+    let provider = link.provider.trim();
+    if provider.is_empty() || provider.chars().count() > 64 {
+        return Err(anyhow!("a provider is 1 to 64 characters"));
+    }
+    let not_found = || fail(ErrorCode::NotFound, "no such login");
+    let vault = VaultId::from_bytes(unhex(&link.account.vault).map_err(|_| not_found())?);
+    let id = ItemId::from_bytes(unhex(&link.account.item).map_err(|_| not_found())?);
+    s.vaults
+        .get(&vault)
+        .and_then(|v| v.item(&id))
+        .filter(|item| !item.deleted && item.kind == "login")
+        .ok_or_else(not_found)?;
+    let input = |name: &str, value: &str| FieldInput {
+        name: name.into(),
+        kind: None,
+        value: value.into(),
+    };
+    let inputs = vec![
+        input("url", url),
+        input("sign-in-with", provider),
+        input("sign-in-account", &hex(id.as_bytes())),
+    ];
+    let title = item_name(link.title);
+    let name = Some(title).filter(|t| !t.is_empty() && *t != site.domain);
+    let vault = s.resolve(None)?;
+    let info = create(s, None, "login", name, inputs)?;
+    Ok(LoginRef {
+        vault: hex(vault.as_bytes()),
+        item: info.id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +363,47 @@ mod tests {
             );
             assert!(values.username.is_none() && values.password.is_none());
         }
+    }
+
+    #[test]
+    fn a_provider_link_is_a_login_that_signs_in_with_the_provider_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let google = login(
+            &mut s,
+            &[
+                ("url", "https://accounts.google.com"),
+                ("username", "kit@gmail.com"),
+                ("password", "hunter22"),
+            ],
+        );
+        fn link_to<'a>(account: &'a LoginRef, url: &'a str) -> Link<'a> {
+            Link {
+                origin: "https://shop.com",
+                title: "shop.com",
+                url,
+                provider: "google",
+                account,
+            }
+        }
+        let saved = link(&mut s, link_to(&google, "https://shop.com")).unwrap();
+        let listed = list(&s, "https://shop.com").unwrap().1;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].login, saved);
+        assert!(!listed[0].has_password && listed[0].username.is_none());
+        let sign_in = listed[0].sign_in.as_ref().unwrap();
+        assert_eq!(
+            (sign_in.provider.as_str(), sign_in.account.as_deref()),
+            ("google", Some("kit@gmail.com"))
+        );
+        // Not off the page's site, and not to a login that isn't here.
+        assert!(link(&mut s, link_to(&google, "https://elsewhere.com")).is_err());
+        let missing = LoginRef {
+            item: "0".repeat(32),
+            ..google.clone()
+        };
+        assert!(link(&mut s, link_to(&missing, "https://shop.com")).is_err());
+        assert_eq!(list(&s, "https://shop.com").unwrap().1.len(), 1);
     }
 
     fn titles(s: &Loaded, origin: &str) -> Vec<String> {

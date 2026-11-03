@@ -302,6 +302,7 @@ fn refused(command: &Command) -> Option<&'static str> {
     Some(match command {
         Command::SiteFill { .. } => "fill a site's login",
         Command::SiteSave { login: Some(_), .. } => "change a saved login",
+        Command::SiteLink { .. } => "link a site to a login",
         Command::FormFill { .. } => "fill a form",
         Command::PasskeyGet { .. } => "sign in with a passkey",
         Command::PasskeyCreate { .. } => "save a passkey",

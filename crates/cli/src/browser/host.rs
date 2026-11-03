@@ -213,9 +213,20 @@ fn generated_id(id: &str) -> Result<String, Refusal> {
 struct Entry {
     title: String,
     url: String,
+    #[serde(default)]
     username: String,
     password: Option<Secret>,
     generated: Option<String>,
+    /// In place of a password: a login that signs in with a provider login.
+    #[serde(rename = "signIn")]
+    sign_in: Option<EntrySignIn>,
+}
+
+/// A save's provider link: the provider's id and the login (a ref) it signs in with.
+#[derive(Deserialize)]
+struct EntrySignIn {
+    provider: String,
+    account: String,
 }
 
 #[derive(Serialize)]
@@ -923,8 +934,47 @@ impl Serial {
             } => {
                 site(&origin)?;
                 let login = login.as_deref().map(parse_ref).transpose()?;
-                let password = check_login(&entry.username, entry.password, entry.generated)?;
                 let title = entry.title.trim();
+                if let Some(link) = entry.sign_in {
+                    if login.is_some()
+                        || entry.password.is_some()
+                        || entry.generated.is_some()
+                        || !entry.username.is_empty()
+                    {
+                        return Err(Refusal::bad(
+                            "a sign-in link is a new login with no username or password",
+                        ));
+                    }
+                    if title.is_empty()
+                        || title.chars().count() > MAX_TITLE
+                        || entry.url.len() > MAX_URL
+                    {
+                        return Err(Refusal::bad(format!(
+                            "a title is 1 to {MAX_TITLE} characters, entry.url at most {MAX_URL} bytes"
+                        )));
+                    }
+                    let url = crate::site::page_url(&entry.url)
+                        .map_err(|reason| Refusal::bad(format!("entry.url: {reason}")))?;
+                    let Reply::SiteSaved { login, created } = call(
+                        &self.paths,
+                        Command::SiteLink {
+                            origin,
+                            title: title.into(),
+                            url: url.into(),
+                            provider: link.provider,
+                            account: parse_ref(&link.account)?,
+                        },
+                    )
+                    .await?
+                    else {
+                        return Err(unexpected());
+                    };
+                    return Ok(Body::Save {
+                        login: format_ref(&login),
+                        created,
+                    });
+                }
+                let password = check_login(&entry.username, entry.password, entry.generated)?;
                 if title.is_empty() || title.chars().count() > MAX_TITLE {
                     return Err(Refusal::bad(format!(
                         "a title is 1 to {MAX_TITLE} characters"
