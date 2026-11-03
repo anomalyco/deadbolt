@@ -36,10 +36,10 @@ interface Chain {
   link?: string
   /**
    * Where an unlinked chain's provider pages may send the person back: the
-   * home host, and any host of the home's site the chain itself saw the
+   * home origin, and any origin of the home's site the chain itself saw the
    * site's own navigation or popup pass through on the way to the provider.
    */
-  hosts: Set<string>
+  origins: Set<string>
   /** Actions taken on the provider's own pages (chooser, form, passkey): a link needs one. */
   providerActions: number
   /** The provider sign-in page the chain's tab last committed. */
@@ -96,7 +96,7 @@ export class ProviderChain {
    */
   private step(s: Chain, url: string) {
     if (!isSignInPage(s.provider, url)) return false
-    return s.link ? returnsTo(s.provider, url, s.site, [...s.hosts]) === "home" : returnsTo(s.provider, url, s.site) !== "foreign"
+    return s.link ? returnsTo(s.provider, url, s.site, [...s.origins]) === "home" : returnsTo(s.provider, url, s.site) !== "foreign"
   }
   private consume(s: Chain) {
     if (!this.live(s) || s.actions >= PROVIDER_CHAIN_ACTIONS) { this.end(s); return false }
@@ -147,7 +147,7 @@ export class ProviderChain {
     if (!p?.hosts.length || !username || !site || target.frameId !== 0 || !saved || ownSite ||
         this.host.status.state !== "ready" || !(await signInEnabled())) return { ok: true }
     if (generation !== this.generations.get(target.tabId) || this.host.status.state !== "ready") return { ok: true }
-    const s: Chain = { id: crypto.randomUUID(), home: target, site, hosts: new Set([new URL(target.origin).hostname]), tab: target.tabId, provider: p, username,
+    const s: Chain = { id: crypto.randomUUID(), home: target, site, origins: new Set([target.origin]), tab: target.tabId, provider: p, username,
       phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, providerActions: 0, busy: false, again: false,
       used: new Set(), filled: new Set(), stop: new AbortController(), ...(unlinked ? { ref: account.ref, link: account.ref } : {}) }
     this.chains.add(s)
@@ -190,7 +190,7 @@ export class ProviderChain {
       await sendToFrame(target, { type: "db:provider-status", session: s.id, label: `Signing in with ${s.provider.name}…` })
       if (!await this.ready(s)) return this.end(s)
       const report = await sendToFrame<ProviderReport>(target, { type: "db:provider-probe", session: s.id, provider: s.provider.id, site: s.site,
-        ...(s.phase === "entry" ? { entry: true } : { account: s.username }), ...(s.link ? { home: [...s.hosts] } : {}) })
+        ...(s.phase === "entry" ? { entry: true } : { account: s.username }), ...(s.link ? { home: [...s.origins] } : {}) })
       if (!this.live(s)) return
       // An acknowledged click can unload its document before a queued scan's
       // probe answers. It grants no further action; the next committed page
@@ -327,7 +327,7 @@ export class ProviderChain {
       s.phase = "return"
       // Home again in the chain's own tab, by a navigation off a provider
       // page that sent it here (not a popup coming back or closing).
-      const back = s.lastProviderUrl ? returnsTo(s.provider, s.lastProviderUrl, s.site, s.link ? [...s.hosts] : undefined) : "none"
+      const back = s.lastProviderUrl ? returnsTo(s.provider, s.lastProviderUrl, s.site, s.link ? [...s.origins] : undefined) : "none"
       s.returnedHome = d.tabId === s.home.tabId && s.providerActions > 0 && back === "home"
     }
     else if (s.phase === "entry") this.end(s)

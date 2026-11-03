@@ -234,7 +234,7 @@ export type ToBackground =
   | { type: "pk:popup-choose"; tabId: number; id: string; choice: PasskeyChoice }
 
 export type ToContent =
-  /** `home`: a chain from a provider account on an unlinked site, held to these hosts of its home's site (see ProviderChain). */
+  /** `home`: a chain from a provider account on an unlinked site, held to these origins of its home's site (see ProviderChain). */
   | { type: "db:provider-probe"; session: string; provider: string; site: string; account?: string; entry?: boolean; home?: string[] }
   | { type: "db:provider-act"; session: string; action: string; values?: FillValues }
   /** `hold`: the chain waits for the person (to pick their account); their clicks don't stop it, and the pill fades. */

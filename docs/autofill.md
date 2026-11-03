@@ -268,18 +268,21 @@ stricter rules than a site's own linked login, since the site has never
 been linked to it:
 
 - Every provider page must carry a return URL, and every one must lead to
-  the home page's host, or a host of its site that the chain itself saw the
-  site's own navigation or popup pass through on the way to the provider
-  (not just anywhere on its site), directly or through another of the
-  provider's sign-in pages. A page with none (a bare
-  `ServiceLogin`) stops it. For every chain, any query parameter holding an
-  absolute http(s) URL counts as a return URL whatever its name or case
-  (`wreply`, `redir`, `Redirect_uri`), except OAuth's `scope`.
-- The chooser's “will share your name, email…” notice is the person's to
-  agree to: the chain waits there, the corner says “Choose your account”
-  and fades, and the person clicks their own tile (their clicks don't stop
-  this wait; Escape does). From the page it leads to, the chain goes on; a
-  step asking for the account again ends it.
+  the home page's origin (scheme, host and port), or an origin of its site
+  that the chain itself saw the site's own navigation or popup pass through
+  on the way to the provider (not just anywhere on its site), directly or
+  through another of the provider's sign-in pages. A page with none (a bare
+  `ServiceLogin`) stops it. For every chain, any query parameter holding a
+  URL to somewhere counts as a return URL whatever its name or case
+  (`wreply`, `redir`, `Redirect_uri`): absolute or scheme-relative (`//host`),
+  as is or URL-decoded once, with `\` read as `/`. OAuth's `scope` is the
+  exception.
+- Picking the account on the provider's chooser is the person's to do,
+  whatever the page says or in whatever language (with or without the
+  “will share your name, email…” notice): the chain waits there, the corner
+  says “Choose your account” and fades, and the person clicks their own
+  tile (their clicks don't stop this wait; Escape does). From the page it
+  leads to, the chain goes on; a step asking for the account again ends it.
 - The provider's form steps fill only the login picked, never another of
   that username, and a password step whose page shows another account (its
   chip or the username it carries, a `login_hint` the site chose) stops,

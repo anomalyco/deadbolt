@@ -840,7 +840,8 @@ try {
     check(!(await listAt(shop)).length, "shop.test has no saved login")
     const p = await context.newPage()
     record(p, flow)
-    await p.goto(`${shop}/signin?flow=${flow}`)
+    // Google's chooser in German: the stop on an unlinked site doesn't hang on its English notice.
+    await p.goto(`${shop}/signin?flow=${flow}&hl=de`)
     const f = await offer(p)
     await p.waitForTimeout(1400)
     await expand(p, f, GOOGLE_OTHER)
@@ -855,7 +856,7 @@ try {
     await second.click()
     await p.waitForURL(`${googleOrigin}/o/oauth2/v2/auth*`)
     await p.waitForTimeout(2500)
-    check(!hits(flow, (h) => h.path === "/signin/select").length, "first visit: the sharing notice is the person's")
+    check(await p.locator("h1").textContent() === "Konto auswählen" && !hits(flow, (h) => h.path === "/signin/select").length, "first visit, a German chooser: picking the account is the person's")
     await p.locator(`[data-identifier="${GOOGLE_OTHER}"]`).click()
     await p.waitForURL(`${shop}/account*`, { timeout: 30_000 })
     check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google`, "first visit: the picked Gmail signs in")

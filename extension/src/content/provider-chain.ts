@@ -70,7 +70,8 @@ const STRONG_CONSENT = phrases(["wants to access", "would like to access", "want
 /**
  * The sign-in disclosure ("Google will share your name, email address…"): on
  * a chooser, picking the account may itself be the consent for the client
- * the URL names. Only a chooser whose return URL leads home is clicked.
+ * the URL names. A linked chain clicks only a chooser whose return URL
+ * leads home; an unlinked one never clicks a tile (see evaluate).
  */
 const SHARES = phrases(["will share your"])
 /** Page text longer than this is unknown: a warning past a cut-off must not be missed. */
@@ -332,9 +333,9 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   // Only the provider's own sign-in and OAuth pages, sending the person back to the site picked on.
   if (!isSignInPage(p, location.href)) return stop("unknown")
   // A chain for a site the person hasn't linked yet (`home`): every page must lead back to exactly that host.
-  const hosts = Array.isArray(message.home) ? message.home.filter((h): h is string => typeof h === "string" && !!h).slice(0, 8) : []
-  const strict = hosts.length > 0
-  const back = returnsTo(p, location.href, message.site, strict ? hosts : undefined)
+  const origins = Array.isArray(message.home) ? message.home.filter((h): h is string => typeof h === "string" && !!h).slice(0, 8) : []
+  const strict = origins.length > 0
+  const back = returnsTo(p, location.href, message.site, strict ? origins : undefined)
   if (strict ? back !== "home" : back === "foreign") return stop("unknown")
   if (deepQueryAll(CAPTCHA, openRoots()).some(isVisible)) return stop("captcha")
   const text = pageWords()
@@ -344,8 +345,9 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   const tile = account ? tileFor(p, account) : null
   if (tile && account) {
     // Sharing the account with a site for the first time is the person's
-    // decision: on an unlinked site, they click their own tile.
-    if (strict && any(text, SHARES)) return stop("choose")
+    // decision: on an unlinked site they click their own tile, whatever the
+    // page says (in any language, with or without the sharing notice).
+    if (strict) return stop("choose")
     if (back !== "home" && any(text, SHARES)) return stop("consent")
     return { kind: "chooser", action: mint({ kind: "click", ...base, provider: true, el: tile, find: () => tileFor(p, account) }) }
   }

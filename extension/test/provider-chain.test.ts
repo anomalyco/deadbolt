@@ -184,7 +184,7 @@ describe("provider chain authority", () => {
     // Two logins of that username at the provider: only the one picked fills.
     await chain.check(commit(GOOGLE, "provider-doc", 1, BACK))
     expect(fills().map((r) => (r as { ref: string }).ref)).toEqual([own.ref])
-    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["www.example.com"])
+    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["https://www.example.com"])
     const sender = commit(SITE, "returned", 1, "/oauth/callback")
     signedInHome()
     await chain.check(sender)
@@ -241,9 +241,17 @@ describe("provider chain authority", () => {
     for (const q of ["wreply=https://evil.test/cb", "redir=https%3A%2F%2Fevil.test%2F", `Redirect_uri=${encodeURIComponent("https://evil.test/")}`, `RETURN_TO=${encodeURIComponent("https://evil.test/")}`]) expect([q, at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&${q}`)]).toEqual([q, "foreign"])
     expect(at(`scope=${encodeURIComponent("https://www.googleapis.com/auth/userinfo.email")}&redirect_uri=${encodeURIComponent(`${SITE}/cb`)}`)).toBe("home")
     expect(at("scope=openid")).toBe("none")
-    // Exact host: another host of the site isn't home for an unlinked chain.
-    expect(returnsTo(google, `${GOOGLE}/x?redirect_uri=${encodeURIComponent("https://cdn.example.com/cb")}`, "example.com", ["www.example.com"])).toBe("foreign")
-    expect(returnsTo(google, `${GOOGLE}/x?redirect_uri=${encodeURIComponent("https://sso.example.com/cb")}`, "example.com", ["www.example.com", "sso.example.com"])).toBe("home")
+    // Exact origin: another host of the site, another port or http isn't home for an unlinked chain.
+    const back = (to: string, origins = ["https://www.example.com"]) => returnsTo(google, `${GOOGLE}/x?redirect_uri=${encodeURIComponent(to)}`, "example.com", origins)
+    expect(back("https://cdn.example.com/cb")).toBe("foreign")
+    expect(back("https://www.example.com:8443/cb")).toBe("foreign")
+    expect(back("http://www.example.com/cb")).toBe("foreign")
+    expect(back("https://www.example.com/cb")).toBe("home")
+    expect(back("https://sso.example.com/cb", ["https://www.example.com", "https://sso.example.com"])).toBe("home")
+    // Unnamed parameters: scheme-relative, backslashed and once more encoded URLs are return URLs too.
+    for (const q of ["r=//evil.test/cb", "r=/\\evil.test/cb", "r=https:\\\\evil.test", `r=${encodeURIComponent(encodeURIComponent("https://evil.test/"))}`, `r=${encodeURIComponent(encodeURIComponent("//evil.test/"))}`])
+      expect([q, at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&${q}`)]).toEqual([q, "foreign"])
+    expect(at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&prompt=select_account&r=/path`)).toBe("home")
   })
   test("an unlinked site's sharing notice waits for the person's own pick, then the chain goes on for the account shown", async () => {
     await chain.start(home, own, true)

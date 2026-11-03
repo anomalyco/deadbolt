@@ -245,10 +245,12 @@ pub struct Link<'a> {
     pub account: &'a LoginRef,
 }
 
-/// Saves a new login in the default vault for the site of `link.origin`
-/// that signs in with `link.provider` through `link.account`, the provider
-/// login a sign-in just went through (docs/autofill.md, "Your provider
-/// accounts"). It holds no password of its own. Returns the new login.
+/// Saves a new login, in the vault of `link.account`, for the site of
+/// `link.origin` that signs in with `link.provider` through `link.account`,
+/// the provider login a sign-in just went through (docs/autofill.md, "Your
+/// provider accounts"). It holds no password of its own. Refused for an
+/// unknown provider or an account not saved at its sign-in host. Returns
+/// the login and whether it is new: an existing link is returned as is.
 pub fn link(s: &mut Loaded, link: Link) -> Result<(LoginRef, bool)> {
     let site = site(link.origin)?;
     let url = page_url(link.url).map_err(|reason| anyhow!("{reason}"))?;

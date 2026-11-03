@@ -82,15 +82,17 @@ export function isSignInPage(p: Provider, url: string): boolean {
 
 /**
  * Where a provider page sends the person back, judged against `site`, the
- * chain's home (a registrable domain), or with `hosts`, exactly one of those:
- * "home" when every return URL it carries resolves there, directly or
- * through another of the provider's own sign-in pages that does; "none"
- * when it carries none; otherwise "foreign". A return URL is a parameter
- * named like one (any case; relative ones resolve against the page), or any
- * other whose value is an absolute http(s) URL, whatever it's called
- * (`wreply`, `redir`), except OAuth's `scope`.
+ * chain's home (a registrable domain), or with `origins`, exactly one of
+ * those (scheme, host and port): "home" when every return URL it carries
+ * resolves there, directly or through another of the provider's own
+ * sign-in pages that does; "none" when it carries none; otherwise
+ * "foreign". A return URL is a parameter named like one (any case; relative
+ * ones resolve against the page), or any other whose value, as is or
+ * URL-decoded once, with `\` read as `/`, is an absolute or
+ * scheme-relative http(s) URL, whatever it's called (`wreply`, `redir`),
+ * except OAuth's `scope`.
  */
-export function returnsTo(p: Provider, url: string, site: string, hosts?: readonly string[], depth = 0): "home" | "none" | "foreign" {
+export function returnsTo(p: Provider, url: string, site: string, origins?: readonly string[], depth = 0): "home" | "none" | "foreign" {
   let u: URL
   try {
     u = new URL(url)
@@ -102,20 +104,34 @@ export function returnsTo(p: Provider, url: string, site: string, hosts?: readon
     const key = name.toLowerCase()
     if (NOT_RETURN.has(key)) continue
     const named = RETURN_PARAMS.has(key)
-    if (!named && !/^\s*https?:\/\//i.test(value)) continue
+    const unnamed = named ? null : urlLike(value)
+    if (!named && unnamed === null) continue
     found = true
     let back: URL
     try {
-      back = named ? new URL(value, u) : new URL(value.trim())
+      back = new URL(named ? value : unnamed!, u)
     } catch {
       return "foreign"
     }
     const at = back.hostname.toLowerCase()
-    if (site && secure(back) && (hosts ? hosts.some((h) => at === h.toLowerCase()) : at === site || at.endsWith(`.${site}`))) continue
-    if (depth < 3 && isSignInPage(p, back.href) && returnsTo(p, back.href, site, hosts, depth + 1) === "home") continue
+    if (site && secure(back) && (origins ? origins.some((o) => back.origin === o.toLowerCase()) : at === site || at.endsWith(`.${site}`))) continue
+    if (depth < 3 && isSignInPage(p, back.href) && returnsTo(p, back.href, site, origins, depth + 1) === "home") continue
     return "foreign"
   }
   return found ? "home" : "none"
+}
+
+/** A parameter value that is a URL to somewhere (absolute or `//host`), as is or URL-decoded once, `\` read as `/`: that URL, else null. */
+function urlLike(value: string): string | null {
+  let decoded = value
+  try {
+    decoded = decodeURIComponent(value)
+  } catch {}
+  for (const v of [value, decoded]) {
+    const norm = v.trim().replace(/\\/g, "/")
+    if (/^(?:https?:)?\/\//i.test(norm)) return norm
+  }
+  return null
 }
 
 /** https, or in an e2e build its http `.test` stand-ins too (see isProviderPage). */

@@ -132,10 +132,12 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
     back.searchParams.set("as", who)
     return Response.redirect(back.href, 303)
   }
+  // `hl=de`: Google's chooser in German, with its sharing notice in German too.
+  const de = q.get("hl") === "de"
   const chooser = () =>
-    google("Sign in - Google Accounts", `<h1>Choose an account</h1><p>to continue to Acme</p><ul>${[["Universal Google", GOOGLE_USER], ["Someone Else", GOOGLE_OTHER]]
+    google(de ? "Anmelden – Google Konten" : "Sign in - Google Accounts", `<h1>${de ? "Konto auswählen" : "Choose an account"}</h1><p>${de ? "weiter zu Acme" : "to continue to Acme"}</p><ul>${[["Universal Google", GOOGLE_USER], ["Someone Else", GOOGLE_OTHER]]
       .map(([name, email]) => `<li><div role="link" tabindex="0" data-identifier="${email}" data-authuser="-1"><span>${name[0]}</span><span><b>${name}</b><br><small>${email}</small></span></div></li>`)
-      .join("")}<li><div role="link" tabindex="0" id="another">Use another account</div></li></ul>${FOOTER}
+      .join("")}<li><div role="link" tabindex="0" id="another">${de ? "Anderes Konto verwenden" : "Use another account"}</div></li></ul>${de ? "<footer><p><small>Zum Fortfahren gibt Google Ihren Namen, Ihre E-Mail-Adresse, Ihre Spracheinstellung und Ihr Profilbild an Acme weiter.</small></p></footer>" : FOOTER}
       <script>for (const t of document.querySelectorAll("[role=link]")) t.addEventListener("click", () => location.assign(${JSON.stringify(step("/signin/select"))} + (t.dataset.identifier ? "&id=" + encodeURIComponent(t.dataset.identifier) : "&another=1")))</script>`)
   switch (url.pathname) {
     case "/o/oauth2/v2/auth":
