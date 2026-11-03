@@ -1518,7 +1518,11 @@ export function initMenu(page: PageState) {
         // whether nothing of Deadbolt's shows, which the measuring needs.
         if (message.token !== token) return void respond(!host)
         if (!message.hold) return void respond(hold(false))
-        pillSettled(900).then(() => respond(hold(true)))
+        pillSettled(900).then(() => {
+          const ok = hold(true)
+          if (!ok || document.hidden) return respond(ok)
+          requestAnimationFrame(() => requestAnimationFrame(() => respond(ok)))
+        })
         return true
       case "db:generated":
         keptGenerated(String(message.generated))
