@@ -135,6 +135,12 @@ body {
   position: relative;
 }
 
+/* A provider's logo (menu.ts providerMark), on the tile's own ground. */
+.avatar.provider.mark svg {
+  width: 16px;
+  height: 16px;
+}
+
 /* Still while the press is checked: nothing in the frame may animate then,
    or the browser's visibility readings, which the check relies on, pause.
    It spins once the pick goes ahead. */

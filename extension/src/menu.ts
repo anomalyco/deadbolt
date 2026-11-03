@@ -16,7 +16,7 @@ import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
-import { siteTile } from "./ui/site-icon"
+import { brandBySlug, siteTile } from "./ui/site-icon"
 
 /** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
 type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account } | { generate: true } | { identity: FormIdentity } | { card: FormCard }
@@ -238,7 +238,8 @@ function row(item: Row, i: number): HTMLElement {
     "button",
     // Rows aren't tab stops: the list is, and says which row is active (see listbox).
     { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", id: `row-${i}`, tabindex: "-1", "aria-selected": String(i === active) },
-    bare ? null : tile,
+    // A provider's mark shows even in a bare list: it says who the row signs in with.
+    bare && !("provider" in item) ? null : tile,
     h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)),
   )
   // A pointer's click only: Enter or Space on a focused row clicks it too (detail 0).
@@ -288,11 +289,60 @@ function loginTile(account: Account, i: number): HTMLElement {
   })
 }
 
-/** A provider's mark: its initial on its own tint (Deadbolt draws no third-party logos). */
+/**
+ * Brand colours of the providers Simple Icons doesn't carry (their owners
+ * asked it not to): their initial in that colour. Microsoft's four squares
+ * are drawn, being plain geometry.
+ */
+const UNBUNDLED: Record<string, string> = { amazon: "FF9900", slack: "4A154B", linkedin: "0A66C2", microsoft: "737373" }
+const MICROSOFT = [["F25022", 0, 0], ["7FBA00", 13, 0], ["00A4EF", 0, 13], ["FFB900", 13, 13]] as const
+
+/** Near-black (Apple, GitHub, X): drawn in the tile's own ink, so it reads in dark mode too. */
+function brandInk(hex: string): string {
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.12 ? "currentColor" : `#${hex}`
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg"
+function markSvg(paint: (svg: SVGSVGElement) => void, box = "0 0 24 24"): SVGSVGElement {
+  const el = document.createElementNS(SVG_NS, "svg")
+  el.setAttribute("viewBox", box)
+  el.setAttribute("aria-hidden", "true")
+  paint(el)
+  return el
+}
+
+/**
+ * A provider's mark, its logo in its brand colour from the bundled Simple
+ * Icons subset (no request), whatever the site icons setting: it says who
+ * the row signs in with. Its initial until that loads, or for a provider
+ * the subset lacks.
+ */
 function providerMark(id: string): HTMLElement {
   const p = providerOf(id)
   const el = avatar(p.name)
   el.classList.add("provider")
+  const show = (mark: SVGSVGElement) => {
+    el.replaceChildren(mark)
+    el.classList.add("mark")
+  }
+  if (p.id === "microsoft")
+    show(markSvg((s) => MICROSOFT.forEach(([fill, x, y]) => {
+      const r = document.createElementNS(SVG_NS, "rect")
+      for (const [k, v] of Object.entries({ x, y, width: 11, height: 11, fill: `#${fill}` })) r.setAttribute(k, String(v))
+      s.append(r)
+    })))
+  else if (UNBUNDLED[p.id]) el.style.color = brandInk(UNBUNDLED[p.id])
+  else if (p.hosts.length)
+    void brandBySlug(p.id).then((brand) => {
+      if (!brand || !/^[0-9a-f]{6}$/i.test(brand[1])) return
+      show(markSvg((s) => {
+        const path = document.createElementNS(SVG_NS, "path")
+        path.setAttribute("d", brand[2])
+        path.setAttribute("fill", brandInk(brand[1]))
+        s.append(path)
+      }))
+    })
   return el
 }
 

@@ -466,6 +466,7 @@ try {
     })
     // The real dwell, then the one trusted pick.
     await p.waitForTimeout(1400)
+    await still(p, menu, `inline-google-${scheme}`)
     const row = menu.locator("button.row", { hasText: "Google" }).first()
     const target = await row.boundingBox()
     const recording = recordings.find((r) => r.page === p)
