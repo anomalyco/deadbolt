@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { AUTOMATIC_STEP_MS, Autofill, FLOWS_KEY, menuAccounts, signsIn, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
+import { AUTOMATIC_STEP_MS, Autofill, FLOWS_KEY, menuAccounts, oneRowEach, signsIn, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
 import { HostError } from "../src/bg/backend"
 import { SIGNIN_SETTING } from "../src/auth-state"
 import { SignInWith } from "../src/bg/signinwith"
@@ -125,6 +125,25 @@ describe("automatic sign-in session", () => {
       expect(delivered("db:signin-submit").length - before.submits).toBe(1)
       fake.fillAck = () => ({ filled: ["email", "password"] })
     }
+  })
+  test.each([true, false])("email-first single sign-on: after the email, a step offering only a provider's button goes on through it (Google account saved: %s)", async (saved) => {
+    const started: Array<[string, boolean]> = []
+    autofill = new Autofill(host.host, undefined, undefined, undefined, { start: async (_: unknown, a: { ref: string }, unlinked?: boolean) => (started.push([a.ref, !!unlinked]), { ok: true as const }), active: () => false })
+    autofill.signedOut = async () => true
+    const gmail = { ...ACCOUNTS[0], ref: `${"c".repeat(64)}:${"7".repeat(32)}`, title: "Google", urls: ["https://accounts.google.com"] }
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req) => req.type === "list"
+      ? { type: "list", site: "example.com", accounts: (req as { origin: string }).origin === "https://accounts.google.com" ? (saved ? [gmail] : []) : [account] }
+      : send(req as never)) as typeof host.host.send
+    const answer = fake.answer
+    fake.answer = (m, doc) => m.type === "db:auth-probe" ? { loginForm: false, entry: true, signOut: false, providers: ["google"] } : answer(m, doc)
+    fake.fillAck = () => ({ filled: ["email"] })
+    expect(await autofill.menuPick(await loginMenu(1, ["email"]), account.ref, menuSender())).toEqual({ ok: true, submitted: true })
+    // The site's next step: no login form, only "Sign in with Google".
+    await autofill.page(next("sso-step"), null, [], 2)
+    expect(started).toEqual(saved ? [[gmail.ref, true]] : [])
+    // Never a password into the site's page on the way.
+    expect(fills().map((r) => (r as { want: string[] }).want)).toEqual([["username"]])
   })
   test("a provider row on a sign-up form, or on a signed-in page, starts no chain", async () => {
     const started: string[] = []
@@ -1338,6 +1357,13 @@ describe("sign in with a provider", () => {
       req.type === "list" ? { type: "list", site: "example.com", accounts: [ACCOUNTS[0], both, google, providerLogin] } : send(req as never)) as typeof host.host.send
   })
 
+  test("one row per person: a site login of the account a provider row signs in with shows only as that row, except on the provider's own pages", () => {
+    const ramp = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"6".repeat(32)}`, title: "Ramp", username: "Kit@Gmail.com " }
+    expect(oneRowEach([ramp, google, ACCOUNTS[1]], "https://app.ramp.com")).toEqual([google, ACCOUNTS[1]])
+    expect(oneRowEach([ramp, google], "https://accounts.google.com")).toEqual([ramp, google])
+    expect(oneRowEach([ramp, ACCOUNTS[1]], "https://app.ramp.com")).toEqual([ramp, ACCOUNTS[1]])
+  })
+
   test("a sign-in-with login shows on password fields too, never on code fields, and one with a password too is two rows", () => {
     expect(menuAccounts([google, ACCOUNTS[0]], "password")).toEqual([google, ACCOUNTS[0]])
     expect(menuAccounts([google], "otp")).toEqual([])
@@ -1407,9 +1433,10 @@ describe("sign in with a provider", () => {
     expect((await ask(`${"k".repeat(500)}@gmail.com`)).rows).toBe(5)
     // The username the user typed comes first.
     expect((await ask("kit@gmail.com", sender, "admin")).rows).toBe(2)
-    // Anywhere but Google's sign-in host, a page-set account is ignored.
-    expect((await ask("kit@gmail.com", pageSender())).rows).toBe(5)
-    expect((await ask("kit@gmail.com", pageSender({ url: "https://github.com/login", origin: "https://github.com" }))).rows).toBe(5)
+    // Anywhere but Google's sign-in host, a page-set account is ignored (and
+    // the Google login there shows once, as the row signing in with it: 4).
+    expect((await ask("kit@gmail.com", pageSender())).rows).toBe(4)
+    expect((await ask("kit@gmail.com", pageSender({ url: "https://github.com/login", origin: "https://github.com" }))).rows).toBe(4)
     // Only on a later step's field.
     expect((await autofill.query(sender, ["email", "password"], "email", 1, false, undefined, false, undefined, undefined, "kit@gmail.com")).rows).toBe(5)
   })

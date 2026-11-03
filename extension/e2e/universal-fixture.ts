@@ -127,15 +127,15 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
   // `chip=other`: the page shows another account than the one chosen (a login_hint the site picked).
   const chip = `<p><span class="chip" data-profile-identifier="" translate="no">${q.get("chip") === "other" ? GOOGLE_OTHER : who}</span></p>`
   const password = (as = who) => go(q.get("pk") === "1" ? "/v3/signin/challenge/pk" : "/v3/signin/challenge/pwd", as)
-  const done = () => {
+  const done = (as = who) => {
     const back = new URL(q.get("redirect_uri") ?? "http://acme.test/")
-    back.searchParams.set("as", who)
+    back.searchParams.set("as", as)
     return Response.redirect(back.href, 303)
   }
   const chooser = () =>
     google("Sign in - Google Accounts", `<h1>Choose an account</h1><p>to continue to Acme</p><ul>${[["Universal Google", GOOGLE_USER], ["Someone Else", GOOGLE_OTHER]]
       .map(([name, email]) => `<li><div role="link" tabindex="0" data-identifier="${email}" data-authuser="-1"><span>${name[0]}</span><span><b>${name}</b><br><small>${email}</small></span></div></li>`)
-      .join("")}<li><div role="link" tabindex="0" id="another">Use another account</div></li></ul>${FOOTER}
+      .join("")}<li><div role="link" tabindex="0" id="another">Use another account</div></li></ul>${q.get("notice") === "0" ? "<p><small>Before using Acme, review its privacy policy and terms of service.</small></p>" : FOOTER}
       <script>for (const t of document.querySelectorAll("[role=link]")) t.addEventListener("click", () => location.assign(${JSON.stringify(step("/signin/select"))} + (t.dataset.identifier ? "&id=" + encodeURIComponent(t.dataset.identifier) : "&another=1")))</script>`)
   switch (url.pathname) {
     case "/o/oauth2/v2/auth":
@@ -146,6 +146,8 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
       await Bun.sleep(Math.min(Number(q.get("delay")) || 0, 150_000))
       if (q.get("loop") === "1") return chooser()
       if (q.has("another")) return go("/v3/signin/identifier")
+      // `nopwd`: signed in to Google already, with consent given before: the tile goes straight back.
+      if (GOOGLE_ACCOUNTS[q.get("id") ?? ""] && q.get("nopwd") === "1") return done(q.get("id")!)
       return GOOGLE_ACCOUNTS[q.get("id") ?? ""] ? password(q.get("id")!) : google("Sign in - Google Accounts", "<h1>This account isn't available</h1>")
     case "/v3/signin/identifier":
       if (data) {
@@ -285,11 +287,59 @@ function acmeFixture(req: Request, url: URL): Response {
   }
 }
 
+/**
+ * Ramp's email-first single sign-on (app.ramp.com): an email-only step,
+ * then, in place, the email locked beside one "Sign in with Google" button, which
+ * opens a popup on the site's own auth host (sso.ramp.test, Firebase Auth's
+ * /__/auth/handler) that goes on to Google with its return URL back to
+ * itself; Google's existing-consent chooser (`notice=0`, `nopwd=1`), and the
+ * handler hands the account to the app and closes. `hop=other`: the handler
+ * is on another site (a project's firebaseapp.com stand-in, ramp-auth.test).
+ */
+async function rampFixture(req: Request, url: URL): Promise<Response> {
+  const q = url.searchParams
+  const flow = clean(q.get("flow"))
+  const style = "<style>body{font:16px system-ui;margin:0;background:#fafafa}main{max-width:420px;margin:90px auto}input,button{display:block;box-sizing:border-box;width:320px;padding:12px;margin:12px 0;font:inherit}</style>"
+  if (url.hostname === "app.ramp.test") {
+    const handler = `http://${q.get("hop") === "other" ? "ramp-auth.test" : "sso.ramp.test"}:${url.port}/__/auth/handler`
+    const keep = new URLSearchParams({ flow, ...(q.get("hop") ? { hop: clean(q.get("hop")) } : {}) })
+    // The email goes by fetch, and the page swaps in the locked email and
+    // the provider's button in place, as Ramp's single-page app does.
+    if (url.pathname === "/login" && req.method === "POST") return Response.json({ sso: "google", email: clean(String((await req.formData()).get("email") ?? "")) })
+    if (url.pathname === "/login") {
+      const auth = `${handler}?${new URLSearchParams({ apiKey: "synthetic", providerId: "google.com", flow })}`
+      return page("Sign in to Ramp", `${style}</head><body><main id="step"><h1>Sign in to Ramp</h1><form method="post" action="/login?${keep}"><label>Email<input name="email" type="email" autocomplete="username"></label><button type="submit">Continue</button></form></main>
+        <script>
+          document.querySelector("form").addEventListener("submit", async (e) => {
+            e.preventDefault()
+            const reply = await (await fetch(e.target.action, { method: "POST", body: new FormData(e.target) })).json()
+            const step = document.querySelector("#step")
+            step.innerHTML = '<h1>Sign in to Ramp</h1><label>Email<input type="email" disabled></label><button id="google" type="button">Sign in with Google</button>'
+            step.querySelector("input").value = reply.email
+            step.querySelector("#google").addEventListener("click", () => window.open(${JSON.stringify(auth)}, "ramp-sso", "popup,width=480,height=640"))
+          })
+          addEventListener("message", (e) => { if (e.origin === ${JSON.stringify(new URL(handler).origin)} && typeof e.data?.as === "string") location.assign("/dashboard?as=" + encodeURIComponent(e.data.as)) })
+        </script></body>`)
+    }
+    if (url.pathname === "/dashboard")
+      return page("Ramp", `</head><body><main><h1>Your dashboard</h1><p id="who">Signed in as ${clean(q.get("as"))} with Google</p><a href="/login">Sign out</a></main></body>`)
+  }
+  if (url.pathname === "/__/auth/handler") {
+    // Back from Google: the account goes to the app that opened this popup.
+    if (q.has("as")) return page("Signing in", `</head><body><p>Signing in…</p><script>opener?.postMessage({ as: ${JSON.stringify(clean(q.get("as")))} }, ${JSON.stringify(`http://app.ramp.test:${url.port}`)}); window.close()</script></body>`)
+    const back = `${url.origin}/__/auth/handler`
+    const google = `http://accounts.google.test:${url.port}/o/oauth2/v2/auth?${new URLSearchParams({ flow, redirect_uri: back, notice: "0", nopwd: "1" })}`
+    return page("Signing in", `</head><body><p>Redirecting…</p><script>setTimeout(() => location.replace(${JSON.stringify(google)}), 150)</script></body>`)
+  }
+  return new Response("Not found", { status: 404 })
+}
+
 async function providerFixture(req: Request, url: URL): Promise<Response> {
   const hit: ProviderHit = { host: url.hostname, path: url.pathname, method: req.method, flow: url.searchParams.get("flow") ?? "", frame: url.searchParams.get("frame") === "1" }
   providerLog.push(hit)
   // shop.test: another site with the same pages, where nothing is saved.
   if (url.hostname === "acme.test" || url.hostname === "shop.test") return acmeFixture(req, url)
+  if (url.hostname.endsWith(".ramp.test") || url.hostname === "ramp-auth.test") return rampFixture(req, url)
   if (url.hostname.startsWith("accounts.")) return googleFixture(req, url, hit)
   return new Response("Not found", { status: 404 })
 }

@@ -325,6 +325,12 @@ function evaluate(message: Probe): ProviderReport | "wait" {
     const el = entryControl(p)
     if (el) return { kind: "entry", action: mint({ kind: "click", ...base, provider: false, el, find: () => entryControl(p) }) }
     if (signedInHint(page)) return { kind: "success" }
+    // Email-first: the provider's button shows only once the email went.
+    // The background fills and submits it with the automatic session's
+    // checks (Autofill.submitIdentifier), then asks again.
+    const fields = page.targets()
+    if (page.kind() === "login" && fields.length && fields.every((f) => IDENTIFIER_ROLES.includes(f.role)))
+      return { kind: "identifier", form: page.form(), roles: [...new Set(fields.map((f) => f.role))].sort() }
     const text = pageWords()
     return text !== null && loading(text) ? "wait" : stop("unknown")
   }

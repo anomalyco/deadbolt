@@ -3,7 +3,7 @@
 import { authState, exactSignInOrigin, SIGNIN_SETTING, signInEnabled, signInOn, type AuthReport } from "../auth-state"
 import { IDENTIFIER_ROLES, type FillValues, type PickReply, type ProviderReport } from "../messages"
 import type { Account, Passkey } from "../protocol"
-import { isProviderPage, isSignInPage, provider, returnsTo, savedAtProvider, type Provider } from "../signin"
+import { isProviderPage, isSignInPage, provider, returnsTo, savedAtProvider, secure, type Provider } from "../signin"
 import { flowFor, namedBy, wantFor } from "./autofill"
 import type { VaultBackend } from "./backend"
 import { sendToFrame, targetFor, topTarget, type FrameTarget } from "./frames"
@@ -13,6 +13,9 @@ import type { SignInWith } from "./signinwith"
 
 export const PROVIDER_CHAIN_TTL_MS = 120_000
 export const PROVIDER_CHAIN_ACTIONS = 8
+/** A same-site auth hop (sso.example.com) is taken only this soon after the site's provider button was clicked, and at most this many. */
+const HOP_MS = 20_000
+const MAX_HOPS = 2
 const UNRELATED = new Set(["typed", "auto_bookmark", "generated", "keyword", "keyword_generated", "reload", "start_page", "auto_toplevel"])
 const NEEDS = { consent: "Review access", phone: "Approve on your phone", sms: "Enter your code", "security-key": "Use your security key", captcha: "Complete the verification", unknown: "", choose: "Choose your account" }
 
@@ -40,6 +43,10 @@ interface Chain {
    * site's own navigation or popup pass through on the way to the provider.
    */
   hosts: Set<string>
+  /** Same-site hosts the chain passed through on the way to the provider (an auth handler on sso.example.com). */
+  hops: number
+  /** The site's email-first step was filled and submitted: its next document is still the entry. */
+  identifierSent?: boolean
   /** Actions taken on the provider's own pages (chooser, form, passkey): a link needs one. */
   providerActions: number
   /** The provider sign-in page the chain's tab last committed. */
@@ -65,6 +72,12 @@ interface Chain {
 }
 
 export class ProviderChain {
+  /**
+   * Fills a site's email-first step with the chain's account and submits it,
+   * with the automatic session's checks (Autofill.submitIdentifier). Unset,
+   * an email-first site's chain stops there.
+   */
+  submitIdentifier?: (target: FrameTarget, username: string, form: number) => Promise<boolean>
   private chains = new Set<Chain>()
   private generations = new Map<number, number>()
   constructor(private host: VaultBackend, private passkeys: Passkeys, private linked: SignInWith) {
@@ -148,7 +161,7 @@ export class ProviderChain {
         this.host.status.state !== "ready" || !(await signInEnabled())) return { ok: true }
     if (generation !== this.generations.get(target.tabId) || this.host.status.state !== "ready") return { ok: true }
     const s: Chain = { id: crypto.randomUUID(), home: target, site, hosts: new Set([new URL(target.origin).hostname]), tab: target.tabId, provider: p, username,
-      phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, providerActions: 0, busy: false, again: false,
+      phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, providerActions: 0, hops: 0, busy: false, again: false,
       used: new Set(), filled: new Set(), stop: new AbortController(), ...(unlinked ? { ref: account.ref, link: account.ref } : {}) }
     this.chains.add(s)
     s.timer = setTimeout(() => this.end(s), PROVIDER_CHAIN_TTL_MS)
@@ -174,6 +187,8 @@ export class ProviderChain {
     if (s.busy) { s.again = true; return }
     s.busy = true
     try {
+      // Passing through the site's own auth host: nothing to do there.
+      if (target.tabId === s.tab && this.transit(s, target.origin)) return
       if (!await this.ready(s) || target.tabId !== s.tab || !this.allowed(s, target.origin)) return this.end(s)
       if (s.phase === "entry" && (target.origin !== s.home.origin || target.documentId !== s.home.documentId)) return this.end(s)
       if (s.phase === "provider" && !isProviderPage(s.provider, target.origin)) return this.end(s)
@@ -206,6 +221,16 @@ export class ProviderChain {
       }
       if (!report || report.kind === "stop") return this.end(s, NEEDS[report?.reason ?? "unknown"])
       if (report.kind === "success") { if (target.origin === s.home.origin) this.end(s, "Signed in"); return }
+      // Email-first, with no provider button yet: the account's email goes,
+      // once, with the automatic session's checks; the next step is asked again.
+      if (report.kind === "identifier") {
+        const key = `${target.documentId}:identifier:${report.form ?? ""}`
+        if (s.phase !== "entry" || s.identifierSent || s.used.has(key) || report.form === undefined || !this.submitIdentifier || !await this.ready(s) || !this.consume(s)) return this.end(s)
+        s.used.add(key)
+        s.identifierSent = true
+        if (!await this.submitIdentifier(target, s.username, report.form)) return this.end(s)
+        return
+      }
       if (!report.action) return this.end(s)
       const key = `${target.documentId}:${report.kind}:${report.form ?? ""}`
       if (s.used.has(key) || s.passkeyDocument === target.documentId) return
@@ -299,6 +324,7 @@ export class ProviderChain {
     this.linked.opened(d.sourceTabId, d.tabId)
     // The first committed document may have arrived while provenance was checked.
     const current = await topTarget(d.tabId)
+    if (current.target && current.url && this.hop(s, current.url)) return
     if (current.target && (!isProviderPage(s.provider, current.target.origin) || !current.url || !this.step(s, current.url.href))) return this.end(s)
     s.documentId = current.target?.documentId
     s.lastProviderUrl = current.url?.href
@@ -310,7 +336,10 @@ export class ProviderChain {
     if (!s || d.frameId !== 0) return
     let origin: string
     try { origin = new URL(d.url).origin } catch { return this.end(s) }
-    if (UNRELATED.has(d.transitionType ?? "") || d.transitionQualifiers?.includes("forward_back") || !this.allowed(s, origin)) return this.end(s)
+    if (UNRELATED.has(d.transitionType ?? "") || d.transitionQualifiers?.includes("forward_back")) return this.end(s)
+    // The site's own auth host on the way to the provider, or back through it: passed, never acted on.
+    if (d.tabId === s.tab && (this.transit(s, origin) || this.hop(s, new URL(d.url)))) return
+    if (!this.allowed(s, origin)) return this.end(s)
     if (d.tabId !== s.tab) {
       if (origin !== s.home.origin) this.end(s)
       return
@@ -330,7 +359,35 @@ export class ProviderChain {
       const back = s.lastProviderUrl ? returnsTo(s.provider, s.lastProviderUrl, s.site, s.link ? [...s.hosts] : undefined) : "none"
       s.returnedHome = d.tabId === s.home.tabId && s.providerActions > 0 && back === "home"
     }
+    // An email-first site's next step, after the chain submitted its email: still the entry.
+    else if (s.phase === "entry" && s.identifierSent && origin === s.home.origin && d.tabId === s.home.tabId && d.documentId) s.home = { ...s.home, documentId: d.documentId }
     else if (s.phase === "entry") this.end(s)
+  }
+
+  /**
+   * A host of the home's site, not the home itself, that the site's own
+   * popup or navigation passes through on its way to the provider (an auth
+   * handler on sso.example.com): taken only soon after the chain clicked the
+   * site's provider button, before any provider page, at most twice. From
+   * then its return URLs count as home for an unlinked chain (see step).
+   */
+  private hop(s: Chain, url: URL): boolean {
+    const host = url.hostname.toLowerCase()
+    if (s.hosts.has(host)) return url.origin !== s.home.origin
+    if (s.lastProviderUrl || !s.opening || Date.now() - s.opening > HOP_MS || s.hops >= MAX_HOPS) return false
+    if (!secure(url) || url.origin === s.home.origin || siteOf(host) !== s.site || isProviderPage(s.provider, url.href)) return false
+    s.hops++
+    s.hosts.add(host)
+    return true
+  }
+  /** A same-site host the chain already passed through (see hop). */
+  private transit(s: Chain, origin: string): boolean {
+    try {
+      const u = new URL(origin)
+      return u.origin !== s.home.origin && s.hosts.has(u.hostname.toLowerCase())
+    } catch {
+      return false
+    }
   }
 
   async loaded(d: { tabId: number; frameId: number }) {

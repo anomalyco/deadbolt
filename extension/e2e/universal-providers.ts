@@ -66,7 +66,7 @@ const context = await chromium.launchPersistentContext(join(root, "profile"), {
   channel: "chromium", headless: true, viewport: { width: 1440, height: 900 }, colorScheme: scheme,
   args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP acme.test 127.0.0.1, MAP *.test 127.0.0.1",
     // Real sites and providers are https: give the http fixtures a secure context (crypto.randomUUID and the like).
-    `--unsafely-treat-insecure-origin-as-secure=${["acme.test", "shop.test", "accounts.google.test", ...LOOKALIKES].map((h) => `http://${h}:${port}`).join(",")}`,
+    `--unsafely-treat-insecure-origin-as-secure=${["acme.test", "shop.test", "app.ramp.test", "sso.ramp.test", "ramp-auth.test", "accounts.google.test", ...LOOKALIKES].map((h) => `http://${h}:${port}`).join(",")}`,
     // The toolbar popup (passkey save prompt) is an extension target Playwright doesn't list: reach it over DevTools.
     "--remote-debugging-port=0"],
   // A real browser blocks a popup no person opened: keep that on.
@@ -138,6 +138,20 @@ async function pick(p: Page, row = "Google") {
   if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
   await button.click()
   return Date.now()
+}
+/**
+ * On a loaded machine a list that just grew can still be settling, and the
+ * pick is refused ("covered", "again"): as a person would, click once more.
+ */
+async function pickAgainIfRefused(p: Page, row: string) {
+  await p.waitForTimeout(1200)
+  const f = p.frames().find((x) => x.url().includes("/menu.html"))
+  const said = f ? await f.locator("#foot").textContent({ timeout: 500 }).catch(() => null) : null
+  const button = f?.locator("button.row", { hasText: row }).first()
+  if (!f || !button || !said || !/covered|again/i.test(said) || !await button.count().catch(() => 0)) return
+  console.log(`INFO pick refused (${said}), clicking again`)
+  await p.waitForTimeout(1500)
+  await button.click()
 }
 /** The pointer moving onto the offer's top account until the others list, then the dwell; `row`'s shows. */
 async function expand(p: Page, f: Frame, row?: string) {
@@ -278,7 +292,7 @@ async function hostRequest(body: Record<string, unknown>) {
 }
 
 /** The logins the vault lists for `origin` (with what they sign in with), as the extension sees them. */
-async function listAt(origin: string): Promise<Array<{ ref: string; signIn?: { provider: string; account?: string } }>> {
+async function listAt(origin: string): Promise<Array<{ ref: string; username?: string; signIn?: { provider: string; account?: string } }>> {
   const reply = native ? await hostRequest({ type: "list", origin }) as { accounts?: [] } : (await command({ type: "list", origin })).reply as { accounts?: [] }
   return reply?.accounts ?? []
 }
@@ -877,6 +891,94 @@ try {
     await top.click()
     await p.waitForURL(`${shop}/account*`, { timeout: 20_000 })
     check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google` && hits(flow, (h) => h.path === "/signin/select").map((h) => h.value).join() === GOOGLE_OTHER, "one click on it signs in, Google's chooser and all, with no other step of the person's")
+    await p.close()
+  }
+  // Ramp's email-first single sign-on (see rampFixture): a login of Ramp's
+  // own under the first Gmail, and one that signs in with the second.
+  const ramp = `http://app.ramp.test:${port}`
+  const otherRef = (await listAt(googleOrigin)).find((a) => a.username === GOOGLE_OTHER)?.ref
+  if (!otherRef) throw new Error("no second Gmail in the vault")
+  if (native) {
+    cli("new", "login", "--name", "Ramp", `url=${ramp}`, `username=${GOOGLE_USER}`, "password=synthetic-ramp-password-7731")
+    cli("new", "login", "--name", "Ramp via Google", `url=${ramp}`, "sign-in-with=google", `sign-in-account=${otherRef.split(":")[1]}`)
+    cli("unset", "--field", "password", "Ramp via Google")
+  } else {
+    await command({ type: "device-item-save", kind: "login", name: "Ramp", fields: [{ name: "url", value: ramp }, { name: "username", value: GOOGLE_USER }, { name: "password", value: "synthetic-ramp-password-7731" }] })
+    await command({ type: "device-item-save", kind: "login", name: "Ramp via Google", fields: [{ name: "url", value: ramp }, { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: otherRef.split(":")[1] }] })
+  }
+  await Bun.sleep(5500)
+  const rampPage = async (flow: string, extra: Record<string, string> = {}) => {
+    const p = await context.newPage()
+    record(p, flow)
+    await p.goto(`${ramp}/login?${new URLSearchParams({ flow, ...extra })}`)
+    return p
+  }
+  /** The inline menu on Ramp's email field, its row for `row` picked after the dwell. */
+  const inlinePick = async (p: Page, row: string) => {
+    await p.click('input[name="email"]')
+    const menu = await until("the inline menu on Ramp's email field", async () => {
+      for (const f of p.frames()) if (f.url().includes("/menu.html") && !await f.locator(".universal").count() && await f.locator("button.row", { hasText: row }).count()) return f
+      return null
+    })
+    await p.waitForTimeout(1400)
+    const target = menu.locator("button.row", { hasText: row }).first()
+    const box = await target.boundingBox()
+    const recording = recordings.find((r) => r.page === p)
+    if (box && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: box.x + box.width / 2, y: box.y + box.height / 2 })
+    await target.click()
+  }
+
+  // One inline pick of Ramp's own login: its email goes, the step after it
+  // offers only "Sign in with Google", and the sign-in goes on through the
+  // site's auth popup (sso.ramp.test) and Google's chooser to signed in.
+  await fresh()
+  {
+    const flow = "ramp-inline"
+    const p = await rampPage(flow)
+    await inlinePick(p, GOOGLE_USER)
+    await p.waitForURL(`${ramp}/dashboard*`, { timeout: 30_000 })
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, "Ramp-shaped: one inline pick on the email field ends signed in, through the site's auth popup and Google")
+    check(hits(flow, (h) => h.host === "app.ramp.test" && h.method === "POST" && h.path === "/login").length === 1 && hits(flow, (h) => h.host === "sso.ramp.test").length >= 1, "the email went once, and the popup passed through sso.ramp.test")
+    check(hits(flow, (h) => google(h) && h.path === "/signin/select").map((h) => h.value).join() === GOOGLE_USER && !hits(flow, (h) => h.path === "/v3/signin/challenge/pwd").length, "Google's existing-consent chooser: the picked account's tile, no password anywhere")
+    await p.close()
+  }
+
+  // The corner offer, left open past its minute: it renews quietly, never
+  // saying it expired. Its "Sign in with Google · someone.else" row: the
+  // chain fills Ramp's email itself, then goes on the same way.
+  await fresh()
+  {
+    const flow = "ramp-corner"
+    const p = await rampPage(flow)
+    const f = await offer(p)
+    for (let waited = 0; waited < 62_000; waited += 4000) {
+      await p.waitForTimeout(4000)
+      check(!/expired/i.test(await f.locator("body").innerText().catch(() => "")), `after ${(waited + 4000) / 1000} s the offer says nothing of expiring`)
+    }
+    // The last flow's sign-in on Ramp is remembered once its outcome is judged, which may be after the fresh() above: forget it again.
+    await fresh()
+    await pick(p, GOOGLE_OTHER)
+    await pickAgainIfRefused(p, GOOGLE_OTHER)
+    await p.waitForTimeout(3000)
+    console.log(`INFO ramp corner after the pick: ${p.url()} | offer: ${JSON.stringify(await f.locator("body").innerText().catch(() => "(gone)"))}`)
+    await p.waitForURL(`${ramp}/dashboard*`, { timeout: 30_000 })
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google`, "a corner pick of the Google row, a minute on: the chain fills Ramp's email step itself, then signs in through the auth popup")
+    await p.close()
+  }
+
+  // The same, with the auth handler on another site (a project's
+  // firebaseapp.com): no hop, the chain stops there, nothing picked at Google.
+  await fresh()
+  {
+    const flow = "ramp-other-site"
+    const p = await rampPage(flow, { hop: "other" })
+    await inlinePick(p, GOOGLE_USER)
+    const popup = await context.waitForEvent("page", { timeout: 20_000 })
+    record(popup, "ramp-other-site-popup")
+    await popup.waitForURL(`${googleOrigin}/o/oauth2/v2/auth*`, { timeout: 15_000 })
+    await popup.waitForTimeout(3000)
+    check(!hits(flow, (h) => h.path === "/signin/select").length && !/\/dashboard/.test(p.url()), "an auth handler on another site is no hop: the chain stops, Google's chooser untouched")
+    await popup.close()
     await p.close()
   }
   console.log(`PASS universal sign-in with a provider (${mode})`)

@@ -232,6 +232,49 @@ a prompt only when the daemon verifies the person (Touch ID on, and the site
 doesn't discourage verification); otherwise the chain ends and the usual
 passkey prompt asks, so no assertion is made without the person present.
 
+#### Email-first single sign-on
+
+Some sites ask for the email alone, then show only a provider's button for
+it (Ramp's “Sign in with Google”, opened in a popup on its own auth host).
+One pick still ends signed in:
+
+- **A chain with no provider button yet.** When its entry page has a login
+  form of a username box alone, the chain fills its account's email there
+  and submits it once, with the automatic session's first-step checks
+  (`Autofill.submitIdentifier`: the username only, never a value from the
+  vault; a POST in this tab to this origin through a sign-in or continue
+  button; one of the chain's eight actions), and looks for the provider's
+  button on the step that follows, in place or on the next page.
+- **An automatic session's email step.** When the step after a site login's
+  email offers no password box but exactly one known provider's button, the
+  session ends and a provider chain goes on from it: with the site's login
+  linked to that provider, or the person's own account at the provider of
+  the same username (saved at its exact host, as for Your provider
+  accounts, which then stops at a first-time sharing notice). The site's
+  password is never filled into that page.
+- **The site's own auth host.** A popup or navigation the site's provider
+  button starts may pass through a host of the home's site (`sso.ramp.com`,
+  Firebase Auth's `/__/auth/handler`) on its way to the provider: within 20
+  seconds of that click, before any provider page, at most two such hosts.
+  The chain never fills or clicks there; it returns through it, and an
+  unlinked chain then takes return URLs to it as home. A handler on another
+  site (a project's `firebaseapp.com`) is no hop, and stops the chain.
+- **One row per person.** A login of the site whose username is the account
+  a “Sign in with …” login there signs in with shows only as that provider
+  row, in the inline menu and the corner offer (not on the provider's own
+  pages, where its login is the one to fill).
+
+A site button that opens a popup needs the page's user activation: the
+chain's click has the pick's own (a click in Deadbolt's frame activates the
+page above it) for about five seconds, so an email step done in place
+(Ramp's) opens the popup, but a provider button on a new page after a full
+navigation can be refused by the browser's popup blocker; the chain then
+waits out its two minutes and ends.
+
+A corner offer left open past its minute says nothing of expiring: the next
+use renews it if the page still looks signed out with accounts to offer
+(a fresh probe), and otherwise it quietly goes.
+
 #### Choosing an account
 
 The corner offer is its top account's own row: the site's first login

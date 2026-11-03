@@ -127,7 +127,8 @@ export type Status =
 
 /** Value-free provider step; its opaque handle fixes the controls before an RPC. */
 export interface ProviderReport {
-  kind: "entry" | "chooser" | "form" | "passkey" | "stop" | "success"
+  /** `identifier`: an email-first sign-in's first step (a username box alone) and no provider button yet: `form` and `roles` name it. */
+  kind: "entry" | "chooser" | "form" | "passkey" | "stop" | "success" | "identifier"
   action?: string
   form?: number
   roles?: FieldRole[]

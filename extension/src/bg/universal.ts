@@ -3,7 +3,7 @@ import { provider as providerOf, providerOrigins, savedAtProvider } from "../sig
 import type { ProviderChain } from "./provider-chain"
 import type { MenuLoadReply, PickReply, SignInReply } from "../messages"
 import type { Account } from "../protocol"
-import { Autofill, resizeMessage } from "./autofill"
+import { Autofill, oneRowEach, resizeMessage } from "./autofill"
 import type { VaultBackend } from "./backend"
 import { menuFrameOf, sendToFrame, targetFor, topTarget, type FrameTarget } from "./frames"
 import { hostHash } from "./site-icons"
@@ -20,6 +20,8 @@ interface Offer extends FrameTarget {
   cancelled?: boolean
 }
 interface Memory { signedIn?: number; quietUntil?: number }
+/** An offer's authority lasts this long between renewals (see UniversalSignIn.token). */
+const OFFER_MS = 60_000
 
 /** The corner offer, with "Offer to sign in" on. Browse fills never enter this path. */
 export class UniversalSignIn {
@@ -181,7 +183,7 @@ export class UniversalSignIn {
       if (this.open(target.tabId)) return
       // The site's own logins first, then the person's provider accounts for its provider buttons; at most 50.
       const providers = cleanProviders(facts.providers)
-      const accounts = [...own, ...(await this.providerAccounts(providers, own, target.origin))].slice(0, 50)
+      const accounts = oneRowEach([...own, ...(await this.providerAccounts(providers, own, target.origin))], target.origin).slice(0, 50)
       if (!accounts.length) return none()
       if (this.open(target.tabId)) return
       if (!await this.enabled() || this.host.status.state !== "ready" || this.quiet(await this.memory(target.origin))) return
@@ -196,12 +198,32 @@ export class UniversalSignIn {
   owns(token: string) { return this.offers.has(token) }
   private async token(token: string, sender: chrome.runtime.MessageSender, parent?: string) {
     const o = this.offers.get(token)
-    if (!o || Date.now() - o.at > 60_000 || !sender.documentId || sender.tab?.id !== o.tabId) return null
+    if (!o || !sender.documentId || sender.tab?.id !== o.tabId) return null
     if (!o.menuDocumentId) {
       if (parent === undefined || !await menuFrameOf(sender, o, parent)) return null
       o.menuDocumentId = sender.documentId
     }
-    return o.menuDocumentId === sender.documentId ? o : null
+    if (o.menuDocumentId !== sender.documentId) return null
+    // Out of time and not yet picked: renewed quietly while the page still
+    // qualifies, else the offer goes. It never says it expired.
+    if (Date.now() - o.at > OFFER_MS && !o.picked && !(await this.renew(o))) {
+      await this.closeTab(o.tabId)
+      return null
+    }
+    return o
+  }
+  /** An open offer past its time: the page still signed out (a fresh probe) with accounts to offer, so it lives on with them. */
+  private async renew(o: Offer): Promise<boolean> {
+    if (o.cancelled || !await this.enabled() || this.host.status.state !== "ready") return false
+    const facts = await this.probe(o, true)
+    const memory = await this.memory(o.origin)
+    if (!facts?.action || authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) !== "signed-out") return false
+    const own = await this.accounts(o.origin, true)
+    const accounts = oneRowEach([...own, ...(await this.providerAccounts(o.providers, own, o.origin, true))], o.origin).slice(0, 50)
+    if (!accounts.length || o.cancelled) return false
+    o.accounts = accounts
+    o.at = Date.now()
+    return true
   }
   async load(token: string, sender: chrome.runtime.MessageSender, parent: string): Promise<MenuLoadReply | null> {
     const o = await this.token(token, sender, parent)
@@ -211,8 +233,8 @@ export class UniversalSignIn {
   }
   async pick(token: string, ref: string, sender: chrome.runtime.MessageSender, provider = false): Promise<PickReply> {
     const o = await this.token(token, sender)
-    if (!o || o.picked || !await this.enabled() || this.host.status.state !== "ready") return { ok: false, message: "This offer has expired." }
-    if (o.picked) return { ok: false, message: "This offer has expired." }
+    // Gone (see token): the surface is on its way out, and says nothing.
+    if (!o || o.picked || !await this.enabled() || this.host.status.state !== "ready") return { ok: false, message: "" }
     // Consume before awaiting a probe; keep dismissal authority while the
     // frame says "Continuing sign-in", so Escape there still cancels.
     o.picked = o.picking = true

@@ -63,9 +63,55 @@ describe("provider chain authority", () => {
     const sender = commit(origin)
     report = { kind: "form", form: 1, roles: ["password"], action: "password" }
     await chain.check(sender)
-    expect(chain.active(1)).toBe(false)
+    // A host of the site's own (login.example.com) right after its button is a hop on the way to the provider: passed, never acted on.
+    expect(chain.active(1)).toBe(origin === "https://login.example.com")
     expect(fills()).toHaveLength(0)
+    expect(actions()).toHaveLength(1)
     expect(fake.delivered.filter((d) => d.message.account)).toHaveLength(0)
+  })
+  test("an auth hop: only a host of the home's site, right after the provider button, at most twice; its return URLs then count as home", async () => {
+    const own = { ...providerAccount, signIn: { provider: "google", account: providerAccount.username! } }
+    await chain.start(home, own, true)
+    expect(actions()).toHaveLength(1)
+    commit("https://sso.example.com", "hop", 1, "/__/auth/handler?apiKey=x")
+    expect(chain.active(1)).toBe(true)
+    // Google sends the person back to the hop host: an unlinked chain takes that as home now.
+    report = { kind: "form", form: 1, roles: ["password"], action: "password" }
+    await chain.check(commit(GOOGLE, "pwd", 1, `/v3/signin/challenge/pwd?redirect_uri=${encodeURIComponent("https://sso.example.com/__/auth/handler")}`))
+    expect(chain.active(1)).toBe(true)
+    expect(fills()).toHaveLength(1)
+    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["www.example.com", "sso.example.com"])
+    chain.stop(1)
+    // Another site's handler (a project's firebaseapp.com) is no hop.
+    fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "top-doc", parentFrameId: -1 }
+    report = { kind: "entry", action: "entry" }
+    await chain.start(home, own, true)
+    commit("https://acme-auth.firebaseapp.com", "other-site", 1, "/__/auth/handler?apiKey=x")
+    expect(chain.active(1)).toBe(false)
+  })
+  test("email-first: with no provider button yet, the chain's account goes into the site's email step once, then the button", async () => {
+    const sent: Array<[string, number]> = []
+    chain.submitIdentifier = async (_, username, form) => (sent.push([username, form]), true)
+    report = { kind: "identifier", form: 3, roles: ["email"] }
+    await chain.start(home, linked)
+    expect(sent).toEqual([[linked.signIn.account!, 3]])
+    // The next step, a new document of the site: the provider's button now.
+    report = { kind: "entry", action: "entry" }
+    fake.frames["1:0"] = { url: `${SITE}/sso`, documentId: "step-2", parentFrameId: -1 }
+    chain.navigated({ tabId: 1, frameId: 0, url: `${SITE}/sso`, documentId: "step-2", transitionType: "form_submit" })
+    expect(chain.active(1)).toBe(true)
+    await chain.check(pageSender({ documentId: "step-2", url: `${SITE}/sso` }))
+    expect(actions()).toHaveLength(1)
+    // Never twice: an email step again ends it.
+    report = { kind: "identifier", form: 4, roles: ["email"] }
+    chain.stop(1)
+    fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "top-doc", parentFrameId: -1 }
+    await chain.start(home, linked)
+    fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "step-3", parentFrameId: -1 }
+    chain.navigated({ tabId: 1, frameId: 0, url: `${SITE}/login`, documentId: "step-3", transitionType: "form_submit" })
+    await chain.check(pageSender({ documentId: "step-3", url: `${SITE}/login` }))
+    expect(sent).toHaveLength(2)
+    expect(chain.active(1)).toBe(false)
   })
   test("provider iframe reports and unrelated tabs never inherit a pick", async () => {
     await chain.start(home, linked)
