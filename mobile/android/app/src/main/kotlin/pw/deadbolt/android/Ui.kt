@@ -183,7 +183,7 @@ private fun PairScreen(vault: Vault) {
         }
     } else {
         StateScreen("Pair with your computer", "On a computer that already has Deadbolt, run:") {
-            Command("deadbolt pair $code")
+            Command("deadbolt approve $code")
             Spacer(Modifier.height(4.dp))
             Text("Pairing code", style = Deadbolt.type.smallMedium, color = Deadbolt.colors.muted)
             Text(code, style = Deadbolt.type.monoLarge, color = Deadbolt.colors.text)

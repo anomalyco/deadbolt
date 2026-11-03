@@ -183,7 +183,7 @@ struct JoiningView: View {
                 .padding(.vertical, 14)
                 .padding(.horizontal, 12)
                 .runeBox()
-                Text("deadbolt pair \(code)")
+                Text("deadbolt approve \(code)")
                     .rune(.mono)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
