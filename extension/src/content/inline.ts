@@ -727,23 +727,10 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     tellGeometry()
   })
   scaleObserver.observe(box, { box: "device-pixel-content-box" })
-  if (as === "save" || as === "signin") {
-    // From the corner, where the toolbar button is: 24 px of travel and a fade.
-    frame.style.borderRadius = `${SAVE_GUESS.height / 2}px`
-    frame.animate(
-      reducedMotion()
-        ? [{ opacity: 0 }, { opacity: 1 }]
-        : [
-            { opacity: 0, transform: "translate(17px, -17px)" },
-            { opacity: 1, transform: "none" },
-          ],
-      timing(0.4),
-    )
-    return
-  }
-  // Grows from the field once its frame has something to show (see reveal):
-  // until the frame first says its size it's blank, and the grow-in played on
-  // an empty box, a ghost of the shadow, with the rows popping in half faded.
+  const cornerOffer = as === "save" || as === "signin"
+  if (cornerOffer) frame.style.borderRadius = `${SAVE_GUESS.height / 2}px`
+  // Shown once its frame first says its size (see reveal): until then it's
+  // blank, and an early entry played on an empty or guessed box.
   const f = frame
   f.style.opacity = "0"
   revealTimer = setTimeout(() => reveal?.(), REVEAL_LATEST_MS)
@@ -756,24 +743,29 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     position()
     if (frame !== f) return
     f.style.opacity = ""
-    // Scale .96 → 1 from the edge that faces the field, inside the frame and
-    // on a temporary shadow layer so the frame itself stays opaque and still
-    // while the visibility dwell runs.
+    // Entry runs inside the frame and on a temporary shadow layer so the
+    // frame itself stays opaque and still while the visibility dwell runs.
     const r = anchor ? anchor.getBoundingClientRect() : boxNow()
     const origin = !r || (lastTarget?.top ?? r.bottom) >= r.bottom ? "top left" : "bottom left"
-    port?.postMessage({ type: "db:reveal", origin })
+    port?.postMessage(cornerOffer ? { type: "db:reveal", corner: true } : { type: "db:reveal", origin })
+    const radius = cornerOffer ? SAVE_GUESS.height / 2 : RADIUS
     const shadow = document.createElement("div")
-    shadow.style.cssText = `all:initial;position:absolute;inset:0;border-radius:${RADIUS}px;box-shadow:${SHADOW()};pointer-events:none;transform-origin:${origin};`
+    shadow.style.cssText = `all:initial;position:absolute;inset:0;border-radius:${radius}px;box-shadow:${SHADOW()};pointer-events:none;${cornerOffer ? "" : `transform-origin:${origin};`}`
     root.insertBefore(shadow, f)
     f.style.boxShadow = "none"
     const anim = shadow.animate(
       reducedMotion()
         ? [{ opacity: 0 }, { opacity: 1 }]
-        : [
-            { opacity: 0, transform: "scale(0.96)" },
-            { opacity: 1, transform: "none" },
-          ],
-      timing(0.25),
+        : cornerOffer
+          ? [
+              { opacity: 0, transform: "translate(17px, -17px)" },
+              { opacity: 1, transform: "none" },
+            ]
+          : [
+              { opacity: 0, transform: "scale(0.96)" },
+              { opacity: 1, transform: "none" },
+            ],
+      timing(cornerOffer ? 0.4 : 0.25),
     )
     const restore = () => {
       revealAnim = null
@@ -805,16 +797,16 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
   if (mode === "accounts") menuHeight = height
   const same = !changed && wanted.width === (width ?? wanted.width) && wanted.height === height
   wanted = { width: width ?? wanted.width, height }
-  // The list's first size, before anything of it showed: it lands there, no
-  // spring from the guess, and grows in now that it has its rows.
-  if (reveal && mode === "accounts") {
+  // The surface's first size, before anything of it showed: it lands there,
+  // no spring from the guess, and enters now that it has its content.
+  if (reveal && (mode === "accounts" || first)) {
     lastTarget = targetRect()
     return reveal()
   }
   reveal?.()
   if (same || !lastTarget) return
   // The offer's first size isn't a change anyone made: it lands there.
-  if (first && mode === "save") return void (lastTarget = targetRect())
+  if (first && (mode === "save" || mode === "signin")) return void (lastTarget = targetRect())
   retarget(changed ? 0.38 : 0.37)
   // The pill inside keeps its place on the page while the frame moves around
   // it: hand the frame the springs, which it steps on its own clock.
@@ -1416,7 +1408,7 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   // The frame's own word that its pill or offer is done, over the channel only it and this script hold.
   port.onmessage = onPortMessage
   tellGeometry()
-  if (!reveal && mode === "accounts") port.postMessage({ type: "db:reveal" })
+  if (!reveal) port.postMessage(mode === "save" || mode === "signin" ? { type: "db:reveal", corner: true } : { type: "db:reveal" })
   // Typed before the frame was ready: narrow it now.
   const typed = anchor && mode === "accounts" && anchor.value && typedSinceOpen ? anchor.value : ""
   if (typed) port.postMessage({ type: "db:filter", query: typed.slice(0, 200) })
