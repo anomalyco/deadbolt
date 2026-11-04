@@ -871,7 +871,7 @@ const server = Bun.serve({
       }
       // A single-page app that never stops changing (a live feed), with ?signin a "Sign in" link too.
       case "/busy":
-        return html("Acme live", `<h1>Live</h1>${url.searchParams.has("signin") ? '<a href="/login">Sign in</a>' : ""}<ul id="feed"></ul><script>
+        return html("Acme live", `<h1>Live</h1>${url.searchParams.has("signin") ? '<a href="/login">Sign in</a>' : ""}${url.searchParams.has("google") ? '<button type="button" id="google">Continue with Google</button>' : ""}<ul id="feed"></ul><script>
           let n = 0
           setInterval(() => { const li = document.createElement("li"); li.textContent = "Update " + ++n; const feed = document.getElementById("feed"); feed.prepend(li); while (feed.children.length > 20) feed.lastChild.remove() }, 100)
         </script>`)
@@ -2816,18 +2816,8 @@ async function menuPosition(scale = 1) {
             const f = extensionFrame(page, "menu.html")
             return f && await f.locator(".universal").count() ? f : null
           })
-          // Two logins open as one "Sign in with Deadbolt" row, and a press on it
-          // only expands the list (no refusal): the press below must land on a
-          // login. A click that doesn't reach the frame (just placed) leaves the
-          // chooser there, so click until the logins show.
-          if (surface === "signin" && menu) {
-            const chooser = menu.locator("button.row", { hasText: "Sign in with Deadbolt" })
-            const listed = await until(`signin ${kind}: the logins listed`, async () => {
-              if (await chooser.count()) return void (await chooser.click().catch(() => {}))
-              return (await menu!.locator("button.row").count()) > 0
-            }, 4000)
-            if (!listed) continue
-          }
+          // The corner offer's collapsed row is its top login: the press below lands on a login.
+          if (surface === "signin" && menu && !(await until(`signin ${kind}: the top login shows`, async () => (await menu!.locator("button.row").count()) > 0, 4000))) continue
         }
         if (!menu) { check(false, `${surface} opens for ${kind}`); continue }
         await settled(menu)
@@ -3727,8 +3717,10 @@ async function quietPages() {
         if (s.tab && s.url) times.push({ type: String(m?.type), at: Date.now(), path: new URL(s.url).pathname + new URL(s.url).search })
       })
     })
-    for (const path of ["/busy", "/busy?signin"]) {
-      await page.goto(`${site}${path}`)
+    // On www.acme.test no login is saved for the exact origin: only a provider button there could bring an offer.
+    const google = `http://www.acme.test:${server.port}`
+    for (const [origin, path] of [[site, "/busy"], [site, "/busy?signin"], [google, "/busy?google"]] as const) {
+      await page.goto(`${origin}${path}`)
       await Bun.sleep(2000)
       const lists = (await hostLog(run)).filter((r) => r.type === "list").length
       const from = Date.now()
@@ -3741,7 +3733,7 @@ async function quietPages() {
       const perMinute = (n: number) => Math.round((n * 60_000) / watch)
       console.log(`  ${path}: ${perMinute(seen.length)} messages/min to the worker (${perMinute(checks)} sign-in/provider checks), ${perMinute(listed)} vault lists/min, longest quiet ${(gap / 1000).toFixed(1)} s`)
       if (path === "/busy") check(checks === 0 && listed === 0, `a busy page that shows nothing of a sign-in sends no sign-in checks (${checks}) and lists nothing (${listed})`)
-      else check(checks <= 4, `a busy page with a Sign in link asks about it once per change, not each scan (${checks} in ${watch / 1000} s)`)
+      else check(checks <= 4 && listed <= 2, `a busy page with a ${path.endsWith("google") ? "Google button and no saved login" : "Sign in link"} asks about it once per change, not each scan (${checks} checks, ${listed} lists in ${watch / 1000} s)`)
     }
   } catch (err) {
     check(false, `quiet pages threw: ${(err as Error).message.split("\n")[0]}`)

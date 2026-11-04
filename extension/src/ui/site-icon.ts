@@ -76,6 +76,11 @@ function simpleIcons(): Promise<SimpleIcons | null> {
   return simple
 }
 
+/** A brand of the bundled subset by its Simple Icons slug ("google"), or null. */
+export async function brandBySlug(slug: string): Promise<[title: string, hex: string, path: string] | null> {
+  return (await simpleIcons())?.brands[slug] ?? null
+}
+
 /**
  * A host's brand from Simple Icons: the host's own entry, else the nearest
  * parent domain's (accounts.google.com is google.com's). The subset only

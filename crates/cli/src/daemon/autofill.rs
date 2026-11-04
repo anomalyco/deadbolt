@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use deadbolt_core::autofill::{self, Status, item_name};
 pub(super) use deadbolt_core::autofill::{otp, urls, value};
+use deadbolt_core::listing::{SIGN_IN_HOSTS, saved_at_provider, sign_in_name, sign_in_provider};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{Item, ItemId, VaultId};
 
@@ -235,6 +236,87 @@ pub fn save(s: &mut Loaded, save: Save) -> Result<(LoginRef, bool)> {
     ))
 }
 
+/// What a provider link saves (see link).
+pub struct Link<'a> {
+    pub origin: &'a str,
+    pub title: &'a str,
+    pub url: &'a str,
+    pub provider: &'a str,
+    pub account: &'a LoginRef,
+}
+
+/// Saves a new login, in the vault of `link.account`, for the site of
+/// `link.origin` that signs in with `link.provider` through `link.account`,
+/// the provider login a sign-in just went through (docs/autofill.md, "Your
+/// provider accounts"). It holds no password of its own. Refused for an
+/// unknown provider or an account not saved at its sign-in host. Returns
+/// the login and whether it is new: an existing link is returned as is.
+pub fn link(s: &mut Loaded, link: Link) -> Result<(LoginRef, bool)> {
+    let site = site(link.origin)?;
+    let url = page_url(link.url).map_err(|reason| anyhow!("{reason}"))?;
+    if !site.matches_url(url) {
+        return Err(fail(
+            ErrorCode::DomainMismatch,
+            format!("{url} isn't on {}", site.domain),
+        ));
+    }
+    // Only a provider Deadbolt knows the sign-in hosts of, by its id.
+    let provider = sign_in_provider(link.provider)
+        .filter(|p| SIGN_IN_HOSTS.iter().any(|(id, _)| id == p))
+        .ok_or_else(|| anyhow!("{} isn't a provider Deadbolt links", link.provider.trim()))?;
+    let not_found = || fail(ErrorCode::NotFound, "no such login");
+    let vault = VaultId::from_bytes(unhex(&link.account.vault).map_err(|_| not_found())?);
+    let id = ItemId::from_bytes(unhex(&link.account.item).map_err(|_| not_found())?);
+    let account = s
+        .vaults
+        .get(&vault)
+        .and_then(|v| v.item(&id))
+        .filter(|item| !item.deleted && item.kind == "login")
+        .ok_or_else(not_found)?;
+    // The account must be the provider's own login, saved at its sign-in host.
+    let test_hosts =
+        crate::config::test_env("DEADBOLT_TEST_PROVIDER_HOSTS").as_deref() == Some("1");
+    if !urls(&account).any(|u| saved_at_provider(&provider, u, test_hosts)) {
+        return Err(fail(
+            ErrorCode::DomainMismatch,
+            format!(
+                "{} isn't saved at {}",
+                label(&account),
+                sign_in_name(&provider)
+            ),
+        ));
+    }
+    // One already links the site to it: that's the link.
+    let account_id = hex(id.as_bytes());
+    if let Some((held, item)) = logins(s, &site).find(|(_, item)| {
+        value(item, "sign-in-with") == Some(provider.as_str())
+            && value(item, "sign-in-account") == Some(account_id.as_str())
+    }) {
+        return Ok((login_ref(&held, &item.id), false));
+    }
+    let input = |name: &str, value: &str| FieldInput {
+        name: name.into(),
+        kind: None,
+        value: value.into(),
+    };
+    let inputs = vec![
+        input("url", url),
+        input("sign-in-with", &provider),
+        input("sign-in-account", &account_id),
+    ];
+    let title = item_name(link.title);
+    let name = Some(title).filter(|t| !t.is_empty() && *t != site.domain);
+    // In the provider login's own vault, beside it, not the default one.
+    let info = create(s, Some(&link.account.vault), "login", name, inputs)?;
+    Ok((
+        LoginRef {
+            vault: link.account.vault.clone(),
+            item: info.id,
+        },
+        true,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +391,85 @@ mod tests {
             );
             assert!(values.username.is_none() && values.password.is_none());
         }
+    }
+
+    #[test]
+    fn a_provider_link_is_a_login_that_signs_in_with_the_provider_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        // The Google login lives in a vault of its own, not the default one.
+        let work = s.create_vault("work").unwrap();
+        let input = |name: &str, value: &str| FieldInput {
+            name: name.into(),
+            kind: None,
+            value: value.into(),
+        };
+        let created = create(
+            &mut s,
+            Some(&hex(work.as_bytes())),
+            "login",
+            None,
+            vec![
+                input("url", "https://accounts.google.com"),
+                input("username", "kit@gmail.com"),
+                input("password", "hunter22"),
+            ],
+        )
+        .unwrap();
+        let google = LoginRef {
+            vault: hex(work.as_bytes()),
+            item: created.id,
+        };
+        let elsewhere = login(
+            &mut s,
+            &[
+                ("url", "https://google.com.evil.example"),
+                ("username", "kit@gmail.com"),
+                ("password", "hunter22"),
+            ],
+        );
+        fn link_to<'a>(account: &'a LoginRef, url: &'a str, provider: &'a str) -> Link<'a> {
+            Link {
+                origin: "https://shop.com",
+                title: "shop.com",
+                url,
+                provider,
+                account,
+            }
+        }
+        let (saved, made) = link(&mut s, link_to(&google, "https://shop.com", "Google")).unwrap();
+        assert!(made);
+        assert_eq!(
+            saved.vault, google.vault,
+            "the link lands beside the provider login"
+        );
+        let listed = list(&s, "https://shop.com").unwrap().1;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].login, saved);
+        assert!(!listed[0].has_password && listed[0].username.is_none());
+        let sign_in = listed[0].sign_in.as_ref().unwrap();
+        assert_eq!(
+            (sign_in.provider.as_str(), sign_in.account.as_deref()),
+            ("google", Some("kit@gmail.com"))
+        );
+        // Linked again: the same login, nothing new.
+        assert_eq!(
+            link(&mut s, link_to(&google, "https://shop.com", "google")).unwrap(),
+            (saved, false)
+        );
+        // Not off the page's site, not a provider without sign-in hosts or
+        // one Deadbolt doesn't know, not a login saved elsewhere than the
+        // provider's host, and not a login that isn't here.
+        assert!(link(&mut s, link_to(&google, "https://elsewhere.com", "google")).is_err());
+        assert!(link(&mut s, link_to(&google, "https://shop.com", "okta")).is_err());
+        assert!(link(&mut s, link_to(&google, "https://shop.com", "My SSO")).is_err());
+        assert!(link(&mut s, link_to(&elsewhere, "https://shop.com", "google")).is_err());
+        let missing = LoginRef {
+            item: "0".repeat(32),
+            ..google.clone()
+        };
+        assert!(link(&mut s, link_to(&missing, "https://shop.com", "google")).is_err());
+        assert_eq!(list(&s, "https://shop.com").unwrap().1.len(), 1);
     }
 
     fn titles(s: &Loaded, origin: &str) -> Vec<String> {

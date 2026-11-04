@@ -2,7 +2,7 @@
 // data. Only boolean evidence and an opaque action handle go back to the
 // background. No cookies are inspected.
 import { authState, type AuthReport, type AuthSignals } from "../auth-state"
-import { isChooserPage, providerForPage } from "../signin"
+import { isChooserPage, provider as providerOf, providerForPage } from "../signin"
 import { controlText, isVisible, LOGIN_URL, providerForControl } from "./detect"
 import { pageFacts } from "./outcome"
 import { deepQueryAll, openRoots } from "./shadow"
@@ -14,7 +14,7 @@ const ACCOUNT = /^(my account|your account|account menu|profile menu|user menu|a
 /** How long a page's scan answers repeat checks while its URL and form stay put. */
 const REPORT_MS = 2000
 const actions = new Map<string, { element?: HTMLElement; form: number; url: string; at: number }>()
-let last: { key: string; at: number; signals: AuthSignals; entry?: HTMLElement } | undefined
+let last: { key: string; at: number; signals: AuthSignals; entry?: HTMLElement; providers: string[] } | undefined
 
 function shown(el: Element): boolean {
   if (!isVisible(el)) return false
@@ -30,7 +30,7 @@ function safeEntry(el: Element): el is HTMLElement {
   return el instanceof HTMLButtonElement || el.getAttribute("role") === "button"
 }
 
-function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement } {
+function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement; providers: string[] } {
   const facts = pageFacts(state.kind(), state.targets())
   const signals: AuthSignals = {
     loginForm: state.kind() === "login" && state.targets().some((f) => shown(f.el)),
@@ -44,13 +44,18 @@ function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement } {
   let entry: HTMLElement | undefined
   /** A visible "Continue with <known provider>" button: an entry, though not one the opaque go action clicks. */
   let providerEntry = false
+  /** Which known providers' buttons show (the corner offer lists their saved accounts, see bg/universal.ts). */
+  const providers = new Set<string>()
   for (const el of controls.slice(0, 400)) {
     if (performance.now() > deadline) { signals.uncertain = true; break }
     if (!signals.accountMenu && ACCOUNT.test(controlText(el).trim()) && shown(el)) signals.accountMenu = true
     if (!entry && safeEntry(el)) entry = el
-    if (!providerEntry && el.matches("a, button, [role=button]")) {
+    if (el.matches("a, button, [role=button]")) {
       const p = providerForControl(el, controlText(el))
-      providerEntry = !!p && p !== "sso" && shown(el)
+      if (p && p !== "sso" && shown(el)) {
+        providerEntry = true
+        if (providerOf(p).hosts.length) providers.add(p)
+      }
     }
   }
   if (controls.length > 400) signals.uncertain = true
@@ -60,7 +65,7 @@ function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement } {
     deepQueryAll("[data-identifier], [data-email]", openRoots()).some(shown)
   // A dashboard's stray provider button is not a sign-in entry.
   signals.entry = !!entry || (!signals.signOut && !signals.accountMenu && (providerEntry || chooser))
-  return { signals, entry }
+  return { signals, entry, providers: signals.signOut || signals.accountMenu ? [] : [...providers].sort() }
 }
 
 /**
@@ -113,8 +118,8 @@ export function authReport(state: PageState, fresh = false): AuthReport {
   const key = `${location.href}\n${state.form()}\n${state.kind() ?? ""}\n${document.hidden}`
   const reuse = !fresh && last && last.key === key && Date.now() - last.at < REPORT_MS && (!last.entry || last.entry.isConnected && safeEntry(last.entry))
   if (!reuse) last = { key, at: Date.now(), ...scan(state) }
-  const { signals, entry } = last!
-  const result: AuthReport = { ...signals }
+  const { signals, entry, providers } = last!
+  const result: AuthReport = { ...signals, ...(providers.length ? { providers } : {}) }
   // A provider button or chooser counts too: the offer's pick needs an
   // action, and takeSignInAction still finds nothing to do with one that has
   // neither a login form nor a sign-in entry element.

@@ -79,7 +79,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
     case "db:provider-check":
       return providers.check(sender)
     case "db:signin-check":
-      return universal.check(sender)
+      return universal.check(sender, message.signal, message.provider === true)
     case "db:signin-signout":
       return universal.signedOut(sender)
     case "db:signin-stop":

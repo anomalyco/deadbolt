@@ -131,7 +131,10 @@ sign-in (a login form, a sign-in path, a provider, “Sign in” or “Sign out�
 button), and
 only when that changes, so a busy page that shows none of it leaves the
 worker asleep; a site with no logins is remembered as such until the vault
-changes.
+changes, and is probed only when it shows a provider button. A page (its
+URL and what of a sign-in it shows) that got no offer isn't probed again
+until the vault changes, and the provider accounts are listed once until it
+does.
 
 The automatic session is bound to the selected account, exact saved origin
 (scheme, host and port), top frame and current document/form snapshots. Its
@@ -174,7 +177,8 @@ bounds reduce probing; surface presence is not invisible to the page.
 
 #### One pick through a provider
 
-A corner or inline-menu pick of a site's linked provider account may activate its uniquely
+A corner or inline-menu pick of a site's linked provider account (or, in the
+corner, of one of your provider accounts, below) may activate its uniquely
 identified “Sign in with Google” control, then complete the provider's chooser,
 identifier, password and learned authenticator-code steps. Only such a pick,
 with the linked account and the provider's sign-in hosts known, starts a chain:
@@ -183,7 +187,9 @@ and a provider with no known hosts (Okta, a custom one) gets the site's button
 pointed at, as is a provider row with the setting off or under a frame's
 field. The setting is not a standing grant.
 
-The site's origin must exactly match the saved login. Button text identifies
+The site's origin must exactly match the saved login (for one of your
+provider accounts, the provider login must instead be saved at the
+provider's own host; see Your provider accounts). Button text identifies
 a candidate, not a trusted destination: `webNavigation` and the browser's current
 committed document must place subsequent work on the provider's exact known
 HTTPS hosts (`signin.ts`), never a lookalike or cross-site frame, and on
@@ -204,7 +210,8 @@ origin is checked with auth-state/outcome evidence; a redirect or field write
 alone is not success. Popup closure does not itself establish authentication.
 Authority lasts at most two minutes and eight actions total (entry/chooser/
 passkey clicks, form submits and passkey assertions), with one use per step.
-Escape, a real click anywhere, unrelated navigation, lock, disabling the setting
+Escape, a real click anywhere (except while it waits for the person to pick
+their account on Google's chooser, see below), unrelated navigation, lock, disabling the setting
 or a worker restart ends it, including pending credential work. No secret or
 resumable chain is stored in session storage.
 
@@ -224,6 +231,72 @@ checks, not a second account prompt or weakened verification. It signs without
 a prompt only when the daemon verifies the person (Touch ID on, and the site
 doesn't discourage verification); otherwise the chain ends and the usual
 passkey prompt asks, so no assertion is made without the person present.
+
+#### Choosing an account
+
+The corner offer is its top account's own row: the site's first login
+(“Sign in as kit@acme.test”, its icon or key), else the first provider
+account (the provider's mark, “Sign in with Google” and the account). One
+click on it is a pick of that account, with every check a pick has. With
+more than one account, a quiet chevron sits at the row's end, and the
+pointer moving onto the row for 150 ms (the person's own movement: a pointer
+resting where the offer came in lists nothing), keyboard focus or ↓/↑ lists
+them all: the site's own logins first, then the provider accounts, each
+group most used first, at most 50 in all. Listing picks nothing, and it
+grows the surface, so a pick waits out the 500 ms dwell again from there,
+as after any move, and passes the fresh 400 ms check. The listed accounts
+take one fixed height and scroll inside it, so the frame's size doesn't say
+how many there are. The pointer leaving the list folds it back after 300 ms
+unless something was picked. Only the person's own pointer or keyboard in
+the extension's frame lists it; a page's events and messages don't reach it.
+
+#### Your provider accounts
+
+When the page shows a known provider's “Sign in with …” button (the probe
+reports which providers, by id only), the offer also lists the person's
+accounts at that provider: logins saved at one of the provider's own sign-in
+hosts exactly (https, no port, `savedAtProvider` in `signin.ts`), with a
+username and a password, that no login of the site already links to (one
+that's also saved for the site shows once, as the site's). So a site with no
+saved login can get an offer from its Google button alone, and a page can
+tell from the offer that the person uses Deadbolt and has an account at that
+provider; it learns nothing of which. A site of the provider's own
+(gist.github.com, sites.google.com) never gets one.
+
+Picking one starts the provider chain above for that very login, held to
+stricter rules than a site's own linked login, since the site has never
+been linked to it:
+
+- Every provider page must carry a return URL, and every one must lead to
+  the home page's origin (scheme, host and port), or an origin of its site
+  that the chain itself saw the site's own navigation or popup pass through
+  on the way to the provider (not just anywhere on its site), directly or
+  through another of the provider's sign-in pages. A page with none (a bare
+  `ServiceLogin`) stops it. For every chain, any query parameter holding a
+  URL to somewhere counts as a return URL whatever its name or case
+  (`wreply`, `redir`, `Redirect_uri`): absolute or scheme-relative (`//host`),
+  as is or URL-decoded once, with `\` read as `/`. OAuth's `scope` is the
+  exception.
+- Picking the account on the provider's chooser is the person's to do,
+  whatever the page says or in whatever language (with or without the
+  “will share your name, email…” notice): the chain waits there, the corner
+  says “Choose your account” and fades, and the person clicks their own
+  tile (their clicks don't stop this wait; Escape does). From the page it
+  leads to, the chain goes on; a step asking for the account again ends it.
+- The provider's form steps fill only the login picked, never another of
+  that username, and a password step whose page shows another account (its
+  chip or the username it carries, a `login_hint` the site chose) stops,
+  for every chain. On an unlinked site the page must show the account.
+
+Once the outcome is confirmed back on the site (the chain's “Signed in”),
+and only if the chain acted on the provider's pages and its own tab came
+home from a provider page whose return URL led there (never a sign-in seen
+before any provider page, a popup coming back by itself or closing),
+Deadbolt saves a login for the site's origin that signs in with it (`save`
+with `signIn`, no password of its own) in the vault that holds the provider
+login, unless one already does. Next time the site lists it as its own and
+one click signs in, chooser and all. A provider with no known hosts (Okta)
+never gets such rows.
 
 ### Host connection
 
@@ -1967,7 +2040,15 @@ to 4096 characters and the username at most 500.
 ```
 
 `entry` takes `"generated": "<id>"` in place of `password`; saving it lets the
-daemon forget it.
+daemon forget it. A provider link (see Your provider accounts) takes
+`"signIn": { "provider": "google", "account": "<ref>" }` instead, with no
+username, password or `ref`: it creates a login at `url` with `sign-in-with`
+and `sign-in-account` (the provider login `account` names, which must be a
+login here) and nothing else. The provider must be a known one with sign-in
+hosts (by `sign_in_provider`), the account must be saved at one of them, and
+the login lands in the account's own vault; a login of the site that already
+links to it is returned instead (`created: false`). The daemon's protocol is
+version 27 with it (`SiteLink`).
 
 - **Without `ref`:** creates a login in the default vault with `url`,
   `username` (when not blank) and `password`, named `title` unless that is

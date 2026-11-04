@@ -16,7 +16,7 @@ import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
-import { siteTile } from "./ui/site-icon"
+import { brandBySlug, siteTile } from "./ui/site-icon"
 
 /** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
 type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account } | { generate: true } | { identity: FormIdentity } | { card: FormCard }
@@ -158,6 +158,8 @@ const REOPEN_SETTLES_MS = 500
 const REPLAY_MS = 150
 /** The pill and the dot cross-fade over this long (menu.css). */
 const CROSSFADE_MS = 260
+/** The pointer moving onto the corner offer's top account this long lists the others: passing over it doesn't. */
+const EXPAND_AFTER_MS = 150
 /** How long a pill says how it went before it goes. */
 const FILLED_STAYS_MS = 900
 const FAILED_STAYS_MS = 1800
@@ -239,7 +241,8 @@ function row(item: Row, i: number): HTMLElement {
     "button",
     // Rows aren't tab stops: the list is, and says which row is active (see listbox).
     { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", id: `row-${i}`, tabindex: "-1", "aria-selected": String(i === active) },
-    bare ? null : tile,
+    // A provider's mark shows even in a bare list: it says who the row signs in with.
+    bare && !("provider" in item) ? null : tile,
     h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)),
   )
   // A pointer's click only: Enter or Space on a focused row clicks it too (detail 0).
@@ -289,11 +292,60 @@ function loginTile(account: Account, i: number): HTMLElement {
   })
 }
 
-/** A provider's mark: its initial on its own tint (Deadbolt draws no third-party logos). */
+/**
+ * Brand colours of the providers Simple Icons doesn't carry (their owners
+ * asked it not to): their initial in that colour. Microsoft's four squares
+ * are drawn, being plain geometry.
+ */
+const UNBUNDLED: Record<string, string> = { amazon: "FF9900", slack: "4A154B", linkedin: "0A66C2", microsoft: "737373" }
+const MICROSOFT = [["F25022", 0, 0], ["7FBA00", 13, 0], ["00A4EF", 0, 13], ["FFB900", 13, 13]] as const
+
+/** Near-black (Apple, GitHub, X): drawn in the tile's own ink, so it reads in dark mode too. */
+function brandInk(hex: string): string {
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.12 ? "currentColor" : `#${hex}`
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg"
+function markSvg(paint: (svg: SVGSVGElement) => void, box = "0 0 24 24"): SVGSVGElement {
+  const el = document.createElementNS(SVG_NS, "svg")
+  el.setAttribute("viewBox", box)
+  el.setAttribute("aria-hidden", "true")
+  paint(el)
+  return el
+}
+
+/**
+ * A provider's mark, its logo in its brand colour from the bundled Simple
+ * Icons subset (no request), whatever the site icons setting: it says who
+ * the row signs in with. Its initial until that loads, or for a provider
+ * the subset lacks.
+ */
 function providerMark(id: string): HTMLElement {
   const p = providerOf(id)
   const el = avatar(p.name)
   el.classList.add("provider")
+  const show = (mark: SVGSVGElement) => {
+    el.replaceChildren(mark)
+    el.classList.add("mark")
+  }
+  if (p.id === "microsoft")
+    show(markSvg((s) => MICROSOFT.forEach(([fill, x, y]) => {
+      const r = document.createElementNS(SVG_NS, "rect")
+      for (const [k, v] of Object.entries({ x, y, width: 11, height: 11, fill: `#${fill}` })) r.setAttribute(k, String(v))
+      s.append(r)
+    })))
+  else if (UNBUNDLED[p.id]) el.style.color = brandInk(UNBUNDLED[p.id])
+  else if (p.hosts.length)
+    void brandBySlug(p.id).then((brand) => {
+      if (!brand || !/^[0-9a-f]{6}$/i.test(brand[1])) return
+      show(markSvg((s) => {
+        const path = document.createElementNS(SVG_NS, "path")
+        path.setAttribute("d", brand[2])
+        path.setAttribute("fill", brandInk(brand[1]))
+        s.append(path)
+      }))
+    })
   return el
 }
 
@@ -532,7 +584,6 @@ function showStatus(status: Status) {
  * the check.
  */
 async function pick(i: number) {
-  if (universal && accounts.length > 1 && !universalExpanded) return expandUniversal()
   const a = accounts[i]
   if (!a || busy || mode !== "accounts" || !matches(a, query)) return
   if (!pressedScale || !dwell.settled(pressedAt)) {
@@ -808,6 +859,11 @@ document.addEventListener("keydown", (e) => {
   }
   const rows = visible()
   if (!rows.length || mode !== "accounts") return
+  // ↓ or ↑ on the corner offer's top account lists the others; the next ↓ moves in them.
+  if (universal && !universalExpanded && accounts.length > 1 && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault()
+    return expandUniversal()
+  }
   const at = Math.max(0, rows.indexOf(active))
   if (e.key === "ArrowDown") active = rows[Math.min(at + 1, rows.length - 1)]
   else if (e.key === "ArrowUp") active = rows[Math.max(at - 1, 0)]
@@ -853,7 +909,8 @@ function show(reply: MenuLoadReply) {
   }
   listbox(reply.kind === "generate" ? "Passwords" : "Logins")
   siteIcons = reply.kind === "accounts" ? (reply.icons ?? null) : null
-  bare = reply.kind === "accounts" && !siteIcons
+  // The corner offer always shows each account's mark: the provider's, or the site's tile.
+  bare = reply.kind === "accounts" && !siteIcons && !universal
   rowsEl.classList.toggle("bare", bare)
   revealable = new Set(reply.kind === "accounts" ? (reply.reveal ?? []) : [])
   listedAt = performance.now()
@@ -870,22 +927,87 @@ function show(reply: MenuLoadReply) {
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
 }
 
+/**
+ * The corner offer's other accounts, listed from its top one. Listing picks
+ * nothing, and the surface grows: as after any move, a pick waits out the
+ * dwell again (see pick). The list is one fixed height, scrolling inside,
+ * so the frame's size doesn't tell the page how many accounts there are.
+ */
 function expandUniversal() {
+  if (universalExpanded || mode !== "accounts" || accounts.length < 2) return
   universalExpanded = true
   surface.classList.add("expanded")
   rowsEl.replaceChildren(...accounts.map(row))
   highlight(false)
+  dwell.moved(performance.now())
   report()
 }
 
+/** Back to the top account alone: the pointer left the list and nothing was picked. */
+function collapseUniversal() {
+  if (!universalExpanded || busy || mode !== "accounts" || surface.matches(":hover, :focus-within")) return
+  universalExpanded = false
+  surface.classList.remove("expanded")
+  showUniversal()
+  dwell.moved(performance.now())
+  report()
+}
+
+let collapsing: ReturnType<typeof setTimeout> | undefined
+// Leaving the listed accounts folds them back after a moment's grace; coming back keeps them.
+surface.addEventListener("pointerleave", (e) => {
+  if (!e.isTrusted || !universal || !universalExpanded) return
+  clearTimeout(collapsing)
+  collapsing = setTimeout(collapseUniversal, COLLAPSE_GRACE_MS)
+})
+surface.addEventListener("pointerenter", () => clearTimeout(collapsing))
+// Keyboard focus coming into the list (Tab) lists the accounts too; a press takes none (see the mousedown handler).
+rowsEl.addEventListener("focus", (e) => e.isTrusted && universal && expandUniversal())
+
+/**
+ * The person's own pointer moving, not the browser replaying where it was
+ * after the frame changed size, nor a pointer resting where the offer came
+ * in (see the save offer's real()).
+ */
+const moving = (e: PointerEvent) => e.isTrusted && (e.movementX !== 0 || e.movementY !== 0) && e.timeStamp - resizedAt > REPLAY_MS
+
+const CHEVRON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+
+/**
+ * The corner offer, collapsed: its top account's own row (the site's first
+ * login, else the first provider account), which one click picks with every
+ * check a pick has. With more accounts a quiet chevron says so, and the
+ * pointer moving onto the row for a moment, focus or ↓ lists them.
+ */
 function showUniversal() {
-  if (accounts.length > 1 && !universalExpanded) {
-    const choose = h("button", { class: "row", type: "button" }, h("span", { class: "title" }, "Sign in with Deadbolt"))
-    choose.addEventListener("click", (e) => { if (e.isTrusted) expandUniversal() })
-    rowsEl.replaceChildren(choose)
+  if (!universalExpanded && accounts.length) {
+    active = 0
+    const top = row(accounts[0], 0)
+    if (accounts.length > 1) {
+      const more = h("span", { class: "more", "aria-hidden": "true" })
+      more.innerHTML = CHEVRON
+      top.append(more)
+      top.setAttribute("aria-description", "More accounts: press ↓")
+      let resting: ReturnType<typeof setTimeout> | undefined
+      let inside = false
+      top.addEventListener("pointermove", (e) => {
+        if (!moving(e)) return
+        inside = true
+        if (resting === undefined) resting = setTimeout(() => {
+          resting = undefined
+          if (inside && !busy) expandUniversal()
+        }, EXPAND_AFTER_MS)
+      })
+      top.addEventListener("pointerleave", () => {
+        inside = false
+        clearTimeout(resting)
+        resting = undefined
+      })
+    }
+    rowsEl.replaceChildren(top)
+    // Quiet until the pointer is on it (the row's own pointermove lights it).
     highlightEl.hidden = true
-  }
-  surface.querySelector(".signin-dismiss")?.remove()
+  }  surface.querySelector(".signin-dismiss")?.remove()
   const dismiss = h("button", { class: "signin-dismiss", type: "button", title: "Not now for this site (30 minutes)", "aria-label": "Not now for this site" }, "×")
   dismiss.addEventListener("click", async (e) => {
     if (!e.isTrusted || (e.detail === 0 && !entry.entered) || busy || !pressedScale || !dwell.settled(pressedAt)) return

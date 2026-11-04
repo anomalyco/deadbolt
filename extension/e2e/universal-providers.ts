@@ -20,11 +20,14 @@ import { mkdtemp, mkdir, copyFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { getDomain } from "tldts"
-import { universalFixture, providerLog, googlePasskey, GOOGLE_USER, GOOGLE_PASSWORD, OTP } from "./universal-fixture"
+import { universalFixture, providerLog, googlePasskey, GOOGLE_OTHER, GOOGLE_OTHER_PASSWORD, GOOGLE_USER, GOOGLE_PASSWORD, OTP } from "./universal-fixture"
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const dist = resolve(arg("--dist") ?? "dist")
 const video = arg("--video")
+/** Stills of the corner offer, light or dark (`--scheme dark`). */
+const stills = arg("--stills")
+const scheme = arg("--scheme") === "dark" ? "dark" : "light"
 const skipTtl = process.argv.includes("--skip-ttl")
 const native = process.argv.includes("--native")
 // Absolute: Chromium reads a relative host path in the manifest as relative to the manifest.
@@ -37,6 +40,8 @@ const store = native ? await mkdtemp(process.platform === "darwin" ? "/tmp/dbup-
 const storeEnv: Record<string, string> = native ? {
   DEADBOLT_HOME: join(store, "home"), XDG_RUNTIME_DIR: join(store, "run"), XDG_STATE_HOME: join(store, "state"), XDG_CONFIG_HOME: join(store, "config"),
   DEADBOLT_NET: "local", DEADBOLT_KDF: "fast", DEADBOLT_PASSPHRASE: "universal providers synthetic store",
+  // The daemon takes the .test stand-ins for providers' hosts (a debug build only), as the e2e build does.
+  DEADBOLT_TEST_PROVIDER_HOSTS: "1",
 } : {}
 const cli = (...args: string[]) => {
   const r = Bun.spawnSync([deadbolt!, ...args], { env: { ...process.env, ...storeEnv }, stdin: "ignore" })
@@ -58,10 +63,10 @@ const googleOrigin = `http://accounts.google.test:${port}`
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const LOOKALIKES = ["accounts.google.evil.test", "accounts.googl.test"]
 const context = await chromium.launchPersistentContext(join(root, "profile"), {
-  channel: "chromium", headless: true, viewport: { width: 1440, height: 900 },
+  channel: "chromium", headless: true, viewport: { width: 1440, height: 900 }, colorScheme: scheme,
   args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP acme.test 127.0.0.1, MAP *.test 127.0.0.1",
     // Real sites and providers are https: give the http fixtures a secure context (crypto.randomUUID and the like).
-    `--unsafely-treat-insecure-origin-as-secure=${["acme.test", "accounts.google.test", ...LOOKALIKES].map((h) => `http://${h}:${port}`).join(",")}`,
+    `--unsafely-treat-insecure-origin-as-secure=${["acme.test", "shop.test", "accounts.google.test", ...LOOKALIKES].map((h) => `http://${h}:${port}`).join(",")}`,
     // The toolbar popup (passkey save prompt) is an extension target Playwright doesn't list: reach it over DevTools.
     "--remote-debugging-port=0"],
   // A real browser blocks a popup no person opened: keep that on.
@@ -106,17 +111,27 @@ async function offer(p: Page): Promise<Frame> {
     return null
   })
 }
-/** The one trusted pick: the offer's "Sign in with Google" row (or the row naming `row`), after the real dwell. */
+/** A still of the corner offer, with room for its shadow (`--stills`). */
+async function still(p: Page, f: Frame, name: string) {
+  if (!stills) return
+  await mkdir(stills, { recursive: true })
+  // A tab in the background runs no animation frames: the offer would be caught mid-entrance.
+  await p.bringToFront()
+  await p.waitForTimeout(600)
+  const box = (await (await f.frameElement()).boundingBox())!
+  const x = Math.max(0, box.x - 28)
+  await p.screenshot({ path: join(stills, `${name}.png`), clip: { x, y: Math.max(0, box.y - 12), width: Math.min(box.width + 56, 1440 - x), height: box.height + 44 } })
+}
+/**
+ * The one trusted pick of the offer's row naming `row`, after the real
+ * dwell: its collapsed row when that's the one, else the list the pointer
+ * moving onto it opens, after the dwell again.
+ */
 async function pick(p: Page, row = "Google") {
   const f = await offer(p)
   check(await p.evaluate(() => document.activeElement === document.body), "the offer does not move page focus")
   await p.waitForTimeout(1400)
-  // With several logins for the site, the offer first says "Sign in with Deadbolt", which lists them.
-  const choose = f.locator("button.row", { hasText: "Sign in with Deadbolt" })
-  if (await choose.count()) {
-    await choose.click()
-    await p.waitForTimeout(1400)
-  }
+  if (!await f.locator("button.row", { hasText: row }).count()) await expand(p, f, row)
   const button = f.locator("button.row", { hasText: row }).first()
   const target = await button.boundingBox()
   const recording = recordings.find((r) => r.page === p)
@@ -124,10 +139,18 @@ async function pick(p: Page, row = "Google") {
   await button.click()
   return Date.now()
 }
+/** The pointer moving onto the offer's top account until the others list, then the dwell; `row`'s shows. */
+async function expand(p: Page, f: Frame, row?: string) {
+  const box = (await f.locator("button.row").first().boundingBox())!
+  await p.mouse.move(box.x + 8, box.y + box.height / 2)
+  await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 6 })
+  await until("the other accounts list", async () => await f.locator("button.row").count() > 1 && (!row || await f.locator("button.row", { hasText: row }).count() > 0), 4000)
+  await p.waitForTimeout(1400)
+}
 
 // db:provider-status is drawn by the content script, possibly in a closed
 // shadow root: read it through CDP's piercing DOM rather than by class name.
-const LABEL = /Signing in with|^Signed in$|Review access|Approve on your phone|Enter your code|Use your security key|Complete the verification/
+const LABEL = /Signing in with|^Signed in$|Choose your account|Review access|Approve on your phone|Enter your code|Use your security key|Complete the verification/
 interface Sample { at: number; url: string; text: string; box?: { x: number; y: number; width: number; height: number } }
 interface Watch { samples: Sample[]; focus: string[]; stop(): void }
 type Node = { nodeType: number; nodeValue?: string; backendNodeId: number; children?: Node[]; shadowRoots?: Array<Node & { shadowRootType?: string }>; contentDocument?: Node }
@@ -188,11 +211,13 @@ async function settles(w: Watch, path: string, label: string, optional = false) 
   const first = w.samples.find(at)!
   await Bun.sleep(4000)
   const on = w.samples.filter(at)
+  // A sample taken as the pill fades in or out can have no box: judge its place by one that has.
+  const placed = on.find((s) => s.box) ?? first
   const last = on[on.length - 1]
   const recent = on.filter((s) => s.at > Date.now() - 1000)
   const texts = [...new Set(on.map((s) => s.text))]
   console.log(`INFO ${label}: pill ${JSON.stringify(texts)} for ${last.at - first.at} ms`)
-  check(first.box && first.box.x > 900 && first.box.y < 120 && first.box.height < 80, `${label}: the status pill is a compact top-right corner pill`)
+  check(placed.box && placed.box.x > 900 && placed.box.y < 120 && placed.box.height < 80, `${label}: the status pill is a compact top-right corner pill (${JSON.stringify(placed.box)})`)
   check(!recent.length && last.at - first.at <= 3000, `${label}: the status pill goes away by itself (~1.5 s)`)
   return texts
 }
@@ -205,6 +230,19 @@ async function command(command: Record<string, unknown>) {
   if (!reply?.ok) throw new Error(`${command.type}: ${reply?.message ?? "no reply"}`)
   return reply
 }
+// What the chain asked each page and what it answered, for the DIAG line on a failure.
+await worker.evaluate(() => {
+  const g = globalThis as unknown as { __chain: unknown[] }
+  g.__chain = []
+  const send = chrome.tabs.sendMessage.bind(chrome.tabs) as (...a: unknown[]) => Promise<unknown>
+  ;(chrome.tabs as unknown as { sendMessage: unknown }).sendMessage = async (...a: unknown[]) => {
+    const reply = await send(...a)
+    const m = a[1] as { type?: string; label?: string }
+    if (m?.type?.startsWith("db:provider")) g.__chain.push(`${m.type} ${m.label ?? ""} ${JSON.stringify(reply)?.slice(0, 120)}`)
+    if (g.__chain.length > 60) g.__chain.splice(0, 20)
+    return reply
+  }
+})
 const setting = (on: boolean) => worker.evaluate((on) => chrome.storage.local.set({ offerToSignIn: on }), on)
 
 /**
@@ -237,6 +275,12 @@ async function hostRequest(body: Record<string, unknown>) {
     port.onDisconnect.addListener(() => reject(new Error(chrome.runtime.lastError?.message ?? "the host went away")))
     port.postMessage({ type: "hello", id: 1 })
   }), body)
+}
+
+/** The logins the vault lists for `origin` (with what they sign in with), as the extension sees them. */
+async function listAt(origin: string): Promise<Array<{ ref: string; signIn?: { provider: string; account?: string } }>> {
+  const reply = native ? await hostRequest({ type: "list", origin }) as { accounts?: [] } : (await command({ type: "list", origin })).reply as { accounts?: [] }
+  return reply?.accounts ?? []
 }
 
 /** The browser's DevTools targets and a minimal connection to one (as e2e/standalone.ts drives its toolbar popup). */
@@ -388,6 +432,11 @@ try {
   {
     const flow = "same-tab"
     const p = await open(flow, {})
+    if (stills) {
+      const f = await offer(p)
+      await p.waitForTimeout(1400)
+      await still(p, f, `offer-collapsed-one-${scheme}`)
+    }
     const w = await watch(p)
     await pick(p)
     await p.waitForURL(`${site}/account*`)
@@ -417,6 +466,7 @@ try {
     })
     // The real dwell, then the one trusted pick.
     await p.waitForTimeout(1400)
+    await still(p, menu, `inline-google-${scheme}`)
     const row = menu.locator("button.row", { hasText: "Google" }).first()
     const target = await row.boundingBox()
     const recording = recordings.find((r) => r.page === p)
@@ -688,11 +738,155 @@ try {
     check(await p.inputValue('input[name="Passwd"]') === "" && posts(flow, "/v3/signin/challenge/pwd") === 0, "after two minutes the chain is over: nothing is filled")
     await p.close()
   }
+
+  // A second Google account, saved only at Google: the corner offer lists it
+  // for Acme's Google button, and for a site with no saved login at all.
+  if (native) cli("new", "login", "--name", "Google", `url=${googleOrigin}`, `username=${GOOGLE_OTHER}`, `password=${GOOGLE_OTHER_PASSWORD}`, `otp=${OTP}`)
+  else await command({ type: "device-item-save", kind: "login", name: "Google", fields: [{ name: "url", value: googleOrigin }, { name: "username", value: GOOGLE_OTHER }, { name: "password", value: GOOGLE_OTHER_PASSWORD }, { name: "otp", value: OTP }] })
+  await Bun.sleep(5500)
+  const linkedTo = async (origin: string, account: string) => (await listAt(origin)).some((a) => a.signIn?.provider === "google" && a.signIn.account === account)
+  const rowCount = (f: Frame) => f.locator("button.row").count()
+  const frameHeight = async (f: Frame) => (await (await f.frameElement()).boundingBox())!.height
+
+  // A provider page for another account than the one picked (the site's
+  // login_hint chose it): the password step shows that account, so nothing fills.
+  await fresh()
+  {
+    const flow = "login-hint"
+    const p = await open(flow, { chip: "other", chooser: "0" })
+    await pick(p, GOOGLE_USER)
+    await p.waitForURL(`${googleOrigin}/v3/signin/challenge/pwd*`, { timeout: 20_000 })
+    await p.waitForTimeout(3000)
+    check(await p.inputValue('input[name="Passwd"]') === "" && posts(flow, "/v3/signin/challenge/pwd") === 0, "a password step showing another account than the one picked gets nothing")
+    await p.close()
+  }
+
+  // Acme: its own login first, collapsed as the offer's one row, then the
+  // provider accounts. A resting pointer or the page lists nothing; the
+  // pointer moving onto the row lists them, picking nothing, and a pick right
+  // as the list grows waits out the dwell. The second Gmail isn't linked to
+  // Acme yet: Google's sharing notice is the person's, so they click its tile,
+  // and from there Deadbolt signs in and links Acme to it.
+  let listed = 0
+  await fresh()
+  {
+    const flow = "choose-hover"
+    const p = await context.newPage()
+    record(p, flow)
+    // The pointer is already where the offer comes in, and rests there.
+    await p.mouse.move(1300, 26)
+    await p.goto(`${site}/signin?${new URLSearchParams({ flow })}`)
+    const f = await offer(p)
+    await p.waitForTimeout(1400)
+    const top = f.locator("button.row").first()
+    check(await rowCount(f) === 1 && /Sign in with Google/.test(await top.textContent() ?? "") && await f.locator(".more").count() === 1, "several accounts: the offer is its top login's own row, with a quiet chevron")
+    check(!/Sign in with Deadbolt/.test(await f.locator("body").innerText()), "nothing says Sign in with Deadbolt")
+    await still(p, f, `offer-collapsed-several-${scheme}`)
+    // A page can't list them or pick: synthetic events at the surface's host, and messages to every frame.
+    await p.evaluate(() => {
+      const host = document.querySelector<HTMLElement>("html > [popover]")
+      for (const type of ["pointerover", "pointerenter", "pointermove", "mouseover", "mousemove", "pointerdown", "click"]) host?.dispatchEvent(new MouseEvent(type, { bubbles: true, composed: true }))
+      host?.dispatchEvent(new FocusEvent("focus"))
+      for (let i = 0; i < frames.length; i++) for (const type of ["db:menu-enter", "db:menu-moved"]) frames[i].postMessage({ type }, "*")
+    })
+    await p.waitForTimeout(800)
+    check(await rowCount(f) === 1 && !hits(flow, google).length, "a resting pointer and a page's events neither list the accounts nor pick one")
+    const collapsed = await frameHeight(f)
+    const box = (await top.boundingBox())!
+    await p.mouse.move(box.x + 8, box.y + box.height / 2)
+    await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 6 })
+    const second = f.locator("button.row", { hasText: GOOGLE_OTHER })
+    await until("moving onto the row lists the accounts", async () => await second.count() > 0, 3000)
+    check(!hits(flow, google).length && new URL(p.url()).pathname === "/signin", "the pointer moving onto it lists the accounts and picks nothing")
+    const rows = await f.locator("button.row").allTextContents()
+    check(rows.findIndex((t) => t.includes(GOOGLE_USER)) >= 0 && rows.findIndex((t) => t.includes(GOOGLE_USER)) < rows.findIndex((t) => t.includes(GOOGLE_OTHER)), `the site's own logins come first, then the provider accounts (${JSON.stringify(rows)})`)
+    await second.click()
+    await p.waitForTimeout(1200)
+    check(!hits(flow, google).length, "a pick right as the list grew is refused until it has sat still")
+    check(await frameHeight(f) > collapsed, "listed, the offer grows")
+    listed = (await f.locator(".list").boundingBox())!.height
+    await p.waitForTimeout(400)
+    const target = await second.boundingBox()
+    const recording = recordings.find((r) => r.page === p)
+    if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
+    const w = await watch(p)
+    await second.click()
+    await p.waitForURL(`${googleOrigin}/o/oauth2/v2/auth*`)
+    await until("the chooser asks the person", async () => w.samples.some((s) => s.text === "Choose your account"), 6000)
+    await p.waitForTimeout(1500)
+    check(!hits(flow, (h) => h.path === "/signin/select").length, "an unlinked site: Google's sharing notice waits for the person's own pick")
+    const tile = p.locator(`[data-identifier="${GOOGLE_OTHER}"]`)
+    const at = (await tile.boundingBox())!
+    if (recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: at.x + at.width / 2, y: at.y + at.height / 2 })
+    await tile.click()
+    await p.waitForURL(`${site}/account*`, { timeout: 20_000 })
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google`, "after the person's pick, Deadbolt signs the second Gmail in to Acme")
+    check(posts(flow, "/v3/signin/challenge/pwd") === 1 && posts(flow, "/v3/signin/challenge/totp") === 1, "with that account's password and code, once each")
+    check(!!await until("Acme is linked to the second Gmail", () => linkedTo(site, GOOGLE_OTHER), 5000), "Acme now has a login that signs in with the second Gmail")
+    noFocus(w, flow)
+    w.stop()
+    await p.close()
+  }
+
+  // A first visit to a site with no saved login: its Google button is enough
+  // to offer both Gmails, listed at the same height as Acme's three rows.
+  // The second, after the person's pick on Google's notice, signs in and
+  // links shop.test. The next visit, one click on the offer's row (now
+  // shop.test's own login) signs in by itself.
+  const shop = `http://shop.test:${port}`
+  await fresh()
+  {
+    const flow = "first-visit"
+    check(!(await listAt(shop)).length, "shop.test has no saved login")
+    const p = await context.newPage()
+    record(p, flow)
+    // Google's chooser in German: the stop on an unlinked site doesn't hang on its English notice.
+    await p.goto(`${shop}/signin?flow=${flow}&hl=de`)
+    const f = await offer(p)
+    await p.waitForTimeout(1400)
+    await expand(p, f, GOOGLE_OTHER)
+    await still(p, f, `offer-expanded-${scheme}`)
+    check(await rowCount(f) === 2 && (await f.locator("button.row .title").allTextContents()).every((t) => t === "Sign in with Google"), "a site with no saved login offers the provider accounts for its Google button")
+    const height = (await f.locator(".list").boundingBox())!.height
+    check(Math.abs(height - listed) < 1, `the listed accounts take one fixed height, whatever their number (two: ${height}, three: ${listed})`)
+    const second = f.locator("button.row", { hasText: GOOGLE_OTHER })
+    const target = await second.boundingBox()
+    const recording = recordings.find((r) => r.page === p)
+    if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
+    await second.click()
+    await p.waitForURL(`${googleOrigin}/o/oauth2/v2/auth*`)
+    await p.waitForTimeout(2500)
+    check(await p.locator("h1").textContent() === "Konto auswählen" && !hits(flow, (h) => h.path === "/signin/select").length, "first visit, a German chooser: picking the account is the person's")
+    await p.locator(`[data-identifier="${GOOGLE_OTHER}"]`).click()
+    await p.waitForURL(`${shop}/account*`, { timeout: 30_000 })
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google`, "first visit: the picked Gmail signs in")
+    check(!!await until("shop.test is linked", () => linkedTo(shop, GOOGLE_OTHER), 5000) && (await listAt(shop)).length === 1, "and shop.test gets one login that signs in with it")
+    await p.close()
+  }
+  await fresh()
+  {
+    const flow = "one-click"
+    const p = await context.newPage()
+    record(p, flow)
+    await p.goto(`${shop}/signin?flow=${flow}`)
+    const f = await offer(p)
+    await p.waitForTimeout(1400)
+    const top = f.locator("button.row").first()
+    check((await top.textContent() ?? "").includes(GOOGLE_OTHER), "next visit: the offer's row is shop.test's own login, first")
+    const target = await top.boundingBox()
+    const recording = recordings.find((r) => r.page === p)
+    if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
+    await top.click()
+    await p.waitForURL(`${shop}/account*`, { timeout: 20_000 })
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google` && hits(flow, (h) => h.path === "/signin/select").map((h) => h.value).join() === GOOGLE_OTHER, "one click on it signs in, Google's chooser and all, with no other step of the person's")
+    await p.close()
+  }
   console.log(`PASS universal sign-in with a provider (${mode})`)
 } catch (err) {
   // What the status pill said last, and where: enough to tell a fixture gap from a chain stop.
   for (const w of watches.slice(-2)) console.log(`DIAG pill ${JSON.stringify([...new Map(w.samples.map((s) => [`${new URL(s.url).pathname} ${s.text}`, 1])).keys()])}`)
   console.log(`DIAG last hits ${JSON.stringify(providerLog.slice(-6).map((h) => `${h.method} ${h.host}${h.path}`))}`)
+  console.log(`DIAG chain ${await worker.evaluate(() => JSON.stringify((globalThis as unknown as { __chain?: unknown[] }).__chain?.slice(-12))).catch(() => "")}`)
   throw err
 } finally {
   await context.close()

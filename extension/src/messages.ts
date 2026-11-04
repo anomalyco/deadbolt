@@ -131,7 +131,8 @@ export interface ProviderReport {
   action?: string
   form?: number
   roles?: FieldRole[]
-  reason?: "consent" | "phone" | "sms" | "security-key" | "captcha" | "unknown"
+  /** `choose`: an unlinked site's chooser shows the provider's sharing notice; the person picks their own tile (see ProviderChain). */
+  reason?: "consent" | "phone" | "sms" | "security-key" | "captcha" | "unknown" | "choose"
   approval?: string
 }
 
@@ -208,7 +209,8 @@ export type ToBackground =
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
   | { type: "db:surface-choose"; token: string; choice: OfferChoice }
-  | { type: "db:signin-check" }
+  /** `signal`: what of a sign-in the page shows (content.ts askAboutSignIn); `provider`: a provider button among it. */
+  | { type: "db:signin-check"; signal?: string; provider?: boolean }
   | { type: "db:signin-signout" }
   | { type: "db:signin-stop" }
   // popup
@@ -232,9 +234,11 @@ export type ToBackground =
   | { type: "pk:popup-choose"; tabId: number; id: string; choice: PasskeyChoice }
 
 export type ToContent =
-  | { type: "db:provider-probe"; session: string; provider: string; site: string; account?: string; entry?: boolean }
+  /** `home`: a chain from a provider account on an unlinked site, held to these origins of its home's site (see ProviderChain). */
+  | { type: "db:provider-probe"; session: string; provider: string; site: string; account?: string; entry?: boolean; home?: string[] }
   | { type: "db:provider-act"; session: string; action: string; values?: FillValues }
-  | { type: "db:provider-status"; session: string; label: string; done?: boolean }
+  /** `hold`: the chain waits for the person (to pick their account); their clicks don't stop it, and the pill fades. */
+  | { type: "db:provider-status"; session: string; label: string; done?: boolean; hold?: true }
   /**
    * `form` is the form snapshot the fill was chosen for; a changed form gets
    * nothing. `approval` names the fields db:approve said may be filled: only
