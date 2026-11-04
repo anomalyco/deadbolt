@@ -626,6 +626,25 @@ const FORMS: Record<string, string> = {
     ${sel("mm", "Expiry month", months)}${sel("yy", "Expiry year", years(new Date().getFullYear()))}
     <label for="cvv">Security code</label><input id="cvv" autocomplete="cc-csc">
     <button type="button">Pay</button></form>`,
+  // A card typed by hand on a checkout that posts to its thank-you page (saving what was typed).
+  pay: `<h1>Payment</h1><form method="post" action="/forms/thanks">
+    <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
+    <label for="cc">Card number</label><input id="cc" autocomplete="cc-number" inputmode="numeric" placeholder="1234 1234 1234 1234">
+    <label for="exp">Expiration</label><input id="exp" autocomplete="cc-exp" placeholder="MM / YY">
+    <label for="cvc">CVC</label><input id="cvc" autocomplete="cc-csc" inputmode="numeric">
+    <button type="submit">Pay</button></form>`,
+  // A shipping address that goes on in place: the form goes once it's sent.
+  ship: `<h1>Shipping</h1><form id="ship">
+    <label for="n">Full name</label><input id="n" autocomplete="shipping name">
+    <label for="a1">Address</label><input id="a1" autocomplete="shipping address-line1">
+    <label for="city">City</label><input id="city" autocomplete="shipping address-level2">
+    <label for="zip">ZIP</label><input id="zip" autocomplete="shipping postal-code">
+    ${sel("country", "Country", countries, ` autocomplete="shipping country"`)}
+    <button type="submit">Continue</button></form>
+    <script>document.getElementById("ship").addEventListener("submit", (e) => {
+      e.preventDefault()
+      setTimeout(() => { e.target.remove(); document.querySelector("main").insertAdjacentHTML("beforeend", "<p>Delivering there.</p>") }, 300)
+    })</script>`,
   // A card number in four boxes.
   "card-split": `<h1>Payment</h1><form>
     <label for="b1">Card number</label><div style="display:flex;gap:6px"><input id="b1" maxlength="4"><input id="b2" maxlength="4"><input id="b3" maxlength="4"><input id="b4" maxlength="4"></div>
@@ -643,6 +662,20 @@ const CARD_FRAME = `<!doctype html><html><head><meta charset="utf-8"><style>
 const cardFrame = (host: string, port: string) => `<h1>Payment</h1>
   <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
   <iframe id="pay" src="http://${host}:${port}/forms/card-frame" style="width:100%;height:220px;border:0;margin-top:12px"></iframe>`
+/** A checkout whose card goes into the provider's frame and whose own form posts to its thank-you page. */
+const cardFramePay = (host: string, port: string) => `<h1>Payment</h1><form method="post" action="/forms/thanks">
+  <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
+  <iframe id="pay" src="http://${host}:${port}/forms/card-frame" style="width:100%;height:220px;border:0;margin-top:12px"></iframe>
+  <button type="submit">Pay</button></form>
+  <script>document.querySelector("form").addEventListener("submit", (e) => {
+    // As a provider's checkout does: confirm the payment with the provider first, then post.
+    e.preventDefault()
+    setTimeout(() => e.target.submit(), 800)
+  })</script>`
+/** A card form that posts to another origin (into a frame of its own), then goes in place: nothing typed in it is offered. */
+const payAway = (port: string) => `${FORMS.pay.replace('action="/forms/thanks"', `action="http://pay.evilpay.test:${port}/forms/thanks" target="sink"`)}
+  <iframe name="sink" hidden></iframe>
+  <script>document.querySelector("form").addEventListener("submit", (e) => setTimeout(() => e.target.remove(), 300))</script>`
 
 /**
  * Apple's sign-in widget as appstoreconnect.apple.com embeds it
@@ -1165,6 +1198,9 @@ const server = Bun.serve({
     if (url.pathname === "/forms/card-frame") return new Response(CARD_FRAME, { headers: { "content-type": "text/html; charset=utf-8" } })
     if (url.pathname === "/forms/stripe") return html("Checkout", cardFrame("js.stripe.test", url.port))
     if (url.pathname === "/forms/unknown") return html("Checkout", cardFrame("pay.evilpay.test", url.port))
+    if (url.pathname === "/forms/stripe-pay") return html("Checkout", cardFramePay("js.stripe.test", url.port))
+    if (url.pathname === "/forms/pay-away") return html("Checkout", payAway(url.port))
+    if (url.pathname === "/forms/thanks") return html("Order placed", "<h1>Thank you</h1><p>Your order is on its way.</p>")
     if (url.pathname.startsWith("/forms/") && FORMS[url.pathname.slice(7)]) return html("Checkout", FORMS[url.pathname.slice(7)])
     if (url.pathname.startsWith("/detect/") && DETECT[url.pathname.slice(8)]) {
       const d = DETECT[url.pathname.slice(8)]
@@ -4765,6 +4801,40 @@ async function pickRow(menu: Frame, text: string) {
 }
 
 const formFills = async (run: Run) => (await hostLog(run)).filter((r) => r.type === "fill-form") as Array<{ ref: string; fields: string[]; origin: string }>
+const formSaves = async (run: Run) => (await hostLog(run)).filter((r) => r.type === "save-form") as Array<{ kind: string; ref?: string; fields: Record<string, string> }>
+/** Fields as one JSON, keys sorted, to compare whatever order they were written in. */
+const sorted = (o: Record<string, string> | undefined) => JSON.stringify(Object.entries(o ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+
+/** Types into each field by id, as a person would (trusted input). */
+async function typeIn(page: Page | Frame, values: Record<string, string>) {
+  for (const [id, text] of Object.entries(values)) await page.fill(`#${id}`, text)
+}
+
+/** The card or identity offer in the page: its title and what it names. */
+async function formOffer(page: Page, what: string) {
+  const offer = await saveSurface(page, what)
+  if (!offer) return null
+  return { offer, title: (await offer.locator(".offer-title").textContent()) ?? "", user: (await offer.locator(".offer-user").textContent()) ?? "" }
+}
+
+/** Opens the offer on approach (a still of it open, as `still`), presses Save, and waits for its Saved pill and for it to go. */
+async function acceptForm(page: Page, offer: Frame, still: string) {
+  await Bun.sleep(500)
+  await offer.locator(".offer-row").hover()
+  await until("the offer opens on approach", async () => (await frameBox(offer)).height > 60)
+  await settled(offer)
+  await shotAround(page, still, offer)
+  await offer.locator(".offer-row .btn.primary").click()
+  const saved = !!(await until("the offer folds into its Saved pill", async () => (await offer.locator(".pill.ok").count().catch(() => 0)) > 0))
+  await until("the pill goes", () => !extensionFrame(page, "menu.html"), 8000)
+  return saved
+}
+
+/** No offer shows in the page, nor badges the toolbar button, for a few seconds after a submit. */
+async function noOffer(run: Run, page: Page) {
+  await Bun.sleep(4000)
+  return !extensionFrame(page, "menu.html") && (await badge(run)) === ""
+}
 const values = (page: Page | Frame, ids: string[]) => Promise.all(ids.map((id) => page.inputValue(`#${id}`)))
 
 /** A shipping address with tokens and a card with its expiry in one box, in the light and dark themes, with stills of both menus. */
@@ -4801,6 +4871,77 @@ async function formsSurface(scheme: Scheme) {
       const got = await values(page, ["cc", "exp", "cvc", "holder"])
       check(JSON.stringify(got) === JSON.stringify(["4242 4242 4242 4242", "08 / 28", "123", "Kit Langton"]), `the card fills: spaced number, MM / YY, code, name (${got.join(" | ")})`)
     }
+
+    // What the user types by hand is offered once the submit went through,
+    // in the corner: a new card, then the same card with a new expiry.
+    const logs: string[] = []
+    run.context.on("console", (m) => logs.push(m.text()))
+    page.on("console", (m) => logs.push(m.text()))
+    await newTurn(run)
+    await page.goto(`${site}/forms/pay`)
+    await formsFound(run, page, "/forms/pay")
+    await typeIn(page, { holder: "Ada Lovelace", cc: "4000 0566 5566 5556", exp: "09 / 30", cvc: "737" })
+    await page.press("#cvc", "Enter")
+    await page.waitForURL("**/forms/thanks")
+    let offer = await formOffer(page, "the card offer shows on the thank-you page")
+    if (offer) {
+      check(offer.title === "Save card?", `a card typed by hand is offered (${offer.title})`)
+      check(offer.user === "Visa •••• 5556 · localhost", `as its brand and last four digits only, with the site (${offer.user})`)
+      await Bun.sleep(500)
+      await shotAround(page, `forms-save-card-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-save-card-open-${scheme}`), "Save in the page saves the card")
+      const saved = (await formSaves(run)).find((r) => r.kind === "card" && !r.ref)
+      check(sorted(saved?.fields) === sorted({ number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }), `with its number, expiry, name and brand, never its security code (${Object.keys(saved?.fields ?? {}).join(",")})`)
+      check(!JSON.stringify(await hostLog(run)).includes("737"), "the security code went nowhere")
+    }
+    await newTurn(run)
+    await page.goto(`${site}/forms/pay`)
+    await formsFound(run, page, "/forms/pay")
+    await typeIn(page, { holder: "Kit Langton", cc: "4242 4242 4242 4242", exp: "01 / 31", cvc: "123" })
+    await page.press("#cvc", "Enter")
+    await page.waitForURL("**/forms/thanks")
+    offer = await formOffer(page, "the update offer shows")
+    if (offer) {
+      check(offer.title === "Update card?" && offer.user === "Visa •••• 4242 · localhost", `a saved card with a new expiry is an update (${offer.title} ${offer.user})`)
+      await Bun.sleep(500)
+      await shotAround(page, `forms-update-card-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-update-card-open-${scheme}`), "Save updates the card")
+      const update = (await formSaves(run)).find((r) => r.kind === "card" && r.ref)
+      check(sorted(update?.fields) === sorted({ expiry: "2031-01" }), `only its expiry changes (${sorted(update?.fields)})`)
+    }
+
+    // A typed address: a new identity, then Home with a new street.
+    await newTurn(run)
+    await page.goto(`${site}/forms/ship`)
+    await formsFound(run, page, "/forms/ship")
+    await typeIn(page, { n: "Ada Lovelace", a1: "1 Main St", city: "Springfield", zip: "12345" })
+    await page.selectOption("#country", "US")
+    await page.click("button[type=submit]")
+    offer = await formOffer(page, "the address offer shows once the form went")
+    if (offer) {
+      check(offer.title === "Save address?" && offer.user === "1 Main St, Springfield · localhost", `a typed address is offered (${offer.title} ${offer.user})`)
+      await Bun.sleep(500)
+      await shotAround(page, `forms-save-address-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-save-address-open-${scheme}`), "Save keeps the address")
+      const identity = (await formSaves(run)).find((r) => r.kind === "identity" && !r.ref)
+      check(sorted(identity?.fields) === sorted({ "given-name": "Ada", "family-name": "Lovelace", "address-line1": "1 Main St", city: "Springfield", "postal-code": "12345", country: "US" }), `as a new identity, the name split and the country its code (${sorted(identity?.fields)})`)
+    }
+    await newTurn(run)
+    await page.goto(`${site}/forms/ship`)
+    await formsFound(run, page, "/forms/ship")
+    await typeIn(page, { n: "Kit Langton", a1: "5 Oak Ave", city: "Brooklyn", zip: "11215" })
+    await page.selectOption("#country", "US")
+    await page.click("button[type=submit]")
+    offer = await formOffer(page, "the address update shows")
+    if (offer) {
+      check(offer.title === "Update address?" && offer.user === "5 Oak Ave, Brooklyn · localhost", `a saved identity at a new street is an update (${offer.title} ${offer.user})`)
+      await Bun.sleep(500)
+      await shotAround(page, `forms-update-address-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-update-address-open-${scheme}`), "Save updates the identity")
+      const moved = (await formSaves(run)).find((r) => r.kind === "identity" && r.ref)
+      check(sorted(moved?.fields) === sorted({ "address-line1": "5 Oak Ave", "postal-code": "11215" }), `with only what changed (${sorted(moved?.fields)})`)
+    }
+    check(!logs.some((l) => /4000056655665556|4000 0566 5566 5556|\b737\b/.test(l)), "no card number or code in the extension's or the page's logs")
   } catch (err) {
     check(false, `formsSurface threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "formsSurface")
@@ -4847,6 +4988,26 @@ async function formsShapes() {
       const got = await values(page, ["b1", "b2", "b3", "b4", "cvv"])
       check(JSON.stringify(got) === JSON.stringify(["4242", "4242", "4242", "4242", "123"]), `a card number split over four boxes fills each (${got.join(" | ")})`)
     } else check(false, "the split card number fills")
+
+    // A card Deadbolt filled and nobody changed offers nothing on submit.
+    await page.goto(`${site}/forms/pay`)
+    const filledCard = await formsMenu(run, page, "#cc", "/forms/pay")
+    if (filledCard && (await pickRow(filledCard, "Visa")) === "ok") {
+      await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+      await page.press("#cvc", "Enter")
+      await page.waitForURL("**/forms/thanks")
+      check((await noOffer(run, page)) && !(await formSaves(run)).length, "a card Deadbolt filled and nobody changed offers nothing")
+    } else check(false, "the card fills on the checkout")
+    // Nor is anything typed on a site saving is off for kept or looked up.
+    await run.worker.evaluate(() => chrome.storage.local.set({ neverSave: ["localhost"] }))
+    await page.goto(`${site}/forms/pay`)
+    await formsFound(run, page, "/forms/pay")
+    const lists = (await hostLog(run)).filter((r) => r.type === "forms").length
+    await typeIn(page, { holder: "Ada Lovelace", cc: "4000 0566 5566 5556", exp: "09 / 30", cvc: "737" })
+    await page.press("#cvc", "Enter")
+    await page.waitForURL("**/forms/thanks")
+    check((await noOffer(run, page)) && (await hostLog(run)).filter((r) => r.type === "forms").length === lists, "Never for this site: a typed card is neither offered nor looked up")
+    await run.worker.evaluate(() => chrome.storage.local.set({ neverSave: [] }))
   } catch (err) {
     check(false, `formsShapes threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "formsShapes")
@@ -4862,7 +5023,8 @@ async function formsShapes() {
  * box. An unknown cross-origin frame gets no menu and no card.
  */
 async function formsFrames() {
-  const run = await launch()
+  // The provider's frame keeps what's typed only in a secure context, as a real provider's https frame is.
+  const run = await launch({ secure: [`http://js.stripe.test:${server.port}`] })
 
   const page = await run.context.newPage()
   try {
@@ -4916,6 +5078,38 @@ async function formsFrames() {
       const last = (await formFills(run)).at(-1)
       check(!!last && !last.fields.includes("number") && !last.fields.includes("cvv"), `and its number and code are never asked for (${last?.fields.join(",")})`)
     }
+
+    // A card typed into the provider's frame and the name typed in the page:
+    // one offer, once the checkout went through.
+    await newTurn(run)
+    await page.goto(`${site}/forms/stripe-pay`)
+    const pay = await until("the Stripe frame loads", () => page.frames().find((f) => f.url().includes("js.stripe.test")) ?? null)
+    if (pay) {
+      await formsFound(run, page, "/forms/card-frame")
+      await page.fill("#holder", "Ada Lovelace")
+      await typeIn(pay, { cardnumber: "4000 0566 5566 5556", "exp-date": "09 / 30", cvc: "737" })
+      await page.locator("h1").click()
+      await page.click("button[type=submit]")
+      await page.waitForURL("**/forms/thanks")
+      const offer = await formOffer(page, "the card typed in the provider's frame is offered")
+      if (!offer) await diagnose(run, page, "card in a provider's frame")
+      if (offer) {
+        check(offer.title === "Save card?" && offer.user === "Visa •••• 5556 · localhost", `a card typed in the provider's frame is offered with the page's name, as one card (${offer.title} ${offer.user})`)
+        check(await acceptForm(page, offer.offer, "forms-save-card-frame-light"), "and saved")
+        const saved = (await formSaves(run)).at(-1)
+        check(sorted(saved?.fields) === sorted({ number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }), `from both: the number and expiry from the frame, the name from the page (${Object.keys(saved?.fields ?? {}).join(",")})`)
+      }
+    }
+
+    // A card form that posts to another origin: nothing typed in it is offered.
+    await newTurn(run)
+    const saves = (await formSaves(run)).length
+    await page.goto(`${site}/forms/pay-away`)
+    await formsFound(run, page, "/forms/pay-away")
+    await typeIn(page, { holder: "Ada Lovelace", cc: "5555 5555 5555 4444", exp: "09 / 30", cvc: "737" })
+    await page.press("#cvc", "Enter")
+    await until("the form goes", async () => (await page.locator("form").count()) === 0, 5000)
+    check((await noOffer(run, page)) && (await formSaves(run)).length === saves, "a card form posting to another origin offers nothing")
   } catch (err) {
     check(false, `formsFrames threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "formsFrames")

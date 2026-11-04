@@ -16,6 +16,7 @@ import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
+import { offerTitle } from "./ui/offer"
 import { brandBySlug, siteTile } from "./ui/site-icon"
 
 /** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
@@ -1099,6 +1100,7 @@ let offerSize: () => { width: number; height: number } = () => ({ width: 0, heig
  */
 function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   mode = "save"
+  const title = offerTitle(offer)
   document.body.classList.add("save")
   document.body.dataset.offer = offerState
   const status = h("p", { class: "offer-status" })
@@ -1109,10 +1111,10 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   const never = h("button", { class: "link never", type: "button" }, "Never for this site")
   const bar = h("span", { class: "bar", "aria-hidden": "true" })
   const mark = h("span", { class: "offer-mark", "aria-hidden": "true" }, svg(ICONS.deadbolt))
-  const row = h("div", { class: "offer-row" }, mark, h("h1", { class: "offer-title" }, offer.update ? "Update password?" : "Save login?"), save)
+  const row = h("div", { class: "offer-row" }, mark, h("h1", { class: "offer-title" }, title), save)
   const section = h(
     "section",
-    { class: "offer", "aria-label": offer.update ? "Update password" : "Save login" },
+    { class: "offer", "aria-label": title.slice(0, -1) },
     row,
     h(
       "div",
@@ -1123,7 +1125,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     ),
     bar,
   )
-  const dot = h("button", { class: "dot", type: "button", "aria-label": offer.update ? "Update password?" : "Save login?" }, svg(ICONS.deadbolt))
+  const dot = h("button", { class: "dot", type: "button", "aria-label": title }, svg(ICONS.deadbolt))
   surface.replaceChildren(section, dot)
   section.inert = offerState === "dot"
   dot.inert = offerState !== "dot"
@@ -1261,7 +1263,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   }
   say("")
   // It shows in the corner, away from where the user is: a screen reader hears it came.
-  announce(`${offer.update ? "Update password" : "Save login"} for ${offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
+  announce(`${title.slice(0, -1)} for ${offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
   const answer = async (choice: OfferChoice, e: MouseEvent) => {
     // Real presses only.
     if (!e.isTrusted || busy || offerState === "dot") return

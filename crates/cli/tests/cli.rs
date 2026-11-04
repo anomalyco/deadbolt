@@ -2791,7 +2791,15 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     assert_eq!(
         hello["capabilities"],
         serde_json::json!([
-            "list", "fill", "check", "save", "generate", "passkeys", "learn", "forms"
+            "list",
+            "fill",
+            "check",
+            "save",
+            "generate",
+            "passkeys",
+            "learn",
+            "forms",
+            "save-form"
         ])
     );
 
@@ -4801,6 +4809,110 @@ fn forms_fill_from_an_imported_identity_and_card() {
     let looked_up = entries.iter().any(|e| e["command"] == "form-items");
     assert_eq!((identity, looked_up), (!browser, !browser), "{entries:?}");
     assert_eq!(entries.len(), if browser { 1 } else { 3 });
+}
+
+/// The browser host keeps a card and an identity typed into a page through
+/// the daemon's item-new and item-set: only form fields, normalized, never a
+/// security code, and an update changes only the fields it names.
+#[test]
+fn browser_host_saves_cards_and_identities_typed_into_a_page() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut host = Host::start(&a);
+    let origin = "https://shop.example.com";
+    let typed = serde_json::json!({
+        "number": "4000 0566 5566 5556", "expiry": "09/30", "cardholder": "Ada Lovelace", "brand": "Visa",
+    });
+    let mut with_code = typed.clone();
+    with_code["cvv"] = "737".into();
+    let refused = host.ask(serde_json::json!({
+        "type": "save-form", "origin": origin, "kind": "card", "fields": with_code,
+    }));
+    assert_error(&refused, "bad_request");
+    let saved = host.ask(serde_json::json!({
+        "type": "save-form", "origin": origin, "kind": "card", "fields": typed,
+    }));
+    assert_eq!(
+        (&saved["type"], &saved["created"]),
+        (&"save-form".into(), &true.into()),
+        "{saved}"
+    );
+    let forms = host.ask(serde_json::json!({"type": "forms", "origin": origin, "kinds": ["card"]}));
+    let card = &forms["cards"][0];
+    assert_eq!(card["ref"], saved["ref"]);
+    assert_eq!(
+        (
+            &card["last4"],
+            &card["expiry"],
+            &card["cardholder"],
+            &card["brand"]
+        ),
+        (
+            &"5556".into(),
+            &"2030-09".into(),
+            &"Ada Lovelace".into(),
+            &"Visa".into()
+        )
+    );
+    assert_eq!(
+        card["fields"],
+        serde_json::json!(["cardholder", "number", "expiry", "brand"])
+    );
+    // An update: only the expiry; never the number.
+    let number = host.ask(serde_json::json!({
+        "type": "save-form", "origin": origin, "kind": "card", "ref": saved["ref"],
+        "fields": {"number": "4242424242424242"},
+    }));
+    assert_error(&number, "bad_request");
+    let updated = host.ask(serde_json::json!({
+        "type": "save-form", "origin": origin, "kind": "card", "ref": saved["ref"],
+        "fields": {"expiry": "2031-01"},
+    }));
+    assert_eq!(
+        (&updated["ref"], &updated["created"]),
+        (&saved["ref"], &false.into()),
+        "{updated}"
+    );
+    // Only an identity or card forms lists, of the kind named.
+    let wrong = host.ask(serde_json::json!({
+        "type": "save-form", "origin": origin, "kind": "identity", "ref": saved["ref"],
+        "fields": {"given-name": "Ada"},
+    }));
+    assert_error(&wrong, "not_found");
+    let identity = host.ask(serde_json::json!({
+        "type": "save-form", "origin": origin, "kind": "identity", "fields": {
+            "given-name": "Ada", "family-name": "Lovelace", "address-line1": "1 Main St",
+            "city": "Springfield", "postal-code": "12345", "country": "us", "phone": "+1 415 555 0100",
+        },
+    }));
+    assert_eq!(identity["created"], true, "{identity}");
+    host.close();
+
+    // `show` lists each field as its name and value.
+    let field = |show: &str, name: &str| {
+        show.lines().find_map(|l| {
+            l.strip_prefix(name)
+                .filter(|v| v.starts_with(' '))
+                .map(|v| v.trim().to_string())
+        })
+    };
+    let card = a.run(&["show", "5556"]);
+    assert_eq!(field(&card, "expiry").as_deref(), Some("2031-01"), "{card}");
+    assert_eq!(field(&card, "cvv"), None, "{card}");
+    let id = identity["ref"].as_str().unwrap().split_once(':').unwrap().1;
+    let home = a.run(&["show", id]);
+    for (name, value) in [
+        ("country", "US"),
+        ("phone", "+14155550100"),
+        ("postal-code", "12345"),
+    ] {
+        assert_eq!(field(&home, name).as_deref(), Some(value), "{home}");
+    }
+    let activity = a.run(&["activity", "--since", "1h", "--json"]);
+    assert!(
+        !activity.contains("4000056655665556") && !activity.contains("\"737\""),
+        "{activity}"
+    );
 }
 
 /// Every item type: its fields checked by its schema, `get` printing the

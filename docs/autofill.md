@@ -1042,6 +1042,13 @@ not running without sending hello, which would start the daemon again.
     sign-up that goes through still gets an offer. Kept passwords expire
     after 15 minutes and locking wipes them; candidates go after two minutes,
     and can't push out kept ones.
+- **Saving cards and addresses.** A card, or an identity (name, address,
+  email, phone), the user typed into a checkout or registration form is
+  offered the same way, in the same corner surface and popup, on the same
+  turn rule: "Save card?" with "Visa •••• 4242 · shop.com" inside, "Update
+  card?", "Save address?" with "1 Main St, Springfield", "Update address?",
+  or "Save details?" for a name, email and phone with no address. See Forms,
+  Saving what was typed.
 - **Changing a password.** A change-password form with a username updates
   the login whose password is the current one. Without a username, it's the
   one login here whose password is the current one (a `check` with no
@@ -1743,6 +1750,89 @@ for `.com` over http, and an http top page on `localhost` or a `.test` host,
 so the e2e run can serve a Stripe-like frame on `js.stripe.test`. Every
 other build defines that branch away.
 
+### Saving what was typed
+
+A card or an identity the user types into a form is offered to save once the
+submit has gone through, as a login is after a sign-in (see Saving): in the
+corner of the page, in the popup, and with the toolbar badge, on the same
+once per site every ten minutes. The offer and the surface's states are the
+login's; only their words change.
+
+- **Only the user's own typing, on the user's own submit.** The content
+  script reads a form's identity and card fields only on a trusted submit
+  of it: a submit event, a click on its submit control or on a button that
+  says it pays or goes on ("Pay", "Place order", "Continue", "Save"), or
+  Enter in one of its fields. A kind counts only when the user typed into
+  (or chose in) at least one of its fields themselves, by the same keyed
+  digest of the last trusted input as for passwords (`typedByUser`), now
+  kept for selects too: a form Deadbolt filled and nobody changed offers
+  nothing. A card number counts only as the user typed it or Deadbolt
+  filled it, never one the page put there, and has to pass the Luhn check.
+  The security code is never read. Of a shipping and a billing address, the
+  one most typed into. A page without identity or card fields does no work
+  for this: the check is the scan's own field list, and nothing is sent.
+- **Not to another origin.** A form whose action (or its submitter's
+  `formaction`) is another origin's is left alone; a `javascript:` action
+  stays in the page. A payment provider's own frame (see Frames and payment
+  providers) is the exception, as its form is the provider's.
+- **Frames.** A card goes into the offer from the top page, a frame of its
+  site, or a payment provider's frame; an identity only from the top page
+  and frames of its site (`formsTargetFor`, as for fills). On the top page's
+  submit the background asks the frames below that reported identity or
+  card fields for what they hold (`db:forms-read`), so a card typed into
+  Stripe's frame and the name typed in the page become one card. A provider's
+  frame tells the top page it's there (`db:forms-frames`), so the page's
+  submit counts even with no field of its own. A frame that isn't a secure
+  context has no `crypto.subtle`, so keeps no digest of what's typed, and
+  gives nothing.
+- **Judged after the outcome.** Nothing is looked up until the submit is
+  judged. It went through when the submitted fields go away from the page
+  (`db:form-outcome`, looked at every 2.5 seconds for a minute) or the top
+  page settles on a new document that isn't the same page showing the same
+  kind of fields again (posted back, as a declined card often is). Still
+  showing five seconds on with a field marked invalid or an error box saying
+  it was declined, refused, required and the like, it didn't.
+- **What's offered.** The background asks `forms`, which lists cards with
+  their last four digits, brand, expiry and cardholder and never a number. A
+  card with the same last four digits and brand is that card: offered as an
+  update of its expiry or cardholder if either changed, and not at all if
+  neither did; an update never changes a number. Any other card is new. An
+  identity is compared by the values of the fields typed, of up to eight
+  identities that have one of them (`fill-form`, which asks for no
+  verification for an identity): one that already has them all means
+  nothing to offer; one that differs in at most one group of fields (name,
+  email, phone, address, company, birthday) and agrees on another is
+  updated with what changed or was missing, the most agreeing first; else
+  it's a new identity. An identity is worth offering only with a street and
+  a city or postal code, or a name with an email and a phone, so a contact
+  form's name and email aren't. A card goes first; a form with both offers
+  the card. Since cards are compared without their numbers, a different
+  card with the same last four digits and brand reads as the same card;
+  the update shows which card it is before anything changes.
+- **Never and Not now.** "Never for this site" (`neverSave`) keeps nothing
+  typed there, and no lookup is made; "Saving is off" in the popup is the
+  same switch. Not now holds back the same card or identity, by its label,
+  for a day, as for a login.
+- **Memory only.** What was typed lives in the service worker's memory, as
+  a login's password does (`bg/save.ts`): for three minutes from the submit,
+  until the offer is answered or ends (five minutes), and never past
+  Deadbolt locking, the tab closing or leaving the site, or a navigation by
+  hand. The page, the surface frame and the popup get only the label: a
+  card's brand and last four digits, an identity's street and city (else its
+  name, email or phone).
+- **Saving.** Save sends `save-form` (see Host messages) with only the
+  fields to write: a new item's, or an update's changed ones. The native
+  host turns it into the daemon's `item-new` (in the default vault) or
+  `item-set` (of an identity or card `forms` lists), each checked by
+  `deadbolt_core::forms::saved_fields`; the browser-only vault writes the
+  same through that function. Under Strict the browser-only vault asks for
+  the passphrase (or an enrolled platform PRF) before it saves a card, as it
+  does before showing a card's number: the prompt says "Save Visa •••• 4242",
+  and a wrong passphrase saves nothing. The native build has no Strict and
+  asks for nothing more: saving shows nothing.
+- **Activity** records the save as the daemon records the browser host's
+  `item-new` and `item-set`, with the fields' names and never a value.
+
 ### Security
 
 - **Origins:** forms aren't bound to a site: any page autofill takes may list
@@ -1764,7 +1854,11 @@ other build defines that branch away.
   identity.
 - **Activity** records every card fill from the browser (which card, which
   page, which fields), never an identity's: addresses fill on every checkout,
-  and they're not secrets. Listing is never an entry. A fill asked by
+  and they're not secrets. Listing is never an entry. A save from a form
+  is an entry, with the fields' names only.
+- **Saving keeps no code:** `save-form` refuses `cvv` (and anything that
+  isn't a form field), the content script never reads it, and a card number
+  is never shown back: only its last four digits. A fill asked by
   anything else than the browser host is recorded, whatever the item.
 - **Waiting on Touch ID** holds the host's other requests behind it (they're
   answered in order), which is fine while the user is at the prompt.
@@ -1773,7 +1867,8 @@ other build defines that branch away.
 
 ### What's next
 
-- Saving a new address or card typed into a checkout, and updating one.
+- Comparing a typed card by its whole number in the vault, which needs a
+  daemon command of its own; today it's by last four digits and brand.
 - Agent grants for forms: Browse and other agent clients fill logins only.
 - A billing address picker in the app (the field is an item id today).
 - Filling forms from the toolbar popup: only the in-page menu fills them.
@@ -1983,7 +2078,7 @@ The host exits when the port closes.
 ```json
 { "id": "1", "type": "hello" }
 { "id": "1", "type": "hello", "protocol": 3, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "forms"] }
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "forms", "save-form"] }
 ```
 
 `status` is one of:
@@ -2160,6 +2255,34 @@ for a card's `number` or `cvv` raises Touch ID when it's on; `verified` says
 whether it did. A cancelled or failed prompt is `failed`. Rate-limited with
 `fill`. An unknown `ref`, or one that isn't an identity or card, gets
 `not_found`.
+
+### save-form: keep an identity or card typed into a form
+
+```json
+{ "id": "11", "type": "save-form", "origin": "https://shop.com", "kind": "card",
+  "fields": { "number": "4242424242424242", "expiry": "2028-08", "cardholder": "Kit Langton", "brand": "Visa" } }
+{ "id": "11", "type": "save-form", "ref": "<64 hex>:<32 hex>", "created": true }
+{ "id": "12", "type": "save-form", "origin": "https://shop.com", "kind": "identity", "ref": "<64 hex>:<32 hex>",
+  "fields": { "address-line1": "5 Oak Ave", "postal-code": "11215" } }
+{ "id": "12", "type": "save-form", "ref": "<64 hex>:<32 hex>", "created": false }
+```
+
+Only after the user said Save to an offer (see Forms, Saving what was
+typed). `kind` is `identity` or `card`; `fields` names its form fields (see
+fill-form), never `cvv`: any other field is `bad_request`. Each value is
+trimmed and normalized as the CLI's input is (a card number without spaces,
+`MM/YY` as `YYYY-MM`, an international phone in E.164, a country's code in
+upper case); one that still doesn't read as valid is left out.
+
+- **Without `ref`:** a new item in the default vault, named as the vault
+  names it ("Visa •••• 4242", an identity's name). A card needs its number
+  (`bad_request` without one).
+- **With `ref`:** only those fields of that identity or card, which `forms`
+  lists for the origin (else `not_found`); a card's `number` never changes
+  (`bad_request`).
+- **Daemon:** `item-new` or `item-set`, which the browser host may ask; no
+  daemon protocol change. Rate-limited with `fill`. Recorded in Activity as
+  those commands are, with the fields' names.
 
 ### passkey-list: the passkeys for a page
 

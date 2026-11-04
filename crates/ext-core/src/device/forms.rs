@@ -2,10 +2,13 @@
 
 use std::{cell::Cell, collections::BTreeMap};
 
-use deadbolt_core::{Item, forms, site::Site};
+use deadbolt_core::{DataOp, Item, forms, site::Site};
 use serde_json::{Value, json};
 
-use super::{Error, PRESET, Result, item_ref, reauthenticate, state, text};
+use super::{
+    Error, PRESET, Result, item_ref, reauthenticate, reference as item_reference, request_sync,
+    state, text,
+};
 use crate::policy;
 
 fn strings(body: &Value, key: &str) -> Result<Vec<String>> {
@@ -124,4 +127,83 @@ pub(super) fn fill(body: &mut Value) -> Result<Value> {
     let item = find(body, &fields)?;
     let values: BTreeMap<_, _> = forms::values(&item, &fields).collect();
     Ok(json!({"type": "fill-form", "verified": verified, "values": values}))
+}
+
+/// `save-form`: keeps an identity or a card the user typed into a form and
+/// chose to save, new or changed, with only its form fields and never a
+/// card's security code (`forms::saved_fields`, the daemon's rule too).
+/// Under Strict a card asks for the passphrase first, as showing its number
+/// does.
+pub(super) fn save(body: &mut Value) -> Result<Value> {
+    Site::from_origin(text(body, "origin")?).map_err(Error::Protocol)?;
+    let kind = text(body, "kind")?.to_owned();
+    let values = body
+        .get("fields")
+        .and_then(Value::as_object)
+        .ok_or(Error::Protocol("Missing form fields"))?
+        .iter()
+        .map(|(name, value)| {
+            value
+                .as_str()
+                .map(|v| (name.clone(), v.to_owned()))
+                .ok_or(Error::Protocol("A form field's value is text"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let update = body.get("ref").is_some();
+    let fields = forms::saved_fields(&kind, values, update).map_err(|error| {
+        Error::Protocol(match error {
+            forms::SaveError::Kind => "kind is identity or card",
+            forms::SaveError::WrongField { .. } => "That item can't be saved with those fields",
+            forms::SaveError::Number => "A new card needs its number",
+            forms::SaveError::NoFields => "Nothing to save",
+        })
+    })?;
+    // A changed item has to be there, and of that kind, before anyone is asked.
+    let target = if update {
+        let target = text(body, "ref")?;
+        let (vault, item) = target
+            .split_once(':')
+            .ok_or(Error::Protocol("Invalid form reference"))?;
+        super::unhex::<32>(vault)?;
+        super::unhex::<16>(item)?;
+        let id = state().with(|s| {
+            let id = item_ref(&s.vault, target).map_err(|_| Error::NotFound)?;
+            s.vault
+                .item(&id)
+                .filter(|i| !i.deleted && i.kind == kind)
+                .ok_or(Error::NotFound)?;
+            Ok(id)
+        })?;
+        Some(id)
+    } else {
+        None
+    };
+    let required = policy::card_reauth(PRESET.with(Cell::get), kind == "card");
+    if required {
+        reauthenticate(body, true)?;
+    }
+    let reply = state().with(|s| {
+        let (id, created) = match target {
+            Some(id) => {
+                s.vault
+                    .item(&id)
+                    .filter(|i| !i.deleted && i.kind == kind)
+                    .ok_or(Error::NotFound)?;
+                s.write(
+                    fields
+                        .into_iter()
+                        .map(|(name, field)| DataOp::set(id, name, field))
+                        .collect(),
+                )?;
+                (id, false)
+            }
+            None => (
+                s.mutate(|v, key| Ok(v.create_item(key, &kind, None, fields)?.0))?,
+                true,
+            ),
+        };
+        Ok(json!({"type": "save-form", "ref": item_reference(&s.vault, id), "created": created}))
+    })?;
+    request_sync();
+    Ok(reply)
 }

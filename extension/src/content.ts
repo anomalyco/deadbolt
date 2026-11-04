@@ -9,15 +9,17 @@ import { SIGNIN_SETTING, signInOn } from "./auth-state"
 import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
+import { readSubmitted } from "./content/formfill"
 import { fillable, ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
-import { pageFacts } from "./content/outcome"
+import { formFailed, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { chainActive, initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
+import { paymentProvider } from "./payments"
 
 const isTop = window === window.top
 let offerSignIn = false
@@ -70,6 +72,17 @@ let submission = 0
 let failureTimer: number | undefined
 /** A site may submit itself when the last digit fills. Suppress only our duplicate click. */
 let submittedForm: HTMLFormElement | undefined
+/** When identity or card fields were last submitted here, and this document's count of such submits. */
+let formsSubmitAt = 0
+let formsSubmission = 0
+/**
+ * The top page: a payment provider's frame below has card fields (the
+ * background says so, see db:forms-frames), so a submit here may carry a
+ * card typed there, even with no identity or card field of the page's own.
+ */
+let cardFrames = false
+/** How long a submitted identity or card form is watched for going away or being turned down. */
+const FORM_WATCH_MS = 60_000
 
 const sameFields = (a: Field[], b: Field[]) =>
   a.length === b.length && a.every((f, i) => f.el === b[i].el && f.role === b[i].role && f.owner.form === b[i].owner.form && f.owner.parent === b[i].owner.parent)
@@ -257,6 +270,17 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     }
     return
   }
+  if (message?.type === "db:forms-frames") {
+    if (isTop) cardFrames = message.on === true
+    return
+  }
+  // The background asks a frame below what it holds, right after the user's
+  // own submit in the top page (see bg/save.ts): never the top page itself.
+  if (message?.type === "db:forms-read") {
+    if (isTop || !formFields.length) return void respond(null)
+    void readSubmitted(formFields).then(respond, () => respond(null))
+    return true
+  }
   if (message?.type === "db:probe") {
     if (!isTop) return void respond(null)
     try {
@@ -386,6 +410,66 @@ function watchForFailure(submittedKind: SurfaceKind | null, roles: Field["role"]
   }, FAILED_AFTER_MS)
 }
 
+// ---- Identity and card submits ------------------------------------------------
+
+/** Where a form sends what it holds: the submitter's formaction, the form's action, else this page. */
+function sameOriginAction(form: HTMLFormElement, submitter?: Element | null): boolean {
+  try {
+    const action = new URL(submitter?.getAttribute("formaction") ?? form.getAttribute("action") ?? location.href, document.baseURI)
+    // A javascript: action stays in the page, which sends what it likes itself.
+    return !/^https?:$/.test(action.protocol) || action.origin === location.origin
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The user themselves submitted identity or card fields (of `form`, or the
+ * page's when there's none): what they typed goes to the background, which
+ * keeps it in memory and offers to save it once the submit has gone through
+ * (bg/save.ts). Costs nothing on a page without such fields. A form posting
+ * to another origin is left alone, except in a payment provider's own frame.
+ */
+function formsSubmitted(form: HTMLFormElement | null, submitter?: Element | null) {
+  if (!formFields.length && !(isTop && cardFrames)) return
+  const now = Date.now()
+  if (now - formsSubmitAt < 800) return
+  if (form && !sameOriginAction(form, submitter) && !paymentProvider(new URL(location.href))) return
+  const fields = form ? formFields.filter((f) => f.form === form) : formFields
+  if (!fields.length && !(isTop && cardFrames)) return
+  formsSubmitAt = now
+  void readSubmitted(fields).then((got) => {
+    // The top page asks the provider's frames below even with nothing of its own.
+    if (!got.card && !got.identity && !(isTop && cardFrames)) return
+    const attempt = ++formsSubmission
+    send({ type: "db:form-capture", ...got, submission: attempt })
+    watchFormOutcome(attempt, fields, form)
+  })
+}
+
+/**
+ * After a submit of identity or card fields: their going away (the page
+ * moved on in place) says it went through, and still showing five seconds
+ * on with an error (a declined card, a required field) says it didn't. A
+ * newer submit takes over. A page that loads a new document is judged by
+ * the background instead.
+ */
+function watchFormOutcome(attempt: number, fields: FormField[], form: HTMLFormElement | null) {
+  const els = fields.map((f) => f.el)
+  if (!els.length) return
+  const started = Date.now()
+  const look = () => {
+    if (attempt !== formsSubmission || document.hidden) return
+    if (!els.some((el) => el.isConnected && rendered(el))) return void send({ type: "db:form-outcome", submission: attempt, ok: true })
+    if (Date.now() - started >= FAILED_AFTER_MS && formFailed(els, form)) return void send({ type: "db:form-outcome", submission: attempt, ok: false })
+    if (Date.now() - started < FORM_WATCH_MS) window.setTimeout(look, QUIET_AFTER_MS)
+  }
+  window.setTimeout(look, QUIET_AFTER_MS)
+}
+
+/** A button that says it pays, orders or goes on: a checkout's own, often outside any form. */
+const GOES_ON = /^(pay|pay now|pay \S+|place (your )?order|order now|buy|buy now|purchase|complete (order|purchase|payment|checkout)|check ?out|continue|next|save|save (address|card|details)|submit|confirm|subscribe|donate|add card|update|review order|proceed)\b/i
+
 const realTarget = (event: Event) => eventTarget(event)
 
 // Only the user's own clicks and keypresses count: pages can dispatch
@@ -427,6 +511,12 @@ const SUBMITS = 'button:not([type]), button[type="submit"], input[type="submit"]
 function onClick(event: MouseEvent) {
   if (!event.isTrusted) return
   let node = realTarget(event) as Element | null
+  if (formFields.length || (isTop && cardFrames)) {
+    const control = node?.closest?.('button, input[type="submit"], input[type="image"], input[type="button"], [role=button]')
+    const label = control ? (control.getAttribute("aria-label") || control.textContent || (control as HTMLInputElement).value || "").trim() : ""
+    const form = control instanceof HTMLButtonElement || control instanceof HTMLInputElement ? control.form : (control?.closest("form") ?? null)
+    if (control && ((control.matches(SUBMITS) && form) || (label.length <= 40 && GOES_ON.test(label)))) formsSubmitted(form, control)
+  }
   const control = node?.closest("a, button")
   if (offerSignIn && isTop && control instanceof HTMLElement && isVisible(control) &&
       !control.matches(":disabled, [aria-disabled=true]") && SIGN_OUT.test((control.getAttribute("aria-label") || control.textContent || "").trim())) {
@@ -452,6 +542,7 @@ function onClick(event: MouseEvent) {
 function onSubmit(event: Event) {
   if (!event.isTrusted) return
   const form = realTarget(event)
+  if (form instanceof HTMLFormElement) formsSubmitted(form, (event as SubmitEvent).submitter)
   if (!(form instanceof HTMLFormElement) || !fields.some((f) => form.contains(f.el))) return
   submittedForm = form
   captured()
@@ -462,6 +553,8 @@ function onKeydown(event: KeyboardEvent) {
   if (event.isTrusted && event.key === "Escape" && isTop && offerSignIn) void send({ type: "db:signin-stop" })
   if (!event.isTrusted || event.key !== "Enter") return
   const target = realTarget(event)
+  const own = formFields.find((f) => f.el === target && !(f.el instanceof HTMLTextAreaElement))
+  if (own) formsSubmitted(own.el.form ?? own.form)
   if (!fields.some((f) => f.el === target)) return
   gesture()
   captured()

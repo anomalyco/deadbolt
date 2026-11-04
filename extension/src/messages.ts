@@ -6,7 +6,7 @@
 
 import type { LearnSession, LearnStep } from "./learn"
 import type { StoredIcon } from "./ui/icon-store"
-import type { Account, Change, FieldRules, FormCard, FormField as HostField, FormIdentity, FormKind, HostStatus } from "./protocol"
+import type { Account, CardField, Change, FieldRules, FormCard, FormField as HostField, FormIdentity, FormKind, HostStatus, IdentityField } from "./protocol"
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
@@ -167,6 +167,15 @@ export type ToBackground =
   | { type: "db:capture"; username?: string; password?: string; newPassword?: string; generated?: string; title: string; kind: SurfaceKind | null; roles: FieldRole[]; submission: number }
   /** The form submitted as `submission` still shows, five seconds on: the sign-in failed. */
   | { type: "db:failed"; submission: number }
+  /**
+   * The user submitted identity or card fields they typed into (see
+   * readSubmitted): their values, never a security code, to offer to save
+   * them once the submit goes through. `submission`: this document's count
+   * of such submits. Sent only on the user's own trusted submit.
+   */
+  | { type: "db:form-capture"; card?: Partial<Record<CardField, string>>; identity?: Partial<Record<IdentityField, string>>; submission: number }
+  /** How the form submitted as `submission` went: its fields went away (`ok`), or it shows it was turned down. */
+  | { type: "db:form-outcome"; submission: number; ok: boolean }
   /** The user themselves submitted a login form here: a trusted click on its submit control, or Enter in one of its fields. */
   | { type: "db:submitted" }
   | { type: "db:menu-close"; token: string; dismissed?: boolean }
@@ -307,6 +316,10 @@ export type ToContent =
   | { type: "db:menu-gone" }
   /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
   | { type: "db:surface"; token: string }
+  /** To a frame with identity or card fields, right after the user's own submit in the top page: what they hold (a Submitted). */
+  | { type: "db:forms-read" }
+  /** To the top page: a payment provider's frame below has card fields, so a submit here may carry a card typed there. */
+  | { type: "db:forms-frames"; on: boolean }
   | { type: "db:signin-offer"; token: string }
   | { type: "db:auth-probe"; fresh?: boolean }
   | { type: "db:signin-go"; action: string }
@@ -435,8 +448,12 @@ export type MenuLoadReply =
   /** A pill on a field a sign-in session's step just filled ("Password filled"). */
   | { kind: "notice"; label: string; title: string }
   | { kind: "status"; status: Status }
-  /** The save offer's surface: what it may show. Never the password. */
-  | { kind: "offer"; site: string; username: string; update: boolean }
+  /**
+   * The save offer's surface: what it may show. Never the password, a card's
+   * number beyond its last four digits, or its code. `what`: a card or an
+   * identity typed into a form, with `username` its label ("Visa •••• 4242").
+   */
+  | { kind: "offer"; site: string; username: string; update: boolean; what?: SaveWhat }
 
 /** `submitted`: the pick signed in (see Autofill.startAutomatic) and its form went on, beyond a fill. */
 export type PickReply = { ok: true; submitted?: boolean } | { ok: false; message: string }
@@ -474,12 +491,18 @@ export type LearnReply = { ok: true; learning?: Learning } | { ok: false; messag
 /** "later" (Not now) also holds back the same login on this site for a day; "never" stops offers for the site. */
 export type OfferChoice = "save" | "later" | "never"
 
+/** What a form save offer keeps: a card, an identity with an address, or one with only contact details. */
+export type SaveWhat = "card" | "address" | "details"
+
 export interface SaveOffer {
   /** Made for each offer; the popup answers by it. */
   id: string
   site: string
+  /** The login's username; for a card or an identity, its label ("Visa •••• 4242", "1 Main St, Springfield"). */
   username: string
   update: boolean
+  /** A card or identity typed into a form, rather than a login. */
+  what?: SaveWhat
 }
 
 /** `gone`: the offer answered isn't the one waiting anymore. */
@@ -621,11 +644,12 @@ export type DeviceCommand =
 /**
  * A request waiting on the passphrase under Strict, as Deadbolt's own pages
  * ask for it: a card's number or code to fill (`kind` "card", the default),
- * or a passkey sign-in ("passkey-get") or registration ("passkey-create").
+ * a card to save from a form ("card-save"), or a passkey sign-in
+ * ("passkey-get") or registration ("passkey-create").
  */
 export interface Reauth {
   id: string
-  kind?: "card" | "passkey-get" | "passkey-create"
+  kind?: "card" | "card-save" | "passkey-get" | "passkey-create"
   /** "Visa •••• 4242"; for a passkey, its username (or "Passkey"). */
   title: string
   site: string

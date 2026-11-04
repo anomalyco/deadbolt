@@ -412,6 +412,8 @@ function reauthText(reauth: Reauth): { title: string; why: string; act: string; 
       return { title: `Sign in to ${reauth.site}`, why: `Strict: enter your passphrase to sign in as ${reauth.title} with a passkey on `, act: "Sign in", busy: "Signing in…" }
     case "passkey-create":
       return { title: `Save a passkey for ${reauth.site}`, why: `Strict: enter your passphrase to save a passkey for ${reauth.title} on `, act: "Save", busy: "Saving…" }
+    case "card-save":
+      return { title: `Save ${reauth.title}`, why: "Strict: enter your passphrase to save this card from ", act: "Save", busy: "Saving…" }
     default:
       return { title: `Fill ${reauth.title}`, why: "Strict: enter your passphrase to fill this card on ", act: "Fill", busy: "Filling…" }
   }
@@ -455,8 +457,8 @@ export function reauthView(app: App, reauth: Reauth): View {
       input.focus()
     } finally { b.disabled = false }
   })
-  // Touch ID may fill a card (no kind is a card); a passkey always takes the passphrase.
-  const card = (reauth.kind ?? "card") === "card"
+  // Touch ID may fill or save a card (no kind is a card); a passkey always takes the passphrase.
+  const card = (reauth.kind ?? "card") === "card" || reauth.kind === "card-save"
   if (card) void enrollment(app).then((t) => { if (t && form.isConnected) { form.insertBefore(touch, input); touch.focus() } })
   form.addEventListener("submit", async (e) => {
     e.preventDefault()

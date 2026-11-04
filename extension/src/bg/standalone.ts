@@ -71,9 +71,9 @@ const tooMany = (wait: number) => `Too many wrong passphrases. Try again in ${Ma
  * learning log is kept here (bg/learn-log.ts), locked or not, as the host
  * keeps it outside the daemon.
  */
-const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel", "learn"])
+const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "save-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel", "learn"])
 /** Requests that count as use for the idle lock. Listing a page's logins or forms doesn't (docs/autofill.md). */
-const USES = new Set<string>(["fill", "save", "fill-form", "generate", "passkey-create", "passkey-get"])
+const USES = new Set<string>(["fill", "save", "fill-form", "save-form", "generate", "passkey-create", "passkey-get"])
 
 /**
  * As the native host (crates/cli/src/browser/host.rs): checks are a password
@@ -93,6 +93,7 @@ const RATED: Partial<Record<string, "checks" | "fills" | "passkeys" | "learns">>
   fill: "fills",
   generate: "fills",
   "fill-form": "fills",
+  "save-form": "fills",
   "passkey-create": "passkeys",
   "passkey-get": "passkeys",
 }
@@ -340,7 +341,7 @@ export class StandaloneBackend implements VaultBackend {
     }
     const expected = REPLY_TYPE[body.type as T]
     if (reply.type !== expected) throw new HostError("failed", UNREADABLE)
-    if (body.type === "save") void this.hello("items")
+    if (body.type === "save" || body.type === "save-form") void this.hello("items")
     return reply as ReplyFor[T]
   }
 
@@ -533,7 +534,7 @@ export class StandaloneBackend implements VaultBackend {
       }
       const abort = () => p.settle({ error: cancelled() })
       const p: Pending = {
-        prompt: { id: newId(), title: reauthTitle(ask.title, request.type === "fill-form" ? "Card" : "Passkey"), site: ask.site, kind: request.type === "fill-form" ? "card" : request.type },
+        prompt: { id: newId(), title: reauthTitle(ask.title, card(request) ? "Card" : "Passkey"), site: ask.site, kind: request.type === "fill-form" ? "card" : request.type === "save-form" ? "card-save" : request.type },
         tabId: ask.tabId,
         body: structuredClone(body),
         checking: (on) => {
@@ -643,9 +644,9 @@ export class StandaloneBackend implements VaultBackend {
   private async confirm(id: string, proof: UnlockProof, started: number): Promise<DeviceReply> {
     const p = this.pending
     if (!p || p.prompt.id !== id) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
-    // A card may be filled after Touch ID. A passkey always takes the
+    // A card may be filled or saved after Touch ID. A passkey always takes the
     // passphrase: this keeps it waiting, so the passphrase can still answer it.
-    if (p.body.type === "fill-form") return this.confirmOnce(p, proof, started)
+    if (card(p.body)) return this.confirmOnce(p, proof, started)
     if (typeof proof.passphrase !== "string") return { ok: false, message: "Enter your passphrase to use this passkey.", code: "passphrase_needed", status: this.status }
     const passphrase = proof.passphrase
     const key = await digest(p.prompt.id, passphrase)
@@ -686,7 +687,7 @@ export class StandaloneBackend implements VaultBackend {
     // The KDF may outlast the time left to answer: the fill waits on it, not the clock.
     p.checking(true)
     try {
-      const passkey = p.body.type !== "fill-form"
+      const passkey = !card(p.body)
       raw = await this.raw(passkey ? { type: "passkey-authorize", ceremony: p.body, passphrase: proof.passphrase } : { ...p.body, ...proof }, SLOW_MS["device-reauth-confirm"]!)
       // Checking the passphrase does not register/sign. Only a still-live
       // ceremony may spend its one-shot, command-bound authorization.
@@ -871,6 +872,9 @@ async function inFront(tabId: number | undefined): Promise<boolean> {
 }
 
 /** Tells Deadbolt's own open pages that the fill waiting on the passphrase changed. */
+/** A card's fill or save, which Touch ID may answer too; anything else waiting is a passkey ceremony. */
+const card = (body: ReauthBody) => body.type === "fill-form" || body.type === "save-form"
+
 function reauthChanged() {
   void Promise.resolve(chrome.runtime.sendMessage({ type: "db:reauth" } satisfies ReauthChanged)).catch(() => {})
 }

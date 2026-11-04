@@ -54,6 +54,12 @@ export type Request =
     }
   | { id: number; type: "forms"; origin: string; kinds: FormKind[] }
   | { id: number; type: "fill-form"; origin: string; ref: string; fields: FormField[] }
+  /**
+   * Keeps an identity or card the user typed into a form and chose to save:
+   * a new one, or the changed fields of `ref`. Never a card's `cvv`; an
+   * update never changes a card's `number`.
+   */
+  | { id: number; type: "save-form"; origin: string; kind: FormKind; ref?: string; fields: Partial<Record<FormField, string>> }
   | { id: number; type: "passkey-list"; origin: string; rpId?: string }
   | {
       id: number
@@ -212,6 +218,11 @@ export interface FillFormReply {
   /** Whether Touch ID verified the user for this fill. */
   verified: boolean
 }
+export interface SaveFormReply {
+  type: "save-form"
+  ref: string
+  created: boolean
+}
 export interface ErrorReply {
   type: "error"
   code: ErrorCode
@@ -228,6 +239,7 @@ export type Reply =
   | SaveReply
   | FormsReply
   | FillFormReply
+  | SaveFormReply
   | PasskeysReply
   | PasskeyCreatedReply
   | PasskeyAssertionReply
@@ -248,6 +260,7 @@ export interface ReplyFor {
   save: SaveReply
   forms: FormsReply
   "fill-form": FillFormReply
+  "save-form": SaveFormReply
   "passkey-list": PasskeysReply
   "passkey-create": PasskeyCreatedReply
   "passkey-get": PasskeyAssertionReply
@@ -268,6 +281,7 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   save: "save",
   forms: "forms",
   "fill-form": "fill-form",
+  "save-form": "save-form",
   "passkey-list": "passkeys",
   "passkey-create": "passkey-created",
   "passkey-get": "passkey-assertion",
@@ -448,6 +462,8 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
       }
       return { type: "fill-form", values, verified: raw.verified === true }
     }
+    case "save-form":
+      return isRef(raw.ref) ? { type: "save-form", ref: raw.ref, created: raw.created === true } : null
     case "passkeys": {
       if (!Array.isArray(raw.passkeys) || typeof raw.rpId !== "string") return null
       const passkeys = raw.passkeys.map(passkey).filter((p): p is Passkey => p !== null)

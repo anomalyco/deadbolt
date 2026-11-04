@@ -41,6 +41,7 @@ providers.submitIdentifier = (target, username, form) => autofill.submitIdentifi
  */
 let unlockTab: number | undefined
 let openingUnlock: Promise<void> | null = null
+saver.formFrames = (tabId) => forms.reported(tabId)
 saver.signedIn = (tabId, site) => {
   void providers.signedIn(tabId)
   void autofill.signedIn(tabId)
@@ -103,6 +104,10 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return saver.capture(sender, message)
     case "db:failed":
       return saver.failed(sender, message.submission)
+    case "db:form-capture":
+      return saver.formCapture(sender, message)
+    case "db:form-outcome":
+      return saver.formOutcome(sender, message.submission, message.ok === true)
     case "db:submitted":
       return autofill.submitted(sender)
     case "db:menu-away":

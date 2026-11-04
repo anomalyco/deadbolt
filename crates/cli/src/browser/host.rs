@@ -28,9 +28,9 @@ use super::{EXTENSION_ID, extension_origin};
 use crate::client;
 use crate::paths::Paths;
 use crate::protocol::{
-    CARD_FORM_FIELDS, Change, Command, ErrorCode, Fill, FormCard, FormIdentity, FormKind,
-    IDENTITY_FORM_FIELDS, LoginRef, PagePassword, Reply, Secret, SignIn, SiteField, SiteStatus,
-    SiteValues,
+    CARD_FORM_FIELDS, Change, Command, ErrorCode, FieldInput, Fill, FormCard, FormIdentity,
+    FormKind, IDENTITY_FORM_FIELDS, LoginRef, PagePassword, Reply, Secret, SignIn, SiteField,
+    SiteStatus, SiteValues,
 };
 use crate::site::Site;
 
@@ -161,6 +161,16 @@ enum Request {
         item: String,
         fields: Vec<String>,
     },
+    /// Saves an identity or card the user typed into a form and chose to
+    /// keep: a new one, or changed fields of the one `ref` names. Never a
+    /// card's security code.
+    SaveForm {
+        origin: String,
+        kind: FormKind,
+        #[serde(rename = "ref")]
+        item: Option<String>,
+        fields: std::collections::BTreeMap<String, Secret>,
+    },
     PasskeyList(passkeys::List),
     PasskeyCreate(passkeys::Create),
     PasskeyGet(passkeys::Get),
@@ -247,7 +257,7 @@ pub(super) enum Body {
         status: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        capabilities: [&'static str; 8],
+        capabilities: [&'static str; 9],
     },
     List {
         site: String,
@@ -290,6 +300,11 @@ pub(super) enum Body {
     FillForm {
         values: std::collections::BTreeMap<String, Secret>,
         verified: bool,
+    },
+    SaveForm {
+        #[serde(rename = "ref")]
+        item: String,
+        created: bool,
     },
     Passkeys(passkeys::Listed),
     PasskeyCreated(passkeys::Created),
@@ -1053,6 +1068,95 @@ impl Serial {
                 };
                 Ok(Body::FillForm { values, verified })
             }
+            // What the user typed into a form and chose to keep: an item the
+            // daemon creates or changes as it does for the CLI, with only an
+            // identity's or a card's form fields, never a security code.
+            Request::SaveForm {
+                origin,
+                kind,
+                item,
+                fields,
+            } => {
+                site(&origin)?;
+                let target = item.as_deref().map(parse_ref).transpose()?;
+                if !self.fills.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                let fields = deadbolt_core::forms::saved_fields(
+                    kind.as_str(),
+                    fields
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.expose().to_owned())),
+                    target.is_some(),
+                )
+                .map_err(|error| Refusal::bad(error.to_string()))?;
+                let inputs: Vec<FieldInput> = fields
+                    .into_iter()
+                    .map(|(name, field)| FieldInput {
+                        name,
+                        kind: None,
+                        value: field.value.clone(),
+                    })
+                    .collect();
+                if let Some(target) = target {
+                    // Only an identity or card of that kind, as `forms` lists it.
+                    if !form_refs(&self.paths, &origin, kind)
+                        .await?
+                        .contains(&target)
+                    {
+                        return Err(Refusal {
+                            code: Code::NotFound,
+                            message: format!("no such {}", kind.as_str()),
+                        });
+                    }
+                    let Reply::Item { .. } = call(
+                        &self.paths,
+                        Command::ItemSet {
+                            vault: Some(target.vault.clone()),
+                            query: vec![target.item.clone()],
+                            fields: inputs,
+                            name: None,
+                            unset: Vec::new(),
+                            favorite: None,
+                            add_tags: Vec::new(),
+                            remove_tags: Vec::new(),
+                        },
+                    )
+                    .await?
+                    else {
+                        return Err(unexpected());
+                    };
+                    return Ok(Body::SaveForm {
+                        item: format_ref(&target),
+                        created: false,
+                    });
+                }
+                let Reply::Item { item } = call(
+                    &self.paths,
+                    Command::ItemNew {
+                        vault: None,
+                        kind: kind.as_str().into(),
+                        name: None,
+                        fields: inputs,
+                        favorite: false,
+                        tags: Vec::new(),
+                    },
+                )
+                .await?
+                else {
+                    return Err(unexpected());
+                };
+                // Its vault, as `forms` names the new item.
+                let created = form_refs(&self.paths, &origin, kind)
+                    .await?
+                    .into_iter()
+                    .find(|r| r.item == item.id)
+                    .ok_or_else(unexpected)?;
+                Ok(Body::SaveForm {
+                    item: format_ref(&created),
+                    created: true,
+                })
+            }
             Request::PasskeyList(list) => {
                 if !self.passkey_lists.take(Instant::now()) {
                     return Err(Refusal::slow_down());
@@ -1071,6 +1175,28 @@ impl Serial {
             }
         }
     }
+}
+
+/// The identities or cards (`kind`) the daemon lists for forms on `origin`.
+async fn form_refs(paths: &Paths, origin: &str, kind: FormKind) -> Result<Vec<LoginRef>, Refusal> {
+    let Reply::FormItems {
+        identities, cards, ..
+    } = call(
+        paths,
+        Command::FormItems {
+            origin: origin.into(),
+            kinds: vec![kind],
+        },
+    )
+    .await?
+    else {
+        return Err(unexpected());
+    };
+    Ok(identities
+        .into_iter()
+        .map(|i| i.item)
+        .chain(cards.into_iter().map(|c| c.item))
+        .collect())
 }
 
 /// A session id is a UUID, as the extension's `crypto.randomUUID()` makes
@@ -1181,7 +1307,15 @@ async fn hello(paths: &Paths) -> (Body, bool) {
         status,
         detail,
         capabilities: [
-            "list", "fill", "check", "save", "generate", "passkeys", "learn", "forms",
+            "list",
+            "fill",
+            "check",
+            "save",
+            "generate",
+            "passkeys",
+            "learn",
+            "forms",
+            "save-form",
         ],
     };
     (body, status != "unavailable")
@@ -1904,6 +2038,138 @@ mod tests {
             .await,
             serde_json::json!({"id": 3, "type": "fill-form", "verified": true,
                                "values": {"number": "4242424242424242"}})
+        );
+    }
+
+    /// `save-form` creates an item through `item-new` or changes one listed
+    /// for forms through `item-set`, with the form fields normalized and
+    /// never a security code; anything else is refused before the daemon
+    /// hears of it.
+    #[tokio::test]
+    async fn save_form_creates_or_changes_an_identity_or_card() {
+        use tokio::io::AsyncBufReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let vault = "ab".repeat(32);
+        let new_card = "ef".repeat(16);
+        let listing = || Message::Ok {
+            reply: Reply::FormItems {
+                identities: Vec::new(),
+                cards: vec![FormCard {
+                    item: LoginRef {
+                        vault: vault.clone(),
+                        item: new_card.clone(),
+                    },
+                    vault: "personal".into(),
+                    title: "Visa •••• 4242".into(),
+                    brand: Some("Visa".into()),
+                    last4: "4242".into(),
+                    expiry: Some("2028-08".into()),
+                    cardholder: None,
+                    billing: None,
+                    fields: vec!["number".into(), "expiry".into()],
+                }],
+                can_verify: true,
+            },
+        };
+        let item = || Message::Ok {
+            reply: Reply::Item {
+                item: crate::protocol::ItemInfo {
+                    id: new_card.clone(),
+                    short: new_card[..4].into(),
+                    kind: "card".into(),
+                    label: "Visa •••• 4242".into(),
+                    detail: None,
+                    fields: Vec::new(),
+                    source: None,
+                    favorite: false,
+                    tags: Vec::new(),
+                    deleted_at: None,
+                },
+            },
+        };
+        // Answers each connection with the next reply, and keeps what it was asked.
+        let script = vec![item(), listing(), listing(), item()];
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let listener = tokio::net::UnixListener::bind(&paths.socket).unwrap();
+        let kept = asked.clone();
+        tokio::spawn(async move {
+            for reply in script {
+                let (conn, _) = listener.accept().await.unwrap();
+                let (read, mut write) = conn.into_split();
+                let mut line = String::new();
+                tokio::io::BufReader::new(read)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap();
+                kept.lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&line).unwrap());
+                let reply = deadbolt_client::encode_json(b"", &reply, b"\n").unwrap();
+                write.write_all(&reply).await.ok();
+            }
+        });
+        let mut host = Host::new(paths);
+        let (frames, _outbox) = mpsc::channel(16);
+        let mut ask = async |request: Value| {
+            let body = serde_json::to_vec(&request).unwrap();
+            json(&host.answer(&body, &frames).await.unwrap())
+        };
+        let origin = "https://shop.example.com";
+        let visa = format!("{vault}:{new_card}");
+        for bad in [
+            serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "card",
+                               "fields": {"number": "4242424242424242", "cvv": "123"}}),
+            serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "card",
+                               "fields": {"number": "4242424242424242", "pin": "1234"}}),
+            serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "card",
+                               "fields": {"expiry": "2028-08"}}),
+            serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "login",
+                               "fields": {"username": "kit"}}),
+            serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "card", "ref": visa,
+                               "fields": {"number": "4242424242424242"}}),
+            serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "identity", "ref": "x",
+                               "fields": {"given-name": "Kit"}}),
+            serde_json::json!({"id": 1, "type": "save-form", "origin": "null", "kind": "identity",
+                               "fields": {"given-name": "Kit"}}),
+        ] {
+            assert_eq!(ask(bad.clone()).await["code"], "bad_request", "{bad}");
+        }
+        assert!(asked.lock().unwrap().is_empty());
+        assert_eq!(
+            ask(serde_json::json!({"id": 2, "type": "save-form", "origin": origin, "kind": "card",
+                "fields": {"number": "4242 4242 4242 4242", "expiry": "08/28", "cardholder": "Kit Langton"}}))
+            .await,
+            serde_json::json!({"id": 2, "type": "save-form", "ref": visa, "created": true})
+        );
+        assert_eq!(
+            ask(
+                serde_json::json!({"id": 3, "type": "save-form", "origin": origin, "kind": "card",
+                "ref": visa, "fields": {"expiry": "2030-09"}})
+            )
+            .await,
+            serde_json::json!({"id": 3, "type": "save-form", "ref": visa, "created": false})
+        );
+        let asked = asked.lock().unwrap();
+        let commands: Vec<&str> = asked.iter().map(|r| r["cmd"].as_str().unwrap()).collect();
+        assert_eq!(
+            commands,
+            ["item-new", "form-items", "form-items", "item-set"]
+        );
+        assert_eq!(asked[0]["kind"], "card");
+        assert_eq!(
+            asked[0]["fields"],
+            serde_json::json!([
+                {"name": "cardholder", "kind": null, "value": "Kit Langton"},
+                {"name": "expiry", "kind": null, "value": "2028-08"},
+                {"name": "number", "kind": null, "value": "4242424242424242"},
+            ])
+        );
+        assert_eq!(asked[3]["vault"], vault);
+        assert_eq!(asked[3]["query"], serde_json::json!([new_card]));
+        assert_eq!(
+            asked[3]["fields"],
+            serde_json::json!([{"name": "expiry", "kind": null, "value": "2030-09"}])
         );
     }
 

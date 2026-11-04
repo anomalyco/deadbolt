@@ -39,7 +39,8 @@ async function digest(value: string): Promise<string | null> {
 
 export function trackUserInput(event: Event) {
   const el = eventTarget(event)
-  if (key && event.isTrusted && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) digests.set(el, digest(el.value))
+  // A select the user chose in counts too, for an address or card they changed (see readSubmitted).
+  if (key && event.isTrusted && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) digests.set(el, digest(el.value))
 }
 
 /** Deadbolt is writing `value` into an identity or card field (see formfill.ts). */

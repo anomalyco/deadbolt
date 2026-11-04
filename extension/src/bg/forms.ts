@@ -13,7 +13,7 @@
 import { FORM_ROLES, fieldsFor, fillsWords, VERIFIED_FIELDS, type Box, type FormRole, type FormsAck, type FormsApproved, type MenuLoadReply, type PickReply, type QueryReply } from "../messages"
 import type { FormCard, FormIdentity, FormKind, FormsReply } from "../protocol"
 import { paymentProvider, securePage } from "../payments"
-import { boxesInTop, cleanBox, isBoxes, menuFrameOf, newToken, sendToFrame, type FrameTarget } from "./frames"
+import { boxesInTop, cleanBox, isBoxes, menuFrameOf, newToken, sendToFrame, topTarget, type FrameTarget } from "./frames"
 import { fillError, resizeMessage } from "./autofill"
 import { HostError, type VaultBackend } from "./backend"
 import { fillableOrigin, sameSite, senderOrigin, siteOf } from "./site"
@@ -40,13 +40,13 @@ interface FormsToken {
   menuDocumentId?: string
 }
 
-interface FormsReport extends Placed {
+export interface FormsReport extends Placed {
   kinds: FormKind[]
   form: number
 }
 
 /** A frame's place in the page, for what it may get. */
-interface Placed extends FrameTarget {
+export interface Placed extends FrameTarget {
   /** A payment provider's frame: its name. */
   provider?: string
 }
@@ -136,6 +136,18 @@ export class Forms {
     if (!clean.length) frames.delete(target.frameId)
     else frames.set(target.frameId, { ...target, kinds: [...clean], form: form as number })
     this.pages.set(target.tabId, frames)
+    // The top page hears whether a provider's card frame is below it: its own
+    // submit may then carry a card typed there (see bg/save.ts formCapture).
+    if (target.frameId !== 0) {
+      const on = [...frames.values()].some((f) => f.provider && f.kinds.includes("card"))
+      const { target: top } = await topTarget(target.tabId)
+      if (top) void sendToFrame(top, { type: "db:forms-frames", on })
+    }
+  }
+
+  /** The frames of a tab that last reported identity or card fields, each with what it may get. */
+  reported(tabId: number): FormsReport[] {
+    return [...(this.pages.get(tabId)?.values() ?? [])]
   }
 
   /**

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { HostError } from "../src/bg/backend"
-import { cleanFacts, judge, NEVER_KEY, NOT_NOW_MS, Saver } from "../src/bg/save"
+import { cardPlan, cleanCard, cleanFacts, identityPlan, judge, NEVER_KEY, NOT_NOW_MS, Saver } from "../src/bg/save"
 import type { RequestBody } from "../src/protocol"
-import { fakeHost, installChrome, menuSender, NO_FACTS, pageSender, SITE, type FakeChrome, type FakeHost } from "./chrome"
+import { CARDS, fakeHost, HOME_REF, HOME_VALUES, installChrome, menuSender, NO_FACTS, pageSender, SITE, VISA_REF, type FakeChrome, type FakeHost } from "./chrome"
 
 let fake: FakeChrome
 let host: FakeHost
@@ -924,3 +924,206 @@ describe("the save offer in the page", () => {
     expect(saver.pending(1)).toBeDefined()
   })
 })
+
+describe("cards and identities typed into a form", () => {
+  const CHECKOUT = { url: "https://www.example.com/checkout", documentId: "checkout-doc" }
+  const top = (over: Partial<chrome.runtime.MessageSender> = {}) => pageSender({ url: CHECKOUT.url, documentId: CHECKOUT.documentId, ...over })
+  const TYPED = { number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }
+  /** The user submits a checkout on the top page, and its fields go away: the submit went through. */
+  const checkout = async (got: { card?: unknown; identity?: unknown }, sender = top()) => {
+    fake.frames["1:0"] = { ...CHECKOUT, parentFrameId: -1 }
+    await saver.formCapture(sender, { ...got, submission: 1 })
+    await saver.formOutcome(sender, 1, true)
+  }
+  const saveForm = () => requests("save-form") as Array<Extract<RequestBody, { type: "save-form" }>>
+
+  test("a card typed on a checkout is offered once the submit went through, as its brand and last four digits only", async () => {
+    // With the security code it was typed with: never kept, never sent.
+    fake.frames["1:0"] = { ...CHECKOUT, parentFrameId: -1 }
+    await saver.formCapture(top(), { card: { ...TYPED, cvv: "737" }, submission: 1 })
+    // Not before the outcome is judged.
+    expect(saver.pending(1)).toBeUndefined()
+    expect(host.requests).toEqual([])
+    await saver.formOutcome(top(), 1, true)
+    expect(saver.pending(1)).toMatchObject({ site: "example.com", username: "Visa •••• 5556", update: false, what: "card" })
+    expect(shown()).toEqual(["page:1"])
+    const token = fake.delivered.find((d) => d.message.type === "db:surface")!.message.token as string
+    expect(await saver.surfaceLoad(token, menuSender(), SITE)).toEqual({ kind: "offer", site: "example.com", username: "Visa •••• 5556", update: false, what: "card" })
+    // Nothing of the number but its last four digits went to a page, the popup or the surface.
+    expect(JSON.stringify([fake.delivered, saver.pending(1)])).not.toContain("4000056655665556")
+    expect(JSON.stringify([fake.delivered, saver.pending(1)])).not.toContain("737")
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
+    expect(saveForm()).toEqual([{ type: "save-form", origin: "https://www.example.com", kind: "card", fields: { number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" } }])
+    expect(JSON.stringify(host.requests)).not.toContain("737")
+  })
+
+  test("a card typed in a payment provider's frame joins the name typed in the page, as one offer", async () => {
+    fake.frames["1:3"] = { url: "https://js.stripe.com/v3/elements-inner-card", documentId: "stripe-doc", parentFrameId: 0 }
+    saver.formFrames = () => [{ tabId: 1, frameId: 3, documentId: "stripe-doc", origin: "https://js.stripe.com", provider: "Stripe", kinds: ["card"], form: 1 }]
+    fake.answer = (message, documentId) => (message.type === "db:forms-read" && documentId === "stripe-doc" ? { card: { number: TYPED.number, expiry: TYPED.expiry }, identity: { email: "frame@example.com" } } : true)
+    await checkout({ card: { cardholder: "Ada Lovelace" } })
+    expect(fake.delivered.filter((d) => d.message.type === "db:forms-read").map((d) => (d.options as { documentId: string }).documentId)).toEqual(["stripe-doc"])
+    expect(saver.pending(1)?.username).toBe("Visa •••• 5556")
+    await saver.choose(1, saver.pending(1)!.id, "save")
+    expect(saveForm()[0].fields).toEqual({ number: TYPED.number, expiry: TYPED.expiry, cardholder: "Ada Lovelace", brand: "Visa" })
+  })
+
+  test("a provider's frame may give a card, never an identity; another site's frame gives nothing", async () => {
+    fake.frames["1:0"] = { ...CHECKOUT, parentFrameId: -1 }
+    fake.frames["1:3"] = { url: "https://js.stripe.com/v3/elements-inner-card", documentId: "stripe-doc", parentFrameId: 0 }
+    fake.frames["1:4"] = { url: "https://evilpay.example.net/card", documentId: "evil-doc", parentFrameId: 0 }
+    const evil = pageSender({ frameId: 4, url: "https://evilpay.example.net/card", origin: "https://evilpay.example.net", documentId: "evil-doc" })
+    await saver.formCapture(evil, { card: TYPED, submission: 1 })
+    await saver.formOutcome(evil, 1, true)
+    expect(saver.pending(1)).toBeUndefined()
+    const stripe = pageSender({ frameId: 3, url: "https://js.stripe.com/v3/elements-inner-card", origin: "https://js.stripe.com", documentId: "stripe-doc" })
+    await saver.formCapture(stripe, { card: TYPED, identity: { "given-name": "Ada", "family-name": "Lovelace", email: "a@example.com", phone: "+15550100100" }, submission: 1 })
+    await saver.formOutcome(stripe, 1, true)
+    expect(saver.pending(1)?.what).toBe("card")
+    expect(requests("fill-form")).toEqual([])
+  })
+
+  test("a changed expiry is an update of that card; an unchanged card, or one Deadbolt filled, offers nothing", async () => {
+    await checkout({ card: { number: "4242424242424242", expiry: "2028-08", cardholder: "Kit Langton", brand: "Visa" } })
+    expect(saver.pending(1)).toBeUndefined()
+    expect(requests("forms")).toHaveLength(1)
+    fake.session = {}
+    await checkout({ card: { number: "4242424242424242", expiry: "2031-01", brand: "Visa" } })
+    expect(saver.pending(1)).toMatchObject({ username: "Visa •••• 4242", update: true, what: "card" })
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Card updated" })
+    expect(saveForm()).toEqual([{ type: "save-form", origin: "https://www.example.com", kind: "card", ref: VISA_REF, fields: { expiry: "2031-01" } }])
+  })
+
+  test("a typed address is offered as a new identity, or as an update of the one it moved from", async () => {
+    await checkout({ identity: { "given-name": "Ada", "family-name": "Lovelace", "address-line1": "1 Main St", city: "Springfield", "postal-code": "12345", country: "US" } })
+    expect(saver.pending(1)).toMatchObject({ username: "1 Main St, Springfield", update: false, what: "address" })
+    // Compared with the identities' values for the fields typed only.
+    expect(requests("fill-form")).toEqual([{ type: "fill-form", origin: "https://www.example.com", ref: HOME_REF, fields: ["given-name", "family-name", "address-line1", "city", "postal-code", "country"] }])
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
+    expect(saveForm()[0]).toMatchObject({ kind: "identity", fields: { "given-name": "Ada", "address-line1": "1 Main St", country: "US" } })
+    expect(saveForm()[0].ref).toBeUndefined()
+
+    fake.session = {}
+    await checkout({ identity: { "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", "address-line1": "5 Oak Ave", city: "Brooklyn", "postal-code": "11215", country: "US" } })
+    expect(saver.pending(1)).toMatchObject({ username: "5 Oak Ave, Brooklyn", update: true, what: "address" })
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Address updated" })
+    expect(saveForm()[1]).toEqual({ type: "save-form", origin: "https://www.example.com", kind: "identity", ref: HOME_REF, fields: { "address-line1": "5 Oak Ave", "postal-code": "11215" } })
+
+    // Already saved: nothing.
+    fake.session = {}
+    await checkout({ identity: { ...HOME_VALUES } })
+    expect(saver.pending(1)).toBeUndefined()
+  })
+
+  test("Never for this site keeps nothing; Not now holds back the same card for a day", async () => {
+    fake.local[NEVER_KEY] = ["example.com"]
+    await checkout({ card: TYPED })
+    expect(saver.pending(1)).toBeUndefined()
+    expect(host.requests).toEqual([])
+    fake.local[NEVER_KEY] = []
+    await checkout({ card: TYPED })
+    await saver.choose(1, saver.pending(1)!.id, "later")
+    fake.session = { notNow: fake.session.notNow, notNowSalt: fake.session.notNowSalt }
+    await checkout({ card: TYPED })
+    expect(saver.pending(1)).toBeUndefined()
+    // Never from the offer turns the site off.
+    await checkout({ card: { ...TYPED, number: "5555555555554444", brand: "Mastercard" } })
+    await saver.choose(1, saver.pending(1)!.id, "never")
+    expect(fake.local[NEVER_KEY]).toEqual(["example.com"])
+  })
+
+  test("a submit that was turned down, or posted back to its page, offers nothing", async () => {
+    fake.frames["1:0"] = { ...CHECKOUT, parentFrameId: -1 }
+    await saver.formCapture(top(), { card: TYPED, submission: 1 })
+    await saver.formOutcome(top(), 1, false)
+    await saver.formOutcome(top(), 1, true)
+    expect(saver.pending(1)).toBeUndefined()
+    // The same page back as a new document, its card fields showing again.
+    await saver.formCapture(top(), { card: TYPED, submission: 2 })
+    const again = { ...CHECKOUT, documentId: "checkout-doc-2" }
+    fake.frames["1:0"] = { ...again, parentFrameId: -1 }
+    saver.formFrames = () => [{ tabId: 1, frameId: 0, documentId: again.documentId, origin: SITE, kinds: ["card"], form: 1 }]
+    await saver.settled(pageSender({ url: again.url, documentId: again.documentId }))
+    await settleTimers()
+    expect(saver.pending(1)).toBeUndefined()
+    // Another page next: it went through.
+    await saver.formCapture(pageSender({ url: again.url, documentId: again.documentId }), { card: TYPED, submission: 1 })
+    fake.frames["1:0"] = { url: "https://www.example.com/thanks", documentId: "thanks-doc", parentFrameId: -1 }
+    saver.formFrames = () => []
+    await saver.settled(pageSender({ url: "https://www.example.com/thanks", documentId: "thanks-doc" }))
+    await waitFor(() => saver.pending(1) !== undefined)
+    expect(saver.pending(1)?.username).toBe("Visa •••• 5556")
+  })
+
+  test("an outcome from another document or for an older submit says nothing", async () => {
+    fake.frames["1:0"] = { ...CHECKOUT, parentFrameId: -1 }
+    await saver.formCapture(top(), { card: TYPED, submission: 2 })
+    await saver.formOutcome(top({ documentId: "other" }), 2, true)
+    await saver.formOutcome(top(), 1, true)
+    expect(saver.pending(1)).toBeUndefined()
+    // Leaving for another site forgets what was typed.
+    saver.navigated(1, "https://elsewhere.net/")
+    await saver.formOutcome(top(), 2, true)
+    expect(host.requests).toEqual([])
+  })
+
+  test("a vault that can't save forms gets nothing kept", async () => {
+    ;(host.host as { capabilities: string[] }).capabilities = ["list", "fill", "forms"]
+    await checkout({ card: TYPED })
+    expect(host.requests).toEqual([])
+  })
+
+  test("the browser-only vault under Strict asks for the passphrase before saving a card", async () => {
+    const asked: unknown[] = []
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: RequestBody) => {
+      if (req.type === "save-form") throw new HostError("passphrase_needed", "Enter your passphrase.")
+      return send(req)
+    }) as typeof host.host.send
+    host.host.reauth = (async (body: unknown, ask: unknown) => {
+      asked.push({ body, ask })
+      return { type: "save-form", ref: "x", created: true }
+    }) as typeof host.host.reauth
+    await checkout({ card: TYPED })
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
+    expect(asked).toEqual([{ body: { type: "save-form", origin: "https://www.example.com", kind: "card", fields: { number: TYPED.number, expiry: TYPED.expiry, cardholder: TYPED.cardholder, brand: "Visa" } }, ask: { tabId: 1, title: "Visa •••• 5556", site: "example.com" } }])
+    // Cancelled: nothing saved, and the offer can be answered again.
+    host.host.reauth = (async () => {
+      throw new HostError("cancelled", "The request was cancelled.")
+    }) as typeof host.host.reauth
+    fake.session = {}
+    await checkout({ card: { ...TYPED, number: "5555555555554444", brand: "Mastercard" } })
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: false, message: "Deadbolt didn't get your passphrase. Nothing was saved." })
+    expect(saver.pending(1)).toBeDefined()
+  })
+})
+
+describe("what a form save offers", () => {
+  test("a card: by last four digits and brand, with only what changed", () => {
+    expect(cardPlan({ number: "4242424242424242", expiry: "2028-08" }, CARDS)).toBeNull()
+    expect(cardPlan({ number: "4242424242424242", cardholder: "KIT  LANGTON" }, CARDS)).toBeNull()
+    expect(cardPlan({ number: "4242424242424242", cardholder: "Kit Lovelace" }, CARDS)).toEqual({ ref: VISA_REF, fields: { cardholder: "Kit Lovelace" }, label: "Visa •••• 4242", what: "card" })
+    // Another brand with the same last four is another card.
+    expect(cardPlan({ number: "5105105105104242", brand: "Mastercard" }, CARDS)?.ref).toBeUndefined()
+    expect(cardPlan({ expiry: "2030-01" }, CARDS)).toBeNull()
+  })
+
+  test("a card's values never include a security code, and a number only as digits", () => {
+    expect(cleanCard({ number: "4242424242424242", cvv: "123", pin: "1234", expiry: "2028-08" })).toEqual({ number: "4242424242424242", expiry: "2028-08" })
+    expect(cleanCard({ number: "4242 4242", expiry: "08/28", cardholder: "Kit" })).toEqual({ cardholder: "Kit" })
+    expect(cleanCard({ cvv: "123" })).toBeUndefined()
+  })
+
+  test("an identity: one group changed is an update, two is a new identity, too little is nothing", () => {
+    const home = { ref: HOME_REF, values: HOME_VALUES }
+    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0199" }, [home])).toEqual({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, label: "Kit Langton", what: "details" })
+    // A phone written another way is the same phone.
+    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0123" }, [home])).toBeNull()
+    expect(identityPlan({ "given-name": "Ada", "family-name": "Lovelace", "address-line1": "1 Main St", city: "Springfield" }, [home])?.ref).toBeUndefined()
+    expect(identityPlan({ email: "kit@example.com" }, [home])).toBeNull()
+    expect(identityPlan({ "given-name": "Kit", email: "kit@example.com" }, [])).toBeNull()
+  })
+})
+
+/** Lets timers and promises run for a moment. */
+const settleTimers = () => Bun.sleep(5)

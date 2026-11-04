@@ -114,9 +114,18 @@ post-submit save flow use these commands unchanged.
 
 The standalone backend applies the native host’s token buckets before forwarding
 requests: `check`/`generate-check` share 20 tokens, refilling one per second;
-`fill`/`generate`/`fill-form` share 60, refilling four per second. Exhaustion returns
+`fill`/`generate`/`fill-form`/`save-form` share 60, refilling four per second. Exhaustion returns
 `rate_limited` without asking the vault. The buckets last for the service worker’s
 lifetime, like the native host’s buckets last for its connection.
+
+`save-form` keeps an identity or card typed into a form once the user says
+Save (see [autofill.md](autofill.md#saving-what-was-typed)), through the
+same `deadbolt-core::forms::saved_fields` the native host uses: only form
+fields, never a security code, and an update never changes a card's number.
+Under Strict a card's save needs the passphrase or a PRF assertion, checked
+in Rust as a card fill's is (`policy::card_reauth`); the prompt says "Save
+Visa •••• 4242". It is an Activity entry (`item-new` or `item-set`, the
+fields' names only), as native records the browser host's.
 
 `forms` and `fill-form` use shared Rust identity/card field allowlists and labels.
 Only requested fields leave the vault; identity ID numbers, notes and card PINs
@@ -505,12 +514,13 @@ scenario named.
 
 | Request | Standalone | Notes |
 | --- | --- | --- |
-| `hello` | Same | Capabilities: `list fill check save generate forms passkeys learn` |
+| `hello` | Same | Capabilities: `list fill check save generate forms save-form passkeys learn` |
 | `list` | Same | Shared `deadbolt-core::site` rules and ranking; `signIn` with the linked account |
 | `fill` (`username`, `password`, `totp`) | Same | Current TOTP from core |
 | `generate`, `generate-check`, `generate-keep`, `generate-drop` | Same | Shared page-rule planning and candidate lifetime |
 | `check`, `save` | Same | Shared login check and password-only update |
 | `forms`, `fill-form` | Shared form rules | Strict asks for the passphrase or an enrolled platform PRF assertion |
+| `save-form` | Shared `forms::saved_fields` rules | Strict asks for the passphrase or an enrolled platform PRF before a card is saved; an identity saves without |
 | `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Shared ceremony rules, without biometric UV | Strict uses passphrase reauthentication; required UV uses the browser |
 | `learn` | Same, kept in the browser | See "Learning logs" below |
 | Rate limits | Same | The host's token buckets, in the service worker |
@@ -526,6 +536,7 @@ scenario named.
 | Google's password step narrowing (#80) | Same | `googleAccount`, `narrowing` |
 | Sign in with a provider: linked accounts, rings on the button and chooser | Same | `signInWith` |
 | Save and update offers, in the page and the popup | Same | `savePrompt`, `savedInPage`, `coldSave`, `signInOutcomes`, `signInShapes` |
+| Save and update offers for cards and identities typed into a form | Same; Strict asks for the passphrase before a card is saved | `formsSurface`, `formsShapes`, `formsFrames`; `e2e/standalone.ts` covers Strict |
 | Generated passwords | Same | `generator`, `rateLimited` |
 | Identity and card fills, provider frames | Same | `formsSurface`, `formsShapes`, `formsFrames` |
 | Clickjacking, occlusion, bfcache, navigation checks | Same | the `security` group, `midFill`, `coveredPill`, `corner` |
@@ -575,7 +586,7 @@ its item list read none of it. An open list reads its newest page again when
 the page comes back to the front or the vault changes.
 
 What's recorded is what native records for the browser host and the app.
-The worker writes an entry for a page's `fill`, `save`, `generate`,
+The worker writes an entry for a page's `fill`, `save`, `save-form`, `generate`,
 `generate-keep`, `passkey-create` and `passkey-get` (a Strict ceremony's
 when its authorization is spent), and for `fill-form` when the item is a
 card. Each entry names the item (its reference and label; a passkey's
@@ -925,8 +936,7 @@ name "this Mac" grants nothing: it only changes the wording.
   import/export, PRF or largeBlob support.
 - Activity records nothing while locked (native holds such entries until
   unlock) and doesn't fold a caller's entries past a rate; see "Activity".
-- No automatic save/update offers for identities or cards. Item-to-item links
-  (a card's billing identity, a login's sign-in account) are kept but not
-  edited on the vault page.
+- Item-to-item links (a card's billing identity, a login's sign-in account)
+  are kept but not edited on the vault page.
 - Worker/offscreen loss locks every preset; no session-key restoration. Chrome
   extension removal or storage clearing destroys this replica.
