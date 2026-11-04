@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 deadbolt-core = { path = "../core", default-features = false }
 deadbolt-store = { path = "../store" }
-deadbolt-net = { path = "../net", features = ["application"] }
+deadbolt-net = { path = "../net", features = ["application", "storage"] }
 blake3 = "1"
 data-encoding = "2.11.1"
 getrandom = { version = "0.4", features = ["wasm_js"] }
@@ -33,6 +33,7 @@ wasm-bindgen-futures = "0.4.79"
 zeroize = "1.9"
 
 [dev-dependencies]
+deadbolt-net = { path = "../net", features = ["storage"] }
 deadbolt-core = { path = "../core" }
 deadbolt-store = { path = "../store" }
 redb = "4"

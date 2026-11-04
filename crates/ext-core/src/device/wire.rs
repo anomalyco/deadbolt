@@ -140,6 +140,30 @@ fn failure(error: Error) -> HandlerError {
     error.to_string().into()
 }
 
+impl application::RoundState for Handler {
+    type Error = Error;
+
+    fn ready(&self) -> Result<bool> {
+        self.with(|s| Ok(s.ready))
+    }
+
+    fn targets(&self) -> Result<Vec<deadbolt_net::PeerAddr>> {
+        self.with(|s| Ok(s.targets()))
+    }
+
+    fn saw(&self, peer: PeerId) -> Result<()> {
+        self.with(|s| s.saw(&DeviceId::from_bytes(peer)))
+    }
+
+    fn publish_ready(&self, addr: Addr) -> Result<()> {
+        self.with(|s| {
+            s.ready = true;
+            s.addr = Some(addr);
+            Ok(())
+        })
+    }
+}
+
 impl SyncHandler for Handler {
     type ReceiveState = ();
 

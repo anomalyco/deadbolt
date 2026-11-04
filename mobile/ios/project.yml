@@ -1,0 +1,138 @@
+# Source for the iOS proof app's Xcode project. Generate with
+# `xcodegen generate --spec mobile/ios/project.yml`; the .xcodeproj is not
+# checked in. Build the Rust core first (`mobile/ios/scripts/build-core.sh`).
+name: Deadbolt
+options:
+  bundleIdPrefix: pw.deadbolt
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: 5NZ4Q7NXJ4
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Deadbolt:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    scheme:
+      testTargets:
+        - DeadboltTests
+    sources:
+      - path: Deadbolt
+        excludes:
+          - Info.plist
+          - Deadbolt.entitlements
+      # UniFFI Swift bindings written by scripts/build-core.sh.
+      - path: Generated/Bindings
+        buildPhase: sources
+      # Rune's fonts, copied from the pinned rune-theme-opencode by build-core.sh.
+      - path: Generated/Fonts
+        buildPhase: resources
+      - path: Generated/ProtocolVersion.swift
+      - path: ../../crates/app/autofill/Protocol.swift
+      - path: ../../crates/app/autofill/IdentitySync.swift
+    dependencies:
+      - framework: Generated/DeadboltMobileCore.xcframework
+        embed: false
+      # Used by the core's networking (iroh's netwatch, system proxies).
+      - sdk: SystemConfiguration.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      # netdev's iOS DNS reader uses res_9_* from libresolv.
+      - sdk: libresolv.tbd
+      - sdk: AuthenticationServices.framework
+      - target: DeadboltAutoFill
+        embed: true
+    info:
+      path: Deadbolt/Info.plist
+      properties:
+        CFBundleDisplayName: Deadbolt
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSFaceIDUsageDescription: Unlock your Deadbolt vault with Face ID.
+        ITSAppUsesNonExemptEncryption: false
+    entitlements:
+      path: Deadbolt/Deadbolt.entitlements
+      properties:
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+        com.apple.security.application-groups:
+          - group.pw.deadbolt
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)pw.deadbolt.app
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: pw.deadbolt.app
+        PRODUCT_NAME: Deadbolt
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: false
+        ENABLE_USER_SCRIPT_SANDBOXING: true
+        # Simulator builds are signed ad hoc with the entitlements above.
+        # Device builds override to Automatic / Apple Development for team
+        # 5NZ4Q7NXJ4; both development profiles have been verified.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        AD_HOC_CODE_SIGNING_ALLOWED: true
+  DeadboltAutoFill:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ../../crates/app/autofill/Protocol.swift
+      - path: ../../crates/app/autofill/IdentitySync.swift
+      - path: ../../crates/app/autofill/ControllerModel.swift
+      - path: ../../crates/app/autofill/AutoFillView.swift
+      - path: ../../crates/app/autofill/CredentialProviderViewController.swift
+      - path: AutoFill/ProviderClient.swift
+      - path: AutoFill/CoreBridge.swift
+      - path: Deadbolt/Theme.swift
+      - path: Deadbolt/Enclave.swift
+      - path: Generated/ProtocolVersion.swift
+      - path: Generated/Bindings
+      - path: Generated/Fonts
+        buildPhase: resources
+    dependencies:
+      - framework: Generated/DeadboltMobileCore.xcframework
+        embed: false
+      - sdk: SystemConfiguration.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: AuthenticationServices.framework
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: pw.deadbolt.app.autofill
+        PRODUCT_NAME: DeadboltAutoFill
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_FILE: AutoFill/Info.plist
+        GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_ENTITLEMENTS: AutoFill/AutoFill.entitlements
+        APPLICATION_EXTENSION_API_ONLY: true
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        AD_HOC_CODE_SIGNING_ALLOWED: true
+  # Unit tests hosted in the app, against the real compiled core.
+  DeadboltTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: DeadboltTests
+    dependencies:
+      - target: Deadbolt
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: pw.deadbolt.app.tests
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
