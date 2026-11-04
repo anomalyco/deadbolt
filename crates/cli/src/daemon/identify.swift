@@ -9,7 +9,7 @@
 // helper's own architecture, the one Deadbolt's binaries run as.
 // where Signature is {"path", "signing_id", "team_id", "cdhash", "valid"}
 // (`path` is the main executable, inside the bundle for an app) and
-// Process is {"ppid", "started", "tty", "session_started", "args", "ancestry"}.
+// Process is {"ppid", "started", "tty", "session_started", "args", "ancestry", "ancestry_complete"}.
 //
 // The process facts are read by pid first, and the code is looked up by the
 // audit token after, which fails once that pid version is gone. So when this
@@ -45,7 +45,8 @@ private func cString<T>(_ tuple: T) -> String {
 private func bsdInfo(_ pid: pid_t) -> proc_bsdinfo? {
     var info = proc_bsdinfo()
     let size = Int32(MemoryLayout<proc_bsdinfo>.stride)
-    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else {
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
+          info.pbi_status != SZOMB else {
         return nil
     }
     return info
@@ -62,6 +63,19 @@ private func pidPath(_ pid: pid_t) -> String? {
 private func processName(_ info: proc_bsdinfo) -> String {
     let name = cString(info.pbi_name)
     return name.isEmpty ? cString(info.pbi_comm) : name
+}
+
+// Full BSD info is restricted for other users' processes (including
+// launchd and login). The short kernel record still gives their real ppid.
+private func parentInfo(_ pid: pid_t) -> (ppid: pid_t, name: String)? {
+    if let info = bsdInfo(pid) {
+        return (pid_t(info.pbi_ppid), processName(info))
+    }
+    var info = proc_bsdshortinfo()
+    let size = Int32(MemoryLayout.size(ofValue: info))
+    guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size,
+          info.pbsi_status != SZOMB else { return nil }
+    return (pid_t(info.pbsi_ppid), cString(info.pbsi_comm))
 }
 
 /// The process's arguments from `KERN_PROCARGS2`: argc, the exec path and
@@ -113,17 +127,21 @@ private func process(_ pid: pid_t) -> [String: Any] {
     }
     out["args"] = arguments(pid)
     var ancestry: [[String: Any]] = []
+    var visited: Set<pid_t> = [pid]
+    var complete = pid == 1
     var next = pid_t(info.pbi_ppid)
-    while next > 0 && ancestry.count < 32, let parent = bsdInfo(next) {
-        var entry: [String: Any] = ["pid": Int(next), "name": processName(parent)]
+    while next > 0 && ancestry.count < 1024 && visited.insert(next).inserted,
+          let parent = parentInfo(next) {
+        var entry: [String: Any] = ["pid": Int(next), "name": parent.name]
         if let path = pidPath(next) {
             entry["path"] = path
         }
         ancestry.append(entry)
-        if next == 1 { break }
-        next = pid_t(parent.pbi_ppid)
+        if next == 1 { complete = true; break }
+        next = parent.ppid
     }
     out["ancestry"] = ancestry
+    out["ancestry_complete"] = complete
     return out
 }
 

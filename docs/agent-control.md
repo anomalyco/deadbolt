@@ -9,7 +9,8 @@ Deadbolt, carefully. Questions for Kit are at the end.
 **What is enforced today** (until `policy::decide`, build order 3; #111).
 The socket admits only this user. Beyond that, a caller that looks like an
 AI (an AI host among its parents, or a claimed `OPENCODE_SESSION_ID`; a
-hint, so it only ever refuses):
+hint, so it only ever refuses), or whose live identity or parent chain
+couldn't be established:
 
 - sees a value (`item-get`, so `get` and `show`, and `item-code`) only with
   Touch ID raised by the daemon each time, as `deadbolt read`; without Touch
@@ -167,9 +168,10 @@ That sorts every connection into one of three:
   Today any process can run `deadbolt browser-host chrome-extension://…`,
   name any origin and get that site's password; this closes it.
   - **Until pairing lands** (build order 3), the daemon calls a peer the
-    browser host only on macOS, under a supported Chromium browser with no AI ancestor or OpenCode session claim, when it runs the daemon's own code with `browser-host`
-    arguments. Arguments are read by pid and a process can rewrite its own,
-    so that label is for Activity only and never grants anything.
+    browser host only on macOS, under a supported Chromium browser in a complete
+    parent chain with no AI ancestor or OpenCode session claim, when it runs the
+    daemon's own code with `browser-host` arguments. A process can rewrite its
+    own arguments, so the label alone never grants access.
   - **Why not a vendor list or the extension id:** the id's manifest key is
     public (`extension/manifest-key.txt`), so anyone can load an unpacked
     copy with the same id into a real, vendor-signed browser (a throwaway
@@ -222,8 +224,8 @@ shows are, as an unverified caller's.
   edit or replay. Anything outside the row asks again.
 - It can't approve itself: approvals are answered only by Deadbolt.app's
   verified connection, and an Allow still needs a finger.
-- It can't borrow the app or the browser's standing: those are checked by
-  code signature, not by name or by what they ask for.
+- On macOS the app and native host are signature-checked. Until pairing,
+  the browser ancestor is checked by executable path, not by signature.
 - It can't loosen the rules: no env var or `config.toml` key weakens the
   gate. Anything that would (later: standing grants) lives in `store.redb`
   and changes in the app with a tap. Restarting the daemon leaves it locked,

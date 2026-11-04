@@ -395,12 +395,12 @@ impl Daemon {
         Ok(())
     }
 
-    /// The stop-gap for a caller that looks like an AI (#111), until
+    /// The stop-gap for an AI-marked or unidentified caller (#111), until
     /// `policy::decide` (docs/agent-control.md, build order 3): a value it
     /// would be shown (`item-get`, `item-code`) asks for Touch ID every
     /// time, as `resolve … read` does, and the Never tier and the browser's
-    /// fills and saves are refused. Other callers, the app, the browser host
-    /// and AutoFill pass unchanged, and so do agent clients' sign-ins
+    /// fills and saves are refused. The identified app and AutoFill are
+    /// exempt; browser-host mode is not. Agent clients' sign-ins pass here
     /// (`agent-fill` and the rest), which their token authenticates.
     pub(super) async fn ai_gate(
         &self,
@@ -408,7 +408,7 @@ impl Daemon {
         command: &Command,
         conv: &Conversation,
     ) -> Result<()> {
-        if matches!(caller.class, CallerClass::App | CallerClass::AutoFill)
+        if (caller.identified && matches!(caller.class, CallerClass::App | CallerClass::AutoFill))
             || !caller::is_ai(caller)
         {
             return Ok(());
@@ -794,7 +794,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(code(&error), Some(ErrorCode::RateLimited));
-        let person = CallerInfo::unverified("zsh › deadbolt");
+        let person = CallerInfo {
+            identified: true,
+            ..CallerInfo::unverified("zsh › deadbolt")
+        };
         for _ in 0..30 {
             assert!(
                 daemon
@@ -808,6 +811,7 @@ mod tests {
     /// A caller under OpenCode, by its parents.
     fn under_opencode(class: CallerClass) -> CallerInfo {
         let mut info = CallerInfo::unverified("OpenCode › zsh › deadbolt");
+        info.identified = true;
         info.class = class;
         info.ancestry = vec![crate::protocol::Ancestor {
             pid: 7,
@@ -899,9 +903,13 @@ mod tests {
             );
         }
         let mut host = CallerInfo::unverified("browser host (Chrome)");
+        host.identified = true;
         host.class = CallerClass::BrowserHost;
         let conflict = under_opencode(CallerClass::BrowserHost);
-        let person = CallerInfo::unverified("zsh › deadbolt");
+        let person = CallerInfo {
+            identified: true,
+            ..CallerInfo::unverified("zsh › deadbolt")
+        };
         for command in &refused {
             assert!(f.daemon.ai_gate(&host, command, &conv).await.is_ok());
             assert!(f.daemon.ai_gate(&person, command, &conv).await.is_ok());
@@ -963,7 +971,7 @@ mod tests {
         ];
         // The direct reproduction, and one with the AI parent just past
         // Activity's 16-parent display limit. Neither needs a session claim.
-        for depth in [0, 16] {
+        for depth in [0, 16, 33] {
             let mut parents = (0..depth)
                 .map(|n| Ancestor {
                     pid: n + 10,
@@ -991,6 +999,123 @@ mod tests {
                     .await;
                 assert_eq!(code(&result.unwrap_err()), Some(ErrorCode::Forbidden));
             }
+        }
+    }
+
+    /// The socket identifies the process that connected, not whoever later
+    /// writes the request. Even a previously identified peer can have exited.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn answer_requires_live_identification_for_fills_and_unapproved_reads() {
+        use super::super::macos_autofill::SocketKind;
+        use crate::protocol::{Fill, LoginRef, PROTOCOL_VERSION, Request};
+        use deadbolt_client::peer::{APP_ID, AUTOFILL_ID, DAEMON_ID, Peer, Process};
+        use tokio::{net::UnixListener, process::Command as Child, time::timeout};
+
+        let f = super::super::passkeys::tests::daemon::unlocked().await;
+        *f.daemon.biometric_hook.lock().unwrap() =
+            Some(Arc::new(|_| Err(biometric::UnlockError::Cancelled)));
+        let (conv, _closed) = super::super::passkeys::tests::daemon::conversation();
+        let origin = "https://example.com";
+        let login = f
+            .daemon
+            .with(|s| {
+                Ok(LoginRef {
+                    vault: s.resolve(None)?.to_string(),
+                    item: new(
+                        s,
+                        "login",
+                        "GitHub",
+                        &[("url", origin), ("password", "fixture-pw")],
+                    ),
+                })
+            })
+            .unwrap();
+        let fill = Command::SiteFill {
+            origin: origin.into(),
+            login,
+            want: vec![Fill::Password],
+        };
+        let get = Command::ItemGet {
+            vault: None,
+            query: vec!["GitHub".into()],
+            otp: false,
+            ssh_private: false,
+            files: vec![],
+            deleted: false,
+        };
+        let answer = async |peer, command, socket| {
+            f.daemon
+                .clone()
+                .answer(
+                    socket,
+                    Ok(peer),
+                    Request {
+                        v: PROTOCOL_VERSION,
+                        claimed: None,
+                        command,
+                    },
+                    &conv,
+                )
+                .await
+                .0
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut child = Child::new("python3").args(["-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.recv(1)"]).arg(path).kill_on_drop(true).spawn().unwrap();
+        let wait = Duration::from_secs(10);
+        let (stream, _) = timeout(wait, listener.accept()).await.unwrap().unwrap();
+        let exited = Peer::of(&stream).unwrap();
+        assert!(f.daemon.callers.identify(Ok(exited), None).identified);
+        drop(stream);
+        assert!(
+            timeout(wait, child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+        for cmd in [get.clone(), fill.clone()] {
+            let err = answer(exited, cmd, SocketKind::Control).await.unwrap_err();
+            assert_eq!(code(&err), Some(ErrorCode::Forbidden));
+        }
+
+        let terminal = Process {
+            ancestry_complete: true,
+            ..Default::default()
+        };
+        for ((peer, info), class, command, socket) in [
+            (
+                caller::tests::signed(DAEMON_ID, terminal.clone()),
+                CallerClass::Caller,
+                get.clone(),
+                SocketKind::Control,
+            ),
+            (
+                caller::tests::signed(APP_ID, terminal.clone()),
+                CallerClass::App,
+                get,
+                SocketKind::Control,
+            ),
+            (
+                caller::tests::signed_host(vec![caller::tests::chrome()]),
+                CallerClass::BrowserHost,
+                fill,
+                SocketKind::Control,
+            ),
+            (
+                caller::tests::signed(AUTOFILL_ID, terminal),
+                CallerClass::AutoFill,
+                Command::AutofillIdentities,
+                SocketKind::AutoFill,
+            ),
+        ] {
+            assert!(info.identified);
+            assert_eq!(info.class, class);
+            f.daemon.callers.cache_for_test(peer, info);
+            answer(peer, command, socket).await.unwrap();
         }
     }
 

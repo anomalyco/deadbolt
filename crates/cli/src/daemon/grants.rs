@@ -1641,7 +1641,10 @@ mod tests {
         use crate::protocol::{Claim, MAX_LINE, Message, Outcome, PROTOCOL_VERSION, Request};
 
         fn kit() -> CallerInfo {
-            CallerInfo::unverified("Ghostty › zsh › deadbolt")
+            CallerInfo {
+                identified: true,
+                ..CallerInfo::unverified("Ghostty › zsh › deadbolt")
+            }
         }
 
         fn add(passphrase: Option<&str>) -> Command {

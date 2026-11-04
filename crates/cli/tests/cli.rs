@@ -2787,7 +2787,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     let hello = host.ask(serde_json::json!({"type": "hello"}));
     assert_eq!(hello["type"], "hello", "{hello}");
     assert_eq!(hello["status"], "ready");
-    assert_eq!(hello["protocol"], 3);
+    assert_eq!(hello["protocol"], 4);
     assert_eq!(
         hello["capabilities"],
         serde_json::json!([

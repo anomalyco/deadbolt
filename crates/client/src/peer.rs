@@ -148,6 +148,8 @@ pub struct Process {
     pub args: Vec<String>,
     /// Nearest first, up to launchd (or init).
     pub ancestry: Vec<Ancestor>,
+    /// True only when the walk actually reached pid 1.
+    pub ancestry_complete: bool,
     /// The executable (Linux; on macOS it's the signature's `path`).
     pub exe: Option<String>,
 }
@@ -331,7 +333,7 @@ pub fn daemon_is(
 pub mod linux {
     //! `/proc`, for what macOS's helper reads with `proc_pidinfo`.
 
-    use std::path::PathBuf;
+    use std::{collections::HashSet, path::PathBuf};
 
     use super::{Ancestor, Process};
 
@@ -352,6 +354,9 @@ pub mod linux {
         let name = text.get(open + 1..close)?.to_string();
         // After the name: state ppid pgrp session tty_nr ... starttime (22nd).
         let rest: Vec<&str> = text.get(close + 1..)?.split_whitespace().collect();
+        if matches!(rest.first(), Some(&"Z" | &"X")) {
+            return None;
+        }
         Some(Stat {
             name,
             ppid: rest.get(1)?.parse().ok()?,
@@ -401,29 +406,51 @@ pub mod linux {
             .collect()
     }
 
-    pub fn process(pid: u32) -> Process {
-        let Some(me) = stat(pid) else {
+    pub(super) fn walk(
+        pid: u32,
+        mut next: u32,
+        mut parent: impl FnMut(u32) -> Option<(Ancestor, u32)>,
+    ) -> (Vec<Ancestor>, bool) {
+        let mut ancestry = Vec::new();
+        let mut seen = HashSet::from([pid]);
+        while next != 0 && ancestry.len() < 1024 && seen.insert(next) {
+            let Some((entry, ppid)) = parent(next) else {
+                break;
+            };
+            ancestry.push(entry);
+            if next == 1 {
+                return (ancestry, true);
+            }
+            next = ppid;
+        }
+        (ancestry, pid == 1)
+    }
+
+    pub fn process(peer: super::Peer) -> Process {
+        let pid = peer.pid;
+        let Some(me) = stat(pid).filter(|s| Some(s.start_ticks) == peer.pid_version) else {
             return Process::default();
         };
         let boot = boot_time();
         let args = std::fs::read(format!("/proc/{pid}/cmdline"))
             .map(|raw| args(&raw))
             .unwrap_or_default();
-        let mut ancestry = Vec::new();
-        let mut next = me.ppid;
-        while next > 0 && ancestry.len() < 32 {
-            let Some(parent) = stat(next) else {
-                break;
-            };
-            ancestry.push(Ancestor {
-                pid: next,
-                name: parent.name,
-                path: exe(next).map(|p| p.display().to_string()),
-            });
-            if next == 1 {
-                break;
-            }
-            next = parent.ppid;
+        let (ancestry, ancestry_complete) = walk(pid, me.ppid, |next| {
+            let parent = stat(next)?;
+            Some((
+                Ancestor {
+                    pid: next,
+                    name: parent.name,
+                    path: exe(next).map(|p| p.display().to_string()),
+                },
+                parent.ppid,
+            ))
+        });
+        let exe = exe(pid).map(|p| p.display().to_string());
+        // A socket can outlive its connecting process. Don't attribute facts
+        // collected by pid to a replacement process or an exited peer.
+        if stat(pid).is_none_or(|s| s.start_ticks != me.start_ticks) {
+            return Process::default();
         }
         Process {
             ppid: Some(me.ppid),
@@ -432,7 +459,8 @@ pub mod linux {
             session_started: stat(me.session).and_then(|leader| unix(leader.start_ticks, boot)),
             args,
             ancestry,
-            exe: exe(pid).map(|p| p.display().to_string()),
+            ancestry_complete,
+            exe,
         }
     }
 }
@@ -464,6 +492,23 @@ mod tests {
         );
         assert_eq!(super::linux::args(b"ls\0\0"), ["ls", ""]);
         assert!(super::linux::args(b"").is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_parent_walk_reports_only_chains_that_reach_init_as_complete() {
+        let parent = |pid| super::Ancestor {
+            pid,
+            name: format!("p{pid}"),
+            path: None,
+        };
+        let (deep, complete) = super::linux::walk(36, 35, |p| Some((parent(p), p - 1)));
+        assert!(complete);
+        assert_eq!(deep.len(), 35);
+        assert_eq!(deep.last().unwrap().pid, 1);
+        assert!(!super::linux::walk(36, 35, |p| (p != 3).then(|| (parent(p), p - 1))).1);
+        assert!(!super::linux::walk(36, 35, |p| Some((parent(p), 35))).1);
+        assert!(!super::linux::walk(2000, 1999, |p| Some((parent(p), p - 1))).1);
     }
 
     #[test]

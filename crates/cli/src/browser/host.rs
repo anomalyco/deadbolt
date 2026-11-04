@@ -35,7 +35,7 @@ use crate::protocol::{
 use crate::site::Site;
 
 /// The version of this message set, in `hello`.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 /// The largest request read; anything bigger is skipped and refused.
 pub const MAX_REQUEST: usize = 64 * 1024;
 /// The browser's limit on a message from the host.
@@ -407,6 +407,7 @@ fn form_fields(mut fields: Vec<String>) -> Result<Vec<String>, Refusal> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Code {
+    Forbidden,
     Locked,
     NotFound,
     DomainMismatch,
@@ -455,13 +456,13 @@ impl From<anyhow::Error> for Refusal {
             Some(ErrorCode::Locked | ErrorCode::NotInitialized) => Code::Locked,
             Some(ErrorCode::NotFound) => Code::NotFound,
             Some(ErrorCode::DomainMismatch) => Code::DomainMismatch,
+            Some(ErrorCode::Forbidden) => Code::Forbidden,
             Some(ErrorCode::Exists) => Code::Exists,
             Some(ErrorCode::Weak) => Code::Weak,
             Some(ErrorCode::RateLimited) => Code::RateLimited,
             // Agent sign-ins and macOS AutoFill only; the browser host never asks for them.
             Some(
                 ErrorCode::Version
-                | ErrorCode::Forbidden
                 | ErrorCode::NotGranted
                 | ErrorCode::ChoosePasskey
                 | ErrorCode::InteractionRequired

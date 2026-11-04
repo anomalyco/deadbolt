@@ -3,14 +3,14 @@
 // u32 length, then UTF-8 JSON); this file is the JSON.
 
 export const NATIVE_HOST = "pw.deadbolt.browser"
-export const PROTOCOL = 3
+export const PROTOCOL = 4
 
 export type Want = "username" | "password" | "totp"
 export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
 export type CheckStatus = "new" | "update" | "same"
 export type Change = "locked" | "unlocked" | "items" | "stopped" | "started"
 /** `passphrase_needed` and `wrong_passphrase` come only from the browser-only vault (bg/standalone.ts), never the native host. */
-export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "failed" | "passphrase_needed" | "wrong_passphrase"
+export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "forbidden" | "failed" | "passphrase_needed" | "wrong_passphrase"
 export type UserVerification = "required" | "preferred" | "discouraged"
 export type FormKind = "identity" | "card"
 
@@ -282,7 +282,7 @@ export type HostMessage =
 const STATUSES: HostStatus[] = ["ready", "locked", "not-set-up", "unavailable"]
 const CHECKS: CheckStatus[] = ["new", "update", "same"]
 const CHANGES: Change[] = ["locked", "unlocked", "items", "stopped", "started"]
-const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "weak", "exists", "cancelled", "failed", "passphrase_needed", "wrong_passphrase"]
+const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "weak", "exists", "cancelled", "forbidden", "failed", "passphrase_needed", "wrong_passphrase"]
 const REF = /^[0-9a-f]{64}:[0-9a-f]{32}$/
 const B64URL = /^[A-Za-z0-9_-]*$/
 

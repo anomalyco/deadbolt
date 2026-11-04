@@ -1007,7 +1007,7 @@ async fn answer(mut body: Value) -> Result<Value> {
                 "not-set-up"
             };
             Ok(
-                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms", "passkeys"]}),
+                json!({"type":"hello", "protocol":4, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms", "passkeys"]}),
             )
         }
         "device-create" => {

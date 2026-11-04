@@ -917,6 +917,13 @@ mod tests {
         }
     }
 
+    fn person() -> CallerInfo {
+        CallerInfo {
+            identified: true,
+            ..CallerInfo::unverified("test terminal")
+        }
+    }
+
     async fn started(pid: &std::path::Path) -> String {
         for _ in 0..200 {
             if let Ok(pid) = fs::read_to_string(pid)
@@ -936,7 +943,7 @@ mod tests {
         let (conv, _client, _closed) = conversation();
         let syncing = {
             let daemon = daemon.clone();
-            tokio::spawn(async move { daemon.dispatch(&caller::nobody(), sync_op(), &conv).await })
+            tokio::spawn(async move { daemon.dispatch(&person(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
 
@@ -944,7 +951,7 @@ mod tests {
         let (conv, _client, _closed) = conversation();
         let error = daemon
             .clone()
-            .dispatch(&caller::nobody(), sync_op(), &conv)
+            .dispatch(&person(), sync_op(), &conv)
             .await
             .unwrap_err();
         assert_eq!(
@@ -974,7 +981,7 @@ mod tests {
         let (conv, _client, closed) = conversation();
         let syncing = {
             let daemon = daemon.clone();
-            tokio::spawn(async move { daemon.dispatch(&caller::nobody(), sync_op(), &conv).await })
+            tokio::spawn(async move { daemon.dispatch(&person(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
         closed.send_replace(true);

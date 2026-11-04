@@ -1982,7 +1982,7 @@ The host exits when the port closes.
 
 ```json
 { "id": "1", "type": "hello" }
-{ "id": "1", "type": "hello", "protocol": 3, "version": "0.1.0+abc123",
+{ "id": "1", "type": "hello", "protocol": 4, "version": "0.1.0+abc123",
   "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "forms"] }
 ```
 
@@ -2271,6 +2271,7 @@ Pushes carry no id and no values. Refetch what's on screen.
 - `weak`: the field's rules allow only passwords under 60 bits.
 - `cancelled`: a passkey request stopped by `passkey-cancel`.
 - `exists`: a passkey the registration excluded is already saved.
+- `forbidden`: the daemon's AI caller gate refused the request.
 - `failed`: anything else.
 
 `message` is for people and never holds a secret.

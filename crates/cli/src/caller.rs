@@ -216,6 +216,7 @@ mod tests {
 
     fn caller() -> CallerInfo {
         CallerInfo {
+            identified: true,
             class: CallerClass::Caller,
             check: Check::Signature,
             pid: 42,
