@@ -61,8 +61,8 @@ pub struct Signature {
     pub valid: bool,
 }
 
-/// One of the peer's parents, nearest first. Read by pid: a hint for the
-/// label, never a basis for trust.
+/// One of the peer's parents, nearest first. Kernel-reported names and
+/// paths inform the AI gate and browser-host label, not signature checks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ancestor {
     pub pid: u32,
@@ -73,6 +73,14 @@ pub struct Ancestor {
 /// How the daemon sees one connection's peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallerInfo {
+    /// The daemon obtained live peer facts and a complete visible parent chain.
+    /// Not a signature check. Historical Activity entries may lack this.
+    #[serde(default)]
+    pub identified: bool,
+    /// Why identification failed or the AI gate applies, before Activity's
+    /// display limit truncates the ancestry. Absent for ordinary callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub class: CallerClass,
     pub check: Check,
     pub pid: u32,
@@ -99,6 +107,8 @@ impl CallerInfo {
     /// A caller nothing is known about but `label`.
     pub fn unverified(label: &str) -> CallerInfo {
         CallerInfo {
+            identified: false,
+            reason: Some(label.into()),
             class: CallerClass::Caller,
             check: Check::None,
             pid: 0,

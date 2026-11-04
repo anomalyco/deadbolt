@@ -422,6 +422,7 @@ fn form_fields(mut fields: Vec<String>) -> Result<Vec<String>, Refusal> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Code {
+    Forbidden,
     Locked,
     NotFound,
     DomainMismatch,
@@ -470,13 +471,13 @@ impl From<anyhow::Error> for Refusal {
             Some(ErrorCode::Locked | ErrorCode::NotInitialized) => Code::Locked,
             Some(ErrorCode::NotFound) => Code::NotFound,
             Some(ErrorCode::DomainMismatch) => Code::DomainMismatch,
+            Some(ErrorCode::Forbidden) => Code::Forbidden,
             Some(ErrorCode::Exists) => Code::Exists,
             Some(ErrorCode::Weak) => Code::Weak,
             Some(ErrorCode::RateLimited) => Code::RateLimited,
             // Agent sign-ins and macOS AutoFill only; the browser host never asks for them.
             Some(
                 ErrorCode::Version
-                | ErrorCode::Forbidden
                 | ErrorCode::NotGranted
                 | ErrorCode::ChoosePasskey
                 | ErrorCode::InteractionRequired

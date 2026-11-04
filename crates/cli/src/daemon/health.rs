@@ -88,7 +88,11 @@ impl Daemon {
         if caller::is_ai(caller) {
             return Err(fail(
                 ErrorCode::Forbidden,
-                "AI agents may not inspect or change password health",
+                if caller.identified {
+                    "AI agents may not inspect or change password health"
+                } else {
+                    "Deadbolt couldn't identify this caller, so it won't share or change password health"
+                },
             ));
         }
         match command {

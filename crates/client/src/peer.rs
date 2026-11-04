@@ -4,17 +4,31 @@
 //! signature up by it (`deadbolt-enclave identify`, `identify.swift` in the
 //! CLI). Linux gives `SO_PEERCRED`, and `/proc` the rest.
 
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(target_os = "macos")]
+use std::io::{Read, Write};
 use std::os::fd::AsFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use crate::protocol::{Ancestor, Signature};
 
-const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(5);
+/// A cache hit still has to name living code with that exact pid version.
+#[cfg(target_os = "macos")]
+pub fn live_token(token: &[u32; 8]) -> bool {
+    use core_foundation::{base::TCFType, data::CFData};
+    use security_framework::os::macos::code_signing::{Flags, GuestAttributes, SecCode};
+    let bytes = token.map(u32::to_ne_bytes);
+    let data = CFData::from_buffer(bytes.as_flattened());
+    let mut attrs = GuestAttributes::new();
+    attrs.set_audit_token(data.as_concrete_TypeRef());
+    SecCode::copy_guest_with_attribues(None, &attrs, Flags::NONE).is_ok()
+}
 
 /// The kernel's word for a socket's peer, taken when it connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -148,6 +162,8 @@ pub struct Process {
     pub args: Vec<String>,
     /// Nearest first, up to launchd (or init).
     pub ancestry: Vec<Ancestor>,
+    /// Reached init, or a confirmed foreign-uid hidepid boundary on Linux.
+    pub ancestry_complete: bool,
     /// The executable (Linux; on macOS it's the signature's `path`).
     pub exe: Option<String>,
 }
@@ -165,6 +181,7 @@ pub struct Identified {
 
 /// Runs `helper identify` on `token` (if any) and `files`. `Ok(None)` when
 /// the token's process is gone, so the token named nobody alive.
+#[cfg(target_os = "macos")]
 pub fn identify(
     helper: &Path,
     token: Option<[u32; 8]>,
@@ -202,19 +219,11 @@ pub fn identify(
         }
         (out, err)
     });
-    let deadline = Instant::now() + IDENTIFY_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-            Ok(None) => {
-                drop(child.kill());
-                drop(child.wait());
-                return Err("deadbolt-enclave identify timed out".into());
-            }
-            Err(e) => return Err(format!("waiting for deadbolt-enclave: {e}")),
-        }
-    };
+    let status = wait_helper(&mut child).map_err(|e| {
+        drop(child.kill());
+        drop(child.wait());
+        format!("waiting for deadbolt-enclave: {e}")
+    })?;
     let (out, err) = reader
         .join()
         .map_err(|_| "reading deadbolt-enclave".to_string())?;
@@ -229,6 +238,38 @@ pub fn identify(
             String::from_utf8_lossy(&err).trim()
         )),
     }
+}
+
+/// Block on the child exiting, retaining the timeout without a polling tick.
+#[cfg(target_os = "macos")]
+fn wait_helper(child: &mut std::process::Child) -> io::Result<std::process::ExitStatus> {
+    use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+    let queue = Kqueue::new()?;
+    let exit = KEvent::new(
+        child.id() as usize,
+        EventFilter::EVFILT_PROC,
+        EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
+        FilterFlag::NOTE_EXIT,
+        0,
+        0,
+    );
+    // Register before checking try_wait, so a quick exit cannot be missed.
+    let registered = queue.kevent(&[exit], &mut [], None);
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    registered?;
+    let timeout = nix::libc::timespec {
+        tv_sec: 5,
+        tv_nsec: 0,
+    };
+    if queue.kevent(&[], &mut [exit], Some(timeout))? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "identification timed out",
+        ));
+    }
+    child.wait()
 }
 
 /// The Apple team that signed this build, compiled in (`build.rs`); `None`
@@ -331,7 +372,7 @@ pub fn daemon_is(
 pub mod linux {
     //! `/proc`, for what macOS's helper reads with `proc_pidinfo`.
 
-    use std::path::PathBuf;
+    use std::{collections::HashSet, path::PathBuf};
 
     use super::{Ancestor, Process};
 
@@ -352,6 +393,9 @@ pub mod linux {
         let name = text.get(open + 1..close)?.to_string();
         // After the name: state ppid pgrp session tty_nr ... starttime (22nd).
         let rest: Vec<&str> = text.get(close + 1..)?.split_whitespace().collect();
+        if matches!(rest.first(), Some(&"Z" | &"X")) {
+            return None;
+        }
         Some(Stat {
             name,
             ppid: rest.get(1)?.parse().ok()?,
@@ -401,29 +445,91 @@ pub mod linux {
             .collect()
     }
 
-    pub fn process(pid: u32) -> Process {
-        let Some(me) = stat(pid) else {
+    pub(super) fn walk(
+        pid: u32,
+        mut next: u32,
+        mut child_start: u64,
+        mut parent: impl FnMut(u32) -> Option<(Ancestor, u32, u64)>,
+        mut hidden: impl FnMut(u32, u32, u64) -> bool,
+    ) -> (Vec<Ancestor>, bool) {
+        let mut ancestry = Vec::new();
+        let mut seen = HashSet::from([pid]);
+        let mut child = pid;
+        while next != 0 && ancestry.len() < 1024 && seen.insert(next) {
+            let Some((entry, ppid, start)) = parent(next) else {
+                return (ancestry, hidden(next, child, child_start));
+            };
+            if start > child_start {
+                break;
+            }
+            ancestry.push(entry);
+            if next == 1 {
+                return (ancestry, true);
+            }
+            child = next;
+            child_start = start;
+            next = ppid;
+        }
+        (ancestry, pid == 1)
+    }
+
+    /// A missing stat is not enough: the parent could have exited. Only
+    /// accept an invisible process that exists but **we cannot signal**,
+    /// and that is still the visible child's parent. An inaccessible peer
+    /// of our own uid, a zombie or an exited parent is not such a boundary.
+    fn hidden_parent(parent: u32, child: u32, child_start: u64) -> bool {
+        let Some(pid) = rustix::process::Pid::from_raw(parent as i32) else {
+            return false;
+        };
+        rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::PERM)
+            && std::fs::metadata(format!("/proc/{parent}"))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            && std::fs::read_to_string("/proc/self/mounts").is_ok_and(|mounts| {
+                mounts.lines().any(|line| {
+                    let mut fields = line.split_whitespace().skip(1);
+                    fields.next() == Some("/proc")
+                        && fields.next() == Some("proc")
+                        && fields.next().is_some_and(|opts| {
+                            opts.split(',')
+                                .any(|o| matches!(o, "hidepid=2" | "hidepid=invisible"))
+                        })
+                })
+            })
+            && stat(child).is_some_and(|s| s.ppid == parent && s.start_ticks == child_start)
+    }
+
+    pub fn process(peer: super::Peer) -> Process {
+        let pid = peer.pid;
+        let Some(me) = stat(pid).filter(|s| Some(s.start_ticks) == peer.pid_version) else {
             return Process::default();
         };
         let boot = boot_time();
         let args = std::fs::read(format!("/proc/{pid}/cmdline"))
             .map(|raw| args(&raw))
             .unwrap_or_default();
-        let mut ancestry = Vec::new();
-        let mut next = me.ppid;
-        while next > 0 && ancestry.len() < 32 {
-            let Some(parent) = stat(next) else {
-                break;
-            };
-            ancestry.push(Ancestor {
-                pid: next,
-                name: parent.name,
-                path: exe(next).map(|p| p.display().to_string()),
-            });
-            if next == 1 {
-                break;
-            }
-            next = parent.ppid;
+        let (ancestry, ancestry_complete) = walk(
+            pid,
+            me.ppid,
+            me.start_ticks,
+            |next| {
+                let parent = stat(next)?;
+                Some((
+                    Ancestor {
+                        pid: next,
+                        name: parent.name,
+                        path: exe(next).map(|p| p.display().to_string()),
+                    },
+                    parent.ppid,
+                    parent.start_ticks,
+                ))
+            },
+            hidden_parent,
+        );
+        let exe = exe(pid).map(|p| p.display().to_string());
+        // A socket can outlive its connecting process. Don't attribute facts
+        // collected by pid to a replacement process or an exited peer.
+        if stat(pid).is_none_or(|s| s.start_ticks != me.start_ticks) {
+            return Process::default();
         }
         Process {
             ppid: Some(me.ppid),
@@ -432,7 +538,8 @@ pub mod linux {
             session_started: stat(me.session).and_then(|leader| unix(leader.start_ticks, boot)),
             args,
             ancestry,
-            exe: exe(pid).map(|p| p.display().to_string()),
+            ancestry_complete,
+            exe,
         }
     }
 }
@@ -464,6 +571,32 @@ mod tests {
         );
         assert_eq!(super::linux::args(b"ls\0\0"), ["ls", ""]);
         assert!(super::linux::args(b"").is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_parent_walk_reports_only_chains_that_reach_init_as_complete() {
+        let parent = |pid| super::Ancestor {
+            pid,
+            name: format!("p{pid}"),
+            path: None,
+        };
+        let visible = |p| Some((parent(p), p - 1, u64::from(p)));
+        let gone = |_, _, _| false;
+        let (deep, complete) = super::linux::walk(36, 35, 36, visible, gone);
+        assert!(complete);
+        assert_eq!(deep.len(), 35);
+        assert_eq!(deep.last().unwrap().pid, 1);
+        let until_hidden = |p| if p == 3 { None } else { visible(p) };
+        assert!(!super::linux::walk(36, 35, 36, until_hidden, gone).1);
+        let (seen, complete) = super::linux::walk(36, 35, 36, until_hidden, |p, c, start| {
+            p == 3 && c == 4 && start == 4
+        });
+        assert!(complete);
+        assert_eq!(seen.last().unwrap().pid, 4);
+        assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 35, 1)), gone).1);
+        assert!(!super::linux::walk(2000, 1999, 2000, visible, gone).1);
+        assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 1, 37)), gone).1);
     }
 
     #[test]

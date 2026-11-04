@@ -642,16 +642,50 @@ mod macos {
     }
 
     pub(super) fn verify_helper_at(path: &Path, expected_hex: &str) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        // ctime (including nanoseconds) is kernel-controlled. Keep the
+        // verified fd open too, so its inode cannot be recycled under us.
+        type Stamp = (u64, u64, u64, i64, i64, i64, i64);
+        static VERIFIED: std::sync::Mutex<Option<(std::fs::File, Stamp, String)>> =
+            std::sync::Mutex::new(None);
+        let stamp = |m: std::fs::Metadata| {
+            (
+                m.dev(),
+                m.ino(),
+                m.size(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+            )
+        };
         if expected_hex.len() != 64 {
             bail!("Touch ID helper was not compiled into this build");
         }
-        if !path.is_file() {
+        let mut cached = VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+        let meta = std::fs::metadata(path)
+            .map_err(|_| anyhow!(deadbolt_client::peer::missing_helper(path)))?;
+        if !meta.is_file() {
             bail!(deadbolt_client::peer::missing_helper(path));
         }
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading Touch ID helper at {}", path.display()))?;
-        if matches_sha256_or_fat_slice(&bytes, expected_hex, CURRENT_CPU_TYPE) {
+        let seen = stamp(meta);
+        if cached
+            .as_ref()
+            .is_some_and(|(_, old, digest)| *old == seen && digest == expected_hex)
+        {
             return Ok(());
+        }
+        let mut file = std::fs::File::open(path)?;
+        let mut bytes = Vec::new();
+        if stamp(file.metadata()?) == seen {
+            file.read_to_end(&mut bytes)?;
+            if matches_sha256_or_fat_slice(&bytes, expected_hex, CURRENT_CPU_TYPE)
+                && stamp(file.metadata()?) == seen
+                && stamp(std::fs::metadata(path)?) == seen
+            {
+                *cached = Some((file, seen, expected_hex.into()));
+                return Ok(());
+            }
         }
         bail!(
             "Touch ID helper at {} failed SHA-256 verification",
@@ -1207,6 +1241,19 @@ mod macos_tests {
     fn helper_sha256_verification_rejects_tampered_binary() {
         let tmp = TempDir::new().unwrap();
         let fake_helper = tmp.path().join("deadbolt-enclave");
+        let expected = env!("DEADBOLT_ENCLAVE_TEST_SHA256");
+        std::fs::copy(env!("DEADBOLT_ENCLAVE_TEST_BIN"), &fake_helper).unwrap();
+        macos::verify_helper_at(&fake_helper, expected).unwrap();
+        // Same inode and length, different bytes. A warm digest is not enough.
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .write(true)
+                .open(&fake_helper)
+                .unwrap(),
+            b"BAD!",
+        )
+        .unwrap();
+        assert!(macos::verify_helper_at(&fake_helper, expected).is_err());
         std::fs::write(&fake_helper, b"#!/bin/sh\necho tampered\n").unwrap();
         assert!(
             macos::verify_helper_at(&fake_helper, env!("DEADBOLT_ENCLAVE_TEST_SHA256")).is_err()

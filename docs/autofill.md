@@ -2438,6 +2438,7 @@ Pushes carry no id and no values. Refetch what's on screen.
 - `weak`: the field's rules allow only passwords under 60 bits.
 - `cancelled`: a passkey request stopped by `passkey-cancel`.
 - `exists`: a passkey the registration excluded is already saved.
+- `forbidden`: the daemon's AI caller gate refused the request.
 - `failed`: anything else.
 
 `message` is for people and never holds a secret.

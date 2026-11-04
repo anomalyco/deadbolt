@@ -22,6 +22,7 @@ const OTP_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 fn mark_peer_as(daemon: &Daemon, stream: &UnixStream, class: CallerClass, label: &str) {
     let peer = Peer::of(stream).unwrap();
     let mut info = CallerInfo::unverified(label);
+    info.identified = true;
     info.class = class;
     info.check = Check::Signature;
     info.pid = peer.pid;
