@@ -27,7 +27,7 @@ export type ChannelSample = number | {
   v: number; kind?: "level" | "phase" | "position"; unit?: string; owner?: string; gate?: string; passive?: boolean
 }
 export type Card = { box: Box; name: string }
-export type LightSample = { elements: [string, ElementSample][]; channels: [string, ChannelSample][] }
+type LightSample = { elements: [string, ElementSample][]; channels: [string, ChannelSample][] }
 
 /** What a report calls a story's component: its card id, or its shot's. */
 export const storyNameOf = (_: string, props: any): string | undefined =>
