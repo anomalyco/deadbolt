@@ -1,6 +1,6 @@
 // Settings: the vault's devices (pair another, remove one), its passkeys
-// (delete one), the lock preset, sites never offered to save, learning logs
-// and the vault's name.
+// (delete one), the lock preset, Activity, sites never offered to save,
+// learning logs and the vault's name.
 
 import { describePreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { DevicePasskey, LockPreset, VaultDevice } from "../messages"
@@ -13,22 +13,9 @@ import { NEVER_KEY } from "../bg/save"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
 import { enroll, enrollment } from "./biometric"
 import { aboutSection } from "./about"
+import { activitySection } from "./activity"
 import { appearanceRows } from "../ui/appearance"
-import { SIGNIN_SETTING } from "../auth-state"
-
-function signInSetting(app: App): HTMLElement {
-  const toggle = h("input", { type: "checkbox", role: "switch", "aria-label": "Offer to sign in" })
-  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { toggle.checked = s[SIGNIN_SETTING] === true })
-  toggle.addEventListener("change", async () => {
-    try {
-      await chrome.storage.local.set({ [SIGNIN_SETTING]: toggle.checked })
-      app.announce(toggle.checked ? "Sign-in offers on." : "Sign-in offers off.")
-    } catch { toggle.checked = !toggle.checked; app.announce("Couldn't change sign-in offers.") }
-  })
-  return h("label", { class: "switch-row" }, h("span", { class: "text" },
-    h("span", { class: "title" }, "Offer to sign in"),
-    h("span", { class: "sub" }, "Experimental. A corner offer fills and submits after you pick an account. Escape stops it.")), toggle)
-}
+import { signInRow } from "../ui/signin-setting"
 
 function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
   const now = Date.now() / 1000
@@ -326,6 +313,8 @@ export function settingsView(app: App): View {
     app.announce(clearing.checked ? "Copied passwords clear after 30 seconds." : "Copied passwords stay until you copy something else.")
   })
 
+  const activity = activitySection(app)
+
   // Passkeys, once the vault has listed them.
   const passkeys = h("div", { class: "rows" })
   const passkeysGroup = h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Passkeys")), passkeys)
@@ -353,6 +342,7 @@ export function settingsView(app: App): View {
       name.value = app.vaultName
       nameChanged()
     }
+    activity.update()
   }
   paintPresets()
   paint()
@@ -373,9 +363,10 @@ export function settingsView(app: App): View {
         clearing,
       ),
     ),
+    activity.el,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")), ...appearanceRows(app.icons, (m) => app.announce(m)), h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks.")),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Saving")), neverRows(app)),
-    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Signing in")), signInSetting(app)),
+    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Signing in")), signInRow((m) => app.announce(m))),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Learning logs")), learnRows(app)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Vault name")), h("div", { class: "reauth-row" }, name, rename), nameHint),
     aboutSection(app),

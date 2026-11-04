@@ -131,7 +131,8 @@ export interface ProviderReport {
   action?: string
   form?: number
   roles?: FieldRole[]
-  reason?: "consent" | "phone" | "sms" | "security-key" | "captcha" | "unknown"
+  /** `choose`: an unlinked site's chooser shows the provider's sharing notice; the person picks their own tile (see ProviderChain). */
+  reason?: "consent" | "phone" | "sms" | "security-key" | "captcha" | "unknown" | "choose"
   approval?: string
 }
 
@@ -154,7 +155,7 @@ export type ToBackground =
    * field shows in the frame's viewport, so the menu can open in the top
    * page under it (see Autofill.query).
    */
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box }
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box; asksNew?: boolean }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean; asksNew?: boolean }
@@ -208,7 +209,8 @@ export type ToBackground =
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
   | { type: "db:surface-choose"; token: string; choice: OfferChoice }
-  | { type: "db:signin-check" }
+  /** `signal`: what of a sign-in the page shows (content.ts askAboutSignIn); `provider`: a provider button among it. */
+  | { type: "db:signin-check"; signal?: string; provider?: boolean }
   | { type: "db:signin-signout" }
   | { type: "db:signin-stop" }
   // popup
@@ -232,9 +234,11 @@ export type ToBackground =
   | { type: "pk:popup-choose"; tabId: number; id: string; choice: PasskeyChoice }
 
 export type ToContent =
-  | { type: "db:provider-probe"; session: string; provider: string; site: string; account?: string; entry?: boolean }
+  /** `home`: a chain from a provider account on an unlinked site, held to these origins of its home's site (see ProviderChain). */
+  | { type: "db:provider-probe"; session: string; provider: string; site: string; account?: string; entry?: boolean; home?: string[] }
   | { type: "db:provider-act"; session: string; action: string; values?: FillValues }
-  | { type: "db:provider-status"; session: string; label: string; done?: boolean }
+  /** `hold`: the chain waits for the person (to pick their account); their clicks don't stop it, and the pill fades. */
+  | { type: "db:provider-status"; session: string; label: string; done?: boolean; hold?: true }
   /**
    * `form` is the form snapshot the fill was chosen for; a changed form gets
    * nothing. `approval` names the fields db:approve said may be filled: only
@@ -305,7 +309,8 @@ export type ToContent =
   | { type: "db:signin-offer"; token: string }
   | { type: "db:auth-probe"; fresh?: boolean }
   | { type: "db:signin-go"; action: string }
-  | { type: "db:signin-submit"; form: number }
+  /** `first`: an automatic session's first step, held to a sign-in's own (see content.ts). */
+  | { type: "db:signin-submit"; form: number; first?: true }
   // Can the user see a frame's form? (see shownInPage)
   /**
    * To the frame above: where those boxes show in it, through the element
@@ -409,13 +414,14 @@ export interface QueryReply {
 export type MenuLoadReply =
   /** `passkeys`: for a sign-in waiting on a passkey pick (conditional mediation). */
   /** `continueAs`: the site signs in identifier first and has one login: say "Continue as …". */
+  /** `signsIn`: the logins a pick here signs in with ("Offer to sign in", see Autofill.startAutomatic), not only fills. */
   /**
    * `icons`: with "Site icons in the fill menu" on, the site icons kept for
    * the logins' hosts (null: none kept), from the background, which alone
    * opens the icon store from here (see ui/icon-store.ts). Off, rows show no icon.
    * `reveal`: those hosts whose icon no menu has dithered in yet this browser session.
    */
-  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; universal?: boolean; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
+  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; universal?: boolean; signsIn?: string[]; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
   | { kind: "generate"; site: string }
   /**
    * An identity or card field's menu: the identities or cards to pick from.
@@ -431,7 +437,8 @@ export type MenuLoadReply =
   /** The save offer's surface: what it may show. Never the password. */
   | { kind: "offer"; site: string; username: string; update: boolean }
 
-export type PickReply = { ok: true } | { ok: false; message: string }
+/** `submitted`: the pick signed in (see Autofill.startAutomatic) and its form went on, beyond a fill. */
+export type PickReply = { ok: true; submitted?: boolean } | { ok: false; message: string }
 
 /** The answer to a "Sign in with …" pick: whether the site's button was found and is being pointed at. */
 export type SignInReply = { ok: true; found: boolean; provider: string } | { ok: false; message: string }
@@ -585,6 +592,14 @@ export type DeviceCommand =
    * never the value.
    */
   | { type: "device-copied"; salt: string; hash: string }
+  /**
+   * Activity, newest first (docs/extension-device.md, "Activity"): `limit`
+   * entries (50 unless asked, at most 1,000) with ids before `before`, the
+   * page back from the last one shown. `{ type: "device-activity", now, entries: ActivityEntry[] }`.
+   */
+  | { type: "device-activity"; before?: number; limit?: number }
+  /** The page showed or copied `field` of `ref`, which only it sees: an Activity entry, never the value. */
+  | { type: "device-report"; action: "reveal" | "copy"; ref: string; field: string }
   /** The fill waiting on the passphrase, if any: `{ type: "device-reauth", reauth: Reauth | null }`. */
   | { type: "device-reauth" }
   /** The passphrase for fill `id`, once: the background runs that fill with it and forgets it. */
@@ -613,6 +628,25 @@ export interface Reauth {
   /** "Visa •••• 4242"; for a passkey, its username (or "Passkey"). */
   title: string
   site: string
+}
+
+/**
+ * An Activity entry, as the vault keeps it: what was filled, saved, made,
+ * signed, shown or copied, naming the item, its fields and the page, never a
+ * value. `caller`: a page through autofill, the vault page, or Deadbolt
+ * itself (`more-past-budget`, counting the `more` entries that went to stay
+ * within the log's budget). `time`: unix seconds.
+ */
+export interface ActivityEntry {
+  id: number
+  time: number
+  caller: "autofill" | "vault" | "deadbolt"
+  command: string
+  items: Array<{ id?: string; title: string }>
+  fields: string[]
+  site?: string
+  outcome: "allowed" | "refused" | "failed"
+  more: number
 }
 
 /** A passkey in the vault, as device-passkeys lists it: never its private key. `created`: ISO date. */

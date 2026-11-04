@@ -50,7 +50,7 @@ export type Request =
       type: "save"
       origin: string
       ref?: string
-      entry: { title: string; url: string; username: string } & PasswordValue
+      entry: ({ title: string; url: string; username: string } & PasswordValue) | { title: string; url: string; signIn: { provider: string; account: string } }
     }
   | { id: number; type: "forms"; origin: string; kinds: FormKind[] }
   | { id: number; type: "fill-form"; origin: string; ref: string; fields: FormField[] }

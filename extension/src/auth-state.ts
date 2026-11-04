@@ -1,6 +1,16 @@
 // Conservative, value-free auth-state judgement shared by the background and
 // tests. A page can only supply hints, never proof of an authenticated session.
 export const SIGNIN_SETTING = "offerToSignIn"
+/**
+ * The setting's stored value: on unless the person turned it off. The
+ * toggle writes only on a change, so a missing key (a new install, or one
+ * that never touched it) is the default, on; an explicit `false` stays off.
+ */
+export const signInOn = (stored: unknown) => stored !== false
+/** Reads the setting (see signInOn). */
+export async function signInEnabled(): Promise<boolean> {
+  return signInOn((await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING])
+}
 export const SIGNED_IN_MS = 5 * 60_000
 export const SIGNIN_QUIET_MS = 30 * 60_000
 
@@ -18,6 +28,8 @@ export interface AuthSignals {
 export interface AuthReport extends AuthSignals {
   /** Opaque content-script handle, not a selector the page can redirect. */
   action?: string
+  /** Known providers (ids) whose "Sign in with …" button shows in the page: no account, no text. */
+  providers?: string[]
 }
 
 export function authState(s: AuthSignals, remembered = false): "signed-in" | "signed-out" | "unknown" {

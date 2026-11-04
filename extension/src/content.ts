@@ -4,9 +4,9 @@
 // submit tracking are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
-import { deliveredCode, isVisible, scanPage, type Field } from "./content/detect"
-import { SIGNIN_SETTING } from "./auth-state"
-import { authReport, SIGN_OUT, takeSignInAction } from "./content/auth-state"
+import { asksNewPassword, deliveredCode, isVisible, scanPage, type Field } from "./content/detect"
+import { SIGNIN_SETTING, signInOn } from "./auth-state"
+import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
 import { fillable, ownValue, rendered, trackUserInput } from "./content/fill"
@@ -15,19 +15,31 @@ import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped 
 import { initLearn, learnScanned } from "./content/learn"
 import { pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
-import { initProviderChain } from "./content/provider-chain"
+import { chainActive, initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 
 const isTop = window === window.top
 let offerSignIn = false
 if (isTop) {
-  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { offerSignIn = s[SIGNIN_SETTING] === true; if (offerSignIn) scheduleScan() })
+  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { offerSignIn = signInOn(s[SIGNIN_SETTING]); if (offerSignIn) scheduleScan() })
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && SIGNIN_SETTING in changes) { offerSignIn = changes[SIGNIN_SETTING].newValue === true; scheduleScan() }
+    if (area === "local" && SIGNIN_SETTING in changes) { offerSignIn = signInOn(changes[SIGNIN_SETTING].newValue); signalSent = ""; scheduleScan() }
   })
 }
 const SCAN_INTERVAL_MS = 750
+/** How soon an unchanged sign-in signal is sent again when the background couldn't decide on it. */
+const RETRY_SIGNAL_MS = 5000
+/** A first automatic step's button: signing in or going on, never confirming something. */
+const FIRST_LABEL = /^(sign\s?in|log\s?in|login|continue|next)$/i
+/** Words of re-authentication or of an action to confirm, which a sign-in's first step doesn't carry. */
+const NOT_SIGN_IN = /\b(confirm (?:your )?(?:access|identity|password)|re-?enter|re-?authenticat\w*|sudo|delete|deleting|remove|close (?:your )?account|deactivate|withdraw\w*|transfer|payment|disable|turn off|unlink)\b/i
+
+/** Whether the form, or the page's title and headings, say it's for something other than signing in. */
+function notSignIn(form: HTMLFormElement | null | undefined): boolean {
+  const text = [document.title, ...Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, [role=heading]"), (el) => el.innerText), form?.innerText ?? ""]
+  return text.some((t) => t.length > 20_000 || NOT_SIGN_IN.test(t))
+}
 const QUIET_AFTER_MS = 2500
 /** A submitted form still showing this long after means the sign-in failed. */
 const FAILED_AFTER_MS = 5000
@@ -68,6 +80,7 @@ function refresh() {
   // One walk of the page's shadow roots serves the whole scan: nothing in it
   // runs page script. A discovery walk: fills are checked on a full one.
   const roots = openRoots(document, undefined, true)
+  scannedRoots = roots
   watchShadowRoots(roots)
   const result = scanPage(roots)
   kind = result.kind
@@ -82,6 +95,33 @@ function refresh() {
   const same = forms.length === formFields.length && forms.every((f, i) => f.el === formFields[i].el && f.role === formFields[i].role && f.section === formFields[i].section && f.form === formFields[i].form && f.parent === formFields[i].parent)
   if (!same) formsId++
   formFields = forms
+}
+
+/** The shadow roots the last scan walked (see refresh). */
+let scannedRoots: Array<Document | ShadowRoot> = [document]
+/** The sign-in signal the background last heard of here, and when it may hear the same one again (it asked to). */
+let signalSent = ""
+let signalRetryAt = Infinity
+
+/**
+ * Asks the background about a corner offer and a provider chain's next step
+ * only when the page shows something of a sign-in (see signInSignal), and
+ * only when that changes: a busy page that shows none keeps the service
+ * worker asleep. A chain serving this document is asked each scan. The
+ * background answers "retry" when it couldn't decide yet (locked, busy).
+ */
+function askAboutSignIn() {
+  const chain = chainActive()
+  if (chain) void send({ type: "db:provider-check" })
+  const signal = signInSignal(state, provider, scannedRoots)
+  if (!signal) return void (signalSent = "")
+  if (signal === signalSent && Date.now() < signalRetryAt) return
+  signalSent = signal
+  signalRetryAt = Infinity
+  void send<string>({ type: "db:signin-check", signal, ...(provider ? { provider: true } : {}) }).then((reply) => {
+    if (reply === "retry" && signalSent === signal) signalRetryAt = Date.now() + RETRY_SIGNAL_MS
+  })
+  if (!chain) void send({ type: "db:provider-check" })
 }
 
 /** Tells the background which kinds of form this frame has, when that changes (card fills span frames). */
@@ -103,11 +143,7 @@ function scan() {
   void report(false)
   reportForms()
   learnScanned()
-  if (offerSignIn && isTop) {
-    void send({ type: "db:signin-check" })
-    // A provider chain's next step, after an SPA change or a new document.
-    void send({ type: "db:provider-check" })
-  }
+  if (offerSignIn && isTop) askAboutSignIn()
 
   // Autofocused login fields get the menu once the form is recognised.
   const active = deepActiveElement()
@@ -162,7 +198,7 @@ async function report(always: boolean) {
   const shown = fields.map((f) => rendered(f.el))
   // A password box that says it wants a new password (autocomplete), whatever
   // the detector made of the form: a sign-in session doesn't fill it (see Autofill.page).
-  const asksNew = fields.some((f) => f.el.type === "password" && /\bnew-password\b/.test(f.el.autocomplete))
+  const asksNew = asksNewPassword(fields)
   const signature = JSON.stringify([location.href, kind, roles, formId, moved, idEmpty, shown, asksNew])
   const tell = always || (kind ? signature !== lastSignature : reported)
   lastSignature = kind ? signature : ""
@@ -186,10 +222,19 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
   if (message?.type === "db:signin-submit") {
     refresh()
     const button = submitControl
-    const form = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button.form : fields[0]?.el.form
+    const control = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button : null
+    const form = control ? control.form : fields[0]?.el.form
     const label = button?.textContent?.trim() || (button instanceof HTMLInputElement ? button.value : "")
     const destination = button?.getAttribute("formaction") ?? form?.getAttribute("action") ?? location.href
-    const target = button?.getAttribute("formtarget") ?? form?.getAttribute("target") ?? ""
+    // The browsing context it goes to: the submitter's, the form's, else the document's <base target>.
+    const target = button?.getAttribute("formtarget") ?? form?.getAttribute("target") ?? document.querySelector("base[target]")?.getAttribute("target") ?? ""
+    // A sign-in posts; a GET form puts what it sends in the URL.
+    const method = control?.hasAttribute("formmethod") ? control.formMethod : form?.method
+    // An automatic session's first step must be a sign-in's own: a username
+    // box, a sign-in or continue button, and no words of re-authentication
+    // or of something else to confirm (Confirm access, delete, withdraw,
+    // turn off two-factor) on the form or the page's headings.
+    const first = message.first !== true || (FIRST_LABEL.test(label) && fields.some((f) => IDENTIFIER_ROLES.includes(f.role)) && !notSignIn(form))
     // A remembered code step is not permission to send a TOTP into a prompt
     // that currently describes delivery by SMS or email.
     const delivered = deliveredCode(fields, form)
@@ -198,7 +243,7 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
       (kind === "login" || kind === "mfa") && button instanceof HTMLElement && isVisible(button) &&
       !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
-      form instanceof HTMLFormElement && fields.length > 0 &&
+      form instanceof HTMLFormElement && fields.length > 0 && method === "post" && first &&
       !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el, null, false)) &&
       !delivered &&
       new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
@@ -272,6 +317,7 @@ function start() {
     if (!event.persisted) return
     lastSignature = ""
     formsReported = ""
+    signalSent = ""
     scheduleScan()
   })
 }

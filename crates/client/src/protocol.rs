@@ -64,7 +64,7 @@ pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// The longest line the daemon reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -350,6 +350,20 @@ pub enum Command {
         url: String,
         username: String,
         password: PagePassword,
+    },
+    /// Browser autofill: links the site at `origin` to `account`, a provider
+    /// login it just signed in with: a new login at `url` (on its site), in
+    /// `account`'s own vault, that signs in with `provider` through
+    /// `account`, with no password of its own. Refused unless `provider` is a
+    /// known one and `account` is a login saved at its sign-in host; an
+    /// existing link is returned instead of a second (`created: false`).
+    /// Replies `site-saved`.
+    SiteLink {
+        origin: String,
+        title: String,
+        url: String,
+        provider: String,
+        account: LoginRef,
     },
     /// Passkeys: those in every vault for the relying party `rp_id` (the
     /// host of the page at `origin` when `None`), refused unless it is that

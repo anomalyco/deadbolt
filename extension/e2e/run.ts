@@ -522,13 +522,13 @@ const DETECT_FRAMES: Record<string, string> = {
 }
 
 /** Step two of a sign-in: the password, for the username step one sent (shown, and carried in a hidden box). */
-const FLOW_PASSWORD = (email: string) => `<h1>Enter your password</h1><p>${email}</p><form method="post" action="/flow/nav/next" novalidate>
+const FLOW_PASSWORD = (email: string, query = "") => `<h1>Enter your password</h1><p>${email}</p><form method="post" action="/flow/nav/next${query}" novalidate>
   <input type="hidden" name="email" value="${email}">
   <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
   <button type="submit" id="go">Sign in</button></form><p><a id="other" href="/flow/nav">Use a different account</a></p>`
 
-/** Step three: a six-digit code, one box per digit. */
-const FLOW_CODE = (email: string) => `<h1>Two-step verification</h1><p>Enter the code from your authenticator app.</p><form method="post" action="/flow/done" novalidate>
+/** Step three: a six-digit code, one box per digit. With `sms`, a code the site sent by text message. */
+const FLOW_CODE = (email: string, sms = false) => `<h1>Two-step verification</h1><p>${sms ? "Enter the code we sent you in a text message." : "Enter the code from your authenticator app."}</p><form method="post" action="/flow/done" novalidate>
   <input type="hidden" name="email" value="${email}">
   <div style="display:flex;gap:6px">${[1, 2, 3, 4, 5, 6].map((i) => `<input id="d${i}" name="d${i}" maxlength="1" inputmode="numeric" autocomplete="one-time-code" style="width:40px;text-align:center">`).join("")}</div>
   <button type="submit" id="go">Verify</button></form>`
@@ -734,6 +734,9 @@ const changeForm = `<h1>Change your password</h1><form method="post" action="/ho
   <label for="confirm">Confirm new password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password">
   <button type="submit">Change password</button></form>`
 
+/** What each /flow/ form posted, in order (see pickSignsIn). */
+const flowPosts: Array<{ host: string; path: string; body: Record<string, string> }> = []
+
 // The Gauntlet (e2e/gauntlet): a page per sign-in, MFA and form pattern, under /gauntlet on every test host.
 let gauntletSite: ReturnType<typeof gauntlet> | undefined
 const server = Bun.serve({
@@ -754,13 +757,15 @@ const server = Bun.serve({
     // Where the sign-in outcome forms post (see signInOutcomes). The email
     // posted is shown back where a real site would show the account.
     if (req.method === "POST") {
-      const email = String((await req.formData().catch(() => null))?.get("email") ?? "").replace(/[<>&"]/g, "")
+      const data = await req.formData().catch(() => null)
+      const email = String(data?.get("email") ?? "").replace(/[<>&"]/g, "")
+      if (url.pathname.startsWith("/flow/")) flowPosts.push({ host: url.host, path: url.pathname, body: Object.fromEntries([...(data?.entries() ?? [])].map(([k, v]) => [k, String(v)])) })
       // Multi-step sign-ins (see signInSessions): the password page, then a
       // code page for the login that has one, then the signed-in page.
-      if (url.pathname === "/flow/nav/password") return html("Enter your password", FLOW_PASSWORD(email))
+      if (url.pathname === "/flow/nav/password") return html("Enter your password", FLOW_PASSWORD(email, url.search))
       if (url.pathname === "/flow/nav/next")
         return email === "kit@acme.test"
-          ? html("Two-step verification", FLOW_CODE(email))
+          ? html("Two-step verification", FLOW_CODE(email, url.searchParams.has("sms")))
           : html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
       if (url.pathname === "/flow/done") return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
       if (url.pathname === "/flow/failed") return Response.redirect(`/flow/failed?email=${encodeURIComponent(email)}`, 303)
@@ -813,7 +818,7 @@ const server = Bun.serve({
       case "/flow/nav": {
         // ?to=<host>: the next step on another host of acme.test (accounts, or a user-content sibling).
         const to = url.searchParams.get("to")
-        const next = to ? `http://${to}.acme.test:${url.port}/flow/nav/password` : url.searchParams.has("accounts") ? `http://accounts.acme.test:${url.port}/flow/nav/password` : "/flow/nav/password"
+        const next = to ? `http://${to}.acme.test:${url.port}/flow/nav/password` : url.searchParams.has("accounts") ? `http://accounts.acme.test:${url.port}/flow/nav/password` : `/flow/nav/password${url.searchParams.has("sms") ? "?sms" : ""}`
         return html(
           "Sign in to Acme",
           `<h1>Sign in to Acme</h1><form method="post" action="${next}" novalidate>
@@ -839,6 +844,37 @@ const server = Bun.serve({
             })
           </script>`,
         )
+      // A login form that posts to another origin (here, the same server as 127.0.0.1).
+      case "/flow/cross":
+        return html("Sign in to Acme", loginForm(`http://127.0.0.1:${url.port}/flow/done`))
+      // Sign-in forms Deadbolt fills but never submits itself (see pickSignsIn): one that opens a new tab (<base target>), one sent by GET,
+      // and a "Continue" whose password box asks for a new password.
+      case "/flow/base-target":
+        return html("Sign in to Acme", `<base target="_blank">${loginForm("/flow/done")}`)
+      case "/flow/get":
+        return html("Sign in to Acme", loginForm("/flow/done").replace('method="post"', 'method="get"'))
+      case "/flow/new-continue":
+        return html("Sign in to Acme", loginForm("/flow/done").replace('autocomplete="current-password"', 'autocomplete="new-password"').replace(">Sign in<", ">Continue<"))
+      // Forms that ask for a password, or a code, to confirm something other than a sign-in.
+      case "/flow/confirm": {
+        const password = `<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">`
+        const email = `<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">`
+        const code = `<label for="code">Authenticator code</label><input id="code" name="code" autocomplete="one-time-code" inputmode="numeric">`
+        const forms: Record<string, [string, string, string]> = {
+          sudo: ["Confirm access", `<p>Signed in as <strong>kit</strong></p>`, `${password}<button type="submit">Confirm</button>`],
+          delete: ["Delete your account", "<p>This can't be undone. Enter your email and password to continue.</p>", `${email}${password}<button type="submit">Continue</button>`],
+          withdraw: ["Withdraw BTC", "<p>Send to an external address.</p>", `<label for="amount">Amount</label><input id="amount" name="amount" inputmode="decimal">${email}${password}${code}<button type="submit">Confirm</button>`],
+          "disable-2fa": ["Turn off two-factor authentication", "", `${email}${password}${code}<button type="submit">Continue</button>`],
+        }
+        const [title, intro, fields] = forms[url.searchParams.get("form") ?? ""] ?? forms.sudo
+        return html(title, `<h1>${title}</h1>${intro}<form method="post" action="/flow/done" novalidate>${fields}</form>`)
+      }
+      // A single-page app that never stops changing (a live feed), with ?signin a "Sign in" link too.
+      case "/busy":
+        return html("Acme live", `<h1>Live</h1>${url.searchParams.has("signin") ? '<a href="/login">Sign in</a>' : ""}${url.searchParams.has("google") ? '<button type="button" id="google">Continue with Google</button>' : ""}<ul id="feed"></ul><script>
+          let n = 0
+          setInterval(() => { const li = document.createElement("li"); li.textContent = "Update " + ++n; const feed = document.getElementById("feed"); feed.prepend(li); while (feed.children.length > 20) feed.lastChild.remove() }, 100)
+        </script>`)
       case "/flow/spa/done":
         return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</strong>.</p>`)
       // A site's sign-in page with a "Continue with Google" button, and a fake
@@ -1181,6 +1217,13 @@ interface LaunchOptions {
   reducedMotion?: boolean
   /** Give the first fake account an exact origin for universal sign-in. */
   universal?: boolean
+  /**
+   * "Offer to sign in", on unless turned off: a pick then submits on a
+   * login whose saved URL names the page's exact origin (the browser
+   * vault's do). Scenarios that check filling pin it off; "default" leaves
+   * it unset (see pickSignsIn).
+   */
+  offerToSignIn?: boolean | "default"
   /** The fake host adds "Sign in with Google" logins. */
   signIn?: boolean
   /** The fake host lists three Google logins instead of its own. */
@@ -1241,6 +1284,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
   context.setDefaultTimeout(10_000)
   const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker"))
   check(worker.url().startsWith(`chrome-extension://${ID}/`), `extension id is ${ID}`)
+  if (options.offerToSignIn !== "default") await worker.evaluate((on) => chrome.storage.local.set({ offerToSignIn: on }), options.offerToSignIn ?? false)
   // A probe: every content-script message the worker receives, for diagnosis.
   await worker.evaluate(() => {
     const seen: string[] = []
@@ -2772,18 +2816,8 @@ async function menuPosition(scale = 1) {
             const f = extensionFrame(page, "menu.html")
             return f && await f.locator(".universal").count() ? f : null
           })
-          // Two logins open as one "Sign in with Deadbolt" row, and a press on it
-          // only expands the list (no refusal): the press below must land on a
-          // login. A click that doesn't reach the frame (just placed) leaves the
-          // chooser there, so click until the logins show.
-          if (surface === "signin" && menu) {
-            const chooser = menu.locator("button.row", { hasText: "Sign in with Deadbolt" })
-            const listed = await until(`signin ${kind}: the logins listed`, async () => {
-              if (await chooser.count()) return void (await chooser.click().catch(() => {}))
-              return (await menu!.locator("button.row").count()) > 0
-            }, 4000)
-            if (!listed) continue
-          }
+          // The corner offer's collapsed row is its top login: the press below lands on a login.
+          if (surface === "signin" && menu && !(await until(`signin ${kind}: the top login shows`, async () => (await menu!.locator("button.row").count()) > 0, 4000))) continue
         }
         if (!menu) { check(false, `${surface} opens for ${kind}`); continue }
         await settled(menu)
@@ -3514,6 +3548,195 @@ async function signInSessions() {
   } catch (err) {
     check(false, `sign-in sessions threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "sessions")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * Picks that sign in: with "Offer to sign in" on (the default, never set
+ * here), an inline pick on the email step of a two-step login fills and
+ * submits each step from the one pick, its code only once the site's code
+ * step is learned. A code the site sent by SMS is left alone, a form that
+ * posts to another origin fills but isn't submitted, and nothing a page does
+ * picks. Turned off, a pick only fills, as before.
+ */
+async function pickSignsIn() {
+  const run = await launch({ universal: true, offerToSignIn: "default", ...(video ? { record: video, scale: 1 } : {}) })
+  const clips: Array<{ page: Page; name: string }> = []
+  let page = await run.context.newPage()
+  const pages = [page]
+  // Each step in a tab of its own: a tab's sign-in session ends with it.
+  const open = async (path: string, clip?: string) => {
+    await page.close()
+    page = await run.context.newPage()
+    pages.push(page)
+    if (clip) clips.push({ page, name: clip })
+    await page.goto(`${site}${path}`)
+  }
+  const pick = async (selector = "#email") => {
+    const menu = await menuOn(page, selector)
+    if (!menu) throw new Error(`no menu on ${page.url()}`)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+  }
+  const since = (n: number) => flowPosts.slice(n).map((p) => p.path)
+  const code = async () => (await Promise.all([1, 2, 3, 4, 5, 6].map((i) => page.inputValue(`#d${i}`)))).join("")
+  try {
+    check(await run.worker.evaluate(async () => !("offerToSignIn" in (await chrome.storage.local.get("offerToSignIn")))), "a new profile has never set \"Offer to sign in\"")
+
+    // An unlearned code step: email and password are submitted, the code only filled.
+    let before = flowPosts.length
+    await open("/flow/nav")
+    await pick()
+    await page.waitForURL("**/flow/nav/next", { timeout: 15_000 })
+    check(!!(await until("the code fills", async () => isCode(await code()))), "one inline pick fills and submits the email step, then the password step, then fills the code")
+    await Bun.sleep(1500)
+    const first = flowPosts.slice(before)
+    check(JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password", "/flow/nav/next"]), `each step is submitted once, and an unlearned code step isn't (${JSON.stringify(since(before))})`)
+    check(first[0]?.body.email === "kit@acme.test" && first[1]?.body.password === "correct horse", "with the picked login's username and password")
+
+    // Learned: the site's sign-in has a code step. One pick lands signed in.
+    await run.worker.evaluate(async () => {
+      let salt = (await chrome.storage.local.get("signinFlowsSalt")).signinFlowsSalt as string | undefined
+      if (!salt) await chrome.storage.local.set({ signinFlowsSalt: (salt = crypto.randomUUID().replaceAll("-", "")) })
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}\nlocalhost`))
+      const key = Array.from(new Uint8Array(digest).slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")
+      const flows = ((await chrome.storage.local.get("signinFlows")).signinFlows ?? {}) as Record<string, unknown>
+      flows[key] = { identifierFirst: true, code: true, navigates: true, seen: 3, codeSeen: 3, at: Date.now() }
+      await chrome.storage.local.set({ signinFlows: flows })
+    })
+    before = flowPosts.length
+    await open("/flow/nav", "pick-signs-in-totp")
+    await pick()
+    await page.waitForURL("**/flow/done", { timeout: 20_000 })
+    const posted = flowPosts.slice(before)
+    check((await page.textContent("main"))?.includes("Signed in as kit@acme.test") === true, "with a learned code step, one inline pick lands signed in")
+    check(JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password", "/flow/nav/next", "/flow/done"]), `email, password and code are each submitted once (${JSON.stringify(since(before))})`)
+    check(isCode([1, 2, 3, 4, 5, 6].map((i) => posted[2]?.body[`d${i}`] ?? "").join("")), "and the code submitted is the login's current one")
+    check((await probe(page)).blurs === 0, "nothing of Deadbolt's took the page's focus")
+    await Bun.sleep(1500)
+
+    // A code the site sent by text message: neither filled nor submitted.
+    before = flowPosts.length
+    await open("/flow/nav?sms")
+    await pick()
+    await page.waitForURL("**/flow/nav/next?sms", { timeout: 15_000 })
+    await Bun.sleep(3000)
+    check((await code()) === "" && !since(before).includes("/flow/done"), "an SMS code step stops the sign-in: nothing filled or submitted")
+
+    // A form posting to another origin: filled, never submitted.
+    before = flowPosts.length
+    await open("/flow/cross")
+    await pick()
+    await until("the cross-origin form fills", async () => (await page.inputValue("#password")) === "correct horse")
+    await Bun.sleep(2000)
+    check(new URL(page.url()).pathname === "/flow/cross" && !flowPosts.slice(before).length, "a form whose action is another origin is filled but not submitted")
+
+    // A page can't pick: synthetic events at the menu's host, its frame and the field, and messages to every frame.
+    before = flowPosts.length
+    const fills = await fillCount(run)
+    await open("/flow/nav")
+    const menu = await menuOn(page)
+    await page.evaluate(() => {
+      const host = document.querySelector<HTMLElement>("html > [popover]")
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) host?.dispatchEvent(new MouseEvent(type, { bubbles: true, composed: true, clientX: 300, clientY: 200 }))
+      const field = document.getElementById("email")!
+      for (const key of ["ArrowDown", "Enter"]) field.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, composed: true }))
+      for (let i = 0; i < frames.length; i++) for (const type of ["db:menu-pick", "db:pick", "db:menu-enter"]) frames[i].postMessage({ type, index: 0, ref: "x" }, "*")
+    })
+    await Bun.sleep(2000)
+    check(!!menu && (await page.inputValue("#email")) === "" && (await fillCount(run)) === fills && !flowPosts.slice(before).length, "a page's synthetic events and messages pick nothing and submit nothing")
+    check(await run.worker.evaluate(async () => !Object.keys(await chrome.storage.session.get(null)).some((k) => k.startsWith("session:"))), "and start no sign-in session")
+
+    // Picks on forms that aren't a sign-in's first step, or that wouldn't stay in this tab as a POST, fill and never submit.
+    for (const path of ["/flow/confirm?form=sudo", "/flow/confirm?form=delete", "/flow/confirm?form=withdraw", "/flow/confirm?form=disable-2fa", "/flow/base-target", "/flow/get", "/flow/new-continue"]) {
+      before = flowPosts.length
+      const pages = run.context.pages().length
+      await open(path)
+      await pick(path.includes("sudo") ? "#password" : "#email")
+      const sudo = path.includes("sudo")
+      await until(`${path} fills`, async () => (await page.inputValue(sudo ? "#password" : "#email")) === (sudo ? "correct horse" : "kit@acme.test"), 6000)
+      await Bun.sleep(2000)
+      const at = new URL(page.url())
+      check(`${at.pathname}${at.search}` === path && !flowPosts.slice(before).length && run.context.pages().length === pages, `${path}: a pick fills and doesn't submit`)
+    }
+
+    // Turned off in the toolbar popup's Settings: a pick only fills, and the next step fills only after the person's own submit.
+    {
+      const p = await popup(run, site)
+      await p.getByRole("button", { name: "Settings", exact: true }).click()
+      const toggle = p.getByRole("switch", { name: "Offer to sign in" })
+      // The switch takes its state from storage as it opens.
+      check(!!(await until("the popup's switch reads on", () => toggle.isChecked(), 4000)), "the popup's Settings show Offer to sign in, on")
+      await toggle.uncheck()
+      check(await run.worker.evaluate(async () => (await chrome.storage.local.get("offerToSignIn")).offerToSignIn === false), "the popup's switch turns it off")
+      await p.close()
+    }
+    before = flowPosts.length
+    await open("/flow/nav", "pick-fill-only")
+    await pick()
+    await until("the email fills", async () => (await page.inputValue("#email")) === "kit@acme.test")
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    await Bun.sleep(1000)
+    check(new URL(page.url()).pathname === "/flow/nav" && !flowPosts.slice(before).length, "with the setting off, a pick fills without submitting")
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/password")
+    await until("the password step fills", async () => (await page.inputValue("#password")) === "correct horse")
+    await Bun.sleep(2000)
+    check(new URL(page.url()).pathname === "/flow/nav/password" && JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password"]), "and its next step fills after the person's own submit, still without submitting")
+  } catch (err) {
+    check(false, `pick signs in threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "pick signs in")
+  } finally {
+    const saved = await Promise.all(clips.map(async ({ page: p, name }) => ({ name, path: await p.video()?.path().catch(() => null) })))
+    const others = await Promise.all([...pages, ...run.context.pages()].map((p) => p.video()?.path().catch(() => null)))
+    await close(run)
+    if (video) {
+      for (const { name, path } of saved) if (path) await rename(path, join(video, `${name}.webm`)).catch((err) => check(false, `couldn't keep ${name}: ${err}`))
+      for (const path of others) if (path && !saved.some((s) => s.path === path)) await rm(path, { force: true })
+    }
+  }
+}
+
+/**
+ * A busy single-page app keeps changing its DOM. With "Offer to sign in" on
+ * (the default), a page that shows nothing of a sign-in sends the service
+ * worker nothing about it, and one with a "Sign in" link asks once, not on
+ * every scan. QUIET_MS sets how long each page is watched (20 s here; a
+ * longer run measures messages per minute and the longest quiet stretch).
+ */
+async function quietPages() {
+  const run = await launch({ universal: true, offerToSignIn: "default" })
+  const page = await run.context.newPage()
+  const watch = Number(process.env.QUIET_MS) || 20_000
+  try {
+    await run.worker.evaluate(() => {
+      const times: Array<{ type: string; at: number; path: string }> = []
+      ;(globalThis as unknown as { __times: typeof times }).__times = times
+      chrome.runtime.onMessage.addListener((m: { type?: string }, s) => {
+        if (s.tab && s.url) times.push({ type: String(m?.type), at: Date.now(), path: new URL(s.url).pathname + new URL(s.url).search })
+      })
+    })
+    // On www.acme.test no login is saved for the exact origin: only a provider button there could bring an offer.
+    const google = `http://www.acme.test:${server.port}`
+    for (const [origin, path] of [[site, "/busy"], [site, "/busy?signin"], [google, "/busy?google"]] as const) {
+      await page.goto(`${origin}${path}`)
+      await Bun.sleep(2000)
+      const lists = (await hostLog(run)).filter((r) => r.type === "list").length
+      const from = Date.now()
+      await Bun.sleep(watch)
+      const seen = (await run.worker.evaluate(() => (globalThis as unknown as { __times: Array<{ type: string; at: number; path: string }> }).__times)).filter((t) => t.at >= from && t.path === path)
+      const checks = seen.filter((t) => t.type === "db:signin-check" || t.type === "db:provider-check").length
+      const listed = (await hostLog(run)).filter((r) => r.type === "list").length - lists
+      const stamps = [from, ...seen.map((t) => t.at), from + watch]
+      const gap = Math.max(...stamps.slice(1).map((t, i) => t - stamps[i]))
+      const perMinute = (n: number) => Math.round((n * 60_000) / watch)
+      console.log(`  ${path}: ${perMinute(seen.length)} messages/min to the worker (${perMinute(checks)} sign-in/provider checks), ${perMinute(listed)} vault lists/min, longest quiet ${(gap / 1000).toFixed(1)} s`)
+      if (path === "/busy") check(checks === 0 && listed === 0, `a busy page that shows nothing of a sign-in sends no sign-in checks (${checks}) and lists nothing (${listed})`)
+      else check(checks <= 4 && listed <= 2, `a busy page with a ${path.endsWith("google") ? "Google button and no saved login" : "Sign in link"} asks about it once per change, not each scan (${checks} checks, ${listed} lists in ${watch / 1000} s)`)
+    }
+  } catch (err) {
+    check(false, `quiet pages threw: ${(err as Error).message.split("\n")[0]}`)
   } finally {
     await close(run)
   }
@@ -5151,6 +5374,8 @@ const once: Record<string, () => Promise<void>> = {
   googleAccount,
   corner,
   signInSessions,
+  pickSignsIn,
+  quietPages,
   signUpStep,
   frameLogins,
   frameMoves,
@@ -5193,7 +5418,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 111, occlusionSweep: 55, signInSessions: 53, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
+  detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
   formsSurface: 7, formsShapes: 14, formsFrames: 16, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,

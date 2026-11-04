@@ -1,5 +1,10 @@
 # Universal sign-in: prototype and next decisions
 
+**2026-11-03:** “Offer to sign in” is now on by default, and inline menu and
+toolbar popup picks start the same automatic session (and provider chain) as
+the corner offer's pick. The current rules are in `docs/autofill.md`; the
+default-off and corner-only statements below are historical.
+
 ## Provider chains (2026-10-30)
 
 **Everything should be effortless; when it cannot be effortless, get out of

@@ -32,7 +32,7 @@
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
-import { findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
+import { asksNewPassword, findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
@@ -42,7 +42,7 @@ import { fillable, fillFields, ownValue, successor, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { learning } from "./learn"
 import { deepActiveElement, eventTarget, markOwnHost } from "./shadow"
-import { SIGNIN_SETTING } from "../auth-state"
+import { signInEnabled } from "../auth-state"
 
 export interface PageState {
   targets(): Field[]
@@ -200,7 +200,7 @@ let near = false
 
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
-let lastRect = ""
+let lastRect: Rect | null = null
 let lastGeometry = ""
 let scaleVisible = false
 let scaleObserver: ResizeObserver | null = null
@@ -597,10 +597,13 @@ function position() {
     // This layout read also syncs the child viewport. Its scale observers
     // rely on seeing restored layout as well as a page's later scaled paint.
     const f = frame.getBoundingClientRect()
-    const rect = [f.left, f.top, f.width, f.height].map(Math.round).join()
-    if (rect !== lastRect && !followedResize(lastRect, rect)) tellMoved()
+    const now = { left: f.left, top: f.top, width: f.width, height: f.height }
+    const moved = !lastRect || (["left", "top", "width", "height"] as const).some((k) => Math.abs(now[k] - lastRect![k]) > 1)
+    if (moved) {
+      if (lastRect && !followedResize(lastRect, now)) tellMoved()
+      lastRect = now
+    }
     resized = null
-    lastRect = rect
   }
   // While it fades out it lets clicks through (and anything under it would
   // read as a cover): only a surface still in use goes back on top.
@@ -640,11 +643,9 @@ function unzoom(el: Element): number {
  * set). A centred login form moves by half an infobar when one comes or goes;
  * that isn't the page moving the menu, so the dwell isn't restarted for it.
  */
-function followedResize(from: string, to: string): boolean {
-  if (!resized || !from || !window.toolbar.visible) return false
-  const [fl, ft, fw, fh] = from.split(",").map(Number)
-  const [tl, tt, tw, th] = to.split(",").map(Number)
-  return fw === tw && fh === th && Math.abs(tl - fl) <= Math.abs(resized.dw) && Math.abs(tt - ft) <= Math.abs(resized.dh)
+function followedResize(from: Rect, to: Rect): boolean {
+  if (!resized || !window.toolbar.visible) return false
+  return Math.abs(to.width - from.width) <= 1 && Math.abs(to.height - from.height) <= 1 && Math.abs(to.left - from.left) <= Math.abs(resized.dw) + 1 && Math.abs(to.top - from.top) <= Math.abs(resized.dh) + 1
 }
 
 function onResize(event: Event) {
@@ -655,7 +656,7 @@ function onResize(event: Event) {
 }
 
 function frameStyle(radius: number) {
-  return `all:initial;width:100%;height:100%;border:0;border-radius:${radius}px;box-shadow:${SHADOW()};background:transparent;color-scheme:normal;`
+  return `all:initial;position:relative;width:100%;height:100%;border:0;border-radius:${radius}px;box-shadow:${SHADOW()};background:transparent;color-scheme:normal;`
 }
 
 /**
@@ -726,23 +727,10 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     tellGeometry()
   })
   scaleObserver.observe(box, { box: "device-pixel-content-box" })
-  if (as === "save" || as === "signin") {
-    // From the corner, where the toolbar button is: 24 px of travel and a fade.
-    frame.style.borderRadius = `${SAVE_GUESS.height / 2}px`
-    frame.animate(
-      reducedMotion()
-        ? [{ opacity: 0 }, { opacity: 1 }]
-        : [
-            { opacity: 0, transform: "translate(17px, -17px)" },
-            { opacity: 1, transform: "none" },
-          ],
-      timing(0.4),
-    )
-    return
-  }
-  // Grows from the field once its frame has something to show (see reveal):
-  // until the frame first says its size it's blank, and the grow-in played on
-  // an empty box, a ghost of the shadow, with the rows popping in half faded.
+  const cornerOffer = as === "save" || as === "signin"
+  if (cornerOffer) frame.style.borderRadius = `${SAVE_GUESS.height / 2}px`
+  // Shown once its frame first says its size (see reveal): until then it's
+  // blank, and an early entry played on an empty or guessed box.
   const f = frame
   f.style.opacity = "0"
   revealTimer = setTimeout(() => reveal?.(), REVEAL_LATEST_MS)
@@ -750,27 +738,48 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     reveal = null
     clearTimeout(revealTimer)
     if (frame !== f) return
+    cancelAnimationFrame(raf)
+    lastRect = null
+    position()
+    if (frame !== f) return
     f.style.opacity = ""
-    // Scale .96 → 1 from the edge that faces the field. Only while it opens:
-    // the menu's visibility guard refuses picks while it's scaled or
-    // see-through, so they wait until it's at rest.
+    // Entry runs inside the frame and on a temporary shadow layer so the
+    // frame itself stays opaque and still while the visibility dwell runs.
     const r = anchor ? anchor.getBoundingClientRect() : boxNow()
-    const below = !r || (lastTarget?.top ?? r.bottom) >= r.bottom
-    f.style.transformOrigin = below ? "top left" : "bottom left"
-    f.animate(
+    const origin = !r || (lastTarget?.top ?? r.bottom) >= r.bottom ? "top left" : "bottom left"
+    port?.postMessage(cornerOffer ? { type: "db:reveal", corner: true } : { type: "db:reveal", origin })
+    const radius = cornerOffer ? SAVE_GUESS.height / 2 : RADIUS
+    const shadow = document.createElement("div")
+    shadow.style.cssText = `all:initial;position:absolute;inset:0;border-radius:${radius}px;box-shadow:${SHADOW()};pointer-events:none;${cornerOffer ? "" : `transform-origin:${origin};`}`
+    root.insertBefore(shadow, f)
+    f.style.boxShadow = "none"
+    const anim = shadow.animate(
       reducedMotion()
         ? [{ opacity: 0 }, { opacity: 1 }]
-        : [
-            { opacity: 0, transform: "scale(0.96)" },
-            { opacity: 1, transform: "none" },
-          ],
-      timing(0.25),
+        : cornerOffer
+          ? [
+              { opacity: 0, transform: "translate(17px, -17px)" },
+              { opacity: 1, transform: "none" },
+            ]
+          : [
+              { opacity: 0, transform: "scale(0.96)" },
+              { opacity: 1, transform: "none" },
+            ],
+      timing(cornerOffer ? 0.4 : 0.25),
     )
+    const restore = () => {
+      revealAnim = null
+      shadow.remove()
+      if (frame === f) f.style.boxShadow = SHADOW()
+    }
+    revealAnim = anim
+    anim.finished.then(restore, restore)
   }
 }
 
 /** Plays the open surface's grow-in, while its frame hasn't shown yet (see openMenu). */
 let reveal: (() => void) | null = null
+let revealAnim: Animation | null = null
 let revealTimer: ReturnType<typeof setTimeout> | undefined
 /** A frame that never says its size grows in anyway after this long. */
 const REVEAL_LATEST_MS = 500
@@ -788,16 +797,16 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
   if (mode === "accounts") menuHeight = height
   const same = !changed && wanted.width === (width ?? wanted.width) && wanted.height === height
   wanted = { width: width ?? wanted.width, height }
-  // The list's first size, before anything of it showed: it lands there, no
-  // spring from the guess, and grows in now that it has its rows.
-  if (reveal && mode === "accounts") {
+  // The surface's first size, before anything of it showed: it lands there,
+  // no spring from the guess, and enters now that it has its content.
+  if (reveal && (mode === "accounts" || first)) {
     lastTarget = targetRect()
     return reveal()
   }
   reveal?.()
   if (same || !lastTarget) return
   // The offer's first size isn't a change anyone made: it lands there.
-  if (first && mode === "save") return void (lastTarget = targetRect())
+  if (first && (mode === "save" || mode === "signin")) return void (lastTarget = targetRect())
   retarget(changed ? 0.38 : 0.37)
   // The pill inside keeps its place on the page while the frame moves around
   // it: hand the frame the springs, which it steps on its own clock.
@@ -829,6 +838,7 @@ function leave(travel = false) {
   if (closing) return
   if (!host || !frame) return closeMenu()
   closing = true
+  revealAnim?.cancel()
   const f = frame
   const done = () => {
     if (frame === f) closeMenu()
@@ -898,6 +908,7 @@ export function closeMenu(refocus = false, dismissed = false) {
   scaleVisible = false
   scaleKnown = false
   reveal = null
+  revealAnim = null
   clearTimeout(revealTimer)
   if (token) void send({ type: "db:menu-close", token, dismissed })
   port?.close()
@@ -916,7 +927,8 @@ export function closeMenu(refocus = false, dismissed = false) {
   near = false
   for (const t of saveTimers) clearTimeout(t)
   saveTimers = []
-  menuOrigin = lastRect = lastGeometry = ""
+  menuOrigin = lastGeometry = ""
+  lastRect = null
   if (refocus) field?.focus({ preventScroll: true })
 }
 
@@ -1031,7 +1043,7 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     const reply =
       rules === null
         ? null
-        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}) })
+        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}), ...(asksNewPassword(state.targets()) ? { asksNew: true } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
     else if (!isTop) {
       framedFor = el
@@ -1248,7 +1260,7 @@ function onKeyDown(event: KeyboardEvent) {
  * background's db:approve fixed for this fill. Answers with what was written.
  */
 async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Promise<FillAck> {
-  if (message.automatic && (!isTop || document.hidden || (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true)) return { filled: [] }
+  if (message.automatic && (!isTop || document.hidden || !(await signInEnabled()))) return { filled: [] }
   // A sign-in session's step (no pick) fills nothing while the tab learns: the user signs in by hand.
   if (message.notice && learning()) return { filled: [] }
   // A pick from the menu folded it into a pill on the field, which stays to
@@ -1396,6 +1408,7 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   // The frame's own word that its pill or offer is done, over the channel only it and this script hold.
   port.onmessage = onPortMessage
   tellGeometry()
+  if (!reveal) port.postMessage(mode === "save" || mode === "signin" ? { type: "db:reveal", corner: true } : { type: "db:reveal" })
   // Typed before the frame was ready: narrow it now.
   const typed = anchor && mode === "accounts" && anchor.value && typedSinceOpen ? anchor.value : ""
   if (typed) port.postMessage({ type: "db:filter", query: typed.slice(0, 200) })
@@ -1505,7 +1518,11 @@ export function initMenu(page: PageState) {
         // whether nothing of Deadbolt's shows, which the measuring needs.
         if (message.token !== token) return void respond(!host)
         if (!message.hold) return void respond(hold(false))
-        pillSettled(900).then(() => respond(hold(true)))
+        pillSettled(900).then(() => {
+          const ok = hold(true)
+          if (!ok || document.hidden) return respond(ok)
+          requestAnimationFrame(() => requestAnimationFrame(() => respond(ok)))
+        })
         return true
       case "db:generated":
         keptGenerated(String(message.generated))

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { SIGNIN_SETTING } from "../src/auth-state"
 import { Passkeys } from "../src/bg/passkeys"
 import { ProviderChain, PROVIDER_CHAIN_ACTIONS, PROVIDER_CHAIN_TTL_MS } from "../src/bg/provider-chain"
+import { provider, returnsTo } from "../src/signin"
 import { SignInWith } from "../src/bg/signinwith"
 import type { ProviderReport } from "../src/messages"
 import { ACCOUNTS, fakeHost, installChrome, pageSender, SITE, type FakeChrome, type FakeHost } from "./chrome"
@@ -158,6 +159,121 @@ describe("provider chain authority", () => {
     report = { kind: "form", form: 2, roles: ["password"], action: "password" }
     await chain.check(commit(GOOGLE, "password-doc"))
     expect(fills()).toHaveLength(1)
+  })
+  // An unlinked chain's provider pages must lead back to its home's exact host.
+  const BACK = `/v3/signin/challenge/pwd?redirect_uri=${encodeURIComponent(`${SITE}/oauth/callback`)}`
+  const own = { ...providerAccount, signIn: { provider: "google", account: providerAccount.username! } }
+  const signedInHome = () => {
+    const answer = fake.answer
+    fake.answer = (m, doc) => m.type === "db:auth-probe" ? { signOut: true, loginForm: false, uncertain: false, challenge: false } : answer(m, doc)
+  }
+  const saves = () => host.requests.filter((r) => r.type === "save")
+  test.each([false, true])("one of the person's provider accounts: saved at the provider's own host, only that login fills, and the site is linked once signed in (already linked: %s)", async (already) => {
+    // Saved for the site, or at a lookalike host, it isn't a provider account.
+    await chain.start(home, { ...own, urls: [SITE] }, true)
+    await chain.start(home, { ...own, urls: ["https://accounts.google.com.evil.test"] }, true)
+    expect(chain.active(1)).toBe(false)
+    const other = { ...providerAccount, ref: `${"c".repeat(64)}:${"3".repeat(32)}` }
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req) => req.type === "list"
+      ? { type: "list", site: "example.com", accounts: (req as { origin: string }).origin === SITE ? (already ? [{ ...linked, signIn: { provider: "google", account: providerAccount.username } }] : []) : [other, providerAccount] }
+      : send(req as never)) as typeof host.host.send
+    await chain.start(home, own, true)
+    expect(chain.active(1)).toBe(true)
+    report = { kind: "form", form: 1, roles: ["password"], action: "password" }
+    // Two logins of that username at the provider: only the one picked fills.
+    await chain.check(commit(GOOGLE, "provider-doc", 1, BACK))
+    expect(fills().map((r) => (r as { ref: string }).ref)).toEqual([own.ref])
+    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["https://www.example.com"])
+    const sender = commit(SITE, "returned", 1, "/oauth/callback")
+    signedInHome()
+    await chain.check(sender)
+    await until(() => !chain.active(1))
+    await Bun.sleep(5)
+    expect(saves()).toEqual(already ? [] : [expect.objectContaining({ origin: SITE, entry: { title: "www.example.com", url: SITE, signIn: { provider: "google", account: own.ref } } })])
+  })
+  test.each(["sign-out before any provider page", "the popup coming back", "the popup closing", "no provider action"])("no link from %s", async (how) => {
+    await chain.start(home, own, true)
+    signedInHome()
+    if (how === "sign-out before any provider page") {
+      // The site shows a Sign out right after its button is clicked.
+      report = { kind: "success" }
+      await chain.check(pageSender())
+    } else if (how === "no provider action") {
+      commit(GOOGLE, "provider-doc", 1, BACK)
+      await chain.check(commit(SITE, "returned", 1, "/oauth/callback"))
+    } else {
+      fake.frames["2:0"] = { url: GOOGLE + BACK, documentId: "popup", parentFrameId: -1 }
+      await chain.opened({ sourceTabId: 1, sourceFrameId: 0, tabId: 2 })
+      report = { kind: "form", form: 1, roles: ["password"], action: "password" }
+      await chain.check(commit(GOOGLE, "popup-pwd", 2, BACK))
+      expect(fills()).toHaveLength(1)
+      if (how === "the popup coming back") await chain.check(commit(SITE, "popup-home", 2, "/oauth/callback"))
+      else await chain.closed(2)
+    }
+    await until(() => !chain.active(1) && !chain.active(2))
+    await Bun.sleep(5)
+    expect(saves()).toEqual([])
+  })
+  test.each([["github", "https://gist.github.com", "https://github.com"], ["google", "https://sites.google.com", GOOGLE]])("a %s account never signs in to %s, the provider's own site", async (id, site, at) => {
+    await chain.start({ ...home, origin: site }, { ...own, urls: [at], signIn: { provider: id, account: own.username! } }, true)
+    expect(chain.active(1)).toBe(false)
+    expect(actions()).toHaveLength(0)
+  })
+  test("an unlinked chain needs every provider page to lead back to its exact host; a linked one only to its site", async () => {
+    for (const [unlinked, path, live] of [
+      [true, "/ServiceLogin", false],
+      [false, "/ServiceLogin", true],
+      [true, `/ServiceLogin?continue=${encodeURIComponent("https://accounts.example.com/cb")}`, false],
+      [false, `/ServiceLogin?continue=${encodeURIComponent("https://accounts.example.com/cb")}`, true],
+      [true, `/ServiceLogin?continue=${encodeURIComponent(`${SITE}/cb`)}`, true],
+    ] as const) {
+      fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "top-doc", parentFrameId: -1 }
+      await chain.start(home, unlinked ? own : linked, unlinked)
+      commit(GOOGLE, "provider-doc", 1, path)
+      expect([path, unlinked, chain.active(1)]).toEqual([path, unlinked, live])
+      chain.stop(1)
+    }
+  })
+  test("any parameter holding an absolute URL is a return URL, whatever its name or case; OAuth scopes aren't", () => {
+    const google = provider("google")
+    const at = (q: string) => returnsTo(google, `${GOOGLE}/o/oauth2/v2/auth?${q}`, "example.com")
+    for (const q of ["wreply=https://evil.test/cb", "redir=https%3A%2F%2Fevil.test%2F", `Redirect_uri=${encodeURIComponent("https://evil.test/")}`, `RETURN_TO=${encodeURIComponent("https://evil.test/")}`]) expect([q, at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&${q}`)]).toEqual([q, "foreign"])
+    expect(at(`scope=${encodeURIComponent("https://www.googleapis.com/auth/userinfo.email")}&redirect_uri=${encodeURIComponent(`${SITE}/cb`)}`)).toBe("home")
+    expect(at("scope=openid")).toBe("none")
+    // Exact origin: another host of the site, another port or http isn't home for an unlinked chain.
+    const back = (to: string, origins = ["https://www.example.com"]) => returnsTo(google, `${GOOGLE}/x?redirect_uri=${encodeURIComponent(to)}`, "example.com", origins)
+    expect(back("https://cdn.example.com/cb")).toBe("foreign")
+    expect(back("https://www.example.com:8443/cb")).toBe("foreign")
+    expect(back("http://www.example.com/cb")).toBe("foreign")
+    expect(back("https://www.example.com/cb")).toBe("home")
+    expect(back("https://sso.example.com/cb", ["https://www.example.com", "https://sso.example.com"])).toBe("home")
+    // Unnamed parameters: scheme-relative, backslashed and once more encoded URLs are return URLs too.
+    for (const q of ["r=//evil.test/cb", "r=/\\evil.test/cb", "r=https:\\\\evil.test", `r=${encodeURIComponent(encodeURIComponent("https://evil.test/"))}`, `r=${encodeURIComponent(encodeURIComponent("//evil.test/"))}`])
+      expect([q, at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&${q}`)]).toEqual([q, "foreign"])
+    expect(at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&prompt=select_account&r=/path`)).toBe("home")
+  })
+  test("an unlinked site's sharing notice waits for the person's own pick, then the chain goes on for the account shown", async () => {
+    await chain.start(home, own, true)
+    report = { kind: "stop", reason: "choose" }
+    const chooser = commit(GOOGLE, "chooser", 1, BACK.replace("/v3/signin/challenge/pwd", "/o/oauth2/v2/auth"))
+    await chain.check(chooser)
+    expect(chain.active(1)).toBe(true)
+    const statuses = fake.delivered.filter((d) => d.message.type === "db:provider-status" && (d.options as { documentId: string }).documentId === "chooser")
+    expect(statuses.at(-1)?.message).toMatchObject({ label: "Choose your account", hold: true })
+    // Scans of the same chooser ask nothing more.
+    const probes = fake.delivered.filter((d) => d.message.type === "db:provider-probe").length
+    await chain.check(chooser)
+    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").length).toBe(probes)
+    expect(actions()).toHaveLength(1)
+    // The person's tile leads to the password step: it fills.
+    report = { kind: "form", form: 1, roles: ["password"], action: "password" }
+    await chain.check(commit(GOOGLE, "pwd", 1, BACK))
+    expect(fills()).toHaveLength(1)
+    // An identifier step after their pick ("Use another account") ends it.
+    report = { kind: "form", form: 2, roles: ["email"], action: "identifier" }
+    await chain.check(commit(GOOGLE, "identifier", 1, BACK.replace("/challenge/pwd", "/identifier")))
+    expect(chain.active(1)).toBe(false)
   })
   test("the return document receives a status before the confirmed success", async () => {
     await chain.start(home, linked)

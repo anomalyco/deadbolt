@@ -1193,6 +1193,38 @@ main.vault.popup {
   margin-bottom: 0;
 }
 
+/* Activity: the newest entries, read a page at a time, scrolled in place. */
+.activity-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activity-list {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.activity-row .btn {
+  flex-shrink: 0;
+}
+
+.activity-list > .hint {
+  margin-top: 0;
+}
+
+.vrow.activity {
+  min-height: 40px;
+  padding: 3px 10px;
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 40px;
+}
+
+.vrow.activity.not-allowed .title {
+  color: var(--muted);
+}
+
 .vrow.device {
   gap: 10px;
   padding: 0 6px 0 8px;

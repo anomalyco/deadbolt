@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import { authState, exactSignInOrigin, type AuthSignals } from "../src/auth-state"
+import { authState, exactSignInOrigin, signInOn, type AuthSignals } from "../src/auth-state"
 import { authReport, takeSignInAction } from "../src/content/auth-state"
 import type { PageState } from "../src/content/inline"
 
 const blank: AuthSignals = { loginForm: false, loginRoute: false, entry: false, signOut: false, accountMenu: false, appShell: false, challenge: false, uncertain: false }
 const state: PageState = { targets: () => [], form: () => 1, kind: () => null, rescan: () => {}, formFields: () => [], formsForm: () => 0 }
+
+test("\"Offer to sign in\" is on unless the person turned it off", () => {
+  // Never set (a new install, or one that never touched the toggle) is the default, on.
+  expect(signInOn(undefined)).toBe(true)
+  expect(signInOn(true)).toBe(true)
+  expect(signInOn(false)).toBe(false)
+})
 
 describe("auth state (suppression, not an authentication oracle)", () => {
   test("a login route alone and an empty app shell stay quiet", () => {
@@ -34,6 +41,14 @@ describe("auth state (suppression, not an authentication oracle)", () => {
     const facts = authReport(state, true)
     expect(facts.entry).toBe(false)
     expect(authState(facts)).toBe("signed-in")
+  })
+  test("names the known providers whose buttons show, not on a signed-in page", () => {
+    document.body.innerHTML = '<h1>Welcome</h1><button>Continue with Google</button><button>Sign in with GitHub</button><button>Continue with Okta</button>'
+    const facts = authReport(state, true)
+    expect(facts.providers).toEqual(["github", "google"])
+    expect(authState(facts)).toBe("signed-out")
+    document.body.innerHTML = '<button>Continue with Google</button><button>Sign out</button>'
+    expect(authReport(state, true).providers).toBeUndefined()
   })
   test("vault usernames shown on the page are not consulted", () => {
     document.body.innerHTML = '<p>kit@example.com</p><img alt="kit@example.com" title="kit@example.com"><button>Sign in</button>'

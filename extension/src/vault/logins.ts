@@ -48,10 +48,17 @@ async function secret(app: App, ref: string, passphrase?: string, prf?: string):
   return { message: r.ok ? "Deadbolt didn't answer." : r.message, reauth: !r.ok && r.code === "passphrase_needed" }
 }
 
-/** Copies a password or one-time code; the background clears it in 30 s if Chrome lets it. */
-async function copySecret(app: App, b: HTMLElement, value: string) {
-  if (await copied(b, value)) app.announce(await app.copiedSecret(value))
-  else app.announce("Couldn't copy.")
+/** Copies a password or one-time code, `field` of `ref`; the background clears it in 30 s if Chrome lets it. */
+async function copySecret(app: App, b: HTMLElement, value: string, ref: string, field: string) {
+  if (await copied(b, value)) {
+    app.report("copy", ref, field)
+    app.announce(await app.copiedSecret(value))
+  } else app.announce("Couldn't copy.")
+}
+
+/** Copies a plain value, `field` of `ref` (a username, notes). */
+async function copyPlain(app: App, b: HTMLElement, value: string, ref: string, field: string, what?: string) {
+  if (await copied(b, value, (m) => app.announce(m), what)) app.report("copy", ref, field)
 }
 
 /** A login's row. `fill`: the popup's site, with Fill; `failed` shows why a fill didn't happen. */
@@ -62,13 +69,13 @@ function row(app: App, a: Account & { favorite?: boolean }, fill: boolean, tile:
   )
   main.dataset.ref = a.ref
   const say = (m: string) => app.announce(m)
-  const user = iconButton(glyph("user"), "Copy username", (b) => a.username && void copied(b, a.username, say, "Copied the username"))
+  const user = iconButton(glyph("user"), "Copy username", (b) => a.username && void copyPlain(app, b, a.username, a.ref, "username", "Copied the username"))
   if (!a.username) user.disabled = true
   const pass = iconButton(icon("key"), "Copy password", async (b) => {
     await app.offerClearing()
     if (app.preset === "strict") return app.go({ name: "item", ref: a.ref, then: "copy" })
     const s = await secret(app, a.ref)
-    if (s.password !== undefined) return void copySecret(app, b, s.password)
+    if (s.password !== undefined) return void copySecret(app, b, s.password, a.ref, "password")
     if (s.reauth) return app.go({ name: "item", ref: a.ref, then: "copy" })
     say(s.message ?? "Couldn't copy.")
   })
@@ -105,14 +112,13 @@ function itemRow(app: App, item: ItemSummary): HTMLElement {
       await app.offerClearing()
       const s = await secretOf(app, item.ref, primary)
       if (s.value !== undefined) {
-        if (await copied(b, s.value)) app.announce(await app.copiedSecret(s.value))
-        return
+        return void copySecret(app, b, s.value, item.ref, primary)
       }
       if (s.reauth) return app.go({ name: "item", ref: item.ref, kind: item.kind })
       // A plain field (an identity's email) isn't a secret: the details have it.
       const r = await app.run({ type: "device-item", ref: item.ref })
       const value = r.ok ? (r.reply as unknown as ItemDetail).fields.find((f) => f.name === primary)?.value : undefined
-      if (value !== undefined) void copied(b, value, (m) => app.announce(m))
+      if (value !== undefined) void copyPlain(app, b, value, item.ref, primary)
       else app.announce(s.message ?? "Couldn't copy.")
     })
     actions.append(copy)
@@ -309,6 +315,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
 
   /** Shows the password, out of sight again after half a minute. */
   const show = (password: string) => {
+    app.report("reveal", ref, "password")
     revealed = password
     reauth = null
     paint()
@@ -345,7 +352,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       }
       return say(s.message ?? "Couldn't copy.")
     }
-    await copySecret(app, b, s.password)
+    await copySecret(app, b, s.password, ref, "password")
   }
 
   const reveal = async (passphrase?: string) => {
@@ -378,7 +385,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
         const s = await secret(app, ref, undefined, await verify(app))
         if (s.password === undefined) throw new Error(s.message || "Couldn't verify Touch ID.")
         if (kind === "reveal") show(s.password)
-        else { reauth = null; paint(); await copySecret(app, el.querySelector<HTMLElement>(".copy-password")!, s.password) }
+        else { reauth = null; paint(); await copySecret(app, el.querySelector<HTMLElement>(".copy-password")!, s.password, ref, "password") }
       } catch (e) { error.textContent = (e as Error).message; error.hidden = false; input.focus() }
       finally { b.disabled = false }
     })
@@ -401,7 +408,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       else {
         reauth = null
         paint()
-        await copySecret(app, el.querySelector<HTMLElement>(".copy-password")!, s.password)
+        await copySecret(app, el.querySelector<HTMLElement>(".copy-password")!, s.password, ref, "password")
       }
     })
     queueMicrotask(() => input.focus())
@@ -416,7 +423,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     const host = hostOf(d.url ?? "")
     const line = (label: string, value: Node, ...actions: Node[]) => h("div", { class: "line" }, h("span", { class: "line-label" }, label), h("span", { class: "value" }, value), h("span", { class: "line-actions" }, ...actions))
     const lines: Node[] = []
-    lines.push(line("Username", d.username ? h("span", {}, d.username) : h("span", { class: "faint" }, "None"), iconButton(icon("copy"), "Copy username", (b) => d.username && void copied(b, d.username, say, "Copied the username"))))
+    lines.push(line("Username", d.username ? h("span", {}, d.username) : h("span", { class: "faint" }, "None"), iconButton(icon("copy"), "Copy username", (b) => d.username && void copyPlain(app, b, d.username, ref, "username", "Copied the username"))))
     if (d.hasPassword) {
       const eye = iconButton(glyph(revealed !== null ? "eyeOff" : "eye"), revealed !== null ? "Hide password" : "Show password", () => void reveal())
       const copy = iconButton(icon("copy"), "Copy password", (b) => void copyPassword(b), "copy-password")
@@ -436,7 +443,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
           h("span", { class: "totp" }, h("span", { class: "mono code-value" }, code), h("span", { class: `countdown${left <= 5 ? " ending" : ""}` }, totpRing(t.period, left), secs, h("span", { class: "sr-only" }, " seconds left"))),
           iconButton(icon("copy"), "Copy one-time code", async (b) => {
             await app.offerClearing()
-            await copySecret(app, b, t.code)
+            await copySecret(app, b, t.code, ref, "otp")
           }),
         ),
       )
@@ -451,7 +458,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     const website = d.url
     if (website) lines.push(line("Website", h("span", {}, host), iconButton(glyph("open"), "Open site", () => openSite(website))))
     const notes = d.fields.find((f) => f.name === "notes")?.value
-    if (notes) lines.push(h("div", { class: "line" }, h("span", { class: "line-label" }, "Notes"), h("span", { class: "value lines" }, notes), h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy notes", (b) => void copied(b, notes, say, "Copied the notes")))))
+    if (notes) lines.push(h("div", { class: "line" }, h("span", { class: "line-label" }, "Notes"), h("span", { class: "value lines" }, notes), h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy notes", (b) => void copyPlain(app, b, notes, ref, "notes", "Copied the notes")))))
     // As in itemDetailView: the deletion button, armed or with its passphrase
     // form, stays mounted across a new code or a sync.
     removeBtn ??= deleteButton(app, ref, d.title)

@@ -1184,6 +1184,20 @@ fn membership_flood_is_bounded_durable_and_replayable() {
     }
 }
 
+/// Seed 54: startup catches a third member up on a 1000-entry membership log
+/// over network seed 7's 2-byte relay chunks (~275 KiB, ~550k scheduler ticks).
+#[test]
+fn membership_flood_catches_up_third_member_over_small_chunks() {
+    replay(&[
+        Action::Pair(1),
+        Action::Pair(3),
+        Action::Crash(1),
+        Action::MembershipFlood(0, 1),
+        Action::Startup(1),
+    ])
+    .unwrap();
+}
+
 #[test]
 fn exploration() {
     let count = crate::config::env("DEADBOLT_SIM_SEEDS")

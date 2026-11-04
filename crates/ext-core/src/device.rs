@@ -1,6 +1,7 @@
 //! Phase-one standalone device, hosted only in an extension-owned worker.
 //! JavaScript routes messages; core owns signatures, membership and secrets.
 
+mod activity;
 mod forms;
 mod generate;
 mod items;
@@ -11,6 +12,7 @@ mod wire;
 
 use crate::policy::{self, Preset};
 use deadbolt_core::autofill::{self, Status, item_name, login_title, otp, urls, value};
+use deadbolt_core::listing::{SIGN_IN_HOSTS, sign_in_provider};
 use deadbolt_core::site::{Site, page_url};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{
@@ -569,13 +571,21 @@ fn save_login(body: &Value) -> Result<Value> {
     let page = site(origin)?;
     let input = body.get("entry").ok_or(Error::Protocol("Missing login"))?;
     let url = page_url(text(input, "url")?).map_err(Error::Protocol)?;
-    let username = text(input, "username")?.trim();
+    let link = input.get("signIn");
+    // A provider link has no username of its own (see link_login).
+    let username = match link {
+        Some(_) if input.get("username").is_none() => "",
+        _ => text(input, "username")?.trim(),
+    };
     let title = text(input, "title")?;
     if url.len() > 2048 || username.chars().count() > 500 {
         return Err(Error::Protocol("The login is too long"));
     }
     if !page.matches_url(url) {
         return Err(Error::DomainMismatch);
+    }
+    if let Some(link) = link {
+        return link_login(body, input, link, url, &page, title, username);
     }
     let reply = state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, input)?;
@@ -599,6 +609,74 @@ fn save_login(body: &Value) -> Result<Value> {
         Ok(json!({"type": "save", "ref": reference(&s.vault, id), "created": created}))
     })?;
     request_sync();
+    Ok(reply)
+}
+
+/// A save of a provider link (`entry.signIn`): a new login for the page's
+/// site that signs in with a provider login here, with no password of its
+/// own (docs/autofill.md, "Your provider accounts").
+fn link_login(
+    body: &Value,
+    input: &Value,
+    link: &Value,
+    url: &str,
+    page: &Site,
+    title: &str,
+    username: &str,
+) -> Result<Value> {
+    if body.get("ref").is_some()
+        || input.get("password").is_some()
+        || input.get("generated").is_some()
+        || !username.is_empty()
+    {
+        return Err(Error::Protocol(
+            "A sign-in link is a new login with no username or password",
+        ));
+    }
+    // Only a provider Deadbolt knows the sign-in hosts of, by its id. (The
+    // extension checked the account is saved at one of them; this vault
+    // lives inside it, so no other caller can ask.)
+    let provider = sign_in_provider(text(link, "provider")?)
+        .filter(|p| SIGN_IN_HOSTS.iter().any(|(id, _)| id == p))
+        .ok_or(Error::Protocol("Not a provider Deadbolt links"))?;
+    let (reply, created) = state().with(|s| {
+        let account = item_ref(&s.vault, text(link, "account")?)?;
+        s.vault
+            .item(&account)
+            .filter(|i| !i.deleted && i.kind == "login")
+            .ok_or(Error::NotFound)?;
+        let account = account.to_string();
+        // One already links the site to it: that's the link.
+        if let Some(item) = s.vault.site_logins(page).find(|item| {
+            value(item, "sign-in-with") == Some(provider.as_str())
+                && value(item, "sign-in-account") == Some(account.as_str())
+        }) {
+            return Ok((
+                json!({"type": "save", "ref": reference(&s.vault, item.id), "created": false}),
+                false,
+            ));
+        }
+        let fields = vec![
+            ("url".into(), Field::new(FieldType::Url, url)),
+            (
+                "sign-in-with".into(),
+                Field::new(FieldType::Text, &provider),
+            ),
+            (
+                "sign-in-account".into(),
+                Field::new(FieldType::Text, &account),
+            ),
+        ];
+        let name = Some(item_name(title)).filter(|t| !t.is_empty() && *t != page.domain);
+        let id = s.mutate(|v, key| Ok(v.create_item(key, "login", name, fields)?.0))?;
+        Ok((
+            json!({"type": "save", "ref": reference(&s.vault, id), "created": true}),
+            true,
+        ))
+    })?;
+    if created {
+        request_sync();
+    }
     Ok(reply)
 }
 
@@ -827,7 +905,18 @@ async fn wait_ready() -> Result<()> {
     .map_err(|_| Error::Protocol(CATCHING_UP))?
 }
 
-async fn dispatch(mut body: Value) -> Result<Value> {
+/// Answers `body`, recording its Activity entry, if it has one, before the
+/// reply goes.
+async fn dispatch(body: Value) -> Result<Value> {
+    let draft = activity::draft(&body);
+    let reply = answer(body).await;
+    if let Some(draft) = draft {
+        draft.record(&reply);
+    }
+    reply
+}
+
+async fn answer(mut body: Value) -> Result<Value> {
     // Apply trusted preset changes only after the command succeeds.
     let preset = policy::accepts_preset(text(&body, "type")?)
         .then(|| {
@@ -949,6 +1038,8 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "device-item-save" => items::save(&body),
         "device-item-delete" => items::delete(&mut body),
         "device-kinds" => Ok(items::kinds()),
+        "device-activity" => activity::list(&body),
+        "device-report" => activity::report(&body),
         "device-save" => edit_login(&body),
         "device-remove" => remove_device(&body),
         "device-rename" => rename_vault(&body),

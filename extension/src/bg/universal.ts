@@ -1,5 +1,5 @@
-import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, type AuthReport } from "../auth-state"
-import { provider as providerOf } from "../signin"
+import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, signInOn, type AuthReport } from "../auth-state"
+import { provider as providerOf, providerOrigins, savedAtProvider } from "../signin"
 import type { ProviderChain } from "./provider-chain"
 import type { MenuLoadReply, PickReply, SignInReply } from "../messages"
 import type { Account } from "../protocol"
@@ -7,10 +7,13 @@ import { Autofill, resizeMessage } from "./autofill"
 import type { VaultBackend } from "./backend"
 import { menuFrameOf, sendToFrame, targetFor, topTarget, type FrameTarget } from "./frames"
 import { hostHash } from "./site-icons"
+import { siteOf } from "./site"
 
 interface Offer extends FrameTarget {
   at: number
   accounts: Account[]
+  /** The known providers whose buttons the page showed (see providerAccounts). */
+  providers: string[]
   menuDocumentId?: string
   picked?: boolean
   picking?: boolean
@@ -18,28 +21,41 @@ interface Offer extends FrameTarget {
 }
 interface Memory { signedIn?: number; quietUntil?: number }
 
-/** Opt-in offers only. Ordinary menu and Browse fills never enter this path. */
+/** The corner offer, with "Offer to sign in" on. Browse fills never enter this path. */
 export class UniversalSignIn {
   private offers = new Map<string, Offer>()
   private checking = new Set<number>()
   private lists = new Map<string, { at: number; accounts: Account[] }>()
+  /** Pages (by what of a sign-in they show, URL included, see content.ts) that got no offer: not probed again until the vault changes, or ten minutes. */
+  private nothing = new Map<string, number>()
   private on?: Promise<boolean>
   constructor(private host: VaultBackend, private autofill: Autofill, private occupied: (tab: number) => boolean, private providers: ProviderChain) {
-    host.onChange((status) => { this.lists.clear(); if (status.state !== "ready") void this.closeAll() })
+    host.onChange((status) => { this.lists.clear(); this.nothing.clear(); if (status.state !== "ready") void this.closeAll() })
     chrome.storage.onChanged?.addListener((changes, area) => {
       if (area !== "local" || !(SIGNIN_SETTING in changes)) return
       this.on = undefined
-      if (changes[SIGNIN_SETTING].newValue !== true) void this.closeAll()
+      if (!signInOn(changes[SIGNIN_SETTING].newValue)) void this.closeAll()
     })
   }
 
   /** Memoized until the setting changes; a failed read is retried next time. */
   private enabled() {
-    const on = this.on ??= chrome.storage.local.get(SIGNIN_SETTING).then((s) => s[SIGNIN_SETTING] === true)
+    const on = this.on ??= chrome.storage.local.get(SIGNIN_SETTING).then((s) => signInOn(s[SIGNIN_SETTING]))
     on.catch(() => { if (this.on === on) this.on = undefined })
     return on.catch(() => false)
   }
-  private async key(origin: string) { return `signin-memory:${await hostHash(origin)}` }
+  /** Each origin's memory key, hashed once (see hostHash). */
+  private keys = new Map<string, Promise<string>>()
+  private key(origin: string) {
+    let key = this.keys.get(origin)
+    if (!key) {
+      if (this.keys.size >= 100) this.keys.delete(this.keys.keys().next().value!)
+      key = hostHash(origin).then((h) => `signin-memory:${h}`)
+      key.catch(() => this.keys.delete(origin))
+      this.keys.set(origin, key)
+    }
+    return key
+  }
   private async memory(origin: string): Promise<Memory> {
     const key = await this.key(origin)
     return (await chrome.storage.session.get(key))[key] ?? {}
@@ -54,6 +70,18 @@ export class UniversalSignIn {
     if (old.length) await chrome.storage.session.remove(old)
   }
 
+  /**
+   * For a pick that would sign in (Autofill.signedOut): a fresh probe of the
+   * top page finds it signed out, and no sign-in is remembered there lately.
+   */
+  async signedOutNow(target: FrameTarget): Promise<boolean> {
+    if (target.frameId !== 0) return false
+    const facts = await this.probe(target, true)
+    if (!facts) return false
+    const memory = await this.memory(target.origin)
+    return authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) === "signed-out"
+  }
+
   /** The existing save/outcome judge confirmed a sign-in; no new heuristic. */
   async signedIn(tabId: number) {
     if (!await this.enabled()) return
@@ -66,18 +94,56 @@ export class UniversalSignIn {
     if (target?.frameId === 0) await this.remember(target.origin, { signedIn: 0 })
   }
 
+  /** A site with none keeps its empty list until the vault changes (see the constructor); others for five seconds. */
   private async accounts(origin: string, fresh = false): Promise<Account[]> {
     const cached = this.lists.get(origin)
-    if (!fresh && cached && Date.now() - cached.at < 5000) return cached.accounts
+    if (!fresh && cached && (!cached.accounts.length || Date.now() - cached.at < 5000)) return cached.accounts
     const list = await this.host.send({ type: "list", origin })
     const accounts = list.accounts.filter((a) => (a.hasPassword || a.signIn) && a.urls.some((u) => exactSignInOrigin(u, origin)))
     if (this.lists.size >= 100) this.lists.delete(this.lists.keys().next().value!)
     this.lists.set(origin, { at: Date.now(), accounts })
     return accounts
   }
+  /**
+   * The person's own accounts at the providers whose "Sign in with …"
+   * buttons the page shows: logins saved at a provider's own sign-in host
+   * (savedAtProvider), each offered as "Sign in with Google · <account>",
+   * a pick of which starts the provider chain for it (see pick). Not one a
+   * site login already links to. Most used first, as the vault lists them.
+   */
+  private async providerAccounts(ids: string[], site: Account[], home: string, fresh = false): Promise<Account[]> {
+    const linked = (p: string, username: string) => site.some((a) => a.signIn?.provider === p && a.signIn.account?.trim().toLowerCase() === username.trim().toLowerCase())
+    const found: Account[] = []
+    const homeSite = siteOf(new URL(home).hostname)
+    for (const id of ids) {
+      const p = providerOf(id)
+      // Never on a site of the provider's own (gist.github.com, sites.google.com).
+      if (p.hosts.some((h) => siteOf(h) === homeSite)) continue
+      for (const origin of providerOrigins(p)) {
+        // Kept apart from the site lists (see accounts), which are filtered.
+        // Until the vault changes (see the constructor), not per check.
+        const key = `provider:${origin}`
+        const cached = this.lists.get(key)
+        const listed = !fresh && cached ? cached.accounts : (await this.host.send({ type: "list", origin }).catch(() => null))?.accounts ?? []
+        if (this.lists.size >= 100) this.lists.delete(this.lists.keys().next().value!)
+        this.lists.set(key, { at: Date.now(), accounts: listed })
+        for (const a of listed) {
+          const username = a.username?.trim()
+          // A provider login saved for the site too is already listed as the site's own.
+          if (!username || !a.hasPassword || a.signIn || !a.urls.some((u) => savedAtProvider(p, u)) || linked(p.id, username) || site.some((x) => x.ref === a.ref) || found.some((f) => f.ref === a.ref)) continue
+          found.push({ ...a, title: p.name, hasPassword: false, hasTotp: false, signIn: { provider: p.id, account: username } })
+        }
+      }
+    }
+    return found
+  }
   /** `fresh` skips the page's short report cache, for the guarded pick. */
   private probe(target: FrameTarget, fresh = false) {
     return sendToFrame<AuthReport>(target, { type: "db:auth-probe", ...(fresh ? { fresh } : {}) })
+  }
+  private rememberNothing(signal: string) {
+    if (this.nothing.size >= 200) this.nothing.delete(this.nothing.keys().next().value!)
+    this.nothing.set(signal, Date.now() + 10 * 60_000)
   }
   private open(tabId: number) { return [...this.offers.values()].some((o) => o.tabId === tabId) }
   /** A fresh sign-in or a recent offer/dismissal on this origin: don't probe at all. */
@@ -85,24 +151,42 @@ export class UniversalSignIn {
     return Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS || Date.now() < (memory.quietUntil ?? 0)
   }
 
-  async check(sender: chrome.runtime.MessageSender) {
+  /**
+   * A page that shows something of a sign-in asks once per change (see
+   * content.ts askAboutSignIn). "retry": nothing could be decided yet
+   * (Deadbolt locked or busy, a check or a sign-in under way), so it asks
+   * again in a few seconds.
+   */
+  async check(sender: chrome.runtime.MessageSender, signal?: unknown, provider = false): Promise<"retry" | undefined> {
     const target = await targetFor(sender)
+    const shown = typeof signal === "string" && signal.length <= 4096 ? signal : undefined
+    if (shown && (this.nothing.get(shown) ?? 0) > Date.now()) return
     // Cheapest first. An open offer stays until navigation, pick, dismissal,
     // lock or the setting going off; it is never re-probed.
-    if (!target || target.frameId !== 0 || this.checking.has(target.tabId) || this.open(target.tabId)) return
-    if (this.host.status.state !== "ready" || this.occupied(target.tabId) || this.providers.active(target.tabId)) return
+    if (!target || target.frameId !== 0 || this.open(target.tabId)) return
+    if (this.checking.has(target.tabId) || this.host.status.state !== "ready" || this.occupied(target.tabId) || this.providers.active(target.tabId)) return "retry"
     this.checking.add(target.tabId)
     try {
-      if (!await this.enabled() || this.quiet(await this.memory(target.origin)) || await this.autofill.signingIn(target.tabId)) return
-      const accounts = await this.accounts(target.origin)
-      if (!accounts.length || accounts.length > 50) return
+      if (!await this.enabled() || this.quiet(await this.memory(target.origin))) return
+      if (await this.autofill.signingIn(target.tabId)) return "retry"
+      const own = await this.accounts(target.origin)
+      // Nothing saved for the site: only a provider button could offer anything, so no probe without one.
+      if (own.length > 50 || (!own.length && !provider)) return
       const facts = await this.probe(target)
       if (!facts) return
+      // This page as it is got no offer: don't probe it again (see nothing).
+      const none = () => { if (shown) this.rememberNothing(shown); return undefined }
       if (facts.signOut) await this.remember(target.origin, { signedIn: Date.now() })
-      if (authState(facts) !== "signed-out" || !facts.action || this.open(target.tabId)) return
+      if (authState(facts) !== "signed-out" || !facts.action) return none()
+      if (this.open(target.tabId)) return
+      // The site's own logins first, then the person's provider accounts for its provider buttons; at most 50.
+      const providers = cleanProviders(facts.providers)
+      const accounts = [...own, ...(await this.providerAccounts(providers, own, target.origin))].slice(0, 50)
+      if (!accounts.length) return none()
+      if (this.open(target.tabId)) return
       if (!await this.enabled() || this.host.status.state !== "ready" || this.quiet(await this.memory(target.origin))) return
       const token = crypto.randomUUID()
-      this.offers.set(token, { ...target, at: Date.now(), accounts })
+      this.offers.set(token, { ...target, at: Date.now(), accounts, providers })
       if (await sendToFrame(target, { type: "db:signin-offer", token }))
         await this.remember(target.origin, { quietUntil: Date.now() + SIGNIN_QUIET_MS })
       else this.offers.delete(token)
@@ -133,7 +217,11 @@ export class UniversalSignIn {
     // frame says "Continuing sign-in", so Escape there still cancels.
     o.picked = o.picking = true
     try {
-      const account = (await this.accounts(o.origin, true)).find((a) => a.ref === ref && o.accounts.some((saved) => saved.ref === ref))
+      const own = await this.accounts(o.origin, true)
+      const fresh = [...own, ...(await this.providerAccounts(o.providers, own, o.origin, true))]
+      const account = fresh.find((a) => a.ref === ref && o.accounts.some((saved) => saved.ref === ref))
+      // One of the person's provider accounts, not a login saved for the site (see providerAccounts).
+      const unlinked = !!account && !own.some((a) => a.ref === ref)
       const facts = account && await this.probe(o, true)
       const memory = await this.memory(o.origin)
       if (o.cancelled || !account || !facts?.action || authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) !== "signed-out")
@@ -148,10 +236,11 @@ export class UniversalSignIn {
       if (chain) {
         await this.autofill.stopAutomatic(o.tabId)
         if (o.cancelled) return { ok: true }
-        const starting = this.providers.start(o, account)
+        const starting = this.providers.start(o, account, unlinked)
         await this.closeTab(o.tabId)
         reply = await starting
-      } else reply = await this.autofill.startAutomatic(o, account, facts.action, provider)
+      } else if (unlinked) return { ok: false, message: "The page changed. Nothing was filled." }
+      else reply = await this.autofill.startAutomatic(o, account, facts.action, provider)
       if (o.cancelled) {
         this.providers.stop(o.tabId)
         await this.autofill.stopAutomatic(o.tabId)
@@ -202,4 +291,9 @@ export class UniversalSignIn {
       await this.closeTab(o.tabId)
     }
   }
+}
+
+/** A content script's provider ids, kept to known providers with sign-in hosts. */
+function cleanProviders(raw: unknown): string[] {
+  return Array.isArray(raw) ? [...new Set(raw.filter((p): p is string => typeof p === "string" && p.length <= 64 && providerOf(p).hosts.length > 0))].slice(0, 12) : []
 }

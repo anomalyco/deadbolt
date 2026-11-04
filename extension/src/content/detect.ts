@@ -12,6 +12,9 @@ import type { FieldRole, SurfaceKind } from "../messages"
 import { bestRole, FIELD_THRESHOLD, FORM_KINDS, hasPhrase, providerFromLabel, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind, type Provider } from "./clues"
 import { deepQueryAll, openRoots } from "./shadow"
 
+/** A password box that asks for a new password by autocomplete, whatever the detector made of its form: a sign-up, never a sign-in step to submit. */
+export const asksNewPassword = (fields: Field[]) => fields.some((f) => f.el.type === "password" && /\bnew-password\b/.test(f.el.autocomplete))
+
 export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|challenge|mfa|2fa|two-factor|verify|webauthn|passkey/i
 const SIGNUP_URL = /sign-?up|sign_up|register|registration|join|create-account|onboard/i
 const RESET_URL = /forgot|reset|recover/i

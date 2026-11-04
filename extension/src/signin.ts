@@ -67,8 +67,10 @@ const SIGN_IN_PATHS: Record<string, RegExp> = {
 }
 /** Re-authentication, sudo and settings pages: never a sign-in step, even under an allowed prefix. */
 const DENIED_PATH = /\/(?:settings|sudo|reauth|re-auth|confirm[-_]?access|security|myaccount|tokens?|personal_access_tokens|billing|password[-_]?(?:reset|change))(?:[/.]|$)/i
-/** Query parameters that name where a provider sends the person back. */
-const RETURN_PARAMS = ["redirect_uri", "redirect_url", "return_to", "returnTo", "return_url", "returnUrl", "continue", "followup", "next", "session_redirect", "openid.return_to"]
+/** Query parameters that name where a provider sends the person back, compared without case. */
+const RETURN_PARAMS = new Set(["redirect_uri", "redirect_url", "return_to", "returnto", "return_url", "returnurl", "continue", "followup", "next", "session_redirect", "openid.return_to"])
+/** OAuth's space-separated scopes are often URLs (Google's), never a place to go. */
+const NOT_RETURN = new Set(["scope"])
 
 /** Whether `url` is one of the provider's own sign-in or OAuth pages: its host (isProviderPage) and an allowed path. */
 export function isSignInPage(p: Provider, url: string): boolean {
@@ -80,12 +82,17 @@ export function isSignInPage(p: Provider, url: string): boolean {
 
 /**
  * Where a provider page sends the person back, judged against `site`, the
- * chain's home (a registrable domain): "home" when every return URL it
- * carries resolves to that site, directly or through another of the
- * provider's own sign-in pages that does; "none" when it carries none;
- * otherwise "foreign".
+ * chain's home (a registrable domain), or with `origins`, exactly one of
+ * those (scheme, host and port): "home" when every return URL it carries
+ * resolves there, directly or through another of the provider's own
+ * sign-in pages that does; "none" when it carries none; otherwise
+ * "foreign". A return URL is a parameter named like one (any case; relative
+ * ones resolve against the page), or any other whose value, as is or
+ * URL-decoded once, with `\` read as `/`, is an absolute or
+ * scheme-relative http(s) URL, whatever it's called (`wreply`, `redir`),
+ * except OAuth's `scope`.
  */
-export function returnsTo(p: Provider, url: string, site: string, depth = 0): "home" | "none" | "foreign" {
+export function returnsTo(p: Provider, url: string, site: string, origins?: readonly string[], depth = 0): "home" | "none" | "foreign" {
   let u: URL
   try {
     u = new URL(url)
@@ -93,20 +100,38 @@ export function returnsTo(p: Provider, url: string, site: string, depth = 0): "h
     return "foreign"
   }
   let found = false
-  for (const name of RETURN_PARAMS) for (const value of u.searchParams.getAll(name)) {
+  for (const [name, value] of u.searchParams) {
+    const key = name.toLowerCase()
+    if (NOT_RETURN.has(key)) continue
+    const named = RETURN_PARAMS.has(key)
+    const unnamed = named ? null : urlLike(value)
+    if (!named && unnamed === null) continue
     found = true
     let back: URL
     try {
-      back = new URL(value, u)
+      back = new URL(named ? value : unnamed!, u)
     } catch {
       return "foreign"
     }
-    const host = back.hostname.toLowerCase()
-    if (site && secure(back) && (host === site || host.endsWith(`.${site}`))) continue
-    if (depth < 3 && isSignInPage(p, back.href) && returnsTo(p, back.href, site, depth + 1) === "home") continue
+    const at = back.hostname.toLowerCase()
+    if (site && secure(back) && (origins ? origins.some((o) => back.origin === o.toLowerCase()) : at === site || at.endsWith(`.${site}`))) continue
+    if (depth < 3 && isSignInPage(p, back.href) && returnsTo(p, back.href, site, origins, depth + 1) === "home") continue
     return "foreign"
   }
   return found ? "home" : "none"
+}
+
+/** A parameter value that is a URL to somewhere (absolute or `//host`), as is or URL-decoded once, `\` read as `/`: that URL, else null. */
+function urlLike(value: string): string | null {
+  let decoded = value
+  try {
+    decoded = decodeURIComponent(value)
+  } catch {}
+  for (const v of [value, decoded]) {
+    const norm = v.trim().replace(/\\/g, "/")
+    if (/^(?:https?:)?\/\//i.test(norm)) return norm
+  }
+  return null
 }
 
 /** https, or in an e2e build its http `.test` stand-ins too (see isProviderPage). */
@@ -156,4 +181,23 @@ export function pageAccountOf(raw: unknown): string | undefined {
   if (typeof raw !== "string" || raw.length > 500) return undefined
   const v = raw.trim()
   return /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/.test(v) || /^[\w.+-]{1,64}$/.test(v) ? v : undefined
+}
+
+/**
+ * Whether a saved URL names one of the provider's own sign-in hosts exactly
+ * (isProviderPage: https, no port): a login saved there is an account at
+ * the provider itself, which a site's "Sign in with …" can use.
+ */
+export function savedAtProvider(p: Provider, saved: string): boolean {
+  try {
+    return isProviderPage(p, new URL(saved.includes("://") ? saved : `https://${saved}`).href)
+  } catch {
+    return false
+  }
+}
+
+/** Where the provider's own logins are listed from: its hosts over https (an e2e build also asks for their http `.test` stand-ins). */
+export function providerOrigins(p: Provider): string[] {
+  const e2e = typeof DEADBOLT_E2E !== "undefined" && DEADBOLT_E2E === true
+  return p.hosts.flatMap((h) => [`https://${h}`, ...(e2e && h.endsWith(".com") ? [`http://${h.slice(0, -4)}.test`] : [])])
 }

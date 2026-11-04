@@ -37,4 +37,6 @@ deadbolt-net = { path = "../net", features = ["storage"] }
 deadbolt-core = { path = "../core" }
 deadbolt-store = { path = "../store" }
 redb = "4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"

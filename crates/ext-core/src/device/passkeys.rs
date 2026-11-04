@@ -44,6 +44,22 @@ pub(super) fn authorize(body: &mut Value) -> Result<Value> {
     Ok(json!({"type": "passkey-authorized", "token": token}))
 }
 
+/// The kind, page and passkey of the ceremony waiting to finish, for its
+/// Activity entry: nothing secret.
+pub(super) fn authorized() -> Option<Value> {
+    AUTHORIZED.with(|slot| {
+        let slot = slot.borrow();
+        let (_, ceremony, _) = slot.as_ref()?;
+        let mut summary = json!({});
+        for key in ["type", "origin", "ref"] {
+            if let Some(value) = ceremony.get(key) {
+                summary[key] = value.clone();
+            }
+        }
+        Some(summary)
+    })
+}
+
 pub(super) fn finish(body: &Value) -> Result<Value> {
     let token = text(body, "token")?;
     let (expected, mut ceremony, at) = AUTHORIZED
