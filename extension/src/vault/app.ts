@@ -452,7 +452,7 @@ export class App {
   }
 }
 
-const REAUTH_KINDS: ReadonlyArray<Reauth["kind"]> = ["card", "passkey-get", "passkey-create"]
+const REAUTH_KINDS: ReadonlyArray<Reauth["kind"]> = ["card", "card-save", "passkey-get", "passkey-create"]
 
 /** An item of the list, checked: a login's account fields as protocol.ts checks them, and the rest. */
 function itemSummary(v: unknown): ItemSummary | null {

@@ -42,6 +42,11 @@ export function activityWords(e: ActivityEntry): string {
         return fields ? `Filled ${fields}` : "Filled"
       case "site-save":
         return e.fields.includes("username") ? "Saved a new login" : "Updated a password"
+      // A card or identity saved from a form: its fields' names only.
+      case "item-new":
+        return e.fields.includes("number") ? "Saved a new card" : "Saved new details"
+      case "item-set":
+        return fields ? `Updated ${fields}` : "Updated"
       case "site-generate":
         return "Made a new password"
       case "site-generate-keep":

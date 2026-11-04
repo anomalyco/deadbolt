@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test"
 import { fillable, fillFields, hiddenByStyle, ownValue, renderedParent, setInputValue, trackUserInput, visibleBox } from "../src/content/fill"
 import { ownerOf, type Field } from "../src/content/detect"
 import { scanForms } from "../src/content/forms"
-import { fillForm } from "../src/content/formfill"
-import { splitNumber, valueFor } from "../src/content/transform"
+import { fillForm, readSubmitted } from "../src/content/formfill"
+import { countryCode, readBirthday, readCardNumber, readExpiry, splitNumber, valueFor } from "../src/content/transform"
+import { cardBrand } from "../src/payments"
 import { fillsWords } from "../src/messages"
 
 function input(): HTMLInputElement {
@@ -443,5 +444,107 @@ describe("form values", () => {
     expect(boxes.map((b) => b.value).join("")).toBe("")
     expect((await fillForm(fields, card, () => true)).filled).toEqual(["cc-number"])
     expect(boxes.map((b) => b.value)).toEqual(["4242", "4242", "4242", "4242"])
+  })
+})
+
+describe("what was submitted, for a save", () => {
+  /** Types into a field as the user would: a trusted input event after the value. */
+  const type = (id: string, value: string) => {
+    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement
+    el.value = value
+    const event = new Event("input", { bubbles: true, composed: true })
+    Object.defineProperty(event, "isTrusted", { value: true })
+    el.addEventListener("input", trackUserInput, { once: true })
+    el.dispatchEvent(event)
+  }
+  const CHECKOUT = `<form>
+    <input id="name" autocomplete="cc-name"><input id="cc" autocomplete="cc-number"><input id="exp" autocomplete="cc-exp"><input id="cvc" autocomplete="cc-csc">
+  </form>`
+
+  test("a typed card: its number, expiry, name and brand, never its security code", async () => {
+    document.body.innerHTML = CHECKOUT
+    for (const [id, v] of [["name", "Ada Lovelace"], ["cc", "4000 0566 5566 5556"], ["exp", "09 / 30"], ["cvc", "737"]]) type(id, v)
+    const got = await readSubmitted(scanForms())
+    expect(got).toEqual({ card: { number: "4000056655665556", brand: "Visa", expiry: "2030-09", cardholder: "Ada Lovelace" }, typed: ["number", "brand", "expiry", "cardholder"], filled: [] })
+    expect(JSON.stringify(got)).not.toContain("737")
+  })
+
+  test("a card Deadbolt filled and nobody changed is nothing; one with a changed expiry keeps its filled number", async () => {
+    document.body.innerHTML = CHECKOUT
+    const fields = scanForms()
+    await fillForm(fields, { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Kit Langton" }, () => true)
+    expect(await readSubmitted(fields)).toEqual({})
+    type("exp", "01/31")
+    // Each value says whether the user typed it or Deadbolt filled it.
+    expect(await readSubmitted(fields)).toEqual({ card: { number: "4242424242424242", brand: "Visa", expiry: "2031-01", cardholder: "Kit Langton" }, typed: ["expiry"], filled: ["number", "brand", "cardholder"] })
+  })
+
+  test("a number the page put there, or one that isn't a card number, isn't read", async () => {
+    document.body.innerHTML = CHECKOUT
+    ;(document.getElementById("cc") as HTMLInputElement).value = "4242424242424242"
+    type("name", "Ada Lovelace")
+    expect(await readSubmitted(scanForms())).toEqual({ card: { cardholder: "Ada Lovelace" }, typed: ["cardholder"], filled: [] })
+    type("cc", "4242 4242 4242 4241")
+    expect((await readSubmitted(scanForms())).card?.number).toBeUndefined()
+  })
+
+  test("a typed address: the name split, the street in lines, the country as its code", async () => {
+    document.body.innerHTML = `<form>
+      <input id="n" autocomplete="shipping name"><textarea id="st" autocomplete="shipping street-address"></textarea>
+      <input id="c" autocomplete="shipping address-level2"><input id="z" autocomplete="shipping postal-code">
+      <select id="co" autocomplete="shipping country"><option value="">-</option><option value="DE">Germany</option><option value="US">United States</option></select>
+      <input id="t" autocomplete="shipping tel">
+    </form>`
+    for (const [id, v] of [["n", "Ada King Lovelace"], ["st", "1 Main St\nApt 2"], ["c", "Springfield"], ["z", "12345"], ["co", "US"], ["t", "+1 415 555 0100"]]) type(id, v)
+    const got = await readSubmitted(scanForms())
+    expect(got.identity).toEqual({ "given-name": "Ada King", "family-name": "Lovelace", "address-line1": "1 Main St", "address-line2": "Apt 2", city: "Springfield", "postal-code": "12345", country: "US", phone: "+1 415 555 0100" })
+    expect(got.typed?.sort()).toEqual(["address-line1", "address-line2", "city", "country", "family-name", "given-name", "phone", "postal-code"])
+  })
+
+  test("a value the page swapped or planted is the page's: not typed, and left out when it doesn't show", async () => {
+    document.body.innerHTML = `<form>
+      <input id="n" autocomplete="name"><input id="e" autocomplete="email"><input id="t" autocomplete="tel">
+      <input id="a" autocomplete="address-line1"><input id="c" autocomplete="address-level2">
+    </form>`
+    for (const [id, v] of [["n", "Kit Langton"], ["e", "kit@example.com"], ["a", "5 Oak Ave"], ["c", "Brooklyn"]]) type(id, v)
+    // The page swaps the email the user typed and plants a phone, in fields that show nowhere.
+    ;(document.getElementById("e") as HTMLInputElement).value = "attacker@example.net"
+    ;(document.getElementById("t") as HTMLInputElement).value = "+15550100999"
+    const got = await readSubmitted(scanForms())
+    expect(got.identity).toEqual({ "given-name": "Kit", "family-name": "Langton", "address-line1": "5 Oak Ave", city: "Brooklyn" })
+    expect(got.typed).not.toContain("email")
+    expect(JSON.stringify(got)).not.toContain("attacker")
+    expect(JSON.stringify(got)).not.toContain("0100999")
+  })
+
+  test("a card's brand comes from its number, never from the page's card type", async () => {
+    document.body.innerHTML = `<form>
+      <input id="cc" autocomplete="cc-number"><input id="exp" autocomplete="cc-exp">
+      <select id="ty" autocomplete="cc-type"><option value="">-</option><option value="mc">Mastercard</option><option value="amex">American Express</option></select>
+    </form>`
+    type("cc", "4000 0566 5566 5556")
+    type("exp", "09/30")
+    type("ty", "amex")
+    expect((await readSubmitted(scanForms())).card?.brand).toBe("Visa")
+    ;(document.getElementById("cc") as HTMLInputElement).value = ""
+    expect((await readSubmitted(scanForms())).card?.brand).toBeUndefined()
+  })
+
+  test("nothing typed in an address is nothing, whatever the page put there", async () => {
+    document.body.innerHTML = `<form><input id="a" autocomplete="address-line1" value="1 Main St"><input id="c" autocomplete="address-level2" value="Springfield"></form>`
+    expect(await readSubmitted(scanForms())).toEqual({})
+  })
+
+  test("values read back: expiries, card numbers, brands, countries and birthdays", () => {
+    expect(["08/28", "8 / 2028", "08-28", "0828", "2028-08"].map(readExpiry)).toEqual(Array(5).fill("2028-08"))
+    expect(["13/28", "08/2", "abc"].map(readExpiry)).toEqual([undefined, undefined, undefined])
+    expect(readCardNumber("4242-4242-4242-4242")).toBe("4242424242424242")
+    expect(readCardNumber("4242424242424241")).toBeUndefined()
+    expect(readCardNumber("4242 4242 x242 4242")).toBeUndefined()
+    expect(["4242424242424242", "5555555555554444", "378282246310005", "6011111111111117"].map(cardBrand)).toEqual(["Visa", "Mastercard", "American Express", "Discover"])
+    expect(["us", "United States", "USA", "united kingdom", "Germany", "Narnia"].map(countryCode)).toEqual(["US", "US", "US", "GB", "DE", undefined])
+    document.body.innerHTML = `<input id="b" placeholder="MM/DD/YYYY">`
+    type("b", "07/04/1990")
+    expect(readBirthday(document.getElementById("b") as HTMLInputElement)).toBe("1990-07-04")
   })
 })
