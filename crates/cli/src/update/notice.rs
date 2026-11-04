@@ -5,8 +5,8 @@ use std::time::Duration;
 use crate::paths::Paths;
 use crate::protocol::UpdateInfo;
 
-use super::installed_with;
-use super::state_dir;
+use super::install::state_dir;
+use super::method::installed_with;
 
 /// Remembers the last notice, `<version> <unix seconds>`, in the state
 /// directory.
