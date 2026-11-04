@@ -32,6 +32,7 @@ const forms = new Forms(host)
 const siteIcons = new SiteIcons(host)
 const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(tabId) !== undefined, providers)
 autofill.signedOut = (target) => universal.signedOutNow(target)
+providers.submitIdentifier = (target, username, form) => autofill.submitIdentifier(target, username, form)
 /**
  * The device.html tab the inline menu's locked row opened. Memory only, like
  * Autofill's return target: a restarted worker returns nowhere. A later click

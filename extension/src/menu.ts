@@ -617,6 +617,8 @@ async function pick(i: number) {
     announce(going ? "Continuing sign-in" : "Filled")
     return void setTimeout(() => done(), FILLED_STAYS_MS + 450)
   }
+  // The corner offer gone under the pick (its page no longer qualifies): it leaves without a word.
+  if (universal && !reply?.message) return done()
   const message = reply?.message || "Couldn't fill. Try again."
   say(message)
   announce(`Couldn't fill. ${message}`)

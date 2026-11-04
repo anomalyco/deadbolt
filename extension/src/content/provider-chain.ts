@@ -188,6 +188,18 @@ function loading(text: string): boolean {
   return document.readyState !== "complete" || deepQueryAll(BUSY, openRoots()).some(isVisible) || any(text, LOADING)
 }
 
+/** A link that leaves the page for anywhere but the provider's own sign-in pages. */
+function leavesHome(el: HTMLElement, p: Provider): boolean {
+  const a = el.closest("a[href]")
+  if (!(a instanceof HTMLAnchorElement)) return false
+  try {
+    const to = new URL(a.href, location.href)
+    return to.origin !== location.origin && !isSignInPage(p, to.href)
+  } catch {
+    return true
+  }
+}
+
 function entryControl(p: Provider): HTMLElement | null {
   const el = findProviderButton(p, true)
   return el instanceof HTMLElement && !(el instanceof HTMLIFrameElement) && clickable(el, false) ? el : null
@@ -313,7 +325,7 @@ function inspectForm(account?: string): FormPlan | { stop: Reason } | "wait" | n
   return { fields: [...fields], scope, button }
 }
 
-function evaluate(message: Probe): ProviderReport | "wait" {
+function evaluate(message: Probe, settled = true): ProviderReport | "wait" {
   const p = providerById(message.provider)
   // Only providers Deadbolt knows by their sign-in hosts (signin.ts KNOWN).
   if (!p.hosts.length || document.hidden || window !== window.top) return stop("unknown")
@@ -323,9 +335,22 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   if (message.entry) {
     // The site's own page: its one provider button, nothing else. No account is sent here.
     if (onProvider || message.account !== undefined) return stop("unknown")
+    const unlinked = Array.isArray(message.home) && message.home.length > 0
     const el = entryControl(p)
+    // A provider account the site isn't linked to: a link off the page goes
+    // only to the provider's own sign-in pages, never via another host.
+    if (el && unlinked && leavesHome(el, p)) return stop("unknown")
     if (el) return { kind: "entry", action: mint({ kind: "click", ...base, provider: false, el, find: () => entryControl(p) }) }
     if (signedInHint(page)) return { kind: "success" }
+    // Email-first: the provider's button shows only once the email went.
+    // Only when no button for it shows at all (its widgets' frames
+    // included), after the page had its time to settle, and for a linked
+    // chain; the background fills and submits it with the automatic
+    // session's checks (Autofill.submitIdentifier), then asks again. A
+    // button Deadbolt can't click alone is the person's (pointed at).
+    const fields = page.targets()
+    if (!unlinked && page.kind() === "login" && fields.length && fields.every((f) => IDENTIFIER_ROLES.includes(f.role)) && !findProviderButton(p))
+      return settled ? { kind: "identifier", form: page.form(), roles: [...new Set(fields.map((f) => f.role))].sort() } : "wait"
     const text = pageWords()
     return text !== null && loading(text) ? "wait" : stop("unknown")
   }
@@ -380,7 +405,7 @@ async function probe(message: Probe): Promise<ProviderReport> {
   const deadline = performance.now() + SETTLE_MS
   for (;;) {
     if (!live(message.session)) return stop("unknown")
-    const report = evaluate(message)
+    const report = evaluate(message, performance.now() + SETTLE_STEP_MS > deadline)
     if (report !== "wait") return report
     if (performance.now() > deadline) return stop("unknown")
     await sleep(SETTLE_STEP_MS)
