@@ -8,9 +8,9 @@ use anyhow::{Context, Result, bail};
 use url::Url;
 
 use super::APP_REQUIREMENT;
+use super::install::{daemon_runs, restart_daemon, stop_daemon};
 use super::protocol::{Target, VERSION};
 use super::service::Service;
-use super::{daemon_runs, restart_daemon, stop_daemon};
 use crate::paths::Paths;
 
 /// A directory beside `dest` to stage its replacement in, on the same
