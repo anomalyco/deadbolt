@@ -1,6 +1,6 @@
 //! Who is asking (`docs/agent-control.md`): each connection's peer as the
 //! kernel names it, its code signature (macOS) or executable (Linux), and the
-//! class that rests on them. What the client claims is attached, never used.
+//! class that rests on them. A client's claim can never establish trust.
 
 use std::collections::HashMap;
 use std::io;
@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use deadbolt_client::peer::{APP_ID, AUTOFILL_ID, CodeSignature, DAEMON_ID, Peer, Process};
 use tracing::warn;
 
-use crate::protocol::{CallerClass, CallerInfo, Check, Claim, Signature};
+use crate::protocol::{Ancestor, CallerClass, CallerInfo, Check, Claim, Signature};
 
 /// Peers remembered, by audit token (pid and pid version).
 const CACHE_MAX: usize = 256;
@@ -121,6 +121,11 @@ impl Callers {
             }
         };
         info.claimed = claimed.filter(|c| !c.is_empty());
+        // The cache contains only process facts. A claim on this request
+        // can remove browser-host standing, never confer it.
+        if info.class == CallerClass::BrowserHost && is_ai(&info) {
+            info.class = CallerClass::Caller;
+        }
         info
     }
 
@@ -255,6 +260,26 @@ fn browser_host_args(args: &[String]) -> bool {
     }
 }
 
+/// Native hosts on macOS run under one of the browsers `browser install`
+/// supports (or Chrome for Testing). Match the kernel's executable path,
+/// not an ancestor's display name. This is a hint, not browser pairing.
+fn browser_ancestor(parent: &Ancestor) -> bool {
+    let Some(path) = parent.path.as_deref().map(Path::new) else {
+        return false;
+    };
+    [
+        "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "Brave Browser.app/Contents/MacOS/Brave Browser",
+        "Arc.app/Contents/MacOS/Arc",
+        "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "Chromium.app/Contents/MacOS/Chromium",
+        "Helium.app/Contents/MacOS/Helium",
+    ]
+    .iter()
+    .any(|bundle| path.ends_with(bundle))
+}
+
 /// The class `evidence` supports. Nothing a client says enters here.
 ///
 /// A Developer ID build knows its own code by team and identifier. An
@@ -263,7 +288,7 @@ fn browser_host_args(args: &[String]) -> bool {
 /// The app must run from the daemon's bundle either way: its executable is
 /// the whole `deadbolt` binary signed as the app, which runs only the app
 /// there, but a copy elsewhere would run CLI commands under its signature.
-pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
+fn classify(evidence: &Evidence, args: &[String], ancestry: &[Ancestor]) -> (CallerClass, Check) {
     match evidence {
         Evidence::Signature {
             code,
@@ -283,7 +308,11 @@ pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
                 CallerClass::App
             } else if is(autofill, AUTOFILL_ID) {
                 CallerClass::AutoFill
-            } else if is(exe, DAEMON_ID) && browser_host_args(args) {
+            } else if is(exe, DAEMON_ID)
+                && browser_host_args(args)
+                && ancestry.iter().any(browser_ancestor)
+                && ai_host(ancestry).is_none()
+            {
                 CallerClass::BrowserHost
             } else {
                 CallerClass::Caller
@@ -296,7 +325,7 @@ pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
 
 /// A peer's info from what was read about it, without a claim.
 pub fn info(peer: Peer, evidence: &Evidence, process: Process) -> CallerInfo {
-    let (class, check) = classify(evidence, &process.args);
+    let (class, check) = classify(evidence, &process.args, &process.ancestry);
     let (program, signature): (Option<String>, Option<Signature>) = match evidence {
         Evidence::Signature { code, .. } => (code.path.clone(), Some(code.signature())),
         Evidence::None => (process.exe.clone(), None),
@@ -334,26 +363,15 @@ fn from_proc(peer: Peer, process: Process) -> CallerInfo {
 /// proof: an AI can start a terminal outside its own tree. So it only ever
 /// refuses (pairing agent clients, granting sign-ins), never allows.
 pub fn is_ai(info: &CallerInfo) -> bool {
-    let host = |name: &str| {
-        let name = name.trim_start_matches('-');
-        HOSTS
-            .iter()
-            .any(|(host, _)| host.eq_ignore_ascii_case(name))
-    };
-    info.ancestry.iter().any(|a| {
-        host(&a.name)
-            || a.path
-                .as_deref()
-                .and_then(|p| Path::new(p).file_name())
-                .is_some_and(|n| host(&n.to_string_lossy()))
-    }) || info
-        .claimed
-        .as_ref()
-        .is_some_and(|c| c.opencode_session.is_some())
+    ai_host(&info.ancestry).is_some()
+        || info
+            .claimed
+            .as_ref()
+            .is_some_and(|c| c.opencode_session.is_some())
 }
 
-/// The AI host among `info`'s parents ("OpenCode"), if any.
-fn ai_host(info: &CallerInfo) -> Option<&'static str> {
+/// The AI host among the parents ("OpenCode"), if any.
+fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
     let host = |name: &str| {
         let name = name.trim_start_matches('-');
         HOSTS
@@ -361,7 +379,7 @@ fn ai_host(info: &CallerInfo) -> Option<&'static str> {
             .find(|(host, _)| host.eq_ignore_ascii_case(name))
             .map(|(_, label)| *label)
     };
-    info.ancestry.iter().find_map(|a| {
+    ancestry.iter().find_map(|a| {
         host(&a.name).or_else(|| {
             a.path
                 .as_deref()
@@ -374,7 +392,7 @@ fn ai_host(info: &CallerInfo) -> Option<&'static str> {
 /// Why the daemon takes `info` for an AI, and where to go instead: for a
 /// refusal, so a person in a terminal inside an AI host knows what to do.
 pub fn not_from_here(info: &CallerInfo) -> String {
-    let why = match ai_host(info) {
+    let why = match ai_host(&info.ancestry) {
         Some(host) => format!("This shell runs under {host} ({})", info.label),
         None => format!("This shell has OPENCODE_SESSION_ID set ({})", info.label),
     };
@@ -456,9 +474,8 @@ fn label(class: CallerClass, program: Option<&str>, process: &Process) -> String
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::protocol::Ancestor;
 
     fn peer(pid: u32, version: u32) -> Peer {
         Peer::from_token([501, 501, 20, 501, 20, pid, 100_000, version])
@@ -470,6 +487,78 @@ mod tests {
             name: name.into(),
             path: Some(path.into()),
         }
+    }
+
+    fn chrome() -> Ancestor {
+        ancestor(
+            3,
+            "Google Chrome",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )
+    }
+
+    /// macOS peer facts for the daemon's signed binary in native-host mode.
+    pub(in crate::daemon) fn signed_host(ancestry: Vec<Ancestor>) -> (Peer, CallerInfo) {
+        let peer = peer(42, 1);
+        let team = Some("TEAM123456");
+        let code = at(Path::new("/fixture/deadbolt"), "e1", team, DAEMON_ID);
+        let evidence = Evidence::Signature {
+            code: &code,
+            exe: None,
+            app: None,
+            autofill: None,
+            team,
+        };
+        let process = Process {
+            args: vec![
+                "deadbolt".into(),
+                "browser-host".into(),
+                crate::browser::extension_origin(),
+            ],
+            ancestry,
+            ..Process::default()
+        };
+        (peer, info(peer, &evidence, process))
+    }
+
+    #[test]
+    fn browser_host_standing_needs_a_browser_and_yields_to_ai() {
+        for name in [
+            "Google Chrome",
+            "Google Chrome for Testing",
+            "Brave Browser",
+            "Arc",
+            "Microsoft Edge",
+            "Chromium",
+            "Helium",
+        ] {
+            let path = format!("/Applications/{name}.app/Contents/MacOS/{name}");
+            let (_, info) =
+                signed_host(vec![ancestor(4, "sh", "/bin/sh"), ancestor(3, name, &path)]);
+            assert_eq!(info.class, CallerClass::BrowserHost, "{name}");
+        }
+        for parents in [
+            vec![],
+            vec![ancestor(3, "Google Chrome", "/bin/sh")],
+            vec![chrome(), ancestor(2, "node", "/bin/opencode-cli")],
+        ] {
+            assert_eq!(signed_host(parents).1.class, CallerClass::Caller);
+        }
+        let callers = Callers::new();
+        let (peer, host) = signed_host(vec![chrome()]);
+        callers.cache_for_test(peer, host);
+        let claim = Claim {
+            opencode_session: Some("ses_1".into()),
+            caller: None,
+        };
+        assert_eq!(
+            callers.identify(Ok(peer), Some(claim)).class,
+            CallerClass::Caller
+        );
+        assert_eq!(
+            callers.identify(Ok(peer), None).class,
+            CallerClass::BrowserHost
+        );
     }
 
     /// A pid the kernel hands to a new process is a new caller: the cache is
@@ -583,7 +672,7 @@ mod tests {
                 }),
                 team: None,
             };
-            classify(&evidence, args).0
+            classify(&evidence, args, &[chrome()]).0
         };
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -633,7 +722,7 @@ mod tests {
             CallerClass::Caller
         );
         assert_eq!(
-            classify(&Evidence::None, &host),
+            classify(&Evidence::None, &host, &[chrome()]),
             (CallerClass::Caller, Check::None)
         );
     }
@@ -664,7 +753,7 @@ mod tests {
                 autofill: None,
                 team,
             };
-            classify(&evidence, args).0
+            classify(&evidence, args, &[chrome()]).0
         };
         assert_eq!(
             class_of(at(&path, "a1", team, APP_ID), &[]),
@@ -708,7 +797,7 @@ mod tests {
             autofill: None,
             team,
         };
-        assert_eq!(classify(&evidence, &[]).0, CallerClass::Caller);
+        assert_eq!(classify(&evidence, &[], &[]).0, CallerClass::Caller);
     }
 
     /// Linux names a peer's program from `/proc`, which a process can race:

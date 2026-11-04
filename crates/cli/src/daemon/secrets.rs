@@ -408,7 +408,9 @@ impl Daemon {
         command: &Command,
         conv: &Conversation,
     ) -> Result<()> {
-        if caller.class != CallerClass::Caller || !caller::is_ai(caller) {
+        if matches!(caller.class, CallerClass::App | CallerClass::AutoFill)
+            || !caller::is_ai(caller)
+        {
             return Ok(());
         }
         let (vault, query, deleted, what) = match command {
@@ -896,11 +898,99 @@ mod tests {
                 "{command:?}"
             );
         }
-        let host = under_opencode(CallerClass::BrowserHost);
+        let mut host = CallerInfo::unverified("browser host (Chrome)");
+        host.class = CallerClass::BrowserHost;
+        let conflict = under_opencode(CallerClass::BrowserHost);
         let person = CallerInfo::unverified("zsh › deadbolt");
         for command in &refused {
             assert!(f.daemon.ai_gate(&host, command, &conv).await.is_ok());
             assert!(f.daemon.ai_gate(&person, command, &conv).await.is_ok());
+            let error = f
+                .daemon
+                .ai_gate(&conflict, command, &conv)
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::Forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_host_mode_does_not_authorize_an_ai() {
+        use crate::protocol::{Ancestor, Fill, LoginRef, PROTOCOL_VERSION, PagePassword, Request};
+        let f = super::super::passkeys::tests::daemon::unlocked().await;
+        let (conv, _closed) = super::super::passkeys::tests::daemon::conversation();
+        let origin = "https://example.com";
+        let (login, identity) = f
+            .daemon
+            .with(|s| {
+                let vault = s.resolve(None)?.to_string();
+                Ok((
+                    LoginRef {
+                        vault: vault.clone(),
+                        item: new(
+                            s,
+                            "login",
+                            "Example",
+                            &[("url", origin), ("password", "fixture-pw")],
+                        ),
+                    },
+                    LoginRef {
+                        vault,
+                        item: new(s, "identity", "Home", &[("city", "Example City")]),
+                    },
+                ))
+            })
+            .unwrap();
+        let cmds = [
+            Command::SiteFill {
+                origin: origin.into(),
+                login: login.clone(),
+                want: vec![Fill::Password],
+            },
+            Command::FormFill {
+                origin: origin.into(),
+                item: identity,
+                fields: vec!["city".into()],
+            },
+            Command::SiteSave {
+                origin: origin.into(),
+                login: Some(login),
+                title: "Example".into(),
+                url: origin.into(),
+                username: String::new(),
+                password: PagePassword::Typed(Secret::new("replacement")),
+            },
+        ];
+        // The direct reproduction, and one with the AI parent just past
+        // Activity's 16-parent display limit. Neither needs a session claim.
+        for depth in [0, 16] {
+            let mut parents = (0..depth)
+                .map(|n| Ancestor {
+                    pid: n + 10,
+                    name: "sh".into(),
+                    path: Some("/bin/sh".into()),
+                })
+                .collect::<Vec<_>>();
+            parents.extend(under_opencode(CallerClass::Caller).ancestry);
+            let (peer, host) = caller::tests::signed_host(parents);
+            f.daemon.callers.cache_for_test(peer, host);
+            for command in cmds.clone() {
+                let (result, _) = f
+                    .daemon
+                    .clone()
+                    .answer(
+                        super::super::macos_autofill::SocketKind::Control,
+                        Ok(peer),
+                        Request {
+                            v: PROTOCOL_VERSION,
+                            claimed: None,
+                            command,
+                        },
+                        &conv,
+                    )
+                    .await;
+                assert_eq!(code(&result.unwrap_err()), Some(ErrorCode::Forbidden));
+            }
         }
     }
 

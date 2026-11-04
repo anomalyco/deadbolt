@@ -167,7 +167,7 @@ That sorts every connection into one of three:
   Today any process can run `deadbolt browser-host chrome-extension://…`,
   name any origin and get that site's password; this closes it.
   - **Until pairing lands** (build order 3), the daemon calls a peer the
-    browser host when it runs the daemon's own code with `browser-host`
+    browser host only on macOS, under a supported Chromium browser with no AI ancestor or OpenCode session claim, when it runs the daemon's own code with `browser-host`
     arguments. Arguments are read by pid and a process can rewrite its own,
     so that label is for Activity only and never grants anything.
   - **Why not a vendor list or the extension id:** the id's manifest key is
