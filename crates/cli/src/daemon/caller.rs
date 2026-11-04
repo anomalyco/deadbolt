@@ -43,9 +43,39 @@ pub struct Callers {
     /// Original process facts, never request claims. An exec changes the
     /// audit token. An exit invalidates the entry even on inherited sockets.
     #[cfg(target_os = "macos")]
-    live: Mutex<HashMap<[u32; 8], CallerInfo>>,
+    live: Mutex<LivePeers<256>>,
     #[cfg(test)]
     fixtures: Mutex<HashMap<Peer, CallerInfo>>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct LivePeers<const LIMIT: usize> {
+    entries: HashMap<[u32; 8], CallerInfo>,
+    probe: usize,
+}
+
+#[cfg(target_os = "macos")]
+impl<const LIMIT: usize> LivePeers<LIMIT> {
+    fn remember(&mut self, token: [u32; 8], info: CallerInfo) -> CallerInfo {
+        if let Some(first) = self.entries.get(&token) {
+            return first.clone();
+        }
+        if self.entries.len() >= LIMIT {
+            // Bound cleanup to one liveness check per miss, not 256 while
+            // holding the cache lock. A recycled pid isn't the old token.
+            if let Some(old) = self.entries.keys().nth(self.probe).copied() {
+                self.probe = (self.probe + 1) % LIMIT;
+                if !deadbolt_client::peer::live_token(&old) {
+                    self.entries.remove(&old);
+                }
+            }
+        }
+        if self.entries.len() < LIMIT {
+            self.entries.insert(token, info.clone());
+        }
+        info
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -162,6 +192,7 @@ impl Callers {
                 .live
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .entries
                 .get(&token)
                 .cloned();
             if let Some(info) = cached {
@@ -175,24 +206,11 @@ impl Callers {
             if !info.identified {
                 return info;
             }
-            let mut cache = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(first) = cache.get(&token) {
-                return first.clone();
-            }
-            if cache.len() >= 256 {
-                // Never evict a live AI and later mistake its reparented
-                // process for a human. Only reclaim demonstrably dead pids.
-                cache.retain(|_, c| {
-                    rustix::process::Pid::from_raw(c.pid as i32).is_some_and(|p| {
-                        rustix::process::test_kill_process(p) != Err(rustix::io::Errno::SRCH)
-                    })
-                });
-                if cache.len() >= 256 {
-                    return unverified(Some(peer), "caller cache is full");
-                }
-            }
-            cache.insert(token, info.clone());
-            return info;
+            return self
+                .live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remember(token, info);
         }
         self.read(peer)
     }
@@ -389,6 +407,7 @@ pub fn info(peer: Peer, evidence: &Evidence, process: Process) -> CallerInfo {
     let label = label(class, program.as_deref(), &process);
     CallerInfo {
         identified,
+        browser_host_mode: browser_host_args(&process.args),
         reason: (!identified).then(|| {
             if process.ppid.is_none() {
                 "missing live process facts"
@@ -1058,5 +1077,31 @@ pub(super) mod tests {
         drop(parent.stdin.take());
         timeout(limit, parent.wait()).await.unwrap().unwrap();
         assert_eq!(callers.identify(Ok(peer), None), first);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cache_capacity_is_not_a_gate_and_stale_versions_do_not_pin_slots() {
+        let (stream, _other) = std::os::unix::net::UnixStream::pair().unwrap();
+        let token = Peer::of(&stream).unwrap().token.unwrap();
+        let mut stale = token;
+        stale[7] = stale[7].wrapping_add(1);
+        let person = CallerInfo {
+            identified: true,
+            reason: None,
+            ..CallerInfo::unverified("terminal")
+        };
+        let mut cache = LivePeers::<1>::default();
+        cache.entries.insert(token, person.clone());
+        let other = peer(100, 1).token.unwrap();
+        let result = cache.remember(other, person.clone());
+        assert_eq!(result, person);
+        assert!(!is_ai(&result));
+        assert!(cache.entries.contains_key(&token) && !cache.entries.contains_key(&other));
+
+        cache.entries.clear();
+        cache.entries.insert(stale, person.clone());
+        cache.remember(token, person);
+        assert!(cache.entries.contains_key(&token) && !cache.entries.contains_key(&stale));
     }
 }

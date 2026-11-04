@@ -127,8 +127,11 @@ The daemon reads the socket's peer, not anything the caller says:
   names living code on every hit. Failures and client claims are not cached.
   Linux gives `SO_PEERCRED`: pid and uid. The daemon checks the start ticks
   from connect and walks `/proc` anew per request. On a `hidepid=2` mount,
-  a confirmed live but hidden foreign-uid parent ends the visible chain;
-  a vanished parent or a parent born after its child still fails closed.
+  the daemon checks every visible task's `children` list for a hidden
+  parent's own parent. It continues from a visible parent if found. Only a
+  complete scan with no match ends the visible chain; it cannot identify
+  processes beyond consecutive hidden ancestors. An unavailable `children`
+  interface, a vanished parent, or a parent born after its child fails closed.
 - **Its code signature:** checked against the audit token
   (`SecCodeCopyGuestWithAttributes`) in the hash-pinned Swift helper that
   already does Touch ID (`docs/touch-id.md`), as `deadbolt-enclave

@@ -229,6 +229,7 @@ mod tests {
     fn caller() -> CallerInfo {
         CallerInfo {
             identified: true,
+            browser_host_mode: false,
             reason: None,
             class: CallerClass::Caller,
             check: Check::Signature,

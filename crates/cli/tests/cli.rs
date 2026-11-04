@@ -1723,7 +1723,7 @@ fn ai_agents_cant_send_the_browsers_fills_and_saves() {
         agent_error(&reply, "forbidden");
         let message = reply["message"].as_str().unwrap();
         assert!(
-            message.contains("This browser was started by an AI agent"),
+            message.contains("This shell ") && message.contains("deadbolt debug whoami"),
             "{reply}"
         );
         assert!(!reply.to_string().contains("hunter2"), "{reply}");
