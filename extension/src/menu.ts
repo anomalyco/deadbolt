@@ -128,7 +128,9 @@ function confirmPlacement(version: number): Promise<boolean> {
 
 async function confirmScale(at: number): Promise<boolean> {
   const version = geometry?.version
-  if (version === undefined || !pressedScale || !scaleMatches() || !(await confirmPick(dwell, at))) return false
+  if (version === undefined || !pressedScale || !scaleMatches()) return false
+  for (const a of surface.getAnimations()) a.cancel()
+  if (!(await confirmPick(dwell, at))) return false
   return (await confirmPlacement(version)) && geometry?.version === version && scaleMatches() && dwell.settled(at)
 }
 
@@ -190,9 +192,10 @@ const leaveLikeSave = () => done(true)
 // ---- Size --------------------------------------------------------------------
 
 let reported = ""
+let ready = false
 /** Tells the parent the size this mode needs, whenever it changes. */
 function report(grow = 0) {
-  if (!token) return
+  if (!token || !ready) return
   const height = Math.ceil(mode === "pill" ? 32 : mode === "save" ? offerSize().height : surface.offsetHeight || surface.getBoundingClientRect().height)
   const pill = document.querySelector<HTMLElement>(".pill")
   // The pill hugs its content: it is the whole pill, padding included.
@@ -1131,7 +1134,9 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     if (offerState === "dot") return { width: DOT, height: DOT }
     const box = section.getBoundingClientRect()
     if (offerState === "open") return { width: Math.ceil(box.width), height: Math.ceil(box.height) }
-    return { width: compactWidth(), height: ROW }
+    const width = compactWidth()
+    bar.style.width = `${width}px`
+    return { width, height: ROW }
   }
   // The bar runs along the compact pill's bottom edge.
   bar.style.width = `${compactWidth()}px`
@@ -1142,6 +1147,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   const shape = (next: OfferState) => {
     clearTimeout(grace)
     if (next === offerState || mode !== "save") return
+    for (const a of surface.getAnimations()) a.cancel()
     const fromDot = offerState === "dot"
     offerState = next
     document.body.dataset.offer = next
@@ -1341,26 +1347,40 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
   token = offered
   parentOrigin = origin
   show(reply)
+  // Mounting the offer's text starts its font load; measure once it's ready so
+  // the compact pill lands at its real width instead of springing from fallback.
+  if (reply.kind === "offer" && document.fonts) await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 50))])
   // Came with the token, so it's the content script's: the page never sees it.
   if (channel) {
     port = channel
     channel.onmessage = (e: MessageEvent<{ type?: unknown }>) => {
-      const data = e.data as { type?: unknown; query?: unknown; near?: unknown; origin?: unknown; geometry?: typeof geometry; check?: number; ok?: boolean }
+      const data = e.data as { type?: unknown; query?: unknown; near?: unknown; origin?: unknown; corner?: unknown; geometry?: typeof geometry; check?: number; ok?: boolean }
       if (data?.type === "db:menu-checked" && typeof data.check === "number") placementChecks.get(data.check)?.(data.ok === true)
       else if (data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
       else if (data?.type === "db:reveal") {
+        const corner = data.corner === true
         const origin = typeof data.origin === "string" ? data.origin : "top left"
         for (const el of [surface, ...Array.from(document.querySelectorAll<HTMLElement>(".pill"))]) {
-          el.style.transformOrigin = origin
-          el.animate(
+          if (!corner) el.style.transformOrigin = origin
+          if (corner && mode === "save" && offerState === "compact") el.style.borderRadius = `${ROW / 2}px`
+          const anim = el.animate(
             reducedMotion()
               ? [{ opacity: 0 }, { opacity: 1 }]
-              : [
-                  { opacity: 0, transform: "scale(0.96)" },
-                  { opacity: 1, transform: "none" },
-                ],
-            timing(0.25),
+              : corner
+                ? [
+                    { opacity: 0, transform: "translate(17px, -17px)" },
+                    { opacity: 1, transform: "none" },
+                  ]
+                : [
+                    { opacity: 0, transform: "scale(0.96)" },
+                    { opacity: 1, transform: "none" },
+                  ],
+            timing(corner ? 0.4 : 0.25),
           )
+          if (corner && mode === "save") {
+            const clear = () => { el.style.borderRadius = "" }
+            anim.finished.then(clear, clear)
+          }
         }
         watchVisibility(dwell, performance.now() + 60)
       } else if (data?.type === "db:menu-geometry" && data.geometry) {
@@ -1381,6 +1401,7 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
   }
   // Keep the frame exactly as big as the content (fonts load late and change
   // sizes): the visibility guard only trusts a fully visible surface.
+  ready = true
   report()
 }
 
