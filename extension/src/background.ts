@@ -41,6 +41,8 @@ providers.submitIdentifier = (target, username, form) => autofill.submitIdentifi
  */
 let unlockTab: number | undefined
 let openingUnlock: Promise<void> | null = null
+saver.formFrames = (tabId) => forms.reported(tabId)
+saver.formFilledFrom = (tabId) => forms.filledFrom(tabId)
 saver.signedIn = (tabId, site) => {
   void providers.signedIn(tabId)
   void autofill.signedIn(tabId)
@@ -103,6 +105,10 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return saver.capture(sender, message)
     case "db:failed":
       return saver.failed(sender, message.submission)
+    case "db:form-capture":
+      return saver.formCapture(sender, message)
+    case "db:form-outcome":
+      return saver.formOutcome(sender, message.submission, message.ok === true)
     case "db:submitted":
       return autofill.submitted(sender)
     case "db:menu-away":
@@ -146,7 +152,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       if (forms.owns(message.token)) return forms.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
       return autofill.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
     case "db:surface-choose":
-      return ["save", "later", "never"].includes(message.choice) && saver.ownsSurface(message.token)
+      return ["save", "later", "never", "new"].includes(message.choice) && saver.ownsSurface(message.token)
         ? saver.surfaceChoose(message.token, sender, message.choice)
         : { ok: false, message: "This offer has expired.", gone: true }
     case "db:popup-load": {
@@ -165,7 +171,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
     case "db:popup-fill":
       return fromExtensionPage(sender, "popup.html") ? autofill.popupFill(message.tabId, String(message.ref)) : { ok: false, message: "" }
     case "db:popup-offer":
-      return fromExtensionPage(sender, "popup.html") && ["save", "later", "never"].includes(message.choice)
+      return fromExtensionPage(sender, "popup.html") && ["save", "later", "never", "new"].includes(message.choice)
         ? saver.choose(message.tabId, String(message.id), message.choice)
         : { ok: false, message: "" }
     case "db:popup-saving-on":

@@ -89,10 +89,28 @@ export function pageFacts(kind: SurfaceKind | null, fields: Field[], username?: 
   return facts
 }
 
+/** Words that say a checkout or address form was turned down, in an error box. */
+const TURNED_DOWN = /\b(declined|refused|rejected|insufficient|required|not valid|failed)\b|refusée?|abgelehnt|rechazad[ao]|fallid[ao]/
+
+/**
+ * Whether a submitted identity or card form (`els`, in `form`) shows that
+ * it was turned down: a field marked invalid, or an error box saying so
+ * (a declined card, a required field), as bounded as pageFacts. Never throws.
+ */
+export function formFailed(els: Element[], form: HTMLFormElement | null): boolean {
+  try {
+    const deadline = performance.now() + BUDGET_MS
+    if (els.some((el) => el.getAttribute("aria-invalid") === "true" && isVisible(el))) return true
+    return errorShown(openRoots(), false, form, () => performance.now() > deadline, TURNED_DOWN)
+  } catch {
+    return false
+  }
+}
+
 /** Inside the login form, or beside it under the same parent. */
 const nearForm = (el: Element, form: HTMLFormElement | null) => !!form && (form.contains(el) || !!form.parentElement?.contains(el))
 
-function errorShown(roots: Array<Document | ShadowRoot>, loginForm: boolean, form: HTMLFormElement | null, late: () => boolean): boolean {
+function errorShown(roots: Array<Document | ShadowRoot>, loginForm: boolean, form: HTMLFormElement | null, late: () => boolean, extra?: RegExp): boolean {
   const boxes = (selector: string) => deepQueryAll(selector, roots).slice(0, MAX_ELEMENTS)
   const looked = new Set<Element>()
   const failed = (el: Element, notice: boolean) => {
@@ -104,7 +122,7 @@ function errorShown(roots: Array<Document | ShadowRoot>, loginForm: boolean, for
     const byForm = loginForm || nearForm(el, form)
     if (notice && !byForm) return false
     const text = textOf(el)
-    return !!text && (FAILURE.test(text) || (byForm && FAILURE_NEAR_FORM.test(text))) && inViewport(el)
+    return !!text && (FAILURE.test(text) || (byForm && FAILURE_NEAR_FORM.test(text)) || (!notice && !!extra?.test(text))) && inViewport(el)
   }
   for (const el of boxes(ERROR_BOX)) {
     if (late()) return false

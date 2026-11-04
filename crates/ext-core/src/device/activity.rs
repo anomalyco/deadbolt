@@ -1,6 +1,7 @@
 //! What this device records in Activity ([`crate::activity`]), as the native
 //! daemon records the browser host's requests and the app's reports: a page's
-//! fills (a card's, not an identity's), saves, made passwords and passkey
+//! fills (a card's, not an identity's), saves (an identity or card saved
+//! from a form too), made passwords and passkey
 //! ceremonies, and what the vault page showed or copied. A page's look-ups
 //! (`list`, `check`, `forms`, `passkey-list`, `generate-check` and
 //! `generate-drop`) come with every page and aren't entries; nor are the vault
@@ -53,6 +54,21 @@ pub(super) fn draft(body: &Value) -> Option<Draft> {
         // An update changes only the password.
         "save" if body.get("ref").is_some() => ("site-save", fields(&["password"])),
         "save" => ("site-save", fields(&["username", "password"])),
+        // An identity or card saved from a form, as native records the
+        // browser host's item-new and item-set: the fields' names only.
+        "save-form" => {
+            let saved = body
+                .get("fields")
+                .and_then(Value::as_object)
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            let command = if body.get("ref").is_some() {
+                "item-set"
+            } else {
+                "item-new"
+            };
+            (command, saved)
+        }
         "generate" => ("site-generate", fields(&["password"])),
         "generate-keep" => ("site-generate-keep", fields(&["password"])),
         "passkey-create" => ("passkey-create", fields(&["passkey"])),

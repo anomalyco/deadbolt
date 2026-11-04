@@ -57,3 +57,28 @@ export function securePage(url: URL): boolean {
   if (url.protocol === "https:") return true
   return typeof DEADBOLT_E2E !== "undefined" && DEADBOLT_E2E === true && url.protocol === "http:" && (url.hostname === "localhost" || url.hostname.endsWith(".test"))
 }
+
+/** Whether a card number passes the Luhn check, as every real one does. */
+export function luhn(number: string): boolean {
+  const d = number.replace(/\D/g, "")
+  let sum = 0
+  for (let i = 0; i < d.length; i++) {
+    let n = +d[d.length - 1 - i]
+    if (i % 2) n = n * 2 > 9 ? n * 2 - 9 : n * 2
+    sum += n
+  }
+  return d.length > 0 && sum % 10 === 0
+}
+
+/** The brand a card number's first digits say, for the commonest ones. */
+export function cardBrand(number: string): string | undefined {
+  const d = number.replace(/\D/g, "")
+  if (/^4/.test(d)) return "Visa"
+  if (/^(5[1-5]|2(2[2-9]|[3-6]\d|7[01]|720))/.test(d)) return "Mastercard"
+  if (/^3[47]/.test(d)) return "American Express"
+  if (/^6(011|5|4[4-9])/.test(d)) return "Discover"
+  if (/^35(2[89]|[3-8])/.test(d)) return "JCB"
+  if (/^3(0[0-5]|[689])/.test(d)) return "Diners Club"
+  if (/^62/.test(d)) return "UnionPay"
+  return undefined
+}

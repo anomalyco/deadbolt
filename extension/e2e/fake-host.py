@@ -20,6 +20,9 @@ under 60 bits are weak, as the daemon's floor.
 the fields asked for. DEADBOLT_FAKE_TOUCHID=deny answers a fill-form that
 asks for a card's number or code with `failed`, as the daemon does when
 Touch ID is turned down; DEADBOLT_FAKE_FILL_DELAY holds fill-form too.
+`save-form` keeps a new identity or card, or changes one listed, by the
+daemon's rules: only form fields, never a security code, a new card needs
+its number and an update never changes one. Later lists and fills have it.
 """
 import json, math, os, secrets, string, struct, sys, time
 
@@ -163,6 +166,35 @@ def secret(req, body):
     return body.get("password")
 
 
+IDENTITY_FIELDS = {"honorific", "given-name", "additional-name", "family-name", "nickname", "organization", "job-title", "email", "phone",
+                   "address-line1", "address-line2", "address-line3", "city", "region", "postal-code", "country", "birthday"}
+CARD_FIELDS = {"cardholder", "number", "expiry", "brand"}
+
+
+def save_form(req):
+    """A save-form's reply: the daemon's rules for what it may write, then the vault here changed."""
+    kind, ref, fields = req.get("kind"), req.get("ref"), req.get("fields") or {}
+    allowed = CARD_FIELDS if kind == "card" else IDENTITY_FIELDS if kind == "identity" else None
+    if allowed is None or not fields or any(k not in allowed or not isinstance(v, str) for k, v in fields.items()):
+        return {"type": "error", "code": "bad_request", "message": "not form fields"}
+    if kind == "card" and (("number" in fields) == bool(ref) or ("number" in fields and not fields["number"].isdigit())):
+        return {"type": "error", "code": "bad_request", "message": "a new card needs its number; an update never changes it"}
+    items = CARDS if kind == "card" else IDENTITIES
+    if ref:
+        if not any(i["ref"] == ref for i in items):
+            return {"type": "error", "code": "not_found", "message": "no such item"}
+        FORM_VALUES[ref].update(fields)
+    else:
+        ref = "d" * 64 + ":" + secrets.token_hex(16)
+        FORM_VALUES[ref] = dict(fields)
+        items.append({"ref": ref, "title": "Saved", "summary": ""})
+    for i in items:
+        if i["ref"] == ref and kind == "card":
+            v = FORM_VALUES[ref]
+            i.update({"title": f"{v.get('brand', 'card')} •••• {v['number'][-4:]}", "last4": v["number"][-4:], **{k: v[k] for k in ("brand", "expiry", "cardholder") if k in v}})
+    return {"type": "save-form", "ref": ref, "created": not req.get("ref")}
+
+
 def valid_entry(entry, origin):
     title, url = entry.get("title", ""), entry.get("url", "")
     if not (1 <= len(title) <= 128) or title != " ".join(title.split()):
@@ -183,7 +215,7 @@ while True:
         why = refusal(req)
         write({"id": rid, "type": "error", "code": why, "message": "No strong password fits."} if why else {"id": rid, "type": "generate-check"})
     elif kind == "hello":
-        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms", "learn"]})
+        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms", "save-form", "learn"]})
     elif kind == "learn":
         # As the host: it works locked too, and keeps no values (the log has the line).
         write({"id": rid, "type": "learned"})
@@ -209,6 +241,8 @@ while True:
         else:
             values = {k: v for k, v in FORM_VALUES.get(req["ref"], {}).items() if k in req["fields"]}
             write({"id": rid, "type": "fill-form", "values": values, "verified": bool(set(values) & {"number", "cvv"})})
+    elif kind == "save-form":
+        write({"id": rid, **save_form(req)})
     elif kind == "generate":
         made = generate(req)
         write({"id": rid, "type": "generate", **made} if isinstance(made, dict) else {"id": rid, "type": "error", "code": made, "message": "No password fits."})

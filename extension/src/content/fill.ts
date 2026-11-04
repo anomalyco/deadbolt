@@ -39,7 +39,8 @@ async function digest(value: string): Promise<string | null> {
 
 export function trackUserInput(event: Event) {
   const el = eventTarget(event)
-  if (key && event.isTrusted && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) digests.set(el, digest(el.value))
+  // A select the user chose in counts too, for an address or card they changed (see readSubmitted).
+  if (key && event.isTrusted && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) digests.set(el, digest(el.value))
 }
 
 /** Deadbolt is writing `value` into an identity or card field (see formfill.ts). */
@@ -61,6 +62,14 @@ export async function typedByUser(el: Element, value: string): Promise<boolean> 
   if (!mine) return true
   const [a, b] = await Promise.all([mine, digest(value)])
   return a === null || a !== b
+}
+
+/** Whether the field holds what Deadbolt last wrote into it, unchanged since. */
+export async function filledByDeadbolt(el: Element, value: string): Promise<boolean> {
+  const mine = ours.get(el)
+  if (!value || !mine || (await ownValue(el, value)) === undefined) return false
+  const [a, b] = await Promise.all([mine, digest(value)])
+  return a !== null && a === b
 }
 
 /** `value` if it's what the user last typed into the field or Deadbolt filled. */

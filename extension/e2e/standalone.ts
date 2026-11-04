@@ -18,7 +18,8 @@
 // on accounts.acme.test (mapped to loopback). Trusted localhost pages check
 // the save offer after a sign-in, the update after
 // a changed password, and generated passwords for a sign-up and a password
-// change, saved through the offer. The two CLI runs add the same on the real
+// change, saved through the offer, and a card typed on a checkout, saved
+// from its offer under Strict after the passphrase, without its code. The two CLI runs add the same on the real
 // demo site (https://acme-demo.i.vogel.dev: sign-up, password change, two-step
 // sign-in), and an identity and a card written on the CLI and filled on a
 // loopback checkout and the demo's: Relaxed and Comfortable fill the card at
@@ -367,7 +368,7 @@ async function newTurn(worker: Worker) {
   })
 }
 /** The offer in the page after a confirmed sign-in, or null if none shows within `ms`. */
-async function offerShown(page: Page, title: "Save login?" | "Update password?", ms = 30_000) {
+async function offerShown(page: Page, title: "Save login?" | "Update password?" | "Save card?", ms = 30_000) {
   return until(`"${title}" shows in the page`, async () => {
     const frame = menuFrame(page)
     return frame && await frame.locator(".offer-title").textContent().catch(() => null) === title ? frame : null
@@ -795,6 +796,79 @@ async function formFlows(device: Page, worker: Worker, url: string) {
     await fillCard(page, device)
     check(true, `Comfortable follows the native Touch-ID-off rule on ${host}`)
   } finally {
+    await request(device, { type: "device-preset", preset: "comfortable" }).catch(() => {})
+    await page.close()
+  }
+}
+/**
+ * A card typed by hand on the loopback checkout, saved from the offer in the
+ * page under Strict: the save asks for the passphrase first, as showing a
+ * card's number does (a wrong one is refused and saves nothing), and the card
+ * is kept without its security code. Neither the number nor the code is left
+ * in Activity, the extension's storage, its IndexedDB or any log.
+ */
+async function formSaveFlows(device: Page, worker: Worker) {
+  const typed = "4000056655665556"
+  const secrets = [typed, "4000 0566 5566 5556", "737"]
+  const logs: string[] = []
+  const listen = (m: { text(): string }) => void logs.push(m.text())
+  context!.on("console", listen)
+  const page = await newPage("checkout-save")
+  page.on("console", listen)
+  try {
+    await request(device, { type: "device-preset", preset: "strict" })
+    await newTurn(worker)
+    await page.goto(`${origin}/checkout`)
+    for (const [id, text] of [["cc-name", "Ada Proof"], ["cc-number", "4000 0566 5566 5556"], ["cc-exp", "09 / 30"], ["cc-csc", "737"]]) await page.fill(`#${id}`, text)
+    await page.press("#cc-csc", "Enter")
+    await until("the order is placed", async () => (await page.title()) === "Order placed")
+    const surface = await offerShown(page, "Save card?")
+    check(surface, "a card typed by hand is offered once the checkout went through")
+    check(await surface.locator(".offer-user").textContent() === "Visa •••• 5556 · localhost", "the offer names the card by its brand and last four digits only")
+    await settle(surface)
+    await surface.locator(".offer-row").hover()
+    await until("the offer opens on approach", async () => ((await (await surface.frameElement()).boundingBox())?.height ?? 0) > 60)
+    await settle(surface)
+    await surface.locator(".offer-row .btn.primary").click()
+    const prompt = await until("Strict asks for the passphrase before saving the card", () => promptShown(device, /^Save Visa/, "strict-card-save"), 15_000)
+    try {
+      check(await prompt.heading() === "Save Visa •••• 5556", "the prompt names the card it saves")
+      const before = (await vault(worker, { type: "forms", origin, kinds: ["card"] })).reply.cards as Array<{ last4: string }>
+      await prompt.answer("wrong fixture passphrase")
+      await until("the prompt says the passphrase is wrong", () => prompt.refused(), 30_000)
+      const after = (await vault(worker, { type: "forms", origin, kinds: ["card"] })).reply.cards as Array<{ last4: string }>
+      check(!before.some((c) => c.last4 === "5556") && !after.some((c) => c.last4 === "5556"), "a wrong passphrase saves nothing")
+      await prompt.answer(passphrase)
+      await until("the prompt goes", () => prompt.gone(), 15_000)
+    } finally {
+      prompt.close()
+    }
+    await until("the offer folds into its Saved pill", async () => await surface.locator(".pill.ok").count().catch(() => 0) > 0)
+    const cards = (await vault(worker, { type: "forms", origin, kinds: ["card"] })).reply.cards as Array<{ ref: string; last4: string; expiry?: string; cardholder?: string; fields: string[] }>
+    const card = cards.find((c) => c.last4 === "5556")
+    check(card && card.expiry === "2030-09" && card.cardholder === "Ada Proof", "the card is saved with its expiry and name")
+    const detail = (await request(device, { type: "device-item", ref: card.ref })).reply as unknown as { fields: Array<{ name: string }> }
+    check(!card.fields.includes("cvv") && !detail.fields.some((f) => f.name === "cvv"), "and without its security code")
+    const entries = ((await request(device, { type: "device-activity", limit: 1000 })).reply.entries as ActivityEntry[]).filter((e) => e.command === "item-new")
+    check(entries.some((e) => e.items[0]?.title === "Visa •••• 5556" && e.site === origin && e.outcome === "allowed"), "Activity has the save, naming the card by its last four digits")
+    const stored = await worker.evaluate(async () => JSON.stringify([await chrome.storage.local.get(null), await chrome.storage.session.get(null)]))
+    const indexed = await device.evaluate(async () => {
+      const out: unknown[] = []
+      for (const { name, version } of await indexedDB.databases()) {
+        if (!name) continue
+        const db = await new Promise<IDBDatabase>((ok, fail) => { const r = indexedDB.open(name, version); r.onsuccess = () => ok(r.result); r.onerror = () => fail(r.error) })
+        for (const store of Array.from(db.objectStoreNames)) {
+          out.push(await new Promise((ok) => { const r = db.transaction(store).objectStore(store).getAll(); r.onsuccess = () => ok(r.result); r.onerror = () => ok(null) }))
+        }
+        db.close()
+      }
+      return JSON.stringify(out)
+    })
+    const activity = JSON.stringify(entries)
+    for (const [where, text] of [["Activity", activity], ["extension storage", stored], ["IndexedDB", indexed], ["logs", logs.join("\n")]] as const)
+      check(!secrets.some((value) => (where === "logs" && value === "737" ? /\b737\b/.test(text) : text.includes(value))) && !text.includes(passphrase), `no card number, code or passphrase in ${where}`)
+  } finally {
+    context!.off("console", listen)
     await request(device, { type: "device-preset", preset: "comfortable" }).catch(() => {})
     await page.close()
   }
@@ -1924,6 +1998,7 @@ try {
 
   count += await siteFlows(device, worker)
   await passkeyFlows(device, worker)
+  await formSaveFlows(device, worker)
   if (!smoke) {
     count += await demoFlows(device, worker)
     await formFlows(device, worker, `${origin}/checkout`)
