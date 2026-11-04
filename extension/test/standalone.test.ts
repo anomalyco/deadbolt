@@ -234,6 +234,17 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-generate", length: 24, symbols: false })).toEqual({ type: "device-generate", length: 24, symbols: false })
     expect(deviceCommand({ type: "device-generate", length: 4, symbols: true })).toBeNull()
     expect(deviceCommand({ type: "device-generate", length: 24.5, symbols: true })).toBeNull()
+    // Activity pages back by id; a report names the item and field, never a value.
+    expect(deviceCommand({ type: "device-activity", extra: 1 })).toEqual({ type: "device-activity" })
+    expect(deviceCommand({ type: "device-activity", before: 71, limit: 50 })).toEqual({ type: "device-activity", before: 71, limit: 50 })
+    expect(deviceCommand({ type: "device-activity", limit: 1001 })).toBeNull()
+    expect(deviceCommand({ type: "device-activity", before: -1 })).toBeNull()
+    expect(deviceCommand({ type: "device-activity", before: 1.5 })).toBeNull()
+    expect(deviceCommand({ type: "device-report", action: "copy", ref: "v:i", field: "password", value: "pw" })).toEqual({ type: "device-report", action: "copy", ref: "v:i", field: "password" })
+    expect(deviceCommand({ type: "device-report", action: "reveal", ref: "v:i", field: "otp" })).toEqual({ type: "device-report", action: "reveal", ref: "v:i", field: "otp" })
+    expect(deviceCommand({ type: "device-report", action: "delete", ref: "v:i", field: "password" })).toBeNull()
+    expect(deviceCommand({ type: "device-report", action: "copy", ref: "", field: "password" })).toBeNull()
+    expect(deviceCommand({ type: "device-report", action: "copy", ref: "v:i", field: "../x" })).toBeNull()
     // A copy is named by its salted hash only; the value itself is refused.
     const salt = "0".repeat(32)
     const hash = "f".repeat(64)

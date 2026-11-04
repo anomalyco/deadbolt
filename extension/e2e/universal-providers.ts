@@ -854,7 +854,8 @@ try {
     check(!(await listAt(shop)).length, "shop.test has no saved login")
     const p = await context.newPage()
     record(p, flow)
-    await p.goto(`${shop}/signin?flow=${flow}`)
+    // Google's chooser in German: the stop on an unlinked site doesn't hang on its English notice.
+    await p.goto(`${shop}/signin?flow=${flow}&hl=de`)
     const f = await offer(p)
     await p.waitForTimeout(1400)
     await expand(p, f, GOOGLE_OTHER)
@@ -869,7 +870,7 @@ try {
     await second.click()
     await p.waitForURL(`${googleOrigin}/o/oauth2/v2/auth*`)
     await p.waitForTimeout(2500)
-    check(!hits(flow, (h) => h.path === "/signin/select").length, "first visit: the sharing notice is the person's")
+    check(await p.locator("h1").textContent() === "Konto auswählen" && !hits(flow, (h) => h.path === "/signin/select").length, "first visit, a German chooser: picking the account is the person's")
     await p.locator(`[data-identifier="${GOOGLE_OTHER}"]`).click()
     await p.waitForURL(`${shop}/account*`, { timeout: 30_000 })
     check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_OTHER} with Google`, "first visit: the picked Gmail signs in")
@@ -929,16 +930,38 @@ try {
     await target.click()
   }
 
+  // Ramp's own password login and the person's Google account of the same
+  // email, on a step with a Google button: two corner rows, the password
+  // login still pickable (the Google account isn't linked to Ramp).
+  await fresh()
+  {
+    const p = await rampPage("ramp-rows", { google: "1" })
+    const f = await offer(p)
+    await p.waitForTimeout(1400)
+    await expand(p, f, GOOGLE_OTHER)
+    const rows = await f.locator("button.row").allTextContents()
+    check(rows.some((t) => t.includes(`Sign in as ${GOOGLE_USER}`)) && rows.some((t) => t.includes("Sign in with Google") && t.includes(GOOGLE_USER)), `a site's password login and a Google account of the same email both show (${JSON.stringify(rows)})`)
+    await p.close()
+  }
+
   // One inline pick of Ramp's own login: its email goes, the step after it
   // offers only "Sign in with Google", and the sign-in goes on through the
-  // site's auth popup (sso.ramp.test) and Google's chooser to signed in.
+  // site's auth popup (sso.ramp.test) with the person's own Google account
+  // of that email. Ramp isn't linked to it yet: on Google's chooser the
+  // account is the person's to pick, then they're signed in.
   await fresh()
   {
     const flow = "ramp-inline"
     const p = await rampPage(flow)
     await inlinePick(p, GOOGLE_USER)
+    const popup = await context.waitForEvent("page", { timeout: 20_000 })
+    record(popup, "ramp-inline-popup")
+    await popup.waitForURL(`${googleOrigin}/o/oauth2/v2/auth*`, { timeout: 15_000 })
+    await popup.waitForTimeout(2500)
+    check(!hits(flow, (h) => h.path === "/signin/select").length, "Ramp-shaped, first time with this Google account: the chooser waits for the person")
+    await popup.locator(`[data-identifier="${GOOGLE_USER}"]`).click()
     await p.waitForURL(`${ramp}/dashboard*`, { timeout: 30_000 })
-    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, "Ramp-shaped: one inline pick on the email field ends signed in, through the site's auth popup and Google")
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, "Ramp-shaped: one inline pick on the email field and the person's tile end signed in, through the site's auth popup and Google")
     check(hits(flow, (h) => h.host === "app.ramp.test" && h.method === "POST" && h.path === "/login").length === 1 && hits(flow, (h) => h.host === "sso.ramp.test").length >= 1, "the email went once, and the popup passed through sso.ramp.test")
     check(hits(flow, (h) => google(h) && h.path === "/signin/select").map((h) => h.value).join() === GOOGLE_USER && !hits(flow, (h) => h.path === "/v3/signin/challenge/pwd").length, "Google's existing-consent chooser: the picked account's tile, no password anywhere")
     await p.close()
@@ -967,13 +990,28 @@ try {
     await p.close()
   }
 
+  // A Google Identity Services button (its frame) beside Ramp's email step:
+  // a linked pick types nothing and points at the button, which is the
+  // person's to click.
+  await fresh()
+  {
+    const flow = "ramp-gis"
+    const p = await rampPage(flow, { gis: "1" })
+    await inlinePick(p, GOOGLE_OTHER)
+    const ringed = await until("the GIS button is pointed at", () => p.evaluate(() => [...document.querySelectorAll("div")].some((d) => d.style.zIndex === "2147483647" && d.style.position === "fixed")), 8000).catch(() => false)
+    await p.waitForTimeout(2500)
+    check(!!ringed && !hits(flow, (h) => h.host === "app.ramp.test" && h.method === "POST").length && await p.locator('input[name="email"]').inputValue() === "", "a linked pick beside a Google Identity Services button points at it and types no email")
+    await p.close()
+  }
+
   // The same, with the auth handler on another site (a project's
-  // firebaseapp.com): no hop, the chain stops there, nothing picked at Google.
+  // firebaseapp.com): no hop, the chain stops there, nothing picked at
+  // Google (the linked row: Deadbolt would otherwise pick its tile).
   await fresh()
   {
     const flow = "ramp-other-site"
     const p = await rampPage(flow, { hop: "other" })
-    await inlinePick(p, GOOGLE_USER)
+    await inlinePick(p, GOOGLE_OTHER)
     const popup = await context.waitForEvent("page", { timeout: 20_000 })
     record(popup, "ramp-other-site-popup")
     await popup.waitForURL(`${googleOrigin}/o/oauth2/v2/auth*`, { timeout: 15_000 })

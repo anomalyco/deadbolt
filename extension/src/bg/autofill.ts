@@ -172,15 +172,17 @@ export function menuAccounts(accounts: Account[], focused: FieldRole, roles: Fie
 
 /**
  * One row per person: a login of the site whose username is the account a
- * "Sign in with …" login there signs in with (Ramp's "ryan@" beside "Sign
- * in with Google · ryan@") shows only as that provider row. Not on that
- * provider's own pages (`origin`), where its own login is the one to fill.
+ * "Sign in with …" login saved for this exact origin signs in with (Ramp's
+ * "ryan@" beside "Sign in with Google · ryan@") shows only as that provider
+ * row. Not on that provider's own pages, where its own login is the one to
+ * fill. The site's logins only: a provider account the site isn't linked
+ * to never hides one (see UniversalSignIn).
  */
 export function oneRowEach(accounts: Account[], origin: string): Account[] {
   const via = new Map<string, string[]>()
   for (const a of accounts) {
     const id = a.signIn?.account?.trim().toLowerCase()
-    if (id && a.signIn && !isProviderPage(providerOf(a.signIn.provider), origin)) via.set(id, [...(via.get(id) ?? []), a.signIn.provider])
+    if (id && a.signIn && !isProviderPage(providerOf(a.signIn.provider), origin) && a.urls.some((u) => exactSignInOrigin(u, origin))) via.set(id, [...(via.get(id) ?? []), a.signIn.provider])
   }
   return accounts.filter((a) => a.signIn || !a.username || !via.has(a.username.trim().toLowerCase()))
 }
@@ -421,7 +423,9 @@ export class Autofill {
       this.lockedShown.add(site)
     } else if (state === "ready") {
       const reply = await this.list(target.origin).catch(() => null)
-      let shown = reply ? menuAccounts(oneRowEach(reply.accounts, target.origin), focused as FieldRole, clean) : []
+      // One row per person on a username box only: on a password box the site's own login is the one to fill.
+      const each = reply ? (IDENTIFIER_ROLES.includes(focused as FieldRole) ? oneRowEach(reply.accounts, target.origin) : reply.accounts) : []
+      let shown = reply ? menuAccounts(each, focused as FieldRole, clean) : []
       const later = focused === "password" || focused === "otp"
       const named = later ? (typeof identifier === "string" && identifier.length <= 500 && identifier.trim()) || this.submittedName?.(target.tabId, site) || "" : ""
       // On the provider's own pages during a sign-in with it, its linked
@@ -468,7 +472,7 @@ export class Autofill {
     try {
       const reply = await this.list(t.origin)
       const passkeys = this.passkeys?.menuPasskeys(t, t.focused)
-      const accounts = menuAccounts(oneRowEach(reply.accounts, t.origin), t.focused, t.roles).filter((a) => !t.only || t.only.includes(a.ref))
+      const accounts = menuAccounts(IDENTIFIER_ROLES.includes(t.focused) ? oneRowEach(reply.accounts, t.origin) : reply.accounts, t.focused, t.roles).filter((a) => !t.only || t.only.includes(a.ref))
       // One login on a site that asks for the username first: "Continue as …".
       const flow = IDENTIFIER_ROLES.includes(t.focused) && accounts.length === 1 ? await flowFor(siteOf(new URL(t.origin).hostname) ?? "") : undefined
       const icons = (await iconSettings()).menu ? await menuIcons(accounts) : undefined
@@ -1026,7 +1030,8 @@ export class Autofill {
     const reply = await this.list(target.origin, true).catch(() => null)
     const picked = reply?.accounts.find((a) => a.ref === s.ref)
     const username = picked?.username?.trim().toLowerCase()
-    if (!picked || !username || generation !== this.generation(target.tabId)) return
+    // A login that signs in with another provider isn't this button's to take.
+    if (!picked || !username || (picked.signIn && picked.signIn.provider !== p.id) || generation !== this.generation(target.tabId)) return
     const same = (v: string | undefined) => v?.trim().toLowerCase() === username
     let account: Account | undefined
     let unlinked = false

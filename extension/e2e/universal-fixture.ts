@@ -132,10 +132,12 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
     back.searchParams.set("as", as)
     return Response.redirect(back.href, 303)
   }
+  // `hl=de`: Google's chooser in German, with its sharing notice in German too.
+  const de = q.get("hl") === "de"
   const chooser = () =>
-    google("Sign in - Google Accounts", `<h1>Choose an account</h1><p>to continue to Acme</p><ul>${[["Universal Google", GOOGLE_USER], ["Someone Else", GOOGLE_OTHER]]
+    google(de ? "Anmelden – Google Konten" : "Sign in - Google Accounts", `<h1>${de ? "Konto auswählen" : "Choose an account"}</h1><p>${de ? "weiter zu Acme" : "to continue to Acme"}</p><ul>${[["Universal Google", GOOGLE_USER], ["Someone Else", GOOGLE_OTHER]]
       .map(([name, email]) => `<li><div role="link" tabindex="0" data-identifier="${email}" data-authuser="-1"><span>${name[0]}</span><span><b>${name}</b><br><small>${email}</small></span></div></li>`)
-      .join("")}<li><div role="link" tabindex="0" id="another">Use another account</div></li></ul>${q.get("notice") === "0" ? "<p><small>Before using Acme, review its privacy policy and terms of service.</small></p>" : FOOTER}
+      .join("")}<li><div role="link" tabindex="0" id="another">${de ? "Anderes Konto verwenden" : "Use another account"}</div></li></ul>${de ? "<footer><p><small>Zum Fortfahren gibt Google Ihren Namen, Ihre E-Mail-Adresse, Ihre Spracheinstellung und Ihr Profilbild an Acme weiter.</small></p></footer>" : q.get("notice") === "0" ? "<p><small>Before using Acme, review its privacy policy and terms of service.</small></p>" : FOOTER}
       <script>for (const t of document.querySelectorAll("[role=link]")) t.addEventListener("click", () => location.assign(${JSON.stringify(step("/signin/select"))} + (t.dataset.identifier ? "&id=" + encodeURIComponent(t.dataset.identifier) : "&another=1")))</script>`)
   switch (url.pathname) {
     case "/o/oauth2/v2/auth":
@@ -306,9 +308,12 @@ async function rampFixture(req: Request, url: URL): Promise<Response> {
     // The email goes by fetch, and the page swaps in the locked email and
     // the provider's button in place, as Ramp's single-page app does.
     if (url.pathname === "/login" && req.method === "POST") return Response.json({ sso: "google", email: clean(String((await req.formData()).get("email") ?? "")) })
+    // A stand-in for Google Identity Services' button frame (the widget's selector matches its src).
+    if (url.pathname === "/accounts.google.com/gsi/button")
+      return page("Sign in with Google Button", `<style>body{margin:0}button{width:240px;height:40px;font:14px system-ui;border:1px solid #dadce0;border-radius:4px;background:#fff}</style></head><body><button type="button">Sign in with Google</button></body>`)
     if (url.pathname === "/login") {
       const auth = `${handler}?${new URLSearchParams({ apiKey: "synthetic", providerId: "google.com", flow })}`
-      return page("Sign in to Ramp", `${style}</head><body><main id="step"><h1>Sign in to Ramp</h1><form method="post" action="/login?${keep}"><label>Email<input name="email" type="email" autocomplete="username"></label><button type="submit">Continue</button></form></main>
+      return page("Sign in to Ramp", `${style}</head><body><main id="step"><h1>Sign in to Ramp</h1><form method="post" action="/login?${keep}"><label>Email<input name="email" type="email" autocomplete="username"></label><button type="submit">Continue</button></form>${q.get("google") === "1" ? '<p>or</p><button type="button" id="google-first">Sign in with Google</button>' : ""}${q.get("gis") === "1" ? '<p>or</p><iframe src="/accounts.google.com/gsi/button" title="Sign in with Google Button" style="width:240px;height:40px;border:0"></iframe>' : ""}</main>
         <script>
           document.querySelector("form").addEventListener("submit", async (e) => {
             e.preventDefault()

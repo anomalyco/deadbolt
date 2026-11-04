@@ -31,9 +31,9 @@ beforeEach(() => {
 })
 afterEach(() => chain.stop(1))
 
-function commit(origin = GOOGLE, documentId = "provider-doc", tabId = 1, path = "/v3/signin/identifier") {
+function commit(origin = GOOGLE, documentId = "provider-doc", tabId = 1, path = "/v3/signin/identifier", transitionQualifiers?: string[]) {
   fake.frames[`${tabId}:0`] = { url: `${origin}${path}`, documentId, parentFrameId: -1 }
-  chain.navigated({ tabId, frameId: 0, url: `${origin}${path}`, documentId, transitionType: "link" })
+  chain.navigated({ tabId, frameId: 0, url: `${origin}${path}`, documentId, transitionType: "link", ...(transitionQualifiers ? { transitionQualifiers } : {}) })
   return pageSender({ tab: { id: tabId } as chrome.tabs.Tab, url: `${origin}${path}`, origin, documentId })
 }
 async function until(test: () => boolean) {
@@ -63,30 +63,50 @@ describe("provider chain authority", () => {
     const sender = commit(origin)
     report = { kind: "form", form: 1, roles: ["password"], action: "password" }
     await chain.check(sender)
-    // A host of the site's own (login.example.com) right after its button is a hop on the way to the provider: passed, never acted on.
-    expect(chain.active(1)).toBe(origin === "https://login.example.com")
+    // A host of the site's own (login.example.com) by a plain link is no hop either (see the auth hop test).
+    expect(chain.active(1)).toBe(false)
     expect(fills()).toHaveLength(0)
     expect(actions()).toHaveLength(1)
     expect(fake.delivered.filter((d) => d.message.account)).toHaveLength(0)
   })
-  test("an auth hop: only a host of the home's site, right after the provider button, at most twice; its return URLs then count as home", async () => {
+  test("an auth hop: only another host of the home's site, by a redirect or as the popup's first page, right after the provider button; its return URLs then count as home", async () => {
     const own = { ...providerAccount, signIn: { provider: "google", account: providerAccount.username! } }
+    const again = async () => {
+      chain.stop(1)
+      fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "top-doc", parentFrameId: -1 }
+      report = { kind: "entry", action: "entry" }
+      await chain.start(home, own, true)
+    }
+    // A link the page offered, to a host of its own: no hop.
     await chain.start(home, own, true)
-    expect(actions()).toHaveLength(1)
-    commit("https://sso.example.com", "hop", 1, "/__/auth/handler?apiKey=x")
+    commit("https://sso.example.com", "hop-link", 1, "/__/auth/handler?apiKey=x")
+    expect(chain.active(1)).toBe(false)
+    // The home's own host over http or on another port: never a hop, even by a redirect.
+    for (const origin of ["http://www.example.com", "https://www.example.com:8443"]) {
+      await again()
+      commit(origin, "home-elsewhere", 1, "/__/auth/handler", ["server_redirect"])
+      expect([origin, chain.active(1)]).toEqual([origin, false])
+    }
+    // The popup's first page on the site's auth host: a hop.
+    await again()
+    await chain.opened({ sourceTabId: 1, sourceFrameId: 0, tabId: 2 })
+    commit("https://sso.example.com", "popup-hop", 2, "/__/auth/handler?apiKey=x")
+    expect(chain.active(2)).toBe(true)
+    chain.stop(2)
+    // By a redirect in the tab itself: a hop.
+    await again()
+    expect(actions()).toHaveLength(5)
+    commit("https://sso.example.com", "hop", 1, "/__/auth/handler?apiKey=x", ["server_redirect"])
     expect(chain.active(1)).toBe(true)
     // Google sends the person back to the hop host: an unlinked chain takes that as home now.
     report = { kind: "form", form: 1, roles: ["password"], action: "password" }
     await chain.check(commit(GOOGLE, "pwd", 1, `/v3/signin/challenge/pwd?redirect_uri=${encodeURIComponent("https://sso.example.com/__/auth/handler")}`))
     expect(chain.active(1)).toBe(true)
     expect(fills()).toHaveLength(1)
-    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["www.example.com", "sso.example.com"])
-    chain.stop(1)
-    // Another site's handler (a project's firebaseapp.com) is no hop.
-    fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "top-doc", parentFrameId: -1 }
-    report = { kind: "entry", action: "entry" }
-    await chain.start(home, own, true)
-    commit("https://acme-auth.firebaseapp.com", "other-site", 1, "/__/auth/handler?apiKey=x")
+    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["https://www.example.com", "https://sso.example.com"])
+    // Another site's handler (a project's firebaseapp.com) is no hop, redirect or not.
+    await again()
+    commit("https://acme-auth.firebaseapp.com", "other-site", 1, "/__/auth/handler?apiKey=x", ["server_redirect"])
     expect(chain.active(1)).toBe(false)
   })
   test("email-first: with no provider button yet, the chain's account goes into the site's email step once, then the button", async () => {
@@ -110,6 +130,17 @@ describe("provider chain authority", () => {
     fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "step-3", parentFrameId: -1 }
     chain.navigated({ tabId: 1, frameId: 0, url: `${SITE}/login`, documentId: "step-3", transitionType: "form_submit" })
     await chain.check(pageSender({ documentId: "step-3", url: `${SITE}/login` }))
+    expect(sent).toHaveLength(2)
+    expect(chain.active(1)).toBe(false)
+    // Never for a provider account the site isn't linked to: nothing typed, it ends.
+    const own = { ...providerAccount, signIn: { provider: "google", account: providerAccount.username! } }
+    fake.frames["1:0"] = { url: `${SITE}/login`, documentId: "top-doc", parentFrameId: -1 }
+    report = { kind: "identifier", form: 3, roles: ["email"] }
+    await chain.start(home, own, true)
+    expect(sent).toHaveLength(2)
+    expect(chain.active(1)).toBe(false)
+    // Only an account name, the provider login's own username: never a title the link falls back to.
+    await chain.start(home, { ...linked, signIn: { provider: "google", account: "Work Google" } })
     expect(sent).toHaveLength(2)
     expect(chain.active(1)).toBe(false)
   })
@@ -230,7 +261,7 @@ describe("provider chain authority", () => {
     // Two logins of that username at the provider: only the one picked fills.
     await chain.check(commit(GOOGLE, "provider-doc", 1, BACK))
     expect(fills().map((r) => (r as { ref: string }).ref)).toEqual([own.ref])
-    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["www.example.com"])
+    expect(fake.delivered.filter((d) => d.message.type === "db:provider-probe").at(-1)?.message.home).toEqual(["https://www.example.com"])
     const sender = commit(SITE, "returned", 1, "/oauth/callback")
     signedInHome()
     await chain.check(sender)
@@ -287,9 +318,17 @@ describe("provider chain authority", () => {
     for (const q of ["wreply=https://evil.test/cb", "redir=https%3A%2F%2Fevil.test%2F", `Redirect_uri=${encodeURIComponent("https://evil.test/")}`, `RETURN_TO=${encodeURIComponent("https://evil.test/")}`]) expect([q, at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&${q}`)]).toEqual([q, "foreign"])
     expect(at(`scope=${encodeURIComponent("https://www.googleapis.com/auth/userinfo.email")}&redirect_uri=${encodeURIComponent(`${SITE}/cb`)}`)).toBe("home")
     expect(at("scope=openid")).toBe("none")
-    // Exact host: another host of the site isn't home for an unlinked chain.
-    expect(returnsTo(google, `${GOOGLE}/x?redirect_uri=${encodeURIComponent("https://cdn.example.com/cb")}`, "example.com", ["www.example.com"])).toBe("foreign")
-    expect(returnsTo(google, `${GOOGLE}/x?redirect_uri=${encodeURIComponent("https://sso.example.com/cb")}`, "example.com", ["www.example.com", "sso.example.com"])).toBe("home")
+    // Exact origin: another host of the site, another port or http isn't home for an unlinked chain.
+    const back = (to: string, origins = ["https://www.example.com"]) => returnsTo(google, `${GOOGLE}/x?redirect_uri=${encodeURIComponent(to)}`, "example.com", origins)
+    expect(back("https://cdn.example.com/cb")).toBe("foreign")
+    expect(back("https://www.example.com:8443/cb")).toBe("foreign")
+    expect(back("http://www.example.com/cb")).toBe("foreign")
+    expect(back("https://www.example.com/cb")).toBe("home")
+    expect(back("https://sso.example.com/cb", ["https://www.example.com", "https://sso.example.com"])).toBe("home")
+    // Unnamed parameters: scheme-relative, backslashed and once more encoded URLs are return URLs too.
+    for (const q of ["r=//evil.test/cb", "r=/\\evil.test/cb", "r=https:\\\\evil.test", `r=${encodeURIComponent(encodeURIComponent("https://evil.test/"))}`, `r=${encodeURIComponent(encodeURIComponent("//evil.test/"))}`])
+      expect([q, at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&${q}`)]).toEqual([q, "foreign"])
+    expect(at(`redirect_uri=${encodeURIComponent(`${SITE}/cb`)}&prompt=select_account&r=/path`)).toBe("home")
   })
   test("an unlinked site's sharing notice waits for the person's own pick, then the chain goes on for the account shown", async () => {
     await chain.start(home, own, true)

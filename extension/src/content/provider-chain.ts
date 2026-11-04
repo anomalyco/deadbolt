@@ -70,7 +70,8 @@ const STRONG_CONSENT = phrases(["wants to access", "would like to access", "want
 /**
  * The sign-in disclosure ("Google will share your name, email address…"): on
  * a chooser, picking the account may itself be the consent for the client
- * the URL names. Only a chooser whose return URL leads home is clicked.
+ * the URL names. A linked chain clicks only a chooser whose return URL
+ * leads home; an unlinked one never clicks a tile (see evaluate).
  */
 const SHARES = phrases(["will share your"])
 /** Page text longer than this is unknown: a warning past a cut-off must not be missed. */
@@ -185,6 +186,18 @@ const any = (text: string, list: string[]) => list.some((p) => hasPhrase(text, p
 
 function loading(text: string): boolean {
   return document.readyState !== "complete" || deepQueryAll(BUSY, openRoots()).some(isVisible) || any(text, LOADING)
+}
+
+/** A link that leaves the page for anywhere but the provider's own sign-in pages. */
+function leavesHome(el: HTMLElement, p: Provider): boolean {
+  const a = el.closest("a[href]")
+  if (!(a instanceof HTMLAnchorElement)) return false
+  try {
+    const to = new URL(a.href, location.href)
+    return to.origin !== location.origin && !isSignInPage(p, to.href)
+  } catch {
+    return true
+  }
 }
 
 function entryControl(p: Provider): HTMLElement | null {
@@ -312,7 +325,7 @@ function inspectForm(account?: string): FormPlan | { stop: Reason } | "wait" | n
   return { fields: [...fields], scope, button }
 }
 
-function evaluate(message: Probe): ProviderReport | "wait" {
+function evaluate(message: Probe, settled = true): ProviderReport | "wait" {
   const p = providerById(message.provider)
   // Only providers Deadbolt knows by their sign-in hosts (signin.ts KNOWN).
   if (!p.hosts.length || document.hidden || window !== window.top) return stop("unknown")
@@ -322,15 +335,22 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   if (message.entry) {
     // The site's own page: its one provider button, nothing else. No account is sent here.
     if (onProvider || message.account !== undefined) return stop("unknown")
+    const unlinked = Array.isArray(message.home) && message.home.length > 0
     const el = entryControl(p)
+    // A provider account the site isn't linked to: a link off the page goes
+    // only to the provider's own sign-in pages, never via another host.
+    if (el && unlinked && leavesHome(el, p)) return stop("unknown")
     if (el) return { kind: "entry", action: mint({ kind: "click", ...base, provider: false, el, find: () => entryControl(p) }) }
     if (signedInHint(page)) return { kind: "success" }
     // Email-first: the provider's button shows only once the email went.
-    // The background fills and submits it with the automatic session's
-    // checks (Autofill.submitIdentifier), then asks again.
+    // Only when no button for it shows at all (its widgets' frames
+    // included), after the page had its time to settle, and for a linked
+    // chain; the background fills and submits it with the automatic
+    // session's checks (Autofill.submitIdentifier), then asks again. A
+    // button Deadbolt can't click alone is the person's (pointed at).
     const fields = page.targets()
-    if (page.kind() === "login" && fields.length && fields.every((f) => IDENTIFIER_ROLES.includes(f.role)))
-      return { kind: "identifier", form: page.form(), roles: [...new Set(fields.map((f) => f.role))].sort() }
+    if (!unlinked && page.kind() === "login" && fields.length && fields.every((f) => IDENTIFIER_ROLES.includes(f.role)) && !findProviderButton(p))
+      return settled ? { kind: "identifier", form: page.form(), roles: [...new Set(fields.map((f) => f.role))].sort() } : "wait"
     const text = pageWords()
     return text !== null && loading(text) ? "wait" : stop("unknown")
   }
@@ -338,9 +358,9 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   // Only the provider's own sign-in and OAuth pages, sending the person back to the site picked on.
   if (!isSignInPage(p, location.href)) return stop("unknown")
   // A chain for a site the person hasn't linked yet (`home`): every page must lead back to exactly that host.
-  const hosts = Array.isArray(message.home) ? message.home.filter((h): h is string => typeof h === "string" && !!h).slice(0, 8) : []
-  const strict = hosts.length > 0
-  const back = returnsTo(p, location.href, message.site, strict ? hosts : undefined)
+  const origins = Array.isArray(message.home) ? message.home.filter((h): h is string => typeof h === "string" && !!h).slice(0, 8) : []
+  const strict = origins.length > 0
+  const back = returnsTo(p, location.href, message.site, strict ? origins : undefined)
   if (strict ? back !== "home" : back === "foreign") return stop("unknown")
   if (deepQueryAll(CAPTCHA, openRoots()).some(isVisible)) return stop("captcha")
   const text = pageWords()
@@ -350,8 +370,9 @@ function evaluate(message: Probe): ProviderReport | "wait" {
   const tile = account ? tileFor(p, account) : null
   if (tile && account) {
     // Sharing the account with a site for the first time is the person's
-    // decision: on an unlinked site, they click their own tile.
-    if (strict && any(text, SHARES)) return stop("choose")
+    // decision: on an unlinked site they click their own tile, whatever the
+    // page says (in any language, with or without the sharing notice).
+    if (strict) return stop("choose")
     if (back !== "home" && any(text, SHARES)) return stop("consent")
     return { kind: "chooser", action: mint({ kind: "click", ...base, provider: true, el: tile, find: () => tileFor(p, account) }) }
   }
@@ -384,7 +405,7 @@ async function probe(message: Probe): Promise<ProviderReport> {
   const deadline = performance.now() + SETTLE_MS
   for (;;) {
     if (!live(message.session)) return stop("unknown")
-    const report = evaluate(message)
+    const report = evaluate(message, performance.now() + SETTLE_STEP_MS > deadline)
     if (report !== "wait") return report
     if (performance.now() > deadline) return stop("unknown")
     await sleep(SETTLE_STEP_MS)

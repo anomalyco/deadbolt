@@ -183,7 +183,8 @@ export class UniversalSignIn {
       if (this.open(target.tabId)) return
       // The site's own logins first, then the person's provider accounts for its provider buttons; at most 50.
       const providers = cleanProviders(facts.providers)
-      const accounts = oneRowEach([...own, ...(await this.providerAccounts(providers, own, target.origin))], target.origin).slice(0, 50)
+      // A provider account the site isn't linked to never stands in for one of the site's logins: both rows show.
+      const accounts = [...oneRowEach(own, target.origin), ...(await this.providerAccounts(providers, own, target.origin))].slice(0, 50)
       if (!accounts.length) return none()
       if (this.open(target.tabId)) return
       if (!await this.enabled() || this.host.status.state !== "ready" || this.quiet(await this.memory(target.origin))) return
@@ -219,7 +220,7 @@ export class UniversalSignIn {
     const memory = await this.memory(o.origin)
     if (!facts?.action || authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) !== "signed-out") return false
     const own = await this.accounts(o.origin, true)
-    const accounts = oneRowEach([...own, ...(await this.providerAccounts(o.providers, own, o.origin, true))], o.origin).slice(0, 50)
+    const accounts = [...oneRowEach(own, o.origin), ...(await this.providerAccounts(o.providers, own, o.origin, true))].slice(0, 50)
     if (!accounts.length || o.cancelled) return false
     o.accounts = accounts
     o.at = Date.now()

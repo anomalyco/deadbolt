@@ -2,10 +2,17 @@
 //! QUIC exposes ordered bytes: we reorder polling/delivery between directions,
 //! never bytes within a stream. Not polling a direction models delay/backpressure.
 use std::{
+    cell::Cell,
     future::Future,
     task::{Context, Poll, Waker},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+/// Ticks with no relayed bytes or task completion before declaring a stall.
+const STALL_TICKS: usize = 100_000;
+/// Total-tick ceiling so a frame-ping-pong livelock still terminates, while
+/// leaving headroom for four 1000-entry membership logs over 1-byte chunks.
+const MAX_TICKS: usize = 10_000_000;
 
 pub struct Rng(pub u64);
 impl Rng {
@@ -28,6 +35,7 @@ async fn relay(
     mut from: impl tokio::io::AsyncRead + Unpin,
     mut to: impl tokio::io::AsyncWrite + Unpin,
     wire: &mut Vec<u8>,
+    moved: &Cell<usize>,
     chunk: usize,
 ) {
     let mut buf = [0; 113];
@@ -47,6 +55,7 @@ async fn relay(
         if to.write_all(&buf[..n]).await.is_err() {
             return;
         }
+        moved.set(moved.get() + n);
         // One scheduler turn per chunk even when both buffers are ready.
         let mut yielded = false;
         std::future::poll_fn(|cx| {
@@ -76,19 +85,34 @@ pub fn drive<A, B>(
     let mut rng = Rng(seed);
     let mut ab = Vec::new();
     let mut ba = Vec::new();
+    let moved = Cell::new(0);
     let result = {
         let (ar, aw) = tokio::io::split(a_wire);
         let (br, bw) = tokio::io::split(b_wire);
         let mut a = std::pin::pin!(a);
         let mut b = std::pin::pin!(b);
-        let mut ab_pump = std::pin::pin!(relay(ar, bw, &mut ab, 1 + (rng.next() % 113) as usize));
-        let mut ba_pump = std::pin::pin!(relay(br, aw, &mut ba, 1 + (rng.next() % 113) as usize));
+        let mut ab_pump = std::pin::pin!(relay(
+            ar,
+            bw,
+            &mut ab,
+            &moved,
+            1 + (rng.next() % 113) as usize,
+        ));
+        let mut ba_pump = std::pin::pin!(relay(
+            br,
+            aw,
+            &mut ba,
+            &moved,
+            1 + (rng.next() % 113) as usize,
+        ));
         let mut a_done = None;
         let mut b_done = None;
         let mut ab_done = false;
         let mut ba_done = false;
+        let mut last_progress = (0, false, false, false, false);
+        let mut idle = 0;
         let mut cx = Context::from_waker(Waker::noop());
-        for tick in 0..100_000 {
+        for tick in 0..MAX_TICKS {
             if cut == Some(tick) || cancelled(tick) {
                 break;
             }
@@ -109,6 +133,22 @@ pub fn drive<A, B>(
             }
             if a_done.is_some() && b_done.is_some() {
                 break;
+            }
+            let progress = (
+                moved.get(),
+                a_done.is_some(),
+                b_done.is_some(),
+                ab_done,
+                ba_done,
+            );
+            if progress != last_progress {
+                last_progress = progress;
+                idle = 0;
+            } else {
+                idle += 1;
+                if idle >= STALL_TICKS {
+                    break;
+                }
             }
         }
         a_done.zip(b_done)

@@ -352,9 +352,11 @@ pub enum Command {
         password: PagePassword,
     },
     /// Browser autofill: links the site at `origin` to `account`, a provider
-    /// login it just signed in with: a new login in the default vault at
-    /// `url` (on its site) that signs in with `provider` through `account`,
-    /// with no password of its own. Refused unless `account` is a login here.
+    /// login it just signed in with: a new login at `url` (on its site), in
+    /// `account`'s own vault, that signs in with `provider` through
+    /// `account`, with no password of its own. Refused unless `provider` is a
+    /// known one and `account` is a login saved at its sign-in host; an
+    /// existing link is returned instead of a second (`created: false`).
     /// Replies `site-saved`.
     SiteLink {
         origin: String,

@@ -238,31 +238,45 @@ Some sites ask for the email alone, then show only a provider's button for
 it (Ramp's “Sign in with Google”, opened in a popup on its own auth host).
 One pick still ends signed in:
 
-- **A chain with no provider button yet.** When its entry page has a login
-  form of a username box alone, the chain fills its account's email there
-  and submits it once, with the automatic session's first-step checks
-  (`Autofill.submitIdentifier`: the username only, never a value from the
-  vault; a POST in this tab to this origin through a sign-in or continue
-  button; one of the chain's eight actions), and looks for the provider's
-  button on the step that follows, in place or on the next page.
+- **A linked chain with no provider button at all.** When its entry page
+  has a login form of a username box alone and, once the page had its two
+  seconds to settle, no button for the provider shows (its widgets' frames
+  included), the chain fills the account name there and submits it once,
+  with the automatic session's first-step checks
+  (`Autofill.submitIdentifier`: a POST in this tab to this origin through a
+  sign-in or continue button; one of the chain's eight actions), and looks
+  for the provider's button on the step that follows, in place or on the
+  next page. The name is the provider login's own username (one login at
+  the provider's sign-in host, reading as an account name), never a title.
+  A button Deadbolt can't click alone (a Google Identity Services frame) is
+  pointed at instead, and nothing is typed. A chain from a provider account
+  the site isn't linked to never types it into the site's page.
 - **An automatic session's email step.** When the step after a site login's
   email offers no password box but exactly one known provider's button, the
-  session ends and a provider chain goes on from it: with the site's login
+  session ends and a provider chain goes on from it (never for a picked
+  login that signs in with another provider): with the site's login
   linked to that provider, or the person's own account at the provider of
   the same username (saved at its exact host, as for Your provider
   accounts, which then stops at a first-time sharing notice). The site's
   password is never filled into that page.
 - **The site's own auth host.** A popup or navigation the site's provider
-  button starts may pass through a host of the home's site (`sso.ramp.com`,
-  Firebase Auth's `/__/auth/handler`) on its way to the provider: within 20
-  seconds of that click, before any provider page, at most two such hosts.
+  button starts may pass through another host of the home's site
+  (`sso.ramp.com`, Firebase Auth's `/__/auth/handler`) on its way to the
+  provider: as the popup's first page or through a redirect (never a link
+  the page offers), within 20 seconds of that click, before any provider
+  page, at most two such origins (by origin: the home's host over http or
+  on another port is none). For a provider account the site isn't linked
+  to, the site's entry link may go only to the provider's own sign-in
+  pages or stay on the page's origin.
   The chain never fills or clicks there; it returns through it, and an
   unlinked chain then takes return URLs to it as home. A handler on another
   site (a project's `firebaseapp.com`) is no hop, and stops the chain.
 - **One row per person.** A login of the site whose username is the account
-  a “Sign in with …” login there signs in with shows only as that provider
-  row, in the inline menu and the corner offer (not on the provider's own
-  pages, where its login is the one to fill).
+  a “Sign in with …” login saved for that exact origin signs in with shows
+  only as that provider row, in the corner offer and on the inline menu's
+  username boxes (not on the provider's own pages, where its login is the
+  one to fill). A provider account the site isn't linked to never hides
+  one of the site's logins: both rows show.
 
 A site button that opens a popup needs the page's user activation: the
 chain's click has the pick's own (a click in Deadbolt's frame activates the
@@ -311,18 +325,21 @@ stricter rules than a site's own linked login, since the site has never
 been linked to it:
 
 - Every provider page must carry a return URL, and every one must lead to
-  the home page's host, or a host of its site that the chain itself saw the
-  site's own navigation or popup pass through on the way to the provider
-  (not just anywhere on its site), directly or through another of the
-  provider's sign-in pages. A page with none (a bare
-  `ServiceLogin`) stops it. For every chain, any query parameter holding an
-  absolute http(s) URL counts as a return URL whatever its name or case
-  (`wreply`, `redir`, `Redirect_uri`), except OAuth's `scope`.
-- The chooser's “will share your name, email…” notice is the person's to
-  agree to: the chain waits there, the corner says “Choose your account”
-  and fades, and the person clicks their own tile (their clicks don't stop
-  this wait; Escape does). From the page it leads to, the chain goes on; a
-  step asking for the account again ends it.
+  the home page's origin (scheme, host and port), or an origin of its site
+  that the chain itself saw the site's own navigation or popup pass through
+  on the way to the provider (not just anywhere on its site), directly or
+  through another of the provider's sign-in pages. A page with none (a bare
+  `ServiceLogin`) stops it. For every chain, any query parameter holding a
+  URL to somewhere counts as a return URL whatever its name or case
+  (`wreply`, `redir`, `Redirect_uri`): absolute or scheme-relative (`//host`),
+  as is or URL-decoded once, with `\` read as `/`. OAuth's `scope` is the
+  exception.
+- Picking the account on the provider's chooser is the person's to do,
+  whatever the page says or in whatever language (with or without the
+  “will share your name, email…” notice): the chain waits there, the corner
+  says “Choose your account” and fades, and the person clicks their own
+  tile (their clicks don't stop this wait; Escape does). From the page it
+  leads to, the chain goes on; a step asking for the account again ends it.
 - The provider's form steps fill only the login picked, never another of
   that username, and a password step whose page shows another account (its
   chip or the username it carries, a `login_hint` the site chose) stops,
