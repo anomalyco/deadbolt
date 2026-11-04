@@ -162,8 +162,10 @@ pub struct Process {
     pub args: Vec<String>,
     /// Nearest first, up to launchd (or init).
     pub ancestry: Vec<Ancestor>,
-    /// Reached init, or no visible parent above a confirmed hidden Linux pid.
+    /// Reached init, or an unlisted hidepid boundary with no visible same-user AI.
     pub ancestry_complete: bool,
+    #[serde(skip)]
+    pub ancestry_error: Option<&'static str>,
     /// The executable (Linux; on macOS it's the signature's `path`).
     pub exe: Option<String>,
 }
@@ -460,6 +462,7 @@ pub mod linux {
         mut child_start: u64,
         mut parent: impl FnMut(u32) -> Option<(Ancestor, u32, u64)>,
         mut hidden: impl FnMut(u32, u32, u64) -> Option<Hidden>,
+        unlisted: impl FnOnce() -> bool,
     ) -> (Vec<Ancestor>, bool) {
         let mut ancestry = Vec::new();
         let mut seen = HashSet::from([pid]);
@@ -468,7 +471,7 @@ pub mod linux {
             let Some((entry, ppid, start)) = parent(next) else {
                 match hidden(next, child, child_start) {
                     None => break,
-                    Some(Hidden::SystemBoundary) => return (ancestry, true),
+                    Some(Hidden::SystemBoundary) => return (ancestry, unlisted()),
                     Some(Hidden::VisibleParent(ppid)) => {
                         ancestry.push(Ancestor {
                             pid: next,
@@ -570,7 +573,73 @@ pub mod linux {
         Ok(Hidden::SystemBoundary)
     }
 
-    pub fn process(peer: super::Peer) -> Process {
+    pub const HIDEPID_AI: &str = "Linux hidepid hides this caller's ancestry. Your AI agent is visible, so even unrelated SSH sessions are restricted. Deadbolt can't detect agents hidden by hidepid.";
+
+    /// Only used when no visible task lists the hidden parent. A marker is
+    /// evidence to restrict this caller, not evidence of a particular parent.
+    fn visible_agent(proc: &Path, uid: u32, marker: fn(&str) -> bool) -> io::Result<bool> {
+        for entry in fs::read_dir(proc)? {
+            let entry = entry?;
+            if !entry
+                .file_name()
+                .as_encoded_bytes()
+                .iter()
+                .all(u8::is_ascii_digit)
+            {
+                continue;
+            }
+            let dir = entry.path();
+            let status = match fs::read(dir.join("status")) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound && !dir.try_exists()? => continue,
+                result => result?,
+            };
+            let status = String::from_utf8_lossy(&status);
+            let field = |key| status.lines().find_map(|line| line.strip_prefix(key));
+            let euid = field("Uid:")
+                .and_then(|s| s.split_ascii_whitespace().nth(1)?.parse::<u32>().ok())
+                .ok_or_else(|| io::Error::other("missing process uid"))?;
+            if euid != uid
+                || field("State:").is_some_and(|s| s.trim_start().starts_with(['Z', 'X']))
+            {
+                continue;
+            }
+            if marker(field("Name:\t").ok_or_else(|| io::Error::other("missing process name"))?) {
+                return Ok(true);
+            }
+            let exe = match fs::read_link(dir.join("exe")) {
+                Ok(path) => path,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if exe.file_name().and_then(|s| s.to_str()).is_some_and(marker) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(super) fn unlisted_error(
+        proc: &Path,
+        uid: u32,
+        marker: fn(&str) -> bool,
+    ) -> Option<&'static str> {
+        match visible_agent(proc, uid, marker) {
+            Ok(true) => Some(HIDEPID_AI),
+            Ok(false) => None,
+            Err(_) => Some(
+                "Linux hidepid hides a parent and Deadbolt couldn't check for visible AI agents",
+            ),
+        }
+    }
+
+    pub fn process(peer: super::Peer, marker: fn(&str) -> bool) -> Process {
         let pid = peer.pid;
         let Some(me) = stat(pid).filter(|s| Some(s.start_ticks) == peer.pid_version) else {
             return Process::default();
@@ -579,6 +648,7 @@ pub mod linux {
         let args = std::fs::read(format!("/proc/{pid}/cmdline"))
             .map(|raw| args(&raw))
             .unwrap_or_default();
+        let mut ancestry_error = None;
         let (ancestry, ancestry_complete) = walk(
             pid,
             me.ppid,
@@ -596,6 +666,10 @@ pub mod linux {
                 ))
             },
             hidden_parent,
+            || {
+                ancestry_error = unlisted_error(Path::new("/proc"), peer.uid, marker);
+                ancestry_error.is_none()
+            },
         );
         let exe = exe(pid).map(|p| p.display().to_string());
         // A socket can outlive its connecting process. Don't attribute facts
@@ -611,6 +685,7 @@ pub mod linux {
             args,
             ancestry,
             ancestry_complete,
+            ancestry_error,
             exe,
         }
     }
@@ -655,20 +730,28 @@ mod tests {
         };
         let visible = |p| Some((parent(p), p - 1, u64::from(p)));
         let gone = |_, _, _| None;
-        let (deep, complete) = super::linux::walk(36, 35, 36, visible, gone);
+        let listed = || unreachable!("no unlisted boundary here");
+        let (deep, complete) = super::linux::walk(36, 35, 36, visible, gone, listed);
         assert!(complete);
         assert_eq!(deep.len(), 35);
         assert_eq!(deep.last().unwrap().pid, 1);
         let until_hidden = |p| if p == 3 { None } else { visible(p) };
-        assert!(!super::linux::walk(36, 35, 36, until_hidden, gone).1);
-        let (seen, complete) = super::linux::walk(36, 35, 36, until_hidden, |p, c, start| {
-            (p == 3 && c == 4 && start == 4).then_some(super::linux::Hidden::SystemBoundary)
-        });
+        assert!(!super::linux::walk(36, 35, 36, until_hidden, gone, listed).1);
+        let (seen, complete) = super::linux::walk(
+            36,
+            35,
+            36,
+            until_hidden,
+            |p, c, start| {
+                (p == 3 && c == 4 && start == 4).then_some(super::linux::Hidden::SystemBoundary)
+            },
+            || true,
+        );
         assert!(complete);
         assert_eq!(seen.last().unwrap().pid, 4);
-        assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 35, 1)), gone).1);
-        assert!(!super::linux::walk(2000, 1999, 2000, visible, gone).1);
-        assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 1, 37)), gone).1);
+        assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 35, 1)), gone, listed).1);
+        assert!(!super::linux::walk(2000, 1999, 2000, visible, gone, listed).1);
+        assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 1, 37)), gone, listed).1);
     }
 
     #[cfg(target_os = "linux")]
@@ -703,6 +786,7 @@ mod tests {
                     _ => None,
                 },
                 |h, _, _| reverse_parent(root, h).ok(),
+                || unreachable!("a visible parent was recovered"),
             )
         };
         let (parents, complete) = run();
@@ -717,6 +801,63 @@ mod tests {
         ));
         fs::remove_file(root.join("thread-self/children")).unwrap();
         assert!(!run().1, "no children interface is not a system boundary");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unlisted_boundary_depends_on_any_visible_same_user_marker() {
+        use super::linux::{HIDEPID_AI, reverse_parent, unlisted_error, walk};
+        use std::{fs, os::unix::fs::symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let proc = dir.path();
+        fs::create_dir(proc.join("thread-self")).unwrap();
+        fs::write(proc.join("thread-self/children"), "").unwrap();
+        // 10 -> tool shell 20 -> hidden 30 -> hidden 31 -> caller 40.
+        // No visible task lists 31; an SSH session can look exactly the same.
+        for (pid, children) in [(10, "20"), (20, "30"), (40, "")] {
+            let task = proc.join(format!("{pid}/task/{pid}"));
+            fs::create_dir_all(&task).unwrap();
+            fs::write(task.join("children"), children).unwrap();
+            fs::write(
+                proc.join(format!("{pid}/status")),
+                "Name:\tsh\nState:\tS\nUid:\t501 501 501 501\n",
+            )
+            .unwrap();
+        }
+        let accepted = || {
+            let mut reason = None;
+            let (_, complete) = walk(
+                40,
+                31,
+                40,
+                |_| None,
+                |h, _, _| reverse_parent(proc, h).ok(),
+                || {
+                    reason = unlisted_error(proc, 501, |n| n == "opencode");
+                    reason.is_none()
+                },
+            );
+            (complete, reason)
+        };
+        assert_eq!(accepted(), (true, None), "ordinary ssh");
+        let status = proc.join("10/status");
+        fs::write(
+            &status,
+            "Name:\topencode\nState:\tS\nUid:\t501 501 501 501\n",
+        )
+        .unwrap();
+        assert_eq!(accepted(), (false, Some(HIDEPID_AI)));
+        fs::write(
+            &status,
+            "Name:\topencode\nState:\tS\nUid:\t502 502 502 502\n",
+        )
+        .unwrap();
+        assert_eq!(accepted(), (true, None), "another user's agent");
+        fs::write(&status, "Name:\tnode\nState:\tS\nUid:\t501 501 501 501\n").unwrap();
+        symlink("/fixture/bin/opencode", proc.join("10/exe")).unwrap();
+        assert_eq!(accepted(), (false, Some(HIDEPID_AI)), "executable marker");
+        fs::remove_file(proc.join("10/exe")).unwrap();
+        assert_eq!(accepted(), (true, None), "no cached veto after agent exit");
     }
 
     #[test]
