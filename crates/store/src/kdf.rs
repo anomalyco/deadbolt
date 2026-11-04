@@ -57,12 +57,6 @@ impl KdfParams {
     }
 }
 
-impl Default for KdfParams {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
 const ALG_ARGON2ID_V13: u8 = 1;
 const SALT_LEN: usize = 16;
 pub(crate) const ENCODED_LEN: usize = 1 + 4 + 4 + 4 + SALT_LEN;
