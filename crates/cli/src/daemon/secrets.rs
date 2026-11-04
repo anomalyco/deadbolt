@@ -430,8 +430,11 @@ impl Daemon {
             command => {
                 if let Some(what) = refused_browser(command) {
                     let message = if !caller.identified {
-                        format!("Deadbolt couldn't identify this caller, so it won't {what}.")
-                    } else {
+                        format!(
+                            "Deadbolt couldn't identify this caller ({}), so it won't {what}.",
+                            caller.reason.as_deref().unwrap_or("missing process facts")
+                        )
+                    } else if caller.browser_host_mode {
                         let launcher = if cfg!(target_os = "macos") {
                             "the Dock"
                         } else {
@@ -439,6 +442,11 @@ impl Daemon {
                         };
                         format!(
                             "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from {launcher}."
+                        )
+                    } else {
+                        format!(
+                            "an AI agent can't {what}. {}.",
+                            caller::not_from_here(caller)
                         )
                     };
                     return Err(fail(ErrorCode::Forbidden, message));
@@ -576,7 +584,7 @@ impl Daemon {
                         } else if caller.identified {
                             Err(not_granted(&missing, purpose))
                         } else {
-                            Err(fail(ErrorCode::NotGranted, "Deadbolt couldn't identify this caller and no grant covers the requested secrets"))
+                            Err(fail(ErrorCode::NotGranted, format!("Deadbolt couldn't identify this caller ({}) and no grant covers the requested secrets", caller.reason.as_deref().unwrap_or("missing process facts"))))
                         }
                     })?;
                 }
@@ -902,9 +910,17 @@ mod tests {
             },
         ];
         let ai = under_opencode(CallerClass::Caller);
+        let mut browser = ai.clone();
+        browser.browser_host_mode = true;
         for command in &refused {
             let error = f.daemon.ai_gate(&ai, command, &conv).await.unwrap_err();
             assert_eq!(code(&error), Some(ErrorCode::Forbidden), "{command:?}");
+            assert!(error.to_string().contains("This shell runs under OpenCode"));
+            let error = f
+                .daemon
+                .ai_gate(&browser, command, &conv)
+                .await
+                .unwrap_err();
             let message = error.to_string();
             assert!(
                 message
@@ -1002,6 +1018,27 @@ mod tests {
                 password: PagePassword::Typed(Secret::new("replacement")),
             },
         ];
+        let unknown = CallerInfo::unverified("incomplete parent chain");
+        let error = f
+            .daemon
+            .ai_gate(&unknown, &cmds[0], &conv)
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), Some(ErrorCode::Forbidden));
+        assert!(error.to_string().contains("incomplete parent chain"));
+        let error = f
+            .daemon
+            .resolve(
+                &unknown,
+                &["deadbolt://personal/Example/password".into()],
+                Purpose::Run,
+                &conv,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), Some(ErrorCode::NotGranted));
+        assert!(error.to_string().contains("incomplete parent chain"));
+
         // The direct reproduction, and one with the AI parent just past
         // Activity's 16-parent display limit. Neither needs a session claim.
         for depth in [0, 16, 33] {

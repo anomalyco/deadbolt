@@ -162,7 +162,7 @@ pub struct Process {
     pub args: Vec<String>,
     /// Nearest first, up to launchd (or init).
     pub ancestry: Vec<Ancestor>,
-    /// Reached init, or a confirmed foreign-uid hidepid boundary on Linux.
+    /// Reached init, or no visible parent above a confirmed hidden Linux pid.
     pub ancestry_complete: bool,
     /// The executable (Linux; on macOS it's the signature's `path`).
     pub exe: Option<String>,
@@ -372,7 +372,11 @@ pub fn daemon_is(
 pub mod linux {
     //! `/proc`, for what macOS's helper reads with `proc_pidinfo`.
 
-    use std::{collections::HashSet, path::PathBuf};
+    use std::{
+        collections::HashSet,
+        fs, io,
+        path::{Path, PathBuf},
+    };
 
     use super::{Ancestor, Process};
 
@@ -445,19 +449,38 @@ pub mod linux {
             .collect()
     }
 
+    pub(super) enum Hidden {
+        SystemBoundary,
+        VisibleParent(u32),
+    }
+
     pub(super) fn walk(
         pid: u32,
         mut next: u32,
         mut child_start: u64,
         mut parent: impl FnMut(u32) -> Option<(Ancestor, u32, u64)>,
-        mut hidden: impl FnMut(u32, u32, u64) -> bool,
+        mut hidden: impl FnMut(u32, u32, u64) -> Option<Hidden>,
     ) -> (Vec<Ancestor>, bool) {
         let mut ancestry = Vec::new();
         let mut seen = HashSet::from([pid]);
         let mut child = pid;
         while next != 0 && ancestry.len() < 1024 && seen.insert(next) {
             let Some((entry, ppid, start)) = parent(next) else {
-                return (ancestry, hidden(next, child, child_start));
+                match hidden(next, child, child_start) {
+                    None => break,
+                    Some(Hidden::SystemBoundary) => return (ancestry, true),
+                    Some(Hidden::VisibleParent(ppid)) => {
+                        ancestry.push(Ancestor {
+                            pid: next,
+                            name: "(hidden)".into(),
+                            path: None,
+                        });
+                        // The visible grandparent must not be younger than
+                        // the last visible child. Keep that birth-time check.
+                        next = ppid;
+                        continue;
+                    }
+                }
             };
             if start > child_start {
                 break;
@@ -473,17 +496,17 @@ pub mod linux {
         (ancestry, pid == 1)
     }
 
-    /// A missing stat is not enough: the parent could have exited. Only
-    /// accept an invisible process that exists but **we cannot signal**,
-    /// and that is still the visible child's parent. An inaccessible peer
-    /// of our own uid, a zombie or an exited parent is not such a boundary.
-    fn hidden_parent(parent: u32, child: u32, child_start: u64) -> bool {
-        let Some(pid) = rustix::process::Pid::from_raw(parent as i32) else {
-            return false;
-        };
-        rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::PERM)
-            && std::fs::metadata(format!("/proc/{parent}"))
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    /// A missing stat is not enough: the pid must still exist, be invisible
+    /// on this hidepid mount, and still parent the same child after the scan.
+    /// Both EPERM (root sshd) and a successful signal-zero probe (the hidden
+    /// user-owned sshd session process) establish existence, not ancestry.
+    fn hidden_parent(parent: u32, child: u32, child_start: u64) -> Option<Hidden> {
+        let pid = rustix::process::Pid::from_raw(parent as i32)?;
+        let hidden = matches!(
+            rustix::process::test_kill_process(pid),
+            Ok(()) | Err(rustix::io::Errno::PERM)
+        ) && std::fs::metadata(format!("/proc/{parent}"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
             && std::fs::read_to_string("/proc/self/mounts").is_ok_and(|mounts| {
                 mounts.lines().any(|line| {
                     let mut fields = line.split_whitespace().skip(1);
@@ -494,8 +517,57 @@ pub mod linux {
                                 .any(|o| matches!(o, "hidepid=2" | "hidepid=invisible"))
                         })
                 })
-            })
-            && stat(child).is_some_and(|s| s.ppid == parent && s.start_ticks == child_start)
+            });
+        if !hidden {
+            return None;
+        }
+        let link = reverse_parent(Path::new("/proc"), parent).ok()?;
+        // Don't use the reverse lookup if the original edge went away
+        // while enumerating tasks (including a reused child pid).
+        stat(child).filter(|s| s.ppid == parent && s.start_ticks == child_start)?;
+        Some(link)
+    }
+
+    /// Find the visible process that forked a hidden pid. Children belong
+    /// to individual threads; looking only at thread-group leaders misses
+    /// helpers started on worker threads. An unreadable scan is not proof
+    /// of a system boundary.
+    pub(super) fn reverse_parent(proc: &Path, hidden: u32) -> io::Result<Hidden> {
+        // Explicit probe: ENOENT here can mean CONFIG_PROC_CHILDREN is off.
+        fs::File::open(proc.join("thread-self/children"))?;
+        for process in fs::read_dir(proc)? {
+            let process = process?;
+            let Some(pid) = process
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let tasks = match fs::read_dir(process.path().join("task")) {
+                Err(e)
+                    if e.kind() == io::ErrorKind::NotFound && !process.path().try_exists()? =>
+                {
+                    continue;
+                }
+                result => result?,
+            };
+            for thread in tasks {
+                let path = thread?.path();
+                let children = match fs::read_to_string(path.join("children")) {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound && !path.try_exists()? => {
+                        continue;
+                    }
+                    result => result?,
+                };
+                for child in children.split_ascii_whitespace() {
+                    if child.parse::<u32>().map_err(io::Error::other)? == hidden {
+                        return Ok(Hidden::VisibleParent(pid));
+                    }
+                }
+            }
+        }
+        Ok(Hidden::SystemBoundary)
     }
 
     pub fn process(peer: super::Peer) -> Process {
@@ -582,7 +654,7 @@ mod tests {
             path: None,
         };
         let visible = |p| Some((parent(p), p - 1, u64::from(p)));
-        let gone = |_, _, _| false;
+        let gone = |_, _, _| None;
         let (deep, complete) = super::linux::walk(36, 35, 36, visible, gone);
         assert!(complete);
         assert_eq!(deep.len(), 35);
@@ -590,13 +662,61 @@ mod tests {
         let until_hidden = |p| if p == 3 { None } else { visible(p) };
         assert!(!super::linux::walk(36, 35, 36, until_hidden, gone).1);
         let (seen, complete) = super::linux::walk(36, 35, 36, until_hidden, |p, c, start| {
-            p == 3 && c == 4 && start == 4
+            (p == 3 && c == 4 && start == 4).then_some(super::linux::Hidden::SystemBoundary)
         });
         assert!(complete);
         assert_eq!(seen.last().unwrap().pid, 4);
         assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 35, 1)), gone).1);
         assert!(!super::linux::walk(2000, 1999, 2000, visible, gone).1);
         assert!(!super::linux::walk(36, 35, 36, |p| Some((parent(p), 1, 37)), gone).1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hidepid_follows_children_of_non_leader_threads_or_fails_closed() {
+        use super::linux::{Hidden, reverse_parent, walk};
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("thread-self")).unwrap();
+        fs::write(root.join("thread-self/children"), "").unwrap();
+        for (tid, children) in [(20, ""), (21, "24 30 ")] {
+            let task = root.join(format!("20/task/{tid}"));
+            fs::create_dir_all(&task).unwrap();
+            fs::write(task.join("children"), children).unwrap();
+        }
+        let run = || {
+            walk(
+                40,
+                30,
+                40,
+                |p| match p {
+                    20 | 1 => Some((
+                        super::Ancestor {
+                            pid: p,
+                            name: if p == 20 { "opencode" } else { "init" }.into(),
+                            path: None,
+                        },
+                        1,
+                        u64::from(p),
+                    )),
+                    _ => None,
+                },
+                |h, _, _| reverse_parent(root, h).ok(),
+            )
+        };
+        let (parents, complete) = run();
+        assert!(complete);
+        assert_eq!(
+            parents.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["(hidden)", "opencode", "init"]
+        );
+        assert!(matches!(
+            reverse_parent(root, 300).unwrap(),
+            Hidden::SystemBoundary
+        ));
+        fs::remove_file(root.join("thread-self/children")).unwrap();
+        assert!(!run().1, "no children interface is not a system boundary");
     }
 
     #[test]

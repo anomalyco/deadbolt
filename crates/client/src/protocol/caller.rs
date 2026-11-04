@@ -77,6 +77,10 @@ pub struct CallerInfo {
     /// Not a signature check. Historical Activity entries may lack this.
     #[serde(default)]
     pub identified: bool,
+    /// Native-host argv selects browser-facing refusal wording only. Not
+    /// browser-host standing and not supplied by clients or persisted in Activity.
+    #[serde(skip)]
+    pub browser_host_mode: bool,
     /// Why identification failed or the AI gate applies, before Activity's
     /// display limit truncates the ancestry. Absent for ordinary callers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,6 +112,7 @@ impl CallerInfo {
     pub fn unverified(label: &str) -> CallerInfo {
         CallerInfo {
             identified: false,
+            browser_host_mode: false,
             reason: Some(label.into()),
             class: CallerClass::Caller,
             check: Check::None,
