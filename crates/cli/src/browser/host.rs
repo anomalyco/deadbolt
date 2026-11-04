@@ -1109,7 +1109,9 @@ impl Serial {
                             message: format!("no such {}", kind.as_str()),
                         });
                     }
-                    let Reply::Item { .. } = call(
+                    // By its vault and its whole id, which names that item
+                    // only (never a text match: see the daemon's item lookup).
+                    let Reply::Item { item } = call(
                         &self.paths,
                         Command::ItemSet {
                             vault: Some(target.vault.clone()),
@@ -1126,6 +1128,9 @@ impl Serial {
                     else {
                         return Err(unexpected());
                     };
+                    if item.id != target.item {
+                        return Err(unexpected());
+                    }
                     return Ok(Body::SaveForm {
                         item: format_ref(&target),
                         created: false,

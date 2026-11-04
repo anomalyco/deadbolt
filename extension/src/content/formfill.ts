@@ -9,7 +9,7 @@ import type { CardField, FormKind, IdentityField } from "../protocol"
 import { Approvals } from "./approvals"
 import type { FormControl } from "./detect"
 import { ownBoxes } from "./embed"
-import { clippedBox, fillable, hiddenByStyle, noteFilled, onTop, ownValue, typedByUser } from "./fill"
+import { clippedBox, fillable, filledByDeadbolt, hiddenByStyle, noteFilled, onTop, ownValue, typedByUser } from "./fill"
 import { formFieldInPlace, sectionFields, type FormField } from "./forms"
 import { withAddressParts } from "./address"
 import { cardBrand } from "../payments"
@@ -197,10 +197,18 @@ export function takeApproved(state: FormsState, id: string, form: number): FormF
 
 // ---- Reading what was submitted, for a save ------------------------------------
 
-/** What a submitted form held in identity and card fields, by the host's field names. Never a security code. */
+/**
+ * What a submitted form held in identity and card fields, by the host's
+ * field names. Never a security code. `typed`: the fields the user typed
+ * into or chose in themselves; `filled`: those still holding what Deadbolt
+ * filled. Only those may change a saved item (bg/save.ts); any other value
+ * is the page's, kept only for a new item, and only if it showed.
+ */
 export interface Submitted {
   card?: Partial<Record<CardField, string>>
   identity?: Partial<Record<IdentityField, string>>
+  typed?: string[]
+  filled?: string[]
 }
 
 const inOrder = (a: FormField, b: FormField) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
@@ -210,23 +218,39 @@ async function typedIn(fields: FormField[]): Promise<number> {
   return (await Promise.all(fields.map((f) => typedByUser(f.el, f.el.value)))).filter(Boolean).length
 }
 
+/** Each value read, with the fields it came from (a full name gives a given and a family name). */
+type Read<K extends string> = { values: Partial<Record<K, string>>; from: Map<K, FormControl[]> }
+
 /**
  * What the user submitted in `fields`, for an offer to save it once the
  * submit has gone through (bg/save.ts). A kind counts only when the user
  * typed into (or chose in) at least one of its fields themselves: a form
- * Deadbolt filled and nobody changed offers nothing. A card number counts
- * only as the user typed it or Deadbolt filled it, never one the page put
- * there, and a security code is never read. Of several identity sections
- * (shipping and billing), the one most typed into. Read in memory, for the
- * background only; nothing here goes to the page.
+ * Deadbolt filled and nobody changed offers nothing. Each value says
+ * whether the user typed it or Deadbolt filled it; one that's neither (the
+ * page's own) is kept only if its field showed as a fill needs it to
+ * (fillCheck: on screen, its size, on top), checked as the submit came in,
+ * before the page could react to it. A card number counts only as typed or
+ * filled, and a security code is never read. Of several identity sections
+ * (shipping and billing), the one most typed into. `ours`: Deadbolt's own
+ * surface, which covers nothing. Read in memory, for the background only.
  */
-export async function readSubmitted(fields: FormField[]): Promise<Submitted> {
+export async function readSubmitted(fields: FormField[], ours?: Element | null): Promise<Submitted> {
+  // As the page stands now, before any await lets it change.
+  const shown = new Set(fields.filter((f) => fillCheck(f.kind, ours)(f.el)).map((f) => f.el))
   const out: Submitted = {}
-  const cards = fields.filter((f) => f.kind === "card" && f.role !== "cc-csc")
-  if (cards.length && (await typedIn(cards))) {
-    const card = readCard(cards, await ownNumber(cards))
-    if (Object.keys(card).length) out.card = card
+  const typed: string[] = []
+  const filled: string[] = []
+  const keep = async <K extends string>(read: Read<K>) => {
+    for (const [key, els] of read.from) {
+      if (read.values[key] === undefined) continue
+      if ((await Promise.all(els.map((el) => typedByUser(el, el.value)))).some(Boolean)) typed.push(key)
+      else if ((await Promise.all(els.map((el) => filledByDeadbolt(el, el.value)))).every(Boolean)) filled.push(key)
+      else if (!els.every((el) => shown.has(el))) delete read.values[key]
+    }
+    return Object.keys(read.values).length ? read.values : undefined
   }
+  const cards = fields.filter((f) => f.kind === "card" && f.role !== "cc-csc")
+  if (cards.length && (await typedIn(cards))) out.card = await keep(await readCard(cards))
   const sections = new Map<string, FormField[]>()
   for (const f of fields) if (f.kind === "identity") sections.set(f.section, [...(sections.get(f.section) ?? []), f])
   let best: FormField[] | undefined
@@ -235,91 +259,93 @@ export async function readSubmitted(fields: FormField[]): Promise<Submitted> {
     const n = await typedIn(list)
     if (n > most) [best, most] = [list, n]
   }
-  if (best) {
-    const identity = readIdentity(best)
-    if (Object.keys(identity).length) out.identity = identity
-  }
+  if (best) out.identity = await keep(readIdentity(best))
+  if (!out.card) delete out.card
+  if (!out.identity) delete out.identity
+  if (out.card || out.identity) Object.assign(out, { typed, filled })
   return out
 }
 
-/** The card number: every box of one split over several, else the first box with one, as typed or filled by Deadbolt. */
-async function ownNumber(cards: FormField[]): Promise<string | undefined> {
+/**
+ * A card's values. The number: every box of one split over several, else
+ * the first box with one, only as typed or filled by Deadbolt. Its brand
+ * only from the number's digits, never from the page's own card type select.
+ */
+async function readCard(cards: FormField[]): Promise<Read<Exclude<CardField, "cvv">>> {
+  const read: Read<Exclude<CardField, "cvv">> = { values: {}, from: new Map() }
+  const set = (key: Exclude<CardField, "cvv">, value: string | undefined, from: Array<FormControl | undefined>) => {
+    const els = from.filter((el): el is FormControl => !!el)
+    if (!value || !els.length) return
+    read.values[key] = value
+    read.from.set(key, els)
+  }
   const numbers = cards.filter((f) => f.role === "cc-number").sort(inOrder)
   const split = numbers.filter((f) => f.split)
-  const boxes = split.length ? split : numbers.filter((f) => f.el.value).slice(0, 1)
-  if (!boxes.length) return undefined
-  const own = await Promise.all(boxes.map((b) => ownValue(b.el, b.el.value)))
-  return own.every((v) => v !== undefined) ? readCardNumber(own.join("")) : undefined
-}
-
-function readCard(cards: FormField[], number: string | undefined): NonNullable<Submitted["card"]> {
-  const card: NonNullable<Submitted["card"]> = {}
+  const boxes = (split.length ? split : numbers.filter((f) => f.el.value).slice(0, 1)).map((f) => f.el)
+  const own = await Promise.all(boxes.map((b) => ownValue(b, b.value)))
+  const number = boxes.length && own.every((v) => v !== undefined) ? readCardNumber(own.join("")) : undefined
+  set("number", number, boxes)
+  set("brand", number && cardBrand(number), boxes)
   const first = (role: FormRole) => cards.find((f) => f.role === role && f.el.value.trim())?.el
-  if (number) card.number = number
   const exp = first("cc-exp")
   const month = first("cc-exp-month")
   const year = first("cc-exp-year")
-  const expiry = exp ? readExpiry(exp.value) : month && year ? readExpiryParts(monthOf(month), year instanceof HTMLSelectElement ? year.value || shownText(year) : year.value) : undefined
-  if (expiry) card.expiry = expiry
-  const name = first("cc-name")?.value.trim() || [first("cc-given-name"), first("cc-family-name")].map((el) => el?.value.trim()).filter(Boolean).join(" ")
-  if (name) card.cardholder = name
-  const type = first("cc-type")
-  const brand = (number && cardBrand(number)) || (type ? shownText(type) : "")
-  if (brand) card.brand = brand
-  return card
+  if (exp) set("expiry", readExpiry(exp.value), [exp])
+  else if (month && year) set("expiry", readExpiryParts(monthOf(month), year instanceof HTMLSelectElement ? year.value || shownText(year) : year.value), [month, year])
+  const name = first("cc-name")
+  if (name) set("cardholder", name.value.trim(), [name])
+  else {
+    const parts = [first("cc-given-name"), first("cc-family-name")]
+    set("cardholder", parts.map((el) => el?.value.trim()).filter(Boolean).join(" "), parts)
+  }
+  return read
 }
 
-function readIdentity(list: FormField[]): NonNullable<Submitted["identity"]> {
-  const v: NonNullable<Submitted["identity"]> = {}
+function readIdentity(list: FormField[]): Read<IdentityField> {
+  const read: Read<IdentityField> = { values: {}, from: new Map() }
   const el = (role: FormRole) => list.find((f) => f.role === role && f.el.value.trim())?.el
   const text = (role: FormRole) => el(role)?.value.trim() || undefined
-  const set = (key: IdentityField, value: string | undefined) => {
-    if (value) v[key] = value
+  const set = (key: IdentityField, value: string | undefined, from: Array<FormControl | undefined>) => {
+    const els = from.filter((e): e is FormControl => !!e)
+    if (!value || !els.length) return
+    read.values[key] = value
+    read.from.set(key, els)
   }
-  const full = text("name")
+  const full = el("name")
   if (full) {
-    const [given, family] = splitName(full)
-    set("given-name", given)
-    set("family-name", family)
+    const [given, family] = splitName(full.value)
+    set("given-name", given, [full])
+    set("family-name", family, [full])
   }
-  set("given-name", text("given-name"))
-  set("additional-name", text("additional-name"))
-  set("family-name", text("family-name"))
+  for (const [key, role] of [["given-name", "given-name"], ["additional-name", "additional-name"], ["family-name", "family-name"], ["email", "email"], ["organization", "organization"], ["job-title", "organization-title"]] as const) set(key, text(role), [el(role)])
   const honorific = el("honorific-prefix")
-  set("honorific", honorific && shownText(honorific))
-  set("email", text("email"))
-  set("organization", text("organization"))
-  set("job-title", text("organization-title"))
+  set("honorific", honorific && shownText(honorific), [honorific])
   const street = el("street-address")
   if (street) {
     const lines = street.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
-    set("address-line1", lines[0])
-    set("address-line2", lines[1])
-    set("address-line3", lines.slice(2).join(", "))
+    set("address-line1", lines[0], [street])
+    set("address-line2", lines[1], [street])
+    set("address-line3", lines.slice(2).join(", "), [street])
   }
-  set("address-line1", text("address-line1"))
-  set("address-line2", text("address-line2"))
-  set("address-line3", text("address-line3"))
-  set("city", text("address-level2"))
-  set("postal-code", text("postal-code"))
+  for (const [key, role] of [["address-line1", "address-line1"], ["address-line2", "address-line2"], ["address-line3", "address-line3"], ["city", "address-level2"], ["postal-code", "postal-code"]] as const) set(key, text(role), [el(role)])
   const region = el("address-level1")
-  if (region instanceof HTMLSelectElement) set("region", /^[a-z]{2,3}$/i.test(region.value.trim()) ? region.value.trim().toUpperCase() : shownText(region))
-  else set("region", region?.value.trim())
+  if (region instanceof HTMLSelectElement) set("region", /^[a-z]{2,3}$/i.test(region.value.trim()) ? region.value.trim().toUpperCase() : shownText(region), [region])
+  else set("region", region?.value.trim(), [region])
   const country = el("country")
-  set("country", country && countryOf(country))
-  const phone = text("tel") ?? text("tel-national")
+  set("country", country && countryOf(country), [country])
+  const phone = el("tel") ?? el("tel-national")
   if (phone) {
     const code = el("tel-country-code")
     const calling = code ? /\+\s?(\d{1,4})/.exec(`${shownText(code)} ${code.value}`)?.[1] : undefined
-    set("phone", readPhone(phone, calling))
+    set("phone", readPhone(phone.value.trim(), calling), [phone, ...(calling ? [code] : [])])
   }
   const bday = el("bday")
-  const birthday = bday ? readBirthday(bday) : undefined
   const day = el("bday-day")
   const month = el("bday-month")
   const year = el("bday-year")
-  set("birthday", birthday ?? (day && month && year ? readBirthdayParts(day.value, monthOf(month), year.value) : undefined))
-  return v
+  if (bday) set("birthday", readBirthday(bday), [bday])
+  else if (day && month && year) set("birthday", readBirthdayParts(day.value, monthOf(month), year.value), [day, month, year])
+  return read
 }
 
 export type { FormsAck }

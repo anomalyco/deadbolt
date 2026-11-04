@@ -1104,11 +1104,15 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   document.body.classList.add("save")
   document.body.dataset.offer = offerState
   const status = h("p", { class: "offer-status" })
-  const saveLabel = h("span", { class: "roll-label" }, "Save")
-  saveLabel.dataset.text = "Save"
+  // An update says so on its button.
+  const primary = offer.update ? "Update" : "Save"
+  const saveLabel = h("span", { class: "roll-label" }, primary)
+  saveLabel.dataset.text = primary
   const save = h("button", { class: "btn primary", type: "button" }, saveLabel)
   const later = h("button", { class: "btn", type: "button" }, "Not now")
   const never = h("button", { class: "link never", type: "button" }, "Never for this site")
+  // An update of a card or identity may be kept as a new one instead.
+  const asNew = offer.saveNew ? h("button", { class: "btn new", type: "button" }, "Save as new") : null
   const bar = h("span", { class: "bar", "aria-hidden": "true" })
   const mark = h("span", { class: "offer-mark", "aria-hidden": "true" }, svg(ICONS.deadbolt))
   const row = h("div", { class: "offer-row" }, mark, h("h1", { class: "offer-title" }, title), save)
@@ -1120,8 +1124,10 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
       "div",
       { class: "offer-more" },
       h("p", { class: "offer-user" }, h("span", { class: "value" }, offer.username), h("span", { class: "site" }, ` · ${offer.site}`)),
+      // What an update changes, for a card: "Expires 08/28 → 09/30".
+      offer.change ? h("p", { class: "offer-change" }, offer.change) : null,
       status,
-      h("div", { class: "offer-actions" }, never, later),
+      h("div", { class: "offer-actions" }, never, asNew, later),
     ),
     bar,
   )
@@ -1263,7 +1269,8 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   }
   say("")
   // It shows in the corner, away from where the user is: a screen reader hears it came.
-  announce(`${title.slice(0, -1)} for ${offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
+  // An update names what it changes: "Update phone for Kit Langton?".
+  announce(`${title.slice(0, -1)} for ${offer.what && offer.update ? offer.username : offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
   const answer = async (choice: OfferChoice, e: MouseEvent) => {
     // Real presses only.
     if (!e.isTrusted || busy || offerState === "dot") return
@@ -1285,12 +1292,13 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     document.body.classList.remove("held")
     // "Saving…" rolls in the button itself, and stays long enough to read.
     const shownAt = performance.now()
-    if (choice === "save") {
+    const saving = choice === "save" || choice === "new"
+    if (saving) {
       document.body.classList.add("busy")
       rollLabel(saveLabel, "Saving…")
     }
     const reply = await send<ChooseReply>({ type: "db:surface-choose", token, choice })
-    if (choice !== "save") return leaveLikeSave()
+    if (!saving) return leaveLikeSave()
     if (reply?.ok) {
       await new Promise((r) => setTimeout(r, Math.max(0, SAVING_READS_MS - (performance.now() - shownAt))))
       const label = fold(saveLabel, "Saving…", true, mark)
@@ -1307,14 +1315,15 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     busy = false
     relax()
     document.body.classList.remove("busy")
-    rollLabel(saveLabel, "Save")
+    rollLabel(saveLabel, primary)
     shape("open")
     say(reply.message)
     rearm()
   }
   // The press shows at once; what it does waits for the checks.
-  for (const b of [save, later, never]) b.addEventListener("pointerdown", (e) => e.isTrusted && e.button === 0 && !busy && press(b))
+  for (const b of [save, later, never, ...(asNew ? [asNew] : [])]) b.addEventListener("pointerdown", (e) => e.isTrusted && e.button === 0 && !busy && press(b))
   save.addEventListener("click", (e) => void answer("save", e))
+  asNew?.addEventListener("click", (e) => void answer("new", e))
   later.addEventListener("click", (e) => void answer("later", e))
   never.addEventListener("click", (e) => void answer("never", e))
   report()

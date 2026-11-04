@@ -12,7 +12,7 @@ import { scanForms, type FormField } from "./content/forms"
 import { readSubmitted } from "./content/formfill"
 import { fillable, ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
-import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
+import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
 import { formFailed, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
@@ -278,7 +278,7 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
   // own submit in the top page (see bg/save.ts): never the top page itself.
   if (message?.type === "db:forms-read") {
     if (isTop || !formFields.length) return void respond(null)
-    void readSubmitted(formFields).then(respond, () => respond(null))
+    void readSubmitted(formFields, menuHost()).then(respond, () => respond(null))
     return true
   }
   if (message?.type === "db:probe") {
@@ -438,7 +438,7 @@ function formsSubmitted(form: HTMLFormElement | null, submitter?: Element | null
   const fields = form ? formFields.filter((f) => f.form === form) : formFields
   if (!fields.length && !(isTop && cardFrames)) return
   formsSubmitAt = now
-  void readSubmitted(fields).then((got) => {
+  void readSubmitted(fields, menuHost()).then((got) => {
     // The top page asks the provider's frames below even with nothing of its own.
     if (!got.card && !got.identity && !(isTop && cardFrames)) return
     const attempt = ++formsSubmission
@@ -469,6 +469,38 @@ function watchFormOutcome(attempt: number, fields: FormField[], form: HTMLFormEl
 
 /** A button that says it pays, orders or goes on: a checkout's own, often outside any form. */
 const GOES_ON = /^(pay|pay now|pay \S+|place (your )?order|order now|buy|buy now|purchase|complete (order|purchase|payment|checkout)|check ?out|continue|next|save|save (address|card|details)|submit|confirm|subscribe|donate|add card|update|review order|proceed)\b/i
+/** The longest label such a button has; a longer one isn't read. */
+const GOES_ON_MAX = 40
+
+/**
+ * A click that submits identity or card fields: on a real button (a
+ * `<button>` or an `input` of type submit or button, never an element that
+ * only says it's a button), in the form that holds the fields, or for fields
+ * in no form, beside them (under the same few parents). A form's submit
+ * control counts whatever it says; any other button only if it says it pays
+ * or goes on. Returns the fields' form, or undefined when the click isn't one.
+ */
+function formsSubmitClick(target: Element | null): { form: HTMLFormElement | null; control: Element } | undefined {
+  const control = target?.closest?.('button, input[type="submit"], input[type="button"]')
+  if (!(control instanceof HTMLButtonElement || control instanceof HTMLInputElement)) return undefined
+  const form = control.form
+  const holds = form ? formFields.some((f) => f.form === form) || (isTop && cardFrames && !!form.querySelector("iframe")) : besideFields(control)
+  if (!holds) return undefined
+  if (form && control.matches(SUBMITS)) return { form, control }
+  // The label's length first, so a big control's whole text is never read.
+  const label = control instanceof HTMLInputElement ? control.value : (control.getAttribute("aria-label") ?? (control.childElementCount <= 4 && (control.textContent?.length ?? 0) <= GOES_ON_MAX * 2 ? control.textContent : "") ?? "")
+  const trimmed = label.trim()
+  return trimmed.length <= GOES_ON_MAX && GOES_ON.test(trimmed) ? { form, control } : undefined
+}
+
+/** A button outside any form, next to identity or card fields outside one (or the top page's provider frame). */
+function besideFields(control: Element): boolean {
+  let node = control.parentElement
+  for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+    if (formFields.some((f) => !f.form && node!.contains(f.el)) || (isTop && cardFrames && node.querySelector("iframe"))) return true
+  }
+  return false
+}
 
 const realTarget = (event: Event) => eventTarget(event)
 
@@ -512,10 +544,8 @@ function onClick(event: MouseEvent) {
   if (!event.isTrusted) return
   let node = realTarget(event) as Element | null
   if (formFields.length || (isTop && cardFrames)) {
-    const control = node?.closest?.('button, input[type="submit"], input[type="image"], input[type="button"], [role=button]')
-    const label = control ? (control.getAttribute("aria-label") || control.textContent || (control as HTMLInputElement).value || "").trim() : ""
-    const form = control instanceof HTMLButtonElement || control instanceof HTMLInputElement ? control.form : (control?.closest("form") ?? null)
-    if (control && ((control.matches(SUBMITS) && form) || (label.length <= 40 && GOES_ON.test(label)))) formsSubmitted(form, control)
+    const click = formsSubmitClick(node)
+    if (click) formsSubmitted(click.form, click.control)
   }
   const control = node?.closest("a, button")
   if (offerSignIn && isTop && control instanceof HTMLElement && isVisible(control) &&

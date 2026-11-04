@@ -300,7 +300,7 @@ export class StandaloneBackend implements VaultBackend {
       if (reply.type !== "hello") throw new HostError("failed", UNREADABLE)
       // Only what this build sends on: a capability it would refuse is never offered.
       // The learning log is this side's own, whatever the vault says.
-      this.capabilities = [...reply.capabilities.filter((c) => c !== "learn" && (c === "passkeys" || SUPPORTED.has(c))), "learn"]
+      this.capabilities = [...reply.capabilities.filter((c) => c !== "learn" && (c === "passkeys" || c === "save-form-match" || SUPPORTED.has(c))), "learn"]
       if (reply.protocol !== PROTOCOL) {
         this.setStatus({ state: "unavailable", detail: "This extension and its vault are different versions. Reload the extension." }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)

@@ -19,6 +19,8 @@ import { HostError, type VaultBackend } from "./backend"
 import { fillableOrigin, sameSite, senderOrigin, siteOf } from "./site"
 
 const TOKEN_TTL_MS = 2 * 60_000
+/** How long a fill's item is remembered for a save after it. */
+const FILLED_TTL_MS = 10 * 60_000
 const LIST_TTL_MS = 30_000
 /** A card's number waits on Touch ID, which the user may take a while over. */
 const VERIFY_TIMEOUT_MS = 90_000
@@ -95,6 +97,8 @@ export class Forms {
   private pages = new Map<number, Map<number, FormsReport>>()
   /** Sites whose fields already showed the locked row on focus since Deadbolt last locked or unlocked. */
   private lockedShown = new Set<string>()
+  /** The card and identity each tab last had filled, and when: a save may write their unchanged values back to them (bg/save.ts). */
+  private filled = new Map<number, { card?: string; identity?: string; at: number }>()
   /** Picks waiting on the passphrase (bg/standalone.ts), by the tab and frames they fill: a navigation there drops them. */
   private waiting = new Map<AbortController, { tabId: number; frames: number[] }>()
 
@@ -314,7 +318,15 @@ export class Forms {
       const ack = await sendToFrame<FormsAck>(a.target, { type: "db:forms-fill", values: own, form: a.form, approval: a.approved.approval })
       filled += cleanRoles(ack?.filled).length
     }
-    return filled ? { ok: true } : { ok: false, message: "The page changed. Try again." }
+    if (!filled) return { ok: false, message: "The page changed. Try again." }
+    this.filled.set(t.owner.tabId, { ...this.filled.get(t.owner.tabId), [t.kind]: ref, at: Date.now() })
+    return { ok: true }
+  }
+
+  /** The card and identity last filled in the tab, in the last ten minutes. */
+  filledFrom(tabId: number): { card?: string; identity?: string } {
+    const f = this.filled.get(tabId)
+    return f && Date.now() - f.at < FILLED_TTL_MS ? { card: f.card, identity: f.identity } : {}
   }
 
   /** Which fields each target may fill now; a frame below only if every one shows through every frame above. */
@@ -354,6 +366,7 @@ export class Forms {
   }
 
   forgetTab(tabId: number) {
+    this.filled.delete(tabId)
     for (const [pick, w] of this.waiting) if (w.tabId === tabId) pick.abort()
     this.pages.delete(tabId)
     for (const [token, t] of this.tokens) if (t.owner.tabId === tabId) this.tokens.delete(token)

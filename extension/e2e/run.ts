@@ -645,6 +645,34 @@ const FORMS: Record<string, string> = {
       e.preventDefault()
       setTimeout(() => { e.target.remove(); document.querySelector("main").insertAdjacentHTML("beforeend", "<p>Delivering there.</p>") }, 300)
     })</script>`,
+  // The same address with no form: a real button beside the fields, and an element that only says it's one.
+  "ship-spa": `<h1>Shipping</h1><div id="ship">
+    <label for="n">Full name</label><input id="n" autocomplete="shipping name">
+    <label for="a1">Address</label><input id="a1" autocomplete="shipping address-line1">
+    <label for="city">City</label><input id="city" autocomplete="shipping address-level2">
+    <label for="zip">ZIP</label><input id="zip" autocomplete="shipping postal-code">
+    <div role="button" id="fake" tabindex="0" style="margin-top:12px;padding:8px;border:1px solid">Continue</div>
+    <button type="button" id="real">Continue</button></div>
+    <script>for (const id of ["fake", "real"]) document.getElementById(id).addEventListener("click", () => setTimeout(() => document.getElementById("ship").remove(), 300))</script>`,
+  // Contact details whose email the page swaps as the form goes, and an address with an email planted where nobody sees it.
+  contact: `<h1>Contact</h1><form id="contact">
+    <label for="n">Full name</label><input id="n" autocomplete="name">
+    <label for="em">Email</label><input id="em" type="email" autocomplete="email">
+    <label for="tel">Phone</label><input id="tel" type="tel" autocomplete="tel">
+    <button type="submit">Save</button></form>
+    <script>document.getElementById("contact").addEventListener("submit", (e) => {
+      e.preventDefault()
+      document.getElementById("em").value = "attacker@example.net"
+      setTimeout(() => e.target.remove(), 300)
+    })</script>`,
+  "ship-planted": `<h1>Shipping</h1><form id="ship">
+    <label for="n">Full name</label><input id="n" autocomplete="shipping name">
+    <label for="a1">Address</label><input id="a1" autocomplete="shipping address-line1">
+    <label for="city">City</label><input id="city" autocomplete="shipping address-level2">
+    <label for="zip">ZIP</label><input id="zip" autocomplete="shipping postal-code">
+    <input id="planted" autocomplete="shipping email" value="attacker@example.net" style="position:absolute;left:-2000px;width:3px;height:3px">
+    <button type="submit">Continue</button></form>
+    <script>document.getElementById("ship").addEventListener("submit", (e) => { e.preventDefault(); setTimeout(() => e.target.remove(), 300) })</script>`,
   // A card number in four boxes.
   "card-split": `<h1>Payment</h1><form>
     <label for="b1">Card number</label><div style="display:flex;gap:6px"><input id="b1" maxlength="4"><input id="b2" maxlength="4"><input id="b3" maxlength="4"><input id="b4" maxlength="4"></div>
@@ -4903,11 +4931,43 @@ async function formsSurface(scheme: Scheme) {
     offer = await formOffer(page, "the update offer shows")
     if (offer) {
       check(offer.title === "Update card?" && offer.user === "Visa •••• 4242 · localhost", `a saved card with a new expiry is an update (${offer.title} ${offer.user})`)
+      check((await offer.offer.locator(".offer-change").textContent()) === "Expires 08/28 → 01/31", "naming the change")
+      check((await offer.offer.locator(".offer-row .btn.primary").textContent()) === "Update" && (await offer.offer.locator(".offer-actions .btn.new").textContent()) === "Save as new", "with Update, and Save as new beside Not now")
       await Bun.sleep(500)
       await shotAround(page, `forms-update-card-${scheme}`, offer.offer)
       check(await acceptForm(page, offer.offer, `forms-update-card-open-${scheme}`), "Save updates the card")
       const update = (await formSaves(run)).find((r) => r.kind === "card" && r.ref)
       check(sorted(update?.fields) === sorted({ expiry: "2031-01" }), `only its expiry changes (${sorted(update?.fields)})`)
+    }
+
+    // The browser-only vault compares the typed number with the card's: a
+    // Visa with the same last four digits but another number is a new card.
+    // (The native daemon has no such comparison yet: there it's the update.)
+    if (standalone) {
+      await newTurn(run)
+      await page.goto(`${site}/forms/pay`)
+      await formsFound(run, page, "/forms/pay")
+      await typeIn(page, { holder: "Kit Langton", cc: "4000 0000 0002 4242", exp: "02 / 32", cvc: "123" })
+      await page.press("#cvc", "Enter")
+      await page.waitForURL("**/forms/thanks")
+      offer = await formOffer(page, "the same last four digits are offered as an update first")
+      if (offer) {
+        await Bun.sleep(500)
+        await offer.offer.locator(".offer-row").hover()
+        await until("the offer opens on approach", async () => (await frameBox(offer!.offer)).height > 60)
+        await settled(offer.offer)
+        await offer.offer.locator(".offer-row .btn.primary").click()
+        const instead = await until("another card is offered as new", async () => {
+          const f = extensionFrame(page, "menu.html")
+          return f && (await f.locator(".offer-title").textContent().catch(() => "")) === "Save card?" ? f : null
+        }, 15_000)
+        check(!!instead, "Update of another number with the same last four: the vault says no, and Save card? is offered instead")
+        const sent = (await formSaves(run)).find((r) => r.ref && (r as { match?: { number: string } }).match?.number === "4000000000024242")
+        check(!!sent && !("number" in sent.fields), "the typed number went only as a match, never as a field")
+        if (instead) check(await acceptForm(page, instead, `forms-save-card-instead-${scheme}`), "and saved as a new card")
+        const added = (await formSaves(run)).find((r) => !r.ref && r.fields.number === "4000000000024242")
+        check(!!added, "a new card with that number")
+      }
     }
 
     // A typed address: a new identity, then Home with a new street.
@@ -4934,7 +4994,8 @@ async function formsSurface(scheme: Scheme) {
     await page.click("button[type=submit]")
     offer = await formOffer(page, "the address update shows")
     if (offer) {
-      check(offer.title === "Update address?" && offer.user === "5 Oak Ave, Brooklyn · localhost", `a saved identity at a new street is an update (${offer.title} ${offer.user})`)
+      check(offer.title === "Update address?" && offer.user === "Home · localhost", `a saved identity at a new street is an update of it, by name (${offer.title} ${offer.user})`)
+      check((await offer.offer.locator(".offer-row .btn.primary").textContent()) === "Update", "with Update")
       await Bun.sleep(500)
       await shotAround(page, `forms-update-address-${scheme}`, offer.offer)
       check(await acceptForm(page, offer.offer, `forms-update-address-open-${scheme}`), "Save updates the identity")
@@ -5008,6 +5069,48 @@ async function formsShapes() {
     await page.waitForURL("**/forms/thanks")
     check((await noOffer(run, page)) && (await hostLog(run)).filter((r) => r.type === "forms").length === lists, "Never for this site: a typed card is neither offered nor looked up")
     await run.worker.evaluate(() => chrome.storage.local.set({ neverSave: [] }))
+
+    // Only a real button submits: an element that only says it's a button doesn't.
+    const captures = () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen.filter((s) => s.startsWith("db:form-capture@")).length)
+    await page.goto(`${site}/forms/ship-spa`)
+    await formsFound(run, page, "/forms/ship-spa")
+    const before = await captures()
+    await typeIn(page, { n: "Ada Lovelace", a1: "1 Main St", city: "Springfield", zip: "12345" })
+    await page.click("#fake")
+    check((await noOffer(run, page)) && (await captures()) === before, "a role=button wrapper's click isn't a submit")
+    await page.goto(`${site}/forms/ship-spa`)
+    await formsFound(run, page, "/forms/ship-spa")
+    await typeIn(page, { n: "Ada Lovelace", a1: "1 Main St", city: "Springfield", zip: "12345" })
+    await page.click("#real")
+    const spa = await formOffer(page, "a real button beside the fields submits them")
+    check(spa?.title === "Save address?", `a real button beside fields with no form submits them (${spa?.title})`)
+    await clearBadge(run)
+    await run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+
+    // A swapped email isn't written into the saved identity: only the phone the user typed is.
+    await page.goto(`${site}/forms/contact`)
+    await formsFound(run, page, "/forms/contact")
+    await typeIn(page, { n: "Kit Langton", em: "kit@acme.test", tel: "+1 415 555 0199" })
+    await page.click("button[type=submit]")
+    const contact = await formOffer(page, "the contact update shows")
+    if (contact) {
+      check(contact.title === "Update phone?" && contact.user === "Home · localhost", `the update names only what the user changed (${contact.title} ${contact.user})`)
+      check(await acceptForm(page, contact.offer, "forms-update-phone-light"), "Update saves it")
+      const written = (await formSaves(run)).find((r) => r.kind === "identity" && r.ref)
+      check(sorted(written?.fields) === sorted({ phone: "+1 415 555 0199" }), `the page's swapped email isn't written (${sorted(written?.fields)})`)
+    }
+    await run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+
+    // An email planted where nobody sees it isn't saved with a new address.
+    await page.goto(`${site}/forms/ship-planted`)
+    await formsFound(run, page, "/forms/ship-planted")
+    await typeIn(page, { n: "Ada Planted", a1: "9 Elm St", city: "Springfield", zip: "12345" })
+    await page.click("button[type=submit]")
+    const planted = await formOffer(page, "the planted page's address shows")
+    if (planted && (await acceptForm(page, planted.offer, "forms-save-planted-light"))) {
+      const kept = (await formSaves(run)).find((r) => r.kind === "identity" && !r.ref && r.fields["given-name"] === "Ada")
+      check(!!kept && !("email" in kept.fields) && !JSON.stringify(kept.fields).includes("attacker"), `a hidden planted email isn't saved (${Object.keys(kept?.fields ?? {}).join(",")})`)
+    } else check(false, "the planted page's address is offered and saved")
   } catch (err) {
     check(false, `formsShapes threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "formsShapes")

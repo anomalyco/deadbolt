@@ -57,9 +57,11 @@ export type Request =
   /**
    * Keeps an identity or card the user typed into a form and chose to save:
    * a new one, or the changed fields of `ref`. Never a card's `cvv`; an
-   * update never changes a card's `number`.
+   * update never changes a card's `number`. `match` (the browser-only vault,
+   * capability `save-form-match`): a card update's typed number, only
+   * compared with the card's (another is `not_found`), never kept.
    */
-  | { id: number; type: "save-form"; origin: string; kind: FormKind; ref?: string; fields: Partial<Record<FormField, string>> }
+  | { id: number; type: "save-form"; origin: string; kind: FormKind; ref?: string; fields: Partial<Record<FormField, string>>; match?: { number: string } }
   | { id: number; type: "passkey-list"; origin: string; rpId?: string }
   | {
       id: number

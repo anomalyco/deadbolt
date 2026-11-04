@@ -453,7 +453,7 @@ export type MenuLoadReply =
    * number beyond its last four digits, or its code. `what`: a card or an
    * identity typed into a form, with `username` its label ("Visa •••• 4242").
    */
-  | { kind: "offer"; site: string; username: string; update: boolean; what?: SaveWhat }
+  | { kind: "offer"; site: string; username: string; update: boolean; what?: SaveWhat; changes?: string; change?: string; saveNew?: boolean }
 
 /** `submitted`: the pick signed in (see Autofill.startAutomatic) and its form went on, beyond a fill. */
 export type PickReply = { ok: true; submitted?: boolean } | { ok: false; message: string }
@@ -489,7 +489,7 @@ export interface Learning {
 export type LearnReply = { ok: true; learning?: Learning } | { ok: false; message: string }
 
 /** "later" (Not now) also holds back the same login on this site for a day; "never" stops offers for the site. */
-export type OfferChoice = "save" | "later" | "never"
+export type OfferChoice = "save" | "later" | "never" | "new"
 
 /** What a form save offer keeps: a card, an identity with an address, or one with only contact details. */
 export type SaveWhat = "card" | "address" | "details"
@@ -503,6 +503,12 @@ export interface SaveOffer {
   update: boolean
   /** A card or identity typed into a form, rather than a login. */
   what?: SaveWhat
+  /** An identity's update: what of it changes, in words ("phone", "email and phone"). */
+  changes?: string
+  /** A card's update: the change ("Expires 08/28 → 09/30"). */
+  change?: string
+  /** An update that may be saved as a new item instead ("Save as new"). */
+  saveNew?: boolean
 }
 
 /** `gone`: the offer answered isn't the one waiting anymore. */

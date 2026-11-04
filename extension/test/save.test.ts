@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { HostError } from "../src/bg/backend"
-import { cardPlan, cleanCard, cleanFacts, identityPlan, judge, NEVER_KEY, NOT_NOW_MS, Saver } from "../src/bg/save"
+import { cardPlan, cleanCard, cleanFacts, identityPlan, judge, NEVER_KEY, NOT_NOW_MS, Saver, type Trust } from "../src/bg/save"
 import type { RequestBody } from "../src/protocol"
 import { CARDS, fakeHost, HOME_REF, HOME_VALUES, installChrome, menuSender, NO_FACTS, pageSender, SITE, VISA_REF, type FakeChrome, type FakeHost } from "./chrome"
 
@@ -929,10 +929,14 @@ describe("cards and identities typed into a form", () => {
   const CHECKOUT = { url: "https://www.example.com/checkout", documentId: "checkout-doc" }
   const top = (over: Partial<chrome.runtime.MessageSender> = {}) => pageSender({ url: CHECKOUT.url, documentId: CHECKOUT.documentId, ...over })
   const TYPED = { number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }
-  /** The user submits a checkout on the top page, and its fields go away: the submit went through. */
-  const checkout = async (got: { card?: unknown; identity?: unknown }, sender = top()) => {
+  /**
+   * The user submits a checkout on the top page, and its fields go away: the
+   * submit went through. Every value typed by the user, unless `typed` says.
+   */
+  const checkout = async (got: { card?: Record<string, string>; identity?: Record<string, string>; typed?: string[]; filled?: string[] }, sender = top()) => {
     fake.frames["1:0"] = { ...CHECKOUT, parentFrameId: -1 }
-    await saver.formCapture(sender, { ...got, submission: 1 })
+    const typed = got.typed ?? [...Object.keys(got.card ?? {}), ...Object.keys(got.identity ?? {})]
+    await saver.formCapture(sender, { ...got, typed, submission: 1 })
     await saver.formOutcome(sender, 1, true)
   }
   const saveForm = () => requests("save-form") as Array<Extract<RequestBody, { type: "save-form" }>>
@@ -989,9 +993,60 @@ describe("cards and identities typed into a form", () => {
     expect(requests("forms")).toHaveLength(1)
     fake.session = {}
     await checkout({ card: { number: "4242424242424242", expiry: "2031-01", brand: "Visa" } })
-    expect(saver.pending(1)).toMatchObject({ username: "Visa •••• 4242", update: true, what: "card" })
+    // The offer names the change, and may be saved as a new card instead.
+    expect(saver.pending(1)).toMatchObject({ username: "Visa •••• 4242", update: true, what: "card", change: "Expires 08/28 → 01/31", saveNew: true })
     expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Card updated" })
+    // Natively no number travels with an update: only the browser-only vault compares one.
     expect(saveForm()).toEqual([{ type: "save-form", origin: "https://www.example.com", kind: "card", ref: VISA_REF, fields: { expiry: "2031-01" } }])
+    // An expiry the page put there (not typed) changes nothing.
+    fake.session = {}
+    await checkout({ card: { number: "4242424242424242", expiry: "2031-01" }, typed: ["number"] })
+    expect(saver.pending(1)).toBeUndefined()
+  })
+
+  test("Save as new keeps an update's card as a new one, number and all", async () => {
+    await checkout({ card: { number: "4242424242424242", expiry: "2031-01" } })
+    expect(await saver.choose(1, saver.pending(1)!.id, "new")).toEqual({ ok: true, message: "Saved to Deadbolt" })
+    expect(saveForm()).toEqual([{ type: "save-form", origin: "https://www.example.com", kind: "card", fields: { number: "4242424242424242", expiry: "2031-01", brand: "Visa" } }])
+    expect(saver.pending(1)).toBeUndefined()
+  })
+
+  test("the page's own brand never matches a card: same last four with another brand is a new card", async () => {
+    // A Mastercard ending 4242, whatever brand the page claimed: a new card, not the saved Visa.
+    await checkout({ card: { number: "5105105105104242", expiry: "2031-01", brand: "Visa" } })
+    expect(saver.pending(1)).toMatchObject({ username: "Mastercard •••• 4242", update: false, what: "card" })
+  })
+
+  test("the browser-only vault compares a card update's typed number; another card is offered as new", async () => {
+    ;(host.host as { capabilities: string[] }).capabilities.push("save-form-match")
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: RequestBody) => {
+      if (req.type === "save-form" && req.ref) {
+        host.requests.push(req)
+        throw new HostError("not_found", "no such card")
+      }
+      return send(req)
+    }) as typeof host.host.send
+    // Same last four and brand as the saved Visa, another number.
+    await checkout({ card: { number: "4000000000004242", expiry: "2031-01" } })
+    const update = saver.pending(1)!
+    expect(update).toMatchObject({ update: true, username: "Visa •••• 4242" })
+    expect(await saver.choose(1, update.id, "save")).toMatchObject({ ok: false, gone: true })
+    expect(saveForm()[0]).toMatchObject({ ref: VISA_REF, fields: { expiry: "2031-01" }, match: { number: "4000000000004242" } })
+    expect(saver.pending(1)).toMatchObject({ update: false, what: "card", username: "Visa •••• 4242" })
+    expect(saver.pending(1)!.id).not.toBe(update.id)
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
+    expect(saveForm()[1]).toEqual({ type: "save-form", origin: "https://www.example.com", kind: "card", fields: { number: "4000000000004242", expiry: "2031-01", brand: "Visa" } })
+  })
+
+  test("a swapped or planted email isn't written into a saved identity: only what the user typed is", async () => {
+    // The user typed a new phone; the page swapped the email (not typed) at submit.
+    await checkout({ identity: { "given-name": "Kit", "family-name": "Langton", email: "attacker@example.net", phone: "(415) 555-0199" }, typed: ["given-name", "family-name", "phone"] })
+    expect(saver.pending(1)).toMatchObject({ username: "Home", update: true, what: "details", changes: "phone", saveNew: true })
+    // The page's email isn't even compared.
+    expect(requests("fill-form")[0]).toMatchObject({ fields: ["given-name", "family-name", "phone"] })
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Details updated" })
+    expect(saveForm()).toEqual([{ type: "save-form", origin: "https://www.example.com", kind: "identity", ref: HOME_REF, fields: { phone: "(415) 555-0199" } }])
   })
 
   test("a typed address is offered as a new identity, or as an update of the one it moved from", async () => {
@@ -1005,7 +1060,7 @@ describe("cards and identities typed into a form", () => {
 
     fake.session = {}
     await checkout({ identity: { "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", "address-line1": "5 Oak Ave", city: "Brooklyn", "postal-code": "11215", country: "US" } })
-    expect(saver.pending(1)).toMatchObject({ username: "5 Oak Ave, Brooklyn", update: true, what: "address" })
+    expect(saver.pending(1)).toMatchObject({ username: "Home", update: true, what: "address", changes: "address" })
     expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Address updated" })
     expect(saveForm()[1]).toEqual({ type: "save-form", origin: "https://www.example.com", kind: "identity", ref: HOME_REF, fields: { "address-line1": "5 Oak Ave", "postal-code": "11215" } })
 
@@ -1073,6 +1128,27 @@ describe("cards and identities typed into a form", () => {
     expect(host.requests).toEqual([])
   })
 
+  test("a save waiting on the passphrase ends when the tab closes, and holds nothing after", async () => {
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: RequestBody) => {
+      if (req.type === "save-form") throw new HostError("passphrase_needed", "Enter your passphrase.")
+      return send(req)
+    }) as typeof host.host.send
+    let signal: AbortSignal | undefined
+    host.host.reauth = ((_body: unknown, _ask: unknown, s: AbortSignal) => {
+      signal = s
+      return new Promise((_, reject) => s.addEventListener("abort", () => reject(new HostError("cancelled", "The request was cancelled."))))
+    }) as typeof host.host.reauth
+    await checkout({ card: TYPED })
+    const saving = saver.choose(1, saver.pending(1)!.id, "save")
+    await waitFor(() => signal !== undefined)
+    expect(signal!.aborted).toBe(false)
+    saver.forgetTab(1)
+    expect(signal!.aborted).toBe(true)
+    expect(await saving).toMatchObject({ ok: false })
+    expect(saver.pending(1)).toBeUndefined()
+  })
+
   test("the browser-only vault under Strict asks for the passphrase before saving a card", async () => {
     const asked: unknown[] = []
     const send = host.host.send.bind(host.host)
@@ -1100,23 +1176,40 @@ describe("cards and identities typed into a form", () => {
 
 describe("what a form save offers", () => {
   test("a card: by last four digits and brand, with only what changed", () => {
-    expect(cardPlan({ number: "4242424242424242", expiry: "2028-08" }, CARDS)).toBeNull()
-    expect(cardPlan({ number: "4242424242424242", cardholder: "KIT  LANGTON" }, CARDS)).toBeNull()
-    expect(cardPlan({ number: "4242424242424242", cardholder: "Kit Lovelace" }, CARDS)).toEqual({ ref: VISA_REF, fields: { cardholder: "Kit Lovelace" }, label: "Visa •••• 4242", what: "card" })
-    // Another brand with the same last four is another card.
+    const visa = { number: "4242424242424242", brand: "Visa" }
+    expect(cardPlan({ ...visa, expiry: "2028-08" }, CARDS)).toBeNull()
+    expect(cardPlan({ ...visa, cardholder: "KIT  LANGTON" }, CARDS)).toBeNull()
+    expect(cardPlan({ ...visa, cardholder: "Kit Lovelace" }, CARDS)).toMatchObject({ ref: VISA_REF, fields: { cardholder: "Kit Lovelace" }, label: "Visa •••• 4242", what: "card", change: "Name on card: Kit Lovelace", match: visa.number })
+    // Another brand with the same last four is another card; so is one whose brand isn't known on either side.
     expect(cardPlan({ number: "5105105105104242", brand: "Mastercard" }, CARDS)?.ref).toBeUndefined()
+    expect(cardPlan({ number: "4242424242424242" }, CARDS)?.ref).toBeUndefined()
+    expect(cardPlan({ ...visa, expiry: "2031-01" }, [{ ...CARDS[0], brand: undefined }])?.ref).toBeUndefined()
     expect(cardPlan({ expiry: "2030-01" }, CARDS)).toBeNull()
+    // Only what the user typed changes a card: an expiry the page put there doesn't.
+    const typedNumber: Trust = { typed: new Set(["number"]), filled: new Set() }
+    expect(cardPlan({ ...visa, expiry: "2031-01" }, CARDS, typedNumber)).toBeNull()
+    // A label shows a long brand cut short.
+    expect(cardPlan({ number: "4242424242424242", brand: "A".repeat(100) }, [])?.label).toBe(`${"A".repeat(20)} •••• 4242`)
   })
 
   test("a card's values never include a security code, and a number only as digits", () => {
-    expect(cleanCard({ number: "4242424242424242", cvv: "123", pin: "1234", expiry: "2028-08" })).toEqual({ number: "4242424242424242", expiry: "2028-08" })
+    expect(cleanCard({ number: "4242424242424242", cvv: "123", pin: "1234", expiry: "2028-08" })).toEqual({ number: "4242424242424242", expiry: "2028-08", brand: "Visa" })
     expect(cleanCard({ number: "4242 4242", expiry: "08/28", cardholder: "Kit" })).toEqual({ cardholder: "Kit" })
     expect(cleanCard({ cvv: "123" })).toBeUndefined()
+    // The brand only from the number: never what the page says.
+    expect(cleanCard({ number: "4242424242424242", brand: "Mastercard" })?.brand).toBe("Visa")
+    expect(cleanCard({ brand: "American Express" })).toBeUndefined()
   })
 
   test("an identity: one group changed is an update, two is a new identity, too little is nothing", () => {
     const home = { ref: HOME_REF, values: HOME_VALUES }
-    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0199" }, [home])).toEqual({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, label: "Kit Langton", what: "details" })
+    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0199" }, [{ ...home, title: "Home" }])).toMatchObject({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, label: "Home", what: "details", changes: "phone" })
+    // A swapped email the user didn't type is neither compared nor written.
+    const trust: Trust = { typed: new Set(["given-name", "family-name", "phone"]), filled: new Set() }
+    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "evil@example.net", phone: "(415) 555-0199" }, [home], trust)).toMatchObject({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, changes: "phone" })
+    // Values Deadbolt filled from Home are written back to Home only, and only if changed.
+    const fromHome: Trust = { typed: new Set(["phone"]), filled: new Set(["given-name", "family-name", "email"]), from: HOME_REF }
+    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0199" }, [home], fromHome)?.fields).toEqual({ phone: "(415) 555-0199" })
     // A phone written another way is the same phone.
     expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0123" }, [home])).toBeNull()
     expect(identityPlan({ "given-name": "Ada", "family-name": "Lovelace", "address-line1": "1 Main St", city: "Springfield" }, [home])?.ref).toBeUndefined()

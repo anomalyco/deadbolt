@@ -304,6 +304,23 @@ pub fn saved_fields(
     Ok(fields)
 }
 
+/// Whether `typed` (spaces and dashes allowed) is the card's number, compared
+/// in constant time, as `autofill::same_password` compares a password. A
+/// browser save sends the typed number only to tell one card from another
+/// with the same last four digits; it is never kept or returned.
+pub fn same_number(card: &Item, typed: &str) -> bool {
+    let typed: zeroize::Zeroizing<String> = typed
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect::<String>()
+        .into();
+    let saved = (card.kind == "card" && !card.deleted)
+        .then(|| card.fields.get("number"))
+        .flatten()
+        .map(|f| f.value.as_str());
+    saved.is_some() && crate::autofill::same_password(saved, &typed)
+}
+
 /// Only requested, allowed form values. Call `validate` first to reject the
 /// entire request if any field is disallowed; this iterator never leaks one.
 pub fn values<'a>(
@@ -585,6 +602,34 @@ mod tests {
             saved_fields("identity", pairs(&[("country", "United States")]), false),
             Err(SaveError::NoFields)
         );
+    }
+
+    #[test]
+    fn a_typed_number_matches_only_its_own_card() {
+        let secret = DeviceSecret::generate();
+        let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+        let card = add(
+            &mut vault,
+            &secret,
+            "card",
+            None,
+            &[("number", "4242424242424242")],
+        );
+        let other = add(
+            &mut vault,
+            &secret,
+            "identity",
+            None,
+            &[("given-name", "Kit")],
+        );
+        let card = vault.item(&card).unwrap();
+        assert!(same_number(&card, "4242 4242-4242 4242"));
+        assert!(!same_number(&card, "4000000000004242"));
+        assert!(!same_number(&card, ""));
+        assert!(!same_number(
+            &vault.item(&other).unwrap(),
+            "4242424242424242"
+        ));
     }
 
     #[test]

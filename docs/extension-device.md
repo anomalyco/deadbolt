@@ -122,6 +122,11 @@ lifetime, like the native host’s buckets last for its connection.
 Save (see [autofill.md](autofill.md#saving-what-was-typed)), through the
 same `deadbolt-core::forms::saved_fields` the native host uses: only form
 fields, never a security code, and an update never changes a card's number.
+A card's update may carry the typed number as `match` (capability
+`save-form-match`): Rust compares it with the card's in constant time
+(`forms::same_number`), after Strict's passphrase, and answers `not_found`
+for another number, so the extension offers "Save card?" instead; the number
+is never kept, returned or recorded.
 Under Strict a card's save needs the passphrase or a PRF assertion, checked
 in Rust as a card fill's is (`policy::card_reauth`); the prompt says "Save
 Visa •••• 4242". It is an Activity entry (`item-new` or `item-set`, the
@@ -514,7 +519,7 @@ scenario named.
 
 | Request | Standalone | Notes |
 | --- | --- | --- |
-| `hello` | Same | Capabilities: `list fill check save generate forms save-form passkeys learn` |
+| `hello` | Same | Capabilities: `list fill check save generate forms save-form save-form-match passkeys learn` (`save-form-match` is the browser-only vault's) |
 | `list` | Same | Shared `deadbolt-core::site` rules and ranking; `signIn` with the linked account |
 | `fill` (`username`, `password`, `totp`) | Same | Current TOTP from core |
 | `generate`, `generate-check`, `generate-keep`, `generate-drop` | Same | Shared page-rule planning and candidate lifetime |

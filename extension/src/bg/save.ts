@@ -134,12 +134,16 @@ interface Offer {
   offer: SaveOffer
   ticket: Ticket
   save: () => Promise<{ created: boolean }>
+  /** An update's other choice: the same as a new item ("Save as new"), and what's offered if the vault says it's another card. */
+  fallback?: Pending
+  /** Ends a save waiting on the passphrase (Strict) when the offer goes, so nothing it holds outlives it. */
+  abort?: AbortController
   timer: ReturnType<typeof setTimeout>
   /** Save was clicked and the host hasn't answered yet. */
   saving: boolean
 }
 
-type Pending = { offer: Omit<SaveOffer, "id">; save: Offer["save"] }
+type Pending = { offer: Omit<SaveOffer, "id">; save: Offer["save"]; fallback?: Pending; abort?: AbortController }
 
 /** The save offer shown in a page: the document it's for, and the offer it answers. */
 interface Surface {
@@ -241,9 +245,29 @@ export type IdentityValues = Partial<Record<IdentityField, string>>
 export interface FormPlan {
   ref?: string
   fields: Record<string, string>
-  /** "Visa •••• 4242", "1 Main St, Springfield": all of it an offer shows. */
+  /** "Visa •••• 4242", "1 Main St, Springfield", an updated identity's title: all of it an offer shows. */
   label: string
   what: SaveWhat
+  /** An identity's update: what of it changes, in words ("phone", "email and phone"). */
+  changes?: string
+  /** A card's update: the change itself ("Expires 08/28 → 09/30"). */
+  change?: string
+  /** An update's other choice: the same as a new item. */
+  asNew?: FormPlan
+  /** A card's update: the typed number, which only the browser-only vault compares with the card's (never kept). */
+  match?: string
+}
+
+/**
+ * Which of the submitted fields may count: `typed` by the user, or still
+ * holding what Deadbolt `filled` (from item `from`, when known). Only these
+ * are compared with the vault, and an update writes only those typed, or
+ * filled from the very item it changes; any other value is the page's.
+ */
+export interface Trust {
+  typed: Set<string>
+  filled: Set<string>
+  from?: string
 }
 
 interface FormCapture {
@@ -253,6 +277,10 @@ interface FormCapture {
   page: string
   card?: CardValues
   identity?: IdentityValues
+  typed: Set<string>
+  filled: Set<string>
+  /** The card and identity Deadbolt last filled in the tab, when the user submitted. */
+  filledFrom: { card?: string; identity?: string }
   /** The top page's document when the user submitted. */
   document: string
   /** The document whose submit this is (the top page's, or a frame's), and its count, for its outcome. */
@@ -266,16 +294,18 @@ const MAX_FORM_VALUE = 500
 /** Identities compared with what was typed, at most: each costs a fill-form of its fields. */
 const MAX_COMPARED = 8
 const ADDRESS_FIELDS: IdentityField[] = ["address-line1", "address-line2", "address-line3", "city", "region", "postal-code", "country"]
-/** Groups of an identity's fields that change together: a move changes the address, not the name. */
-const IDENTITY_GROUPS: IdentityField[][] = [
-  ["honorific", "given-name", "additional-name", "family-name", "nickname"],
-  ["email"],
-  ["phone"],
-  ADDRESS_FIELDS,
-  ["organization", "job-title"],
-  ["birthday"],
+/** Groups of an identity's fields that change together (a move changes the address, not the name), and their words. */
+const IDENTITY_GROUPS: Array<[string, IdentityField[]]> = [
+  ["name", ["honorific", "given-name", "additional-name", "family-name", "nickname"]],
+  ["email", ["email"]],
+  ["phone", ["phone"]],
+  ["address", ADDRESS_FIELDS],
+  ["company", ["organization", "job-title"]],
+  ["birthday", ["birthday"]],
 ]
 const UPDATED: Record<SaveWhat, string> = { card: "Card updated", address: "Address updated", details: "Details updated" }
+/** The most of a brand a card's label shows. */
+const MAX_BRAND = 20
 
 /** A content script's values of `keys`, trimmed, nothing else. */
 function cleanValues<K extends string>(raw: unknown, keys: readonly K[]): Partial<Record<K, string>> | undefined {
@@ -288,15 +318,27 @@ function cleanValues<K extends string>(raw: unknown, keys: readonly K[]): Partia
   return Object.keys(out).length ? out : undefined
 }
 
-/** A card's values: a number only as 12 to 19 digits, an expiry only as YYYY-MM, and never a code. */
+/**
+ * A card's values: a number only as 12 to 19 digits, an expiry only as
+ * YYYY-MM, a brand only as the number's digits say (never the page's), and
+ * never a code.
+ */
 export function cleanCard(raw: unknown): CardValues | undefined {
   const card = cleanValues(raw, CARD_KEYS)
-  if (card?.number && !/^\d{12,19}$/.test(card.number)) delete card.number
-  if (card?.expiry && !/^\d{4}-(0[1-9]|1[0-2])$/.test(card.expiry)) delete card.expiry
-  return card && Object.keys(card).length ? card : undefined
+  if (!card) return undefined
+  delete card.brand
+  if (card.number && !/^\d{12,19}$/.test(card.number)) delete card.number
+  if (card.expiry && !/^\d{4}-(0[1-9]|1[0-2])$/.test(card.expiry)) delete card.expiry
+  const brand = card.number && cardBrand(card.number)
+  if (brand) card.brand = brand
+  return Object.keys(card).length ? card : undefined
 }
 
 export const cleanIdentity = (raw: unknown): IdentityValues | undefined => cleanValues(raw, IDENTITY_FIELDS)
+
+/** The field names a content script says were typed or filled: known ones only. */
+const KNOWN_FIELDS = new Set<string>([...CARD_KEYS, ...IDENTITY_FIELDS])
+const cleanNames = (raw: unknown): string[] => (Array.isArray(raw) ? raw.filter((n): n is string => typeof n === "string" && KNOWN_FIELDS.has(n)) : [])
 
 const merged = <T extends object>(a: T | undefined, b: T | undefined): T | undefined => (a || b ? { ...a, ...b } as T : undefined)
 
@@ -312,8 +354,8 @@ function sameValue(field: string, typed: string | undefined, saved: string | und
   return folded(typed) === folded(saved)
 }
 
-/** "Visa •••• 4242": a card's brand and last four digits, all of its number an offer shows. */
-export const cardLabel = (brand: string | undefined, last4: string) => `${brand || "Card"} •••• ${last4}`
+/** "Visa •••• 4242": a card's brand, cut short, and last four digits, all of its number an offer shows. */
+export const cardLabel = (brand: string | undefined, last4: string) => `${Array.from(brand || "Card").slice(0, MAX_BRAND).join("").trim()} •••• ${last4}`
 
 /** "1 Main St, Springfield", else the name, the email or the phone. */
 export function identityLabel(v: IdentityValues): string {
@@ -322,26 +364,46 @@ export function identityLabel(v: IdentityValues): string {
   return Array.from(place || name || v.email || v.phone || "Address").slice(0, 80).join("")
 }
 
+/** "phone", "email and phone", "name, email and phone". */
+const inWords = (words: string[]) => (words.length <= 1 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`)
+
+/** An expiry (YYYY-MM) as a card shows it: 08/28. */
+const shortExpiry = (expiry: string | undefined) => (expiry && /^\d{4}-\d{2}$/.test(expiry) ? `${expiry.slice(5)}/${expiry.slice(2, 4)}` : "")
+
+/** Everything the page could have given: for code that judges values alone. */
+const TRUST_ALL: Trust = { typed: KNOWN_FIELDS, filled: new Set() }
+
 /**
  * What to offer for a card typed into a form, against the vault's cards
  * (`forms`, which has no numbers): a card with the same last four digits
- * and brand is that card, offered as an update of its expiry or name when
- * either changed and not at all when neither did; any other is a new card.
- * The number itself never changes on an update.
+ * and the same brand, both known, is that card, offered as an update of
+ * the expiry or name the user typed when either differs, and not at all
+ * when neither does; any other is a new card. An update names its change
+ * ("Expires 08/28 → 09/30"), never changes the number, carries the typed
+ * number for the browser-only vault to check (`match`), and can be saved
+ * as a new card instead.
  */
-export function cardPlan(card: CardValues, cards: FormCard[]): FormPlan | null {
+export function cardPlan(card: CardValues, cards: FormCard[], trust: Trust = TRUST_ALL): FormPlan | null {
   const number = card.number
   if (!number) return null
   const last4 = number.slice(-4)
-  const match = cards.find((c) => c.last4 === last4 && (!c.brand || !card.brand || folded(c.brand) === folded(card.brand)))
-  if (!match) {
-    const fields = Object.fromEntries(CARD_KEYS.filter((k) => card[k]).map((k) => [k, card[k]!]))
-    return { fields, label: cardLabel(card.brand, last4), what: "card" }
-  }
+  const asNew: FormPlan = { fields: Object.fromEntries(CARD_KEYS.filter((k) => card[k]).map((k) => [k, card[k]!])), label: cardLabel(card.brand, last4), what: "card" }
+  const match = card.brand ? cards.find((c) => c.last4 === last4 && !!c.brand && folded(c.brand) === folded(card.brand)) : undefined
+  if (!match) return asNew
+  const counts = (f: string) => trust.typed.has(f) || trust.filled.has(f)
+  const writes = (f: string) => trust.typed.has(f) || (trust.filled.has(f) && trust.from === match.ref)
   const fields: Record<string, string> = {}
-  if (card.expiry && card.expiry !== match.expiry) fields.expiry = card.expiry
-  if (card.cardholder && !sameValue("cardholder", card.cardholder, match.cardholder)) fields.cardholder = card.cardholder
-  return Object.keys(fields).length ? { ref: match.ref, fields, label: cardLabel(match.brand || card.brand, last4), what: "card" } : null
+  const change: string[] = []
+  if (card.expiry && counts("expiry") && writes("expiry") && card.expiry !== match.expiry) {
+    fields.expiry = card.expiry
+    change.push(match.expiry ? `Expires ${shortExpiry(match.expiry)} → ${shortExpiry(card.expiry)}` : `Expires ${shortExpiry(card.expiry)}`)
+  }
+  if (card.cardholder && counts("cardholder") && writes("cardholder") && !sameValue("cardholder", card.cardholder, match.cardholder)) {
+    fields.cardholder = card.cardholder
+    change.push(`Name on card: ${card.cardholder}`)
+  }
+  if (!Object.keys(fields).length) return null
+  return { ref: match.ref, fields, label: cardLabel(match.brand, last4), what: "card", change: change.join(" · "), asNew, match: number }
 }
 
 /** Enough of an identity to be worth keeping: an address (its street and city or postal code), or a name with an email and a phone. */
@@ -351,36 +413,48 @@ export function worthKeeping(v: IdentityValues): boolean {
 
 /**
  * What to offer for an identity typed into a form, against the vault's
- * identities' values for the same fields: none if one already has them all;
- * an update of the one that differs in at most one group of fields (a new
- * address, a new phone) and agrees on another, the most agreeing first,
- * with what changed or was missing; else a new identity.
+ * identities' values for the same fields. Only the fields that count
+ * (`trust`: typed, or filled by Deadbolt) are compared: none to offer if
+ * one identity already has them all; an update of the one that differs in
+ * at most one group of fields (a new address, a new phone) and agrees on
+ * another, the most agreeing first, writing only what the user typed there
+ * (or Deadbolt filled from it) and naming it ("Update phone for Kit
+ * Langton?"); else a new identity, with every value the content script
+ * kept. An update can be saved as a new identity instead.
  */
-export function identityPlan(identity: IdentityValues, known: Array<{ ref: string; values: IdentityValues }>): FormPlan | null {
+export function identityPlan(identity: IdentityValues, known: Array<{ ref: string; title?: string; values: IdentityValues }>, trust: Trust = TRUST_ALL): FormPlan | null {
   if (!worthKeeping(identity)) return null
-  const label = identityLabel(identity)
   const what: SaveWhat = ADDRESS_FIELDS.some((f) => identity[f]) ? "address" : "details"
-  let best: { ref: string; fields: Record<string, string>; agree: number } | undefined
+  const asNew: FormPlan = { fields: { ...identity } as Record<string, string>, label: identityLabel(identity), what }
+  const counts = (f: string) => trust.typed.has(f) || trust.filled.has(f)
+  let best: { ref: string; title?: string; fields: Record<string, string>; words: string[]; agree: number } | undefined
   for (const k of known) {
+    const writes = (f: string) => trust.typed.has(f) || (trust.filled.has(f) && trust.from === k.ref)
     let agree = 0
     let differ = 0
+    let changedAny = false
     const fields: Record<string, string> = {}
-    for (const group of IDENTITY_GROUPS) {
-      const mine = group.filter((f) => identity[f])
+    const words: string[] = []
+    for (const [word, group] of IDENTITY_GROUPS) {
+      const mine = group.filter((f) => identity[f] && counts(f))
       if (!mine.length) continue
       const changed = mine.filter((f) => !sameValue(f, identity[f], k.values[f]))
       if (!changed.length) {
         agree++
         continue
       }
+      changedAny = true
       if (changed.some((f) => k.values[f])) differ++
-      for (const f of changed) fields[f] = identity[f]!
+      const written = changed.filter(writes)
+      for (const f of written) fields[f] = identity[f]!
+      if (written.length) words.push(word)
     }
-    if (!Object.keys(fields).length) return null
-    if (agree && differ <= 1 && (!best || agree > best.agree)) best = { ref: k.ref, fields, agree }
+    // Already saved: every field that counts is this identity's.
+    if (!changedAny) return null
+    if (agree && differ <= 1 && words.length && (!best || agree > best.agree)) best = { ref: k.ref, title: k.title, fields, words, agree }
   }
-  if (best) return { ref: best.ref, fields: best.fields, label, what }
-  return { fields: { ...identity } as Record<string, string>, label, what }
+  if (best) return { ref: best.ref, fields: best.fields, label: best.title || asNew.label, what, changes: inWords(best.words), asNew }
+  return asNew
 }
 
 /** What Not now holds back: a login by its username, a card or identity by its label. */
@@ -412,6 +486,8 @@ export class Saver {
   private formCaptures = new Map<number, FormCapture>()
   /** The frames of a tab that reported identity or card fields (bg/forms.ts), to read on a top page's submit and to tell a form posted back. */
   formFrames?: (tabId: number) => FormsReport[]
+  /** The card and identity Deadbolt last filled in a tab (bg/forms.ts): an update may write their unchanged values back. */
+  formFilledFrom?: (tabId: number) => { card?: string; identity?: string }
 
   /** Serializes the once-per-site check, so two tabs can't both take the turn. */
   private opening: Promise<unknown> = Promise.resolve()
@@ -689,10 +765,12 @@ export class Saver {
    * frame joins the name typed in the page, as one offer. Nothing is kept
    * for a site saving is off for, or a vault that can't save forms.
    */
-  async formCapture(sender: chrome.runtime.MessageSender, raw: { card?: unknown; identity?: unknown; submission?: unknown }) {
+  async formCapture(sender: chrome.runtime.MessageSender, raw: { card?: unknown; identity?: unknown; typed?: unknown; filled?: unknown; submission?: unknown }) {
     const tabId = sender.tab?.id
     if (tabId === undefined || !sender.documentId || !this.host.capabilities.includes("save-form")) return
     const ticket = this.ticket(tabId)
+    // What Deadbolt filled in the tab, as the user submitted (a navigation may come before the rest).
+    const filledFrom = this.formFilledFrom?.(tabId) ?? {}
     const [cardFrom, identityFrom] = await Promise.all([formsTargetFor(sender, "card"), formsTargetFor(sender, "identity")])
     // The top page's own submit is judged by its document (it may have moved on already); a frame's, by the page around it.
     const { target: top, url: topUrl } = sender.frameId === 0 ? { target: null, url: senderOrigin(sender) } : await topTarget(tabId)
@@ -703,13 +781,25 @@ export class Saver {
     if ((await neverSites()).includes(site) || !this.fresh(tabId, ticket)) return
     let card = cardFrom ? cleanCard(raw.card) : undefined
     let identity = identityFrom ? cleanIdentity(raw.identity) : undefined
+    const typed = new Set<string>()
+    const filled = new Set<string>()
+    /** What a frame says was typed or filled, of the kinds it may give. */
+    const trusted = (got: { typed?: unknown; filled?: unknown }, cards: boolean, identities: boolean) => {
+      const may = (n: string) => ((CARD_KEYS as readonly string[]).includes(n) ? cards : identities)
+      for (const n of cleanNames(got.typed)) if (may(n)) typed.add(n)
+      for (const n of cleanNames(got.filled)) if (may(n)) filled.add(n)
+    }
+    trusted(raw, !!cardFrom, !!identityFrom)
     if (sender.frameId === 0) {
       for (const frame of this.formFrames?.(tabId) ?? []) {
         if (frame.frameId === 0) continue
-        const got = await sendToFrame<{ card?: unknown; identity?: unknown }>(frame, { type: "db:forms-read" })
+        const got = await sendToFrame<{ card?: unknown; identity?: unknown; typed?: unknown; filled?: unknown }>(frame, { type: "db:forms-read" })
         if (!got) continue
-        if (frame.kinds.includes("card")) card = merged(card, cleanCard(got.card))
-        if (!frame.provider && frame.kinds.includes("identity")) identity = merged(identity, cleanIdentity(got.identity))
+        const cards = frame.kinds.includes("card")
+        const identities = !frame.provider && frame.kinds.includes("identity")
+        if (cards) card = merged(card, cleanCard(got.card))
+        if (identities) identity = merged(identity, cleanIdentity(got.identity))
+        trusted(got, cards, identities)
       }
       if (!this.fresh(tabId, ticket)) return
     }
@@ -718,13 +808,20 @@ export class Saver {
     const same = prev && prev.site === site && prev.until > now ? prev : undefined
     card = merged(same?.card, card)
     identity = merged(same?.identity, identity)
-    // A frame's number without a brand of its own: the number's first digits say.
-    if (card?.number && !card.brand) card.brand = cardBrand(card.number)
+    for (const n of same?.typed ?? []) typed.add(n)
+    for (const n of same?.filled ?? []) if (!typed.has(n)) filled.add(n)
+    for (const n of typed) filled.delete(n)
+    // The brand only from the number, whoever gave which.
+    if (card) {
+      delete card.brand
+      const brand = card.number && cardBrand(card.number)
+      if (brand) card.brand = brand
+    }
     if (!card && !identity) return
     this.dropFormCapture(tabId)
     const timer = setTimeout(() => this.dropFormCapture(tabId), this.ttl.capture)
     const submission = Number.isSafeInteger(raw.submission) ? (raw.submission as number) : undefined
-    this.formCaptures.set(tabId, { site, origin: url.origin, page: saveUrl(url), card, identity, document, from: { document: sender.documentId, submission }, until: now + this.ttl.capture, timer })
+    this.formCaptures.set(tabId, { site, origin: url.origin, page: saveUrl(url), card, identity, typed, filled, filledFrom: same?.filledFrom ?? filledFrom, document, from: { document: sender.documentId, submission }, until: now + this.ttl.capture, timer })
   }
 
   /** The document that submitted says how it went: its fields went away (it went through), or it shows it was turned down. */
@@ -779,29 +876,52 @@ export class Saver {
    */
   private async decideForm(c: FormCapture, tabId: number): Promise<{ asked: boolean; pending?: Pending }> {
     const listed = await this.host.send({ type: "forms", origin: c.origin, kinds: ["identity", "card"] })
-    const card = c.card ? cardPlan(c.card, listed.cards) : null
+    const trust = (from?: string): Trust => ({ typed: c.typed, filled: c.filled, from })
+    const card = c.card ? cardPlan(c.card, listed.cards, trust(c.filledFrom.card)) : null
     if (card) return { asked: true, pending: this.formPending(tabId, c, "card", card) }
     const identity = c.identity
     if (!identity || !worthKeeping(identity)) return { asked: true }
-    const candidates = listed.identities.filter((i) => i.fields.some((f) => identity[f])).slice(0, MAX_COMPARED)
+    // Compared by the fields that count only: the page's own values never pick, or change, an identity.
+    const counts = (f: string) => !!identity[f as IdentityField] && (c.typed.has(f) || c.filled.has(f))
+    const candidates = listed.identities.filter((i) => i.fields.some(counts)).slice(0, MAX_COMPARED)
     const known = await Promise.all(
-      candidates.map(async (i) => ({ ref: i.ref, values: (await this.host.send({ type: "fill-form", origin: c.origin, ref: i.ref, fields: i.fields.filter((f) => identity[f]) })).values as IdentityValues })),
+      candidates.map(async (i) => ({ ref: i.ref, title: i.title, values: (await this.host.send({ type: "fill-form", origin: c.origin, ref: i.ref, fields: i.fields.filter(counts) })).values as IdentityValues })),
     )
-    const plan = identityPlan(identity, known)
+    const plan = identityPlan(identity, known, trust(c.filledFrom.identity))
     return { asked: true, pending: plan ? this.formPending(tabId, c, "identity", plan) : undefined }
   }
 
+  /**
+   * An offer's Pending for a plan, and for an update, its new item's
+   * (`fallback`: Save as new, or what's offered if the vault says the typed
+   * card is another). A card's update carries the typed number only to the
+   * browser-only vault, which compares it and keeps nothing of it.
+   */
   private formPending(tabId: number, c: FormCapture, kind: FormKind, plan: FormPlan): Pending {
-    const body = { type: "save-form" as const, origin: c.origin, kind, ...(plan.ref ? { ref: plan.ref } : {}), fields: plan.fields }
+    const match = plan.ref && plan.match && this.host.capabilities.includes("save-form-match") ? { match: { number: plan.match } } : {}
+    const body = { type: "save-form" as const, origin: c.origin, kind, ...(plan.ref ? { ref: plan.ref } : {}), fields: plan.fields, ...match }
+    const abort = new AbortController()
+    const fallback = plan.ref && plan.asNew ? this.formPending(tabId, c, kind, plan.asNew) : undefined
     return {
-      offer: { site: c.site, username: plan.label, update: !!plan.ref, what: plan.what },
+      offer: {
+        site: c.site,
+        username: plan.label,
+        update: !!plan.ref,
+        what: plan.what,
+        ...(plan.changes ? { changes: plan.changes } : {}),
+        ...(plan.change ? { change: plan.change } : {}),
+        ...(fallback ? { saveNew: true } : {}),
+      },
+      abort,
+      fallback,
       save: async () => {
         try {
           return await this.host.send(body)
         } catch (err) {
           // The browser-only vault under Strict: a card's save asks for the passphrase, as showing its number does.
+          // It ends when the offer does (abort), so what it holds goes with it.
           if (!(this.host.reauth && err instanceof HostError && err.code === "passphrase_needed")) throw err
-          return this.host.reauth(body, { tabId, title: plan.label, site: c.site }, new AbortController().signal)
+          return this.host.reauth(body, { tabId, title: plan.label, site: c.site }, abort.signal)
         }
       },
     }
@@ -851,7 +971,7 @@ export class Saver {
     this.dropOffer(tabId)
     const id = newToken()
     const timer = setTimeout(() => this.dropOffer(tabId, id), this.ttl.offer)
-    this.offers.set(tabId, { offer: { ...pending.offer, id }, ticket, save: pending.save, timer, saving: false })
+    this.offers.set(tabId, { offer: { ...pending.offer, id }, ticket, save: pending.save, fallback: pending.fallback, abort: pending.abort, timer, saving: false })
     void Promise.all([chrome.action.setBadgeBackgroundColor({ tabId, color: BADGE }), chrome.action.setBadgeText({ tabId, text: "1" })]).catch(() => {})
     if (!turn) return
     const current = () => this.offers.get(tabId)?.offer.id === id
@@ -897,7 +1017,8 @@ export class Saver {
     const s = await this.surface(token, sender, parent)
     const o = s && this.offers.get(s.target.tabId)
     if (!s || !o || o.offer.id !== s.offer || this.host.status.state !== "ready") return null
-    return { kind: "offer", site: o.offer.site, username: o.offer.username, update: o.offer.update, ...(o.offer.what ? { what: o.offer.what } : {}) }
+    const { site, username, update, what, changes, change, saveNew } = o.offer
+    return { kind: "offer", site, username, update, ...(what ? { what } : {}), ...(changes ? { changes } : {}), ...(change ? { change } : {}), ...(saveNew ? { saveNew } : {}) }
   }
 
   /**
@@ -981,6 +1102,9 @@ export class Saver {
     if (!o || (id !== undefined && o.offer.id !== id)) return
     clearTimeout(o.timer)
     this.offers.delete(tabId)
+    // A save still waiting on the passphrase ends with the offer: what it holds goes too.
+    o.abort?.abort()
+    o.fallback?.abort?.abort()
     this.dropSurfaces(o.offer.id)
     void chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {})
   }
@@ -996,7 +1120,7 @@ export class Saver {
     const o = this.offers.get(tabId)
     if (!o || o.offer.id !== id) return { ok: false, message: "This offer has expired.", gone: true }
     if (o.saving) return { ok: false, message: "Saving…" }
-    if (choice !== "save") {
+    if (choice === "later" || choice === "never") {
       this.moveOn(tabId)
       this.dropOffer(tabId, id)
       if (choice === "never") {
@@ -1006,22 +1130,42 @@ export class Saver {
       } else await this.holdBack(o.offer.site, heldKey(o.offer))
       return { ok: true, message: "" }
     }
+    // Save as new: an update's other choice.
+    const asNew = choice === "new"
+    if (asNew && !o.fallback) return { ok: false, message: "This offer has expired.", gone: true }
     o.saving = true
     if (!(await this.still(tabId, o.ticket, o.offer.site)) || this.offers.get(tabId) !== o) {
       this.dropOffer(tabId, id)
       return { ok: false, message: "This offer has expired.", gone: true }
     }
     try {
-      const reply = await o.save()
+      const reply = await (asNew ? o.fallback!.save() : o.save())
       this.dropOffer(tabId, id)
       return { ok: true, message: reply.created ? "Saved to Deadbolt" : o.offer.what ? UPDATED[o.offer.what] : "Password updated" }
     } catch (err) {
       o.saving = false
+      // The browser-only vault compared the typed number with the card's and
+      // it's another card: offer to save it as a new one instead.
+      if (!asNew && o.offer.what === "card" && o.offer.update && o.fallback && err instanceof HostError && err.code === "not_found" && this.offers.get(tabId) === o) return this.fallBack(tabId, o)
       if (err instanceof HostError && err.code === "locked") return { ok: false, message: "Deadbolt is locked. Unlock it, then save again." }
       if (err instanceof HostError && err.code === "cancelled") return { ok: false, message: "Deadbolt didn't get your passphrase. Nothing was saved." }
       if (err instanceof HostError && err.code === "rate_limited") return { ok: false, message: "Deadbolt is busy. Try again in a moment." }
       return { ok: false, message: (err as Error).message || "Couldn't save." }
     }
+  }
+
+  /**
+   * An update the vault turned down as another card: its new card is offered
+   * in its place, where the old one showed (the page's corner, else the
+   * toolbar), and the old one goes.
+   */
+  private async fallBack(tabId: number, o: Offer): Promise<ChooseReply> {
+    const next = o.fallback!
+    o.fallback = undefined
+    const target = [...this.surfaces.values()].find((s) => s.offer === o.offer.id)?.target
+    this.dropOffer(tabId, o.offer.id)
+    await this.publish(tabId, o.ticket, next, !!target, target)
+    return { ok: false, message: "That's another card. Deadbolt offers to save it as a new one.", gone: true }
   }
 
   private async setNever(site: string, never: boolean) {

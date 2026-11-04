@@ -4,6 +4,7 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use deadbolt_core::{DataOp, Item, forms, site::Site};
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 use super::{
     Error, PRESET, Result, item_ref, reauthenticate, reference as item_reference, request_sync,
@@ -133,10 +134,20 @@ pub(super) fn fill(body: &mut Value) -> Result<Value> {
 /// chose to save, new or changed, with only its form fields and never a
 /// card's security code (`forms::saved_fields`, the daemon's rule too).
 /// Under Strict a card asks for the passphrase first, as showing its number
-/// does.
+/// does. A card's update may carry the typed number as `match`: it is only
+/// compared with the card's (`forms::same_number`), never kept or returned,
+/// and another number is `not_found`, so the extension offers a new card.
 pub(super) fn save(body: &mut Value) -> Result<Value> {
     Site::from_origin(text(body, "origin")?).map_err(Error::Protocol)?;
     let kind = text(body, "kind")?.to_owned();
+    let matched = match body.get_mut("match").map(Value::take) {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(mut m)) => match m.remove("number") {
+            Some(Value::String(number)) => Some(Zeroizing::new(number)),
+            _ => return Err(Error::Protocol("A match names a card's number")),
+        },
+        Some(_) => return Err(Error::Protocol("A match names a card's number")),
+    };
     let values = body
         .get("fields")
         .and_then(Value::as_object)
@@ -150,6 +161,9 @@ pub(super) fn save(body: &mut Value) -> Result<Value> {
         })
         .collect::<Result<Vec<_>>>()?;
     let update = body.get("ref").is_some();
+    if matched.is_some() && !(update && kind == "card") {
+        return Err(Error::Protocol("Only a card's update takes a match"));
+    }
     let fields = forms::saved_fields(&kind, values, update).map_err(|error| {
         Error::Protocol(match error {
             forms::SaveError::Kind => "kind is identity or card",
@@ -185,10 +199,18 @@ pub(super) fn save(body: &mut Value) -> Result<Value> {
     let reply = state().with(|s| {
         let (id, created) = match target {
             Some(id) => {
-                s.vault
+                let item = s
+                    .vault
                     .item(&id)
                     .filter(|i| !i.deleted && i.kind == kind)
                     .ok_or(Error::NotFound)?;
+                // Under Strict only after the passphrase: no number oracle without it.
+                if matched
+                    .as_ref()
+                    .is_some_and(|n| !forms::same_number(&item, n))
+                {
+                    return Err(Error::NotFound);
+                }
                 s.write(
                     fields
                         .into_iter()

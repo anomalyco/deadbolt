@@ -64,6 +64,14 @@ export async function typedByUser(el: Element, value: string): Promise<boolean> 
   return a === null || a !== b
 }
 
+/** Whether the field holds what Deadbolt last wrote into it, unchanged since. */
+export async function filledByDeadbolt(el: Element, value: string): Promise<boolean> {
+  const mine = ours.get(el)
+  if (!value || !mine || (await ownValue(el, value)) === undefined) return false
+  const [a, b] = await Promise.all([mine, digest(value)])
+  return a !== null && a === b
+}
+
 /** `value` if it's what the user last typed into the field or Deadbolt filled. */
 export async function ownValue(el: Element, value: string): Promise<string | undefined> {
   const recorded = digests.get(el)
