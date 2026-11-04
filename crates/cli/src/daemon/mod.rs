@@ -5,6 +5,7 @@ mod activity;
 mod autofill;
 pub mod biometric;
 mod caller;
+mod connection;
 mod forms;
 mod generate;
 mod grants;
@@ -12,6 +13,7 @@ mod guesses;
 mod health;
 mod items;
 mod legacy;
+mod lifecycle;
 mod macos_autofill;
 mod mirror;
 mod pairing;
@@ -33,36 +35,34 @@ mod watch_tests;
 mod watchers;
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, TryLockError};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use deadbolt_client::export;
 use deadbolt_core::DeviceId;
 use deadbolt_net::{Membership, Node, NodeConfig, PeerId};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Notify, mpsc, watch};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
-use zeroize::Zeroizing;
 
 use crate::client::{DaemonError, protocol, version};
 use crate::config::Config;
 use crate::paths::Paths;
-use crate::protocol::{
-    Answer, CallerInfo, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request,
-    Status,
-};
+use crate::protocol::{CallerInfo, Change, Command, ErrorCode, Message, Reply, Status};
 use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
 use watchers::Watchers;
+
+/// Tests read the control line limit from here; the daemon itself uses it in
+/// [`lifecycle`].
+#[cfg(test)]
+pub(super) use crate::protocol::MAX_LINE;
+pub use connection::Conversation;
+pub(super) use lifecycle::remove_socket;
+pub use lifecycle::serve;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,7 +85,7 @@ struct BiometricFlight {
 
 #[cfg(test)]
 type BiometricUnsealHook = Arc<
-    dyn Fn(&biometric::CancelHandle) -> Result<Zeroizing<[u8; 32]>, biometric::UnlockError>
+    dyn Fn(&biometric::CancelHandle) -> Result<zeroize::Zeroizing<[u8; 32]>, biometric::UnlockError>
         + Send
         + Sync,
 >;
@@ -288,371 +288,7 @@ fn fail(code: ErrorCode, message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
-/// Runs the daemon until it's stopped. `old_name`: an older build's update
-/// started it as `deadbolt agent` and waits for it at the old socket
-/// ([`legacy`]).
-pub async fn serve(paths: Paths, old_name: bool) -> Result<()> {
-    let runtime = paths.socket.parent().context("socket has no parent")?;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(runtime)
-        .with_context(|| format!("creating {}", runtime.display()))?;
-    // Only this user can reach the socket, from the moment it's bound.
-    deadbolt_client::paths::secure_dir(runtime)
-        .with_context(|| format!("checking {}", runtime.display()))?;
-    let lock = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&paths.lock)
-        .with_context(|| format!("opening {}", paths.lock.display()))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => bail!("the daemon is already running"),
-        Err(TryLockError::Error(error)) => return Err(error).context("locking the daemon"),
-    }
-    legacy::stop(&paths).await;
-    remove_socket(&paths.socket)?;
-    let listener = UnixListener::bind(&paths.socket)
-        .with_context(|| format!("binding {}", paths.socket.display()))?;
-    fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
-    let old_link = if old_name { legacy::link(&paths) } else { None };
-
-    let env = crate::config::Environment::load();
-    let local_net = env.local_net;
-    let socket = paths.socket.clone();
-    drop(
-        tokio::time::timeout(
-            Duration::from_millis(500),
-            tokio::task::spawn_blocking(biometric::refresh_status),
-        )
-        .await,
-    );
-    ssh_cleanup::run(&paths);
-    let daemon = Daemon::new(paths, local_net, env.kdf);
-    let mut autofill = macos_autofill::bind_default().await;
-    info!(
-        pid = std::process::id(),
-        version = %version(),
-        local_net,
-        autofill_socket = autofill.as_ref().map(|(_, p)| p.display().to_string()),
-        "daemon started"
-    );
-    let (system, events) = mpsc::channel(8);
-    let _sources = system::spawn(system);
-    let _follow = AbortOnDrop(tokio::spawn(daemon.clone().follow_system(events)));
-    let _updates = AbortOnDrop(tokio::spawn(updates::run(daemon.clone())));
-
-    let mut connections = JoinSet::new();
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, _) = accepted.context("accepting control connection")?;
-                let daemon = daemon.clone();
-                connections.spawn(async move { daemon.handle(stream, MAX_LINE).await });
-            }
-            accepted = async {
-                match autofill.as_ref() {
-                    Some((autofill_listener, _)) => autofill_listener.accept().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                let (stream, _) = accepted.context("accepting macOS AutoFill connection")?;
-                let daemon = daemon.clone();
-                connections.spawn(async move {
-                    daemon
-                        .handle_on(
-                            stream,
-                            crate::protocol::MAX_AUTOFILL_LINE,
-                            macos_autofill::SocketKind::AutoFill,
-                        )
-                        .await
-                });
-            }
-            Some(result) = connections.join_next(), if !connections.is_empty() => report_connection(result),
-            _ = daemon.shutdown.notified() => break,
-            _ = terminate.recv() => break,
-            _ = interrupt.recv() => break,
-            _ = tick.tick() => daemon.check_idle().await,
-        }
-    }
-    info!("daemon stopping");
-    drop(listener);
-    let autofill_socket = autofill.take().map(|(autofill_listener, path)| {
-        drop(autofill_listener);
-        path
-    });
-    daemon.cancel_biometric_prompt();
-    daemon.interrupt_op();
-    daemon.watchers.stopping();
-    daemon.stop_sends().await;
-    drain_connections(&mut connections).await;
-    daemon.lock().await;
-    if let Some(old_link) = old_link {
-        drop(remove_socket(&old_link));
-    }
-    remove_socket(&socket)?;
-    if let Some(autofill_socket) = autofill_socket {
-        drop(remove_socket(&autofill_socket));
-    }
-    drop(lock);
-    Ok(())
-}
-
-fn remove_socket(path: &std::path::Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("removing control socket"),
-    }
-}
-
-fn report_connection(result: Result<Result<()>, tokio::task::JoinError>) {
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => warn!("control connection failed: {error:#}"),
-        Err(error) => warn!("control connection task failed: {error}"),
-    }
-}
-
-async fn drain_connections(connections: &mut JoinSet<Result<()>>) {
-    let drain = async {
-        while let Some(result) = connections.join_next().await {
-            report_connection(result);
-        }
-    };
-    if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
-        warn!("control connections did not finish during shutdown; cancelling them");
-        connections.shutdown().await;
-    }
-}
-
-/// Limit each line before buffering it, preserving buffered answers for the next read.
-async fn request_line(
-    read: &mut (impl AsyncBufRead + Unpin),
-    max: usize,
-) -> Result<Option<Zeroizing<String>>> {
-    // Requests carry passphrases and whole exports: the line grows in a
-    // buffer that is wiped, also when it is outgrown. Past `max` (plus a
-    // `\r`) it stops growing and the rest of the line is skipped.
-    let mut line = Zeroizing::new(Vec::new());
-    let mut read_any = false;
-    let mut too_large = false;
-    loop {
-        let bytes = read.fill_buf().await?;
-        if bytes.is_empty() {
-            break;
-        }
-        read_any = true;
-        let newline = bytes.iter().position(|b| *b == b'\n');
-        let end = newline.unwrap_or(bytes.len());
-        if !too_large && line.len() + end > max + 1 {
-            too_large = true;
-            line = Zeroizing::new(Vec::new());
-        }
-        if !too_large {
-            export::append(&mut line, &bytes[..end], max + 1);
-        }
-        read.consume(newline.map_or(end, |i| i + 1));
-        if newline.is_some() {
-            break;
-        }
-    }
-    if !read_any {
-        return Ok(None);
-    }
-    if line.ends_with(b"\r") {
-        line.pop();
-    }
-    if too_large || line.len() > max {
-        return Err(fail(ErrorCode::Failed, "request too large"));
-    }
-    match String::from_utf8(std::mem::take(&mut *line)) {
-        Ok(line) => Ok(Some(Zeroizing::new(line))),
-        Err(error) => {
-            drop(Zeroizing::new(error.into_bytes()));
-            Err(fail(ErrorCode::Failed, "invalid request: not UTF-8"))
-        }
-    }
-}
-
-/// Why a request isn't valid, by position only: serde's messages can
-/// quote the values in it.
-fn invalid_request(error: &serde_json::Error) -> anyhow::Error {
-    let what = match error.classify() {
-        serde_json::error::Category::Io => "unreadable",
-        serde_json::error::Category::Syntax => "not valid JSON",
-        serde_json::error::Category::Data => "not a request this daemon knows",
-        serde_json::error::Category::Eof => "cut short",
-    };
-    fail(
-        ErrorCode::Failed,
-        format!(
-            "invalid request: {what} (line {} column {})",
-            error.line(),
-            error.column()
-        ),
-    )
-}
-
-/// One control connection: sends events and reads answers.
-pub struct Conversation {
-    write: tokio::sync::Mutex<OwnedWriteHalf>,
-    answers: tokio::sync::Mutex<mpsc::Receiver<Answer>>,
-    closed: watch::Receiver<bool>,
-}
-
-impl Conversation {
-    async fn send(&self, message: &Message) -> Result<()> {
-        // Replies carry secrets.
-        let body = deadbolt_client::encode_json(b"", message, b"\n")?;
-        tokio::time::timeout(IO_TIMEOUT, async {
-            self.write.lock().await.write_all(&body).await
-        })
-        .await??;
-        Ok(())
-    }
-
-    pub async fn event(&self, event: Event) -> Result<()> {
-        self.send(&Message::Event { event }).await
-    }
-
-    /// Sends an event and waits for the client's answer; `None` if it hangs up.
-    pub async fn ask(&self, event: Event) -> Option<Answer> {
-        self.event(event).await.ok()?;
-        self.answers.lock().await.recv().await
-    }
-
-    /// Resolves once the client hangs up.
-    pub async fn closed(&self) {
-        let mut closed = self.closed.clone();
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "a dropped sender also means the connection closed"
-        )]
-        let _ = closed.wait_for(|closed| *closed).await;
-    }
-}
-
 impl Daemon {
-    async fn handle(self: Arc<Self>, stream: UnixStream, max_line: usize) -> Result<()> {
-        self.handle_on(stream, max_line, macos_autofill::SocketKind::Control)
-            .await
-    }
-
-    async fn handle_on(
-        self: Arc<Self>,
-        stream: UnixStream,
-        max_line: usize,
-        socket: macos_autofill::SocketKind,
-    ) -> Result<()> {
-        // The socket's directory keeps other users out; this holds even if
-        // it didn't. (macOS keeps a peer's uid, but not its audit token, once
-        // it hangs up.)
-        match deadbolt_client::peer::uid(&stream) {
-            Ok(uid) if uid == rustix::process::getuid().as_raw() => {}
-            Ok(uid) => bail!("refused a connection from uid {uid}: not this user"),
-            Err(error) => bail!("refused a connection: reading its credentials: {error}"),
-        }
-        let peer = deadbolt_client::peer::Peer::of(&stream);
-        let (read, write) = stream.into_split();
-        let mut read = BufReader::new(read);
-        let request =
-            match tokio::time::timeout(IO_TIMEOUT, request_line(&mut read, max_line)).await? {
-                Ok(Some(line)) => {
-                    serde_json::from_str::<Request>(&line).map_err(|e| invalid_request(&e))
-                }
-                Ok(None) => return Ok(()),
-                Err(error) => Err(error),
-            };
-        let (answers_tx, answers) = mpsc::channel(4);
-        let (closed_tx, closed) = watch::channel(false);
-        let _reader = AbortOnDrop(tokio::spawn(async move {
-            while let Ok(Some(line)) = request_line(&mut read, max_line).await {
-                let Ok(answer) = serde_json::from_str::<Answer>(&line) else {
-                    break;
-                };
-                if answers_tx.send(answer).await.is_err() {
-                    break;
-                }
-            }
-            closed_tx.send_replace(true);
-        }));
-        let conversation = Conversation {
-            write: tokio::sync::Mutex::new(write),
-            answers: tokio::sync::Mutex::new(answers),
-            closed,
-        };
-        let mut stop = false;
-        let result = match request {
-            Ok(Request {
-                v,
-                command: Command::Watch { app },
-                ..
-            }) if v == protocol() && socket == macos_autofill::SocketKind::Control => {
-                return self.watch(&conversation, app).await;
-            }
-            Ok(request) => {
-                let asked_stop = matches!(request.command, Command::Stop);
-                let always = matches!(request.command, Command::Status | Command::Stop);
-                if request.v != protocol() && !always {
-                    Err(fail(
-                        ErrorCode::Version,
-                        format!(
-                            "the daemon speaks protocol {}, not {}; run `deadbolt debug daemon stop`",
-                            protocol(),
-                            request.v
-                        ),
-                    ))
-                } else {
-                    let (result, entry) = self
-                        .clone()
-                        .answer(socket, peer, request, &conversation)
-                        .await;
-                    // Recorded before the reply goes: a client that never
-                    // reads it, or the daemon stopping, can't lose the entry.
-                    if let Some(entry) = entry {
-                        self.record(entry);
-                    }
-                    stop = asked_stop && result.is_ok();
-                    result
-                }
-            }
-            Err(error) => Err(error),
-        };
-        let message = match result {
-            Ok(reply) => Message::Ok { reply },
-            Err(error) => match error.downcast::<DaemonError>() {
-                Ok(error) => Message::Error {
-                    code: error.code,
-                    message: error.message,
-                    grant: error.grant,
-                    passkeys: error.passkeys,
-                },
-                Err(error) => Message::Error {
-                    code: ErrorCode::Failed,
-                    message: format!("{error:#}"),
-                    grant: None,
-                    passkeys: None,
-                },
-            },
-        };
-        let sent = async {
-            conversation.send(&message).await?;
-            conversation.write.lock().await.shutdown().await?;
-            Ok(())
-        }
-        .await;
-        if stop {
-            self.shutdown.notify_one();
-        }
-        sent
-    }
-
     async fn dispatch(
         self: Arc<Self>,
         caller: &CallerInfo,

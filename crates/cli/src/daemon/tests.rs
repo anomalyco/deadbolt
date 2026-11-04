@@ -1,8 +1,17 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+
+use super::connection::{invalid_request, request_line};
+use super::lifecycle::drain_connections;
 use super::*;
 use crate::protocol::FieldInput;
 use crate::protocol::PROTOCOL_VERSION;
+use crate::protocol::Request;
 use deadbolt_core::DeviceSecret;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, BufReader};
+use tokio::net::UnixStream;
+use tokio::task::JoinSet;
+use zeroize::Zeroizing;
 
 fn locked_daemon(dir: &std::path::Path) -> Arc<Daemon> {
     Daemon::new(test_paths(dir), true, deadbolt_store::KdfParams::DEFAULT)
