@@ -104,7 +104,7 @@ describe("provider chain, page side", () => {
   test("on the site's page: an email step alone only for a linked chain with no provider button at all; an unlinked chain's entry link stays home", async () => {
     const entry = (session: string, home?: string[]) => deliver<ProviderReport>({ type: "db:provider-probe", session, provider: "google", site: "example.com", entry: true, ...(home ? { home } : {}) })
     const EMAIL = `<main data-box="0 100 600 400"><form action="/login" method="post" data-box="0 100 600 300"><label for="e">Email</label><input id="e" type="email" autocomplete="username" data-box="10 120 300 32"><button type="submit" data-box="10 170 100 32">Continue</button></form>`
-    const GIS = `<iframe src="https://accounts.google.com/gsi/button?type=standard" title="Sign in with Google Button" data-box="10 260 240 40"></iframe>`
+    const GIS = `<iframe srcdoc="<button>Sign in with Google</button>" src="https://accounts.google.com/gsi/button?type=standard" title="Sign in with Google Button" data-box="10 260 240 40"></iframe>`
     const UNLINKED = ["https://www.example.com"]
     // A Google Identity Services button beside the email step: Deadbolt can't
     // click its frame, and types nothing; the chain ends and the pick points at it.
