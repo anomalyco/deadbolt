@@ -36,6 +36,7 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
         timeout-minutes: 10
       # Same steps as `bun run check`; cargo-deny stays in its dedicated job below.
+      - run: bash scripts/file-size.sh
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       # The static musl release build: deadbolt without the app.
