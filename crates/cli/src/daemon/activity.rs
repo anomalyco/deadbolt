@@ -638,12 +638,14 @@ impl Daemon {
         conv: &Conversation,
     ) -> (Result<Reply>, Option<ActivityEntry>) {
         let daemon = self.clone();
-        let claimed = request.claimed;
+        let mut claimed = request.claimed;
+        if let Some(claim) = &mut claimed {
+            ledger::bound_claim(claim);
+        }
         let mut caller =
             tokio::task::spawn_blocking(move || daemon.callers.identify(peer, claimed))
                 .await
                 .unwrap_or_else(|_| caller::nobody());
-        ledger::bound_caller(&mut caller);
         let draft = draft(&request.command, caller.class);
         let mut result =
             match super::macos_autofill::check_access(socket, &caller, &request.command) {
@@ -705,6 +707,8 @@ impl Daemon {
                     command => self.clone().dispatch(&caller, command, conv).await,
                 },
             };
+        // Display limits must not hide an AI ancestor from the gate.
+        ledger::bound_caller(&mut caller);
         if let Ok(Reply::Status(status)) = &mut result {
             status.caller = caller.clone();
         }

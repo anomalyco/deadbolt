@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// What a client says about who is driving it, from `DEADBOLT_CALLER` and
 /// `OPENCODE_SESSION_ID`. Shown as claimed and never trusted: it labels an
-/// entry, and never changes a caller's [`CallerClass`].
+/// entry; an OpenCode session claim can remove browser-host standing, never grant it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
     pub caller: Option<String>,
