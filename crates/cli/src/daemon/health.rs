@@ -89,9 +89,12 @@ impl Daemon {
             return Err(fail(
                 ErrorCode::Forbidden,
                 if caller.identified {
-                    "AI agents may not inspect or change password health"
+                    "AI agents may not inspect or change password health".into()
                 } else {
-                    "Deadbolt couldn't identify this caller, so it won't share or change password health"
+                    format!(
+                        "Can't share or change password health: {}",
+                        caller.reason.as_deref().unwrap_or("missing process facts")
+                    )
                 },
             ));
         }

@@ -431,7 +431,7 @@ impl Daemon {
                 if let Some(what) = refused_browser(command) {
                     let message = if !caller.identified {
                         format!(
-                            "Deadbolt couldn't identify this caller ({}), so it won't {what}.",
+                            "Can't {what}: {}",
                             caller.reason.as_deref().unwrap_or("missing process facts")
                         )
                     } else if caller.browser_host_mode {
@@ -1161,6 +1161,27 @@ mod tests {
         for cmd in [get.clone(), fill.clone()] {
             let err = answer(exited, cmd, SocketKind::Control).await.unwrap_err();
             assert_eq!(code(&err), Some(ErrorCode::Forbidden));
+        }
+
+        #[cfg(target_os = "linux")]
+        for reason in [Some(deadbolt_client::peer::linux::HIDEPID_AI), None] {
+            let process = Process {
+                ppid: Some(31),
+                exe: Some("/bin/deadbolt".into()),
+                ancestry_complete: reason.is_none(),
+                ancestry_error: reason,
+                ..Default::default()
+            };
+            let info = caller::info(exited, &caller::Evidence::None, process);
+            f.daemon.callers.cache_for_test(exited, info);
+            let result = answer(exited, fill.clone(), SocketKind::Control).await;
+            if let Some(reason) = reason {
+                let error = result.unwrap_err();
+                assert_eq!(code(&error), Some(ErrorCode::Forbidden));
+                assert!(error.to_string().contains(reason));
+            } else {
+                assert!(matches!(result.unwrap(), Reply::SiteFill { .. }));
+            }
         }
 
         let terminal = Process {

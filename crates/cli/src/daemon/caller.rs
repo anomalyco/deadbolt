@@ -280,7 +280,7 @@ impl Callers {
     /// nothing a Linux peer does is taken on its word.
     #[cfg(target_os = "linux")]
     fn read(&self, peer: Peer) -> CallerInfo {
-        let process = deadbolt_client::peer::linux::process(peer);
+        let process = deadbolt_client::peer::linux::process(peer, |name| host_name(name).is_some());
         from_proc(peer, process)
     }
 
@@ -412,7 +412,7 @@ pub fn info(peer: Peer, evidence: &Evidence, process: Process) -> CallerInfo {
             if process.ppid.is_none() {
                 "missing live process facts"
             } else if !process.ancestry_complete {
-                "incomplete parent chain"
+                process.ancestry_error.unwrap_or("incomplete parent chain")
             } else {
                 "missing executable identity"
             }
@@ -466,21 +466,22 @@ pub fn gate_subject(info: &CallerInfo) -> &'static str {
     }
 }
 
+fn host_name(name: &str) -> Option<&'static str> {
+    let name = name.trim_start_matches('-');
+    HOSTS
+        .iter()
+        .find(|(host, _)| host.eq_ignore_ascii_case(name))
+        .map(|(_, label)| *label)
+}
+
 /// The AI host among the parents ("OpenCode"), if any.
 fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
-    let host = |name: &str| {
-        let name = name.trim_start_matches('-');
-        HOSTS
-            .iter()
-            .find(|(host, _)| host.eq_ignore_ascii_case(name))
-            .map(|(_, label)| *label)
-    };
     ancestry.iter().find_map(|a| {
-        host(&a.name).or_else(|| {
+        host_name(&a.name).or_else(|| {
             a.path
                 .as_deref()
                 .and_then(|p| Path::new(p).file_name())
-                .and_then(|n| host(&n.to_string_lossy()))
+                .and_then(|n| host_name(&n.to_string_lossy()))
         })
     })
 }
@@ -488,11 +489,13 @@ fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
 /// Why the daemon takes `info` for an AI, and where to go instead: for a
 /// refusal, so a person in a terminal inside an AI host knows what to do.
 pub fn not_from_here(info: &CallerInfo) -> String {
-    let why = match ai_host(&info.ancestry) {
-        _ if !info.identified => format!(
-            "Deadbolt couldn't identify this caller ({})",
+    if !info.identified {
+        return format!(
+            "Deadbolt couldn't identify this caller ({}); see `deadbolt debug whoami`",
             info.reason.as_deref().unwrap_or("missing process facts")
-        ),
+        );
+    }
+    let why = match ai_host(&info.ancestry) {
         Some(host) => format!("This shell runs under {host} ({})", info.label),
         None => format!("This shell has OPENCODE_SESSION_ID set ({})", info.label),
     };

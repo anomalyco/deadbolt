@@ -129,9 +129,13 @@ The daemon reads the socket's peer, not anything the caller says:
   from connect and walks `/proc` anew per request. On a `hidepid=2` mount,
   the daemon checks every visible task's `children` list for a hidden
   parent's own parent. It continues from a visible parent if found. Only a
-  complete scan with no match ends the visible chain; it cannot identify
-  processes beyond consecutive hidden ancestors. An unavailable `children`
-  interface, a vanished parent, or a parent born after its child fails closed.
+  complete scan with no match ends the visible chain. Deadbolt cannot see past
+  that hidden process. If any AI agent of yours is visibly running, Deadbolt
+  fails closed and applies the AI restrictions, even to unrelated SSH sessions
+  whose parent chain ends there. With no visible AI agent, ordinary SSH works.
+  Deadbolt cannot detect an agent that `hidepid` itself hides. An unavailable
+  `children` interface, a vanished parent, or a parent born after its child
+  still fails closed.
 - **Its code signature:** checked against the audit token
   (`SecCodeCopyGuestWithAttributes`) in the hash-pinned Swift helper that
   already does Touch ID (`docs/touch-id.md`), as `deadbolt-enclave
