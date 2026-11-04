@@ -5718,7 +5718,7 @@ const cost: Record<string, number> = {
   detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
-  formsSurface: 44, formsShapes: 25, formsFrames: 28, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,
+  formsSurface: 50, formsShapes: 50, formsFrames: 28, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,
   menuReveal: 2, menuScale: 115, menuPosition: 169, menuPositionDpr: 247,
   pageZoom: 11,
   pageDismiss: 6,
