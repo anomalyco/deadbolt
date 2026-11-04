@@ -2,8 +2,10 @@
 # Checks source file sizes. Counts non-test lines per tracked .rs file under crates/
 # and per tracked .ts file under extension/src (inline #[cfg(test)] items are
 # excluded; test-only files are measured separately).
-#   warn  > 800 non-test lines       error > 1500 non-test lines unless listed in
-#   warn  > 1000 lines in a test file or inline test module   scripts/file-size-exceptions.txt ("<path> <ceiling>")
+#   warn  > 800 non-test lines
+#   error > 1500 non-test lines, unless scripts/file-size-exceptions.txt lists a
+#         ceiling for the file ("<path> <ceiling>"; ceilings only go down)
+#   warn  > 1000 lines in a test file or inline test module
 # Usage: scripts/file-size.sh [--warn-only] [--update-exceptions [--allow-raise]]
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"

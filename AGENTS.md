@@ -27,7 +27,7 @@ For file sizes, `bash scripts/file-size.sh` counts non-test lines per tracked
 CI. It warns above 800 lines and fails above 1,500 unless
 `scripts/file-size-exceptions.txt` lists `<path> <ceiling>`; test files over
 1,000 lines warn. `--update-exceptions` rewrites the list to current sizes, but
-only lowers a ceiling unless given `--allow-raise`.
+only lowers a ceiling unless given `--allow-raise`; `--warn-only` always exits 0.
 
 See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 `DEADBOLT_SIM_SEED`, `DEADBOLT_SIM_SEEDS`, `DEADBOLT_SIM_TRACE`,
