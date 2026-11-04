@@ -1,8 +1,4 @@
 # <path> <ceiling>: non-test line ceilings for files above 1500. Ceilings only go down.
 # Refresh with scripts/file-size.sh --update-exceptions.
-crates/cli/src/daemon/biometric.rs 1514
-crates/cli/src/daemon/mod.rs 1987
 crates/cli/src/daemon/sim/mod.rs 1963
-crates/cli/src/update.rs 2518
-crates/client/src/protocol.rs 1661
 extension/src/content/inline.ts 1646
