@@ -101,6 +101,49 @@ describe("provider chain, page side", () => {
     expect(takeSignInAction(facts.action!, state)).toBeNull()
   })
 
+  test("on the site's page: an email step alone only for a linked chain with no provider button at all; an unlinked chain's entry link stays home", async () => {
+    const entry = (session: string, home?: string[]) => deliver<ProviderReport>({ type: "db:provider-probe", session, provider: "google", site: "example.com", entry: true, ...(home ? { home } : {}) })
+    const EMAIL = `<main data-box="0 100 600 400"><form action="/login" method="post" data-box="0 100 600 300"><label for="e">Email</label><input id="e" type="email" autocomplete="username" data-box="10 120 300 32"><button type="submit" data-box="10 170 100 32">Continue</button></form>`
+    const GIS = `<iframe srcdoc="<button>Sign in with Google</button>" src="https://accounts.google.com/gsi/button?type=standard" title="Sign in with Google Button" data-box="10 260 240 40"></iframe>`
+    const UNLINKED = ["https://www.example.com"]
+    // A Google Identity Services button beside the email step: Deadbolt can't
+    // click its frame, and types nothing; the chain ends and the pick points at it.
+    for (const home of [undefined, UNLINKED]) {
+      const s = fresh()
+      page(`${EMAIL}${GIS}</main>`, "https://www.example.com/login")
+      await status(s)
+      expect([home, (await entry(s, home)).kind]).toEqual([home, "stop"])
+    }
+    // No button at all: the linked chain's email step, after the page had its time to settle; never an unlinked one's.
+    const linked = fresh()
+    page(`${EMAIL}</main>`, "https://www.example.com/login")
+    await status(linked)
+    const started = performance.now()
+    expect(await entry(linked)).toMatchObject({ kind: "identifier", roles: ["username"] })
+    expect(performance.now() - started).toBeGreaterThan(1500)
+    const unlinked = fresh()
+    await status(unlinked)
+    expect((await entry(unlinked, UNLINKED)).kind).toBe("stop")
+    // An unlinked chain's entry link: to the provider's own sign-in page, or nowhere off the page.
+    const link = (href: string) => `<a href="${href}" data-box="10 10 220 40">Sign in with Google</a>`
+    for (const [href, kind] of [["https://accounts.google.com/o/oauth2/v2/auth?client_id=x", "entry"], ["/auth/google", "entry"], ["https://sso.example.com/start", "stop"], ["https://evil.test/google", "stop"]]) {
+      const s = fresh()
+      page(link(href), "https://www.example.com/login")
+      await status(s)
+      expect([href, (await entry(s, UNLINKED)).kind]).toEqual([href, kind])
+    }
+  })
+
+  test("an unlinked chain never clicks a tile on the provider's chooser, in any language", async () => {
+    const s = fresh()
+    const chooser = `<h1>Konto auswählen</h1><p>weiter zu Example</p><ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>`
+    page(chooser, `https://accounts.google.com/o/oauth2/v2/auth?hl=de&redirect_uri=${encodeURIComponent("https://www.example.com/cb")}`)
+    await status(s)
+    const ask = (home?: string[]) => deliver<ProviderReport>({ type: "db:provider-probe", session: s, provider: "google", site: "example.com", account: "kit@gmail.com", ...(home ? { home } : {}) })
+    expect(await ask(["https://www.example.com"])).toEqual({ kind: "stop", reason: "choose" })
+    expect((await ask()).kind).toBe("chooser")
+  })
+
   test("only the service worker drives it", async () => {
     page(LOGIN)
     expect(await deliver({ type: "db:provider-status", session: fresh(), label: "x" }, { id: "other" } as chrome.runtime.MessageSender)).toBe(false)

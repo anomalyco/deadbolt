@@ -135,7 +135,7 @@ function urlLike(value: string): string | null {
 }
 
 /** https, or in an e2e build its http `.test` stand-ins too (see isProviderPage). */
-function secure(u: URL): boolean {
+export function secure(u: URL): boolean {
   if (u.protocol === "https:") return true
   return typeof DEADBOLT_E2E !== "undefined" && DEADBOLT_E2E === true && u.protocol === "http:" && u.hostname.endsWith(".test")
 }

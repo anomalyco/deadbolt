@@ -219,6 +219,8 @@ describe("offscreen document", () => {
 describe("clearing a copied password", () => {
   let clipboard = ""
   beforeEach(() => {
+    // Another file's page (a textarea left in the shared document) isn't the offscreen document's.
+    document.body.replaceChildren()
     // The offscreen document reads by pasting and writes by copying.
     document.execCommand = ((command: string) => {
       if (command === "paste") {

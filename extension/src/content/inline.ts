@@ -951,8 +951,10 @@ export function openSaveSurface(t: string) {
 function openSignInSurface(t: string) {
   const active = deepActiveElement()
   if (!isTop || document.hidden || host || learning() || (active instanceof HTMLInputElement && active.value)) return false
+  // It stays until it's answered, dismissed or the page moves on: past its
+  // minute the background renews it on use while the page still qualifies,
+  // or takes it away (bg/universal.ts token).
   openMenu(null, t, 0, "signin")
-  saveTimers = [setTimeout(() => token === t && leave(), SAVE_CAP_MS)]
   return true
 }
 

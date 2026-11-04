@@ -9,13 +9,13 @@ import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, phoneLike, t
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { boxesInTop, cleanApproved, cleanBox, LOGIN_FRAME_PLACE, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type VaultBackend } from "./backend"
-import { isAccountPage, pageAccountOf, provider as providerOf } from "../signin"
+import { isAccountPage, isProviderPage, pageAccountOf, provider as providerOf, providerOrigins, savedAtProvider } from "../signin"
 import type { ProviderChain } from "./provider-chain"
 import type { SignInWith } from "./signinwith"
 import { siteOf } from "./site"
 import { iconKey, iconSettings, storedIcon, type StoredIcon } from "../ui/icon-store"
 import { hostHash } from "./site-icons"
-import { exactSignInOrigin, SIGNIN_SETTING, signInEnabled, signInOn } from "../auth-state"
+import { exactSignInOrigin, SIGNIN_SETTING, signInEnabled, signInOn, type AuthReport } from "../auth-state"
 
 const TOKEN_TTL_MS = 2 * 60_000
 const LIST_TTL_MS = 30_000
@@ -168,6 +168,23 @@ export function menuAccounts(accounts: Account[], focused: FieldRole, roles: Fie
   if (named.length === offered.length) return offered
   if (named.length && roles.some((r) => IDENTIFIER_ROLES.includes(r))) return named
   return [...named, ...offered.filter(nameless)]
+}
+
+/**
+ * One row per person: a login of the site whose username is the account a
+ * "Sign in with …" login saved for this exact origin signs in with (Ramp's
+ * "ryan@" beside "Sign in with Google · ryan@") shows only as that provider
+ * row. Not on that provider's own pages, where its own login is the one to
+ * fill. The site's logins only: a provider account the site isn't linked
+ * to never hides one (see UniversalSignIn).
+ */
+export function oneRowEach(accounts: Account[], origin: string): Account[] {
+  const via = new Map<string, string[]>()
+  for (const a of accounts) {
+    const id = a.signIn?.account?.trim().toLowerCase()
+    if (id && a.signIn && !isProviderPage(providerOf(a.signIn.provider), origin) && a.urls.some((u) => exactSignInOrigin(u, origin))) via.set(id, [...(via.get(id) ?? []), a.signIn.provider])
+  }
+  return accounts.filter((a) => a.signIn || !a.username || !via.has(a.username.trim().toLowerCase()))
 }
 
 /** How many rows the menu shows for these logins: a login with both a password and a sign-in-with has two. */
@@ -406,7 +423,9 @@ export class Autofill {
       this.lockedShown.add(site)
     } else if (state === "ready") {
       const reply = await this.list(target.origin).catch(() => null)
-      let shown = reply ? menuAccounts(reply.accounts, focused as FieldRole, clean) : []
+      // One row per person on a username box only: on a password box the site's own login is the one to fill.
+      const each = reply ? (IDENTIFIER_ROLES.includes(focused as FieldRole) ? oneRowEach(reply.accounts, target.origin) : reply.accounts) : []
+      let shown = reply ? menuAccounts(each, focused as FieldRole, clean) : []
       const later = focused === "password" || focused === "otp"
       const named = later ? (typeof identifier === "string" && identifier.length <= 500 && identifier.trim()) || this.submittedName?.(target.tabId, site) || "" : ""
       // On the provider's own pages during a sign-in with it, its linked
@@ -453,7 +472,7 @@ export class Autofill {
     try {
       const reply = await this.list(t.origin)
       const passkeys = this.passkeys?.menuPasskeys(t, t.focused)
-      const accounts = menuAccounts(reply.accounts, t.focused, t.roles).filter((a) => !t.only || t.only.includes(a.ref))
+      const accounts = menuAccounts(IDENTIFIER_ROLES.includes(t.focused) ? oneRowEach(reply.accounts, t.origin) : reply.accounts, t.focused, t.roles).filter((a) => !t.only || t.only.includes(a.ref))
       // One login on a site that asks for the username first: "Continue as …".
       const flow = IDENTIFIER_ROLES.includes(t.focused) && accounts.length === 1 ? await flowFor(siteOf(new URL(t.origin).hostname) ?? "") : undefined
       const icons = (await iconSettings()).menu ? await menuIcons(accounts) : undefined
@@ -969,6 +988,74 @@ export class Autofill {
     })
   }
 
+  /**
+   * A provider chain's email-first step (see ProviderChain): the chain's
+   * account goes into the site's username box alone, with the checks of an
+   * automatic session's first step (db:approve, db:fill `automatic`, and
+   * db:signin-submit `first`: a POST in this tab to this origin, a sign-in
+   * or continue button, no words of something else). Only the username,
+   * never a value from the vault. True if the content script submitted.
+   */
+  async submitIdentifier(target: FrameTarget, username: string, form: number): Promise<boolean> {
+    if (target.frameId !== 0 || !username.trim() || username.length > 500 || !(await signInEnabled())) return false
+    const approved = cleanApproved(await sendToFrame(target, { type: "db:approve", form, measure: false }))
+    if (!approved?.roles.length || approved.roles.some((r) => !IDENTIFIER_ROLES.includes(r))) return false
+    const ack = await sendToFrame<FillAck>(target, { type: "db:fill", values: { username }, form, approval: approved.approval, automatic: true })
+    if (!sanitizeRoles(ack?.filled).length || !(await signInEnabled())) return false
+    this.submits.set(target.tabId, { documentId: target.documentId, at: Date.now() })
+    return (await sendToFrame(target, { type: "db:signin-submit", form, first: true })) === true
+  }
+
+  /**
+   * An automatic session submitted the site's email, and the step after it
+   * offers no password box but one provider's button (email-first single
+   * sign-on, Ramp's). The sign-in goes on through that provider (see
+   * ProviderChain): with the login the site links to it, or the person's own
+   * account there of the same username. Never the site's password, which
+   * this step doesn't ask for. Call inside `serial`.
+   */
+  private async ssoStep(target: FrameTarget, generation: number) {
+    const s = await this.session(target.tabId)
+    if (!s?.automatic || !this.providers || target.frameId !== 0 || target.origin !== s.origin || generation !== this.generation(target.tabId)) return
+    if (s.filled.some((r) => r === "password" || r === "otp") || !s.filled.some((r) => IDENTIFIER_ROLES.includes(r))) return
+    // After this session's own submit of its email, from the document it filled.
+    const sub = this.submits.get(target.tabId)
+    if (!sub || sub.documentId !== s.documentId || sub.at < s.filledAt) return
+    const facts = await sendToFrame<AuthReport>(target, { type: "db:auth-probe", fresh: true })
+    const ids = [...new Set(Array.isArray(facts?.providers) ? facts.providers : [])].filter((id) => typeof id === "string" && providerOf(id).hosts.length > 0)
+    if (ids.length !== 1 || facts?.signOut || generation !== this.generation(target.tabId)) return
+    const p = providerOf(ids[0])
+    // Never a site of the provider's own (see ProviderChain.start).
+    if (p.hosts.some((h) => siteOf(h) === s.site)) return
+    const reply = await this.list(target.origin, true).catch(() => null)
+    const picked = reply?.accounts.find((a) => a.ref === s.ref)
+    const username = picked?.username?.trim().toLowerCase()
+    // A login that signs in with another provider isn't this button's to take.
+    if (!picked || !username || (picked.signIn && picked.signIn.provider !== p.id) || generation !== this.generation(target.tabId)) return
+    const same = (v: string | undefined) => v?.trim().toLowerCase() === username
+    let account: Account | undefined
+    let unlinked = false
+    if (picked.signIn?.provider === p.id && picked.signIn.account) account = picked
+    else {
+      const linked = (reply?.accounts ?? []).filter((a) => a.signIn?.provider === p.id && same(a.signIn.account) && a.urls.some((u) => exactSignInOrigin(u, target.origin)))
+      if (linked.length === 1) account = linked[0]
+      else {
+        const own: Account[] = []
+        for (const origin of providerOrigins(p)) {
+          const at = (await this.host.send({ type: "list", origin }).catch(() => null))?.accounts ?? []
+          for (const a of at) if (!a.signIn && a.hasPassword && same(a.username) && a.urls.some((u) => savedAtProvider(p, u)) && !own.some((o) => o.ref === a.ref)) own.push(a)
+        }
+        if (own.length === 1) {
+          account = { ...own[0], title: p.name, hasPassword: false, hasTotp: false, signIn: { provider: p.id, account: own[0].username! } }
+          unlinked = true
+        }
+      }
+    }
+    if (!account || generation !== this.generation(target.tabId) || !(await signInEnabled())) return
+    await this.endSession(target.tabId)
+    await this.providers.start(target, account, unlinked)
+  }
+
   /** The outcome judge confirmed a sign-in in `tabId` (bg/save.ts): an automatic session there is over, whatever step it waited for. */
   async signedIn(tabId: number) {
     await this.stopAutomatic(tabId)
@@ -1034,7 +1121,11 @@ export class Autofill {
     if (!kind) frames.delete(target.frameId)
     else frames.set(target.frameId, { ...target, kind, roles: clean, form: form as number, asksNew })
     this.pages.set(target.tabId, frames)
-    if (!kind) return
+    if (!kind) {
+      // An automatic session's email went and the next step has no login form at all: maybe only a provider's button.
+      if (target.frameId === 0) await this.serial(target.tabId, () => this.ssoStep(target, generation))
+      return
+    }
     // Only frames that may have the inline menu go on with a session (see sameSiteTop).
     const framed = target.frameId !== 0
     if (framed && !(await sameSiteTop(target))) return
@@ -1065,7 +1156,11 @@ export class Autofill {
       const identifierOnly = clean.some((r) => IDENTIFIER_ROLES.includes(r)) && !clean.includes("password") && !clean.includes("otp")
       // "Not you? Use a different account": the username box came back
       // empty. The session ends; whoever signs in now picks again.
-      if (identifierOnly && !first) return void (idEmpty && (await this.endSession(target.tabId)))
+      if (identifierOnly && !first) {
+        if (idEmpty) return this.endSession(target.tabId)
+        // The email shown back, locked, beside a provider's button (email-first single sign-on).
+        return this.ssoStep(target, generation)
+      }
       if (s.automatic && !(await signInEnabled())) return this.endSession(target.tabId)
       if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return
       const reply = await this.list(target.origin).catch(() => null)
