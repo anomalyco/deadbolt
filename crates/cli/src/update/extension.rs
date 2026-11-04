@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use url::Url;
 
-use super::install::{UpdateState, check_sequence};
+use super::install::{UpdateState, check_sequence, state_dir};
 use super::protocol::{Decision, Running, Target, build_channel, decide, rollout_bucket};
 use super::replace::{refuse_foreign_root, stage_beside};
 use super::service::{SERVICE, Service};
@@ -270,12 +270,7 @@ pub async fn switch_extension(
              pass --channel dev or --channel stable"
         );
     };
-    let state = paths
-        .log
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    let state = UpdateState::open(&state)?;
+    let state = UpdateState::open(&state_dir(paths))?;
     let config = crate::config::Config::load(&paths.config)?;
     let dir = match (dir, config.extensions.as_slice()) {
         (Some(dir), _) => {
