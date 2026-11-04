@@ -729,7 +729,8 @@ impl Daemon {
         {
             let message = if super::caller::is_ai(caller) {
                 format!(
-                    "an AI agent can't pair agent clients or grant access to secrets. {}.",
+                    "{} can't pair agent clients or grant access to secrets. {}.",
+                    super::caller::gate_subject(caller),
                     super::caller::not_from_here(caller)
                 )
             } else {

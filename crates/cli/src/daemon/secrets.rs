@@ -298,7 +298,7 @@ fn uncovered<'a>(
 /// "Tiers"), and the browser's fills and saves, which are the browser
 /// host's alone (any same-user process can send them, so an AI is refused
 /// them here until browser pairing). `None` for anything else.
-fn refused(command: &Command) -> Option<&'static str> {
+fn refused_browser(command: &Command) -> Option<&'static str> {
     Some(match command {
         Command::SiteFill { .. } => "fill a site's login",
         Command::SiteSave { login: Some(_), .. } => "change a saved login",
@@ -306,6 +306,12 @@ fn refused(command: &Command) -> Option<&'static str> {
         Command::FormFill { .. } => "fill a form",
         Command::PasskeyGet { .. } => "sign in with a passkey",
         Command::PasskeyCreate { .. } => "save a passkey",
+        _ => return None,
+    })
+}
+
+fn refused(command: &Command) -> Option<&'static str> {
+    Some(match command {
         Command::Setup { .. } => "set Deadbolt up",
         Command::Unlock { .. } | Command::UnlockBiometric { .. } => "unlock Deadbolt",
         Command::TouchIdSet { .. } => "turn Touch ID unlock on or off",
@@ -389,7 +395,7 @@ impl Daemon {
         if !all {
             return Err(fail(
                 ErrorCode::RateLimited,
-                "too many references resolved by AI agents; try again shortly",
+                "too many secret requests; try again shortly",
             ));
         }
         Ok(())
@@ -422,11 +428,27 @@ impl Daemon {
             } => (vault, query, *deleted, ""),
             Command::ItemCode { vault, query } => (vault, query, false, "the one-time code of "),
             command => {
+                if let Some(what) = refused_browser(command) {
+                    let message = if !caller.identified {
+                        format!("Deadbolt couldn't identify this caller, so it won't {what}.")
+                    } else {
+                        let launcher = if cfg!(target_os = "macos") {
+                            "the Dock"
+                        } else {
+                            "your app launcher"
+                        };
+                        format!(
+                            "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from {launcher}."
+                        )
+                    };
+                    return Err(fail(ErrorCode::Forbidden, message));
+                }
                 return match refused(command) {
                     Some(what) => Err(fail(
                         ErrorCode::Forbidden,
                         format!(
-                            "an AI agent can't {what}. {}.",
+                            "{} can't {what}. {}.",
+                            caller::gate_subject(caller),
                             caller::not_from_here(caller)
                         ),
                     )),
@@ -438,7 +460,7 @@ impl Daemon {
         // Locked, or a query that finds nothing, fails before anyone is
         // asked anything.
         let item = self.with(|s| items::named(s, vault.as_deref(), query, deleted))?;
-        let reason = format!("show {what}{item} to an AI agent");
+        let reason = format!("show {what}{item} to {}", caller::gate_subject(caller));
         self.ai_touch_id(caller, conv, &reason).await
     }
 
@@ -455,7 +477,8 @@ impl Daemon {
             return Err(fail(
                 ErrorCode::Forbidden,
                 format!(
-                    "an AI agent can see a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` with a grant instead. {}.",
+                    "{} can see a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` with a grant instead. {}.",
+                    caller::gate_subject(caller),
                     caller::not_from_here(caller)
                 ),
             ));
@@ -468,7 +491,7 @@ impl Daemon {
             Err(error) if error.downcast_ref::<DaemonError>().is_some() => Err(error),
             Err(error) => Err(fail(
                 ErrorCode::Forbidden,
-                format!("{error:#}: the value wasn't shown to the AI agent"),
+                format!("{error:#}: the value wasn't shown to the caller"),
             )),
         }
     }
@@ -535,7 +558,11 @@ impl Daemon {
             match purpose {
                 Purpose::Read => {
                     let names: Vec<String> = found.iter().map(named).collect();
-                    let reason = format!("show {} to an AI agent", names.join(", "));
+                    let reason = format!(
+                        "show {} to {}",
+                        names.join(", "),
+                        caller::gate_subject(caller)
+                    );
                     self.ai_touch_id(caller, conv, &reason).await?;
                     // A one-time code may have moved on during the prompt.
                     found = self.with(|s| lookup(s))?;
@@ -546,8 +573,10 @@ impl Daemon {
                         let missing = uncovered(s, &found, purpose, now)?;
                         if missing.is_empty() {
                             Ok(())
-                        } else {
+                        } else if caller.identified {
                             Err(not_granted(&missing, purpose))
+                        } else {
+                            Err(fail(ErrorCode::NotGranted, "Deadbolt couldn't identify this caller and no grant covers the requested secrets"))
                         }
                     })?;
                 }
@@ -878,8 +907,12 @@ mod tests {
             assert_eq!(code(&error), Some(ErrorCode::Forbidden), "{command:?}");
             let message = error.to_string();
             assert!(
-                message.contains("This shell runs under OpenCode (OpenCode › zsh › deadbolt)")
-                    && message.contains("see `deadbolt debug whoami`"),
+                message
+                    == if cfg!(target_os = "macos") {
+                        "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from the Dock."
+                    } else {
+                        "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from your app launcher."
+                    },
                 "{message}"
             );
         }
@@ -1070,6 +1103,17 @@ mod tests {
         let exited = Peer::of(&stream).unwrap();
         assert!(f.daemon.callers.identify(Ok(exited), None).identified);
         drop(stream);
+        // The connecting process is dead but its pid has not been reaped.
+        use rustix::process::{Pid, WaitIdOptions, waitid};
+        waitid(
+            rustix::process::WaitId::Pid(Pid::from_raw(exited.pid as i32).unwrap()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+        )
+        .unwrap();
+        assert!(
+            !f.daemon.callers.identify(Ok(exited), None).identified,
+            "a zombie is not a live peer"
+        );
         assert!(
             timeout(wait, child.wait())
                 .await

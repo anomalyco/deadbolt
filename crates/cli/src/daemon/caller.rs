@@ -2,7 +2,7 @@
 //! kernel names it, its code signature (macOS) or executable (Linux), and the
 //! class that rests on them. A client's claim can never establish trust.
 
-#[cfg(test)]
+#[cfg(any(test, target_os = "macos"))]
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
@@ -40,6 +40,10 @@ pub struct Callers {
     /// Their signatures, read with the first peer.
     #[cfg(target_os = "macos")]
     own: Mutex<Option<Own>>,
+    /// Original process facts, never request claims. An exec changes the
+    /// audit token. An exit invalidates the entry even on inherited sockets.
+    #[cfg(target_os = "macos")]
+    live: Mutex<HashMap<[u32; 8], CallerInfo>>,
     #[cfg(test)]
     fixtures: Mutex<HashMap<Peer, CallerInfo>>,
 }
@@ -98,6 +102,8 @@ impl Callers {
             exe,
             #[cfg(target_os = "macos")]
             own: Mutex::default(),
+            #[cfg(target_os = "macos")]
+            live: Mutex::default(),
             #[cfg(test)]
             fixtures: Mutex::default(),
         }
@@ -122,6 +128,17 @@ impl Callers {
             }
         };
         info.claimed = claimed.filter(|c| !c.is_empty());
+        if info.identified {
+            info.reason = ai_host(&info.ancestry)
+                .map(|host| format!("AI ancestor: {host}"))
+                .or_else(|| {
+                    info.claimed
+                        .as_ref()?
+                        .opencode_session
+                        .as_ref()
+                        .map(|_| "claimed OPENCODE_SESSION_ID".into())
+                });
+        }
         // A claim can remove browser-host standing, never confer it.
         if info.class == CallerClass::BrowserHost && is_ai(&info) {
             info.class = CallerClass::Caller;
@@ -139,8 +156,44 @@ impl Callers {
         {
             return info.clone();
         }
-        // A previous lookup doesn't prove liveness: a child can inherit
-        // a connected socket and send after the connecting peer has exited.
+        #[cfg(target_os = "macos")]
+        if let Some(token) = peer.token {
+            let cached = self
+                .live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&token)
+                .cloned();
+            if let Some(info) = cached {
+                return if deadbolt_client::peer::live_token(&token) {
+                    info
+                } else {
+                    unverified(Some(peer), "process is no longer identifiable")
+                };
+            }
+            let info = self.read(peer);
+            if !info.identified {
+                return info;
+            }
+            let mut cache = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(first) = cache.get(&token) {
+                return first.clone();
+            }
+            if cache.len() >= 256 {
+                // Never evict a live AI and later mistake its reparented
+                // process for a human. Only reclaim demonstrably dead pids.
+                cache.retain(|_, c| {
+                    rustix::process::Pid::from_raw(c.pid as i32).is_some_and(|p| {
+                        rustix::process::test_kill_process(p) != Err(rustix::io::Errno::SRCH)
+                    })
+                });
+                if cache.len() >= 256 {
+                    return unverified(Some(peer), "caller cache is full");
+                }
+            }
+            cache.insert(token, info.clone());
+            return info;
+        }
         self.read(peer)
     }
 
@@ -150,7 +203,7 @@ impl Callers {
             Ok(helper) => helper,
             Err(error) => {
                 warn!("can't identify callers: {error:#}");
-                return unverified(Some(peer), "unverified process");
+                return unverified(Some(peer), "identification helper unavailable");
             }
         };
         let own = self.own.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -169,7 +222,7 @@ impl Callers {
             Ok(None) => return unverified(Some(peer), "exited process"),
             Err(error) => {
                 warn!("identifying a caller: {error}");
-                return unverified(Some(peer), "unverified process");
+                return unverified(Some(peer), "identification helper failed");
             }
         };
         let own = own.unwrap_or_else(|| {
@@ -336,6 +389,16 @@ pub fn info(peer: Peer, evidence: &Evidence, process: Process) -> CallerInfo {
     let label = label(class, program.as_deref(), &process);
     CallerInfo {
         identified,
+        reason: (!identified).then(|| {
+            if process.ppid.is_none() {
+                "missing live process facts"
+            } else if !process.ancestry_complete {
+                "incomplete parent chain"
+            } else {
+                "missing executable identity"
+            }
+            .into()
+        }),
         class,
         check,
         pid: peer.pid,
@@ -375,6 +438,15 @@ pub fn is_ai(info: &CallerInfo) -> bool {
             .is_some_and(|c| c.opencode_session.is_some())
 }
 
+/// For messages only: inability to identify a caller is not evidence of AI.
+pub fn gate_subject(info: &CallerInfo) -> &'static str {
+    if info.identified {
+        "an AI agent"
+    } else {
+        "an unidentified caller"
+    }
+}
+
 /// The AI host among the parents ("OpenCode"), if any.
 fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
     let host = |name: &str| {
@@ -398,11 +470,11 @@ fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
 /// refusal, so a person in a terminal inside an AI host knows what to do.
 pub fn not_from_here(info: &CallerInfo) -> String {
     let why = match ai_host(&info.ancestry) {
-        Some(host) => format!("This shell runs under {host} ({})", info.label),
-        None if !info.identified => format!(
-            "Deadbolt couldn't identify this caller or trace its parents ({})",
-            info.label
+        _ if !info.identified => format!(
+            "Deadbolt couldn't identify this caller ({})",
+            info.reason.as_deref().unwrap_or("missing process facts")
         ),
+        Some(host) => format!("This shell runs under {host} ({})", info.label),
         None => format!("This shell has OPENCODE_SESSION_ID set ({})", info.label),
     };
     format!("{why}; run it from a terminal outside it, or in the app (see `deadbolt debug whoami`)")
@@ -962,5 +1034,29 @@ pub(super) mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_live_cached_peer_keeps_its_first_ancestry_after_reparenting() {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use tokio::{net::UnixListener, process::Command, time::timeout};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut parent = Command::new("/bin/sh")
+            .args(["-c", "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.recv(1)' \"$1\" & read -r keepalive", "fixture"])
+            .arg(path).stdin(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let limit = Duration::from_secs(10);
+        let (stream, _) = timeout(limit, listener.accept()).await.unwrap().unwrap();
+        let peer = Peer::of(&stream).unwrap();
+        let callers = Callers::new();
+        let first = callers.identify(Ok(peer), None);
+        assert!(first.identified);
+        assert!(first.ancestry.iter().any(|a| Some(a.pid) == parent.id()));
+        drop(parent.stdin.take());
+        timeout(limit, parent.wait()).await.unwrap().unwrap();
+        assert_eq!(callers.identify(Ok(peer), None), first);
     }
 }

@@ -31,7 +31,7 @@ beforeEach(() => {
     if (m.type !== VAULT_REQUEST) return undefined
     switch (m.body.type) {
       case "hello":
-        return { reply: { type: "hello", protocol: 4, version: "test", status: vault, capabilities: [] } }
+        return { reply: { type: "hello", protocol: 3, version: "test", status: vault, capabilities: [] } }
       case "device-unlock":
       case "device-secret":
         // The vault's own check: "wrong" is a wrong passphrase.
@@ -149,7 +149,7 @@ describe("device page commands", () => {
     const base = fake.runtimeAnswer
     fake.runtimeAnswer = (message) => {
       const m = message as VaultRequest
-      if (m.type === VAULT_REQUEST && m.body.type === "hello") return { reply: { type: "hello", protocol: 4, version: "test", status: "ready", capabilities: ["list", "passkeys", "learn"] } }
+      if (m.type === VAULT_REQUEST && m.body.type === "hello") return { reply: { type: "hello", protocol: 3, version: "test", status: "ready", capabilities: ["list", "passkeys", "learn"] } }
       return base(message)
     }
     const backend = new StandaloneBackend()

@@ -35,7 +35,7 @@ use crate::protocol::{
 use crate::site::Site;
 
 /// The version of this message set, in `hello`.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 3;
 /// The largest request read; anything bigger is skipped and refused.
 pub const MAX_REQUEST: usize = 64 * 1024;
 /// The browser's limit on a message from the host.

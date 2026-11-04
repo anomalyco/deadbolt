@@ -68,6 +68,7 @@ pub fn bound_claim(claim: &mut Claim) {
 /// Caps every string and list of `caller`, its claim included.
 pub fn bound_caller(caller: &mut CallerInfo) {
     cut(&mut caller.label);
+    cut_opt(&mut caller.reason);
     cut_opt(&mut caller.program);
     cut_opt(&mut caller.tty);
     if let Some(signature) = &mut caller.signature {

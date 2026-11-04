@@ -848,7 +848,10 @@ impl Daemon {
         if caller::is_ai(caller) && !self.can_verify() {
             return Err(fail(
                 ErrorCode::Forbidden,
-                "an AI agent can export an SSH private key only with Touch ID each time",
+                format!(
+                    "{} can export an SSH private key only with Touch ID each time",
+                    caller::gate_subject(caller)
+                ),
             ));
         }
         if self.can_verify() {

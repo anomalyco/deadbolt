@@ -2117,7 +2117,7 @@ The host exits when the port closes.
 
 ```json
 { "id": "1", "type": "hello" }
-{ "id": "1", "type": "hello", "protocol": 4, "version": "0.1.0+abc123",
+{ "id": "1", "type": "hello", "protocol": 3, "version": "0.1.0+abc123",
   "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "forms", "save-form"] }
 ```
 

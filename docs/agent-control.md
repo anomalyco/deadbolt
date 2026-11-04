@@ -122,16 +122,13 @@ every command for every kind of caller.
 The daemon reads the socket's peer, not anything the caller says:
 
 - **The process:** macOS gives the peer's audit token (`LOCAL_PEERTOKEN`):
-  pid plus pid version, so a reused pid can't pass. Linux gives
-  `SO_PEERCRED`: pid and uid, with no pid version. The daemon remembers
-  each peer it identified by pid, uid and pid version; on Linux the last is
-  the process's start time (clock ticks), read from `/proc` after the
-  connection, so it is missing if the process has already exited, and a
-  process that `exec`s another program keeps its start time and so the
-  entry made for the first. One more reason a Linux peer is labels only
-  (below). The workspace forbids `unsafe`, so this comes from a dependency
-  (`nix`, in `deadbolt-client`'s `peer` module, shared by the daemon, the
-  CLI and the app).
+  pid plus pid version, so a reused pid can't pass. The daemon caches only a
+  successful, complete identification by full token and checks the token still
+  names living code on every hit. Failures and client claims are not cached.
+  Linux gives `SO_PEERCRED`: pid and uid. The daemon checks the start ticks
+  from connect and walks `/proc` anew per request. On a `hidepid=2` mount,
+  a confirmed live but hidden foreign-uid parent ends the visible chain;
+  a vanished parent or a parent born after its child still fails closed.
 - **Its code signature:** checked against the audit token
   (`SecCodeCopyGuestWithAttributes`) in the hash-pinned Swift helper that
   already does Touch ID (`docs/touch-id.md`), as `deadbolt-enclave

@@ -1699,43 +1699,33 @@ fn ai_agents_cant_send_the_browsers_fills_and_saves() {
         vault: "personal".into(),
         item: "0000".into(),
     };
-    for (command, says) in [
-        (
-            Cmd::SiteFill {
-                origin: origin.clone(),
-                login: login.clone(),
-                want: vec![Fill::Password],
-            },
-            "can't fill a site's login",
-        ),
-        (
-            Cmd::SiteSave {
-                origin: origin.clone(),
-                login: Some(login.clone()),
-                title: "GitHub".into(),
-                url: origin.clone(),
-                username: "kit".into(),
-                password: PagePassword::Typed(Secret::new("pwned-pwned")),
-            },
-            "can't change a saved login",
-        ),
-        (
-            Cmd::FormFill {
-                origin: origin.clone(),
-                item: login.clone(),
-                fields: vec!["number".into()],
-            },
-            "can't fill a form",
-        ),
+    for command in [
+        Cmd::SiteFill {
+            origin: origin.clone(),
+            login: login.clone(),
+            want: vec![Fill::Password],
+        },
+        Cmd::SiteSave {
+            origin: origin.clone(),
+            login: Some(login.clone()),
+            title: "GitHub".into(),
+            url: origin.clone(),
+            username: "kit".into(),
+            password: PagePassword::Typed(Secret::new("pwned-pwned")),
+        },
+        Cmd::FormFill {
+            origin: origin.clone(),
+            item: login.clone(),
+            fields: vec!["number".into()],
+        },
     ] {
         let reply = ai(command);
         agent_error(&reply, "forbidden");
         let message = reply["message"].as_str().unwrap();
-        assert!(message.contains(says), "{reply}");
-        // Why (a claim here, or an AI host above the test), and where to
-        // go instead.
-        assert!(message.contains("This shell "), "{reply}");
-        assert!(message.contains("deadbolt debug whoami"), "{reply}");
+        assert!(
+            message.contains("This browser was started by an AI agent"),
+            "{reply}"
+        );
         assert!(!reply.to_string().contains("hunter2"), "{reply}");
     }
     // Looking at a page's logins (no values) still answers.
@@ -2787,7 +2777,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     let hello = host.ask(serde_json::json!({"type": "hello"}));
     assert_eq!(hello["type"], "hello", "{hello}");
     assert_eq!(hello["status"], "ready");
-    assert_eq!(hello["protocol"], 4);
+    assert_eq!(hello["protocol"], 3);
     assert_eq!(
         hello["capabilities"],
         serde_json::json!([

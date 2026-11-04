@@ -66,16 +66,18 @@ private func processName(_ info: proc_bsdinfo) -> String {
 }
 
 // Full BSD info is restricted for other users' processes (including
-// launchd and login). The short kernel record still gives their real ppid.
-private func parentInfo(_ pid: pid_t) -> (ppid: pid_t, name: String)? {
+// launchd and login). KERN_PROC_PID still gives their ppid and birth time.
+private func parentInfo(_ pid: pid_t) -> (ppid: pid_t, name: String, birth: (UInt64, UInt64))? {
     if let info = bsdInfo(pid) {
-        return (pid_t(info.pbi_ppid), processName(info))
+        return (pid_t(info.pbi_ppid), processName(info), (info.pbi_start_tvsec, info.pbi_start_tvusec))
     }
-    var info = proc_bsdshortinfo()
-    let size = Int32(MemoryLayout.size(ofValue: info))
-    guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size,
-          info.pbsi_status != SZOMB else { return nil }
-    return (pid_t(info.pbsi_ppid), cString(info.pbsi_comm))
+    var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    var info = kinfo_proc()
+    var size = MemoryLayout.size(ofValue: info)
+    guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size == MemoryLayout.size(ofValue: info),
+          info.kp_proc.p_pid == pid, info.kp_proc.p_stat != SZOMB else { return nil }
+    let birth = info.kp_proc.p_un.__p_starttime
+    return (info.kp_eproc.e_ppid, cString(info.kp_proc.p_comm), (UInt64(birth.tv_sec), UInt64(birth.tv_usec)))
 }
 
 /// The process's arguments from `KERN_PROCARGS2`: argc, the exec path and
@@ -130,8 +132,9 @@ private func process(_ pid: pid_t) -> [String: Any] {
     var visited: Set<pid_t> = [pid]
     var complete = pid == 1
     var next = pid_t(info.pbi_ppid)
+    var childBirth = (info.pbi_start_tvsec, info.pbi_start_tvusec)
     while next > 0 && ancestry.count < 1024 && visited.insert(next).inserted,
-          let parent = parentInfo(next) {
+          let parent = parentInfo(next), parent.birth <= childBirth {
         var entry: [String: Any] = ["pid": Int(next), "name": parent.name]
         if let path = pidPath(next) {
             entry["path"] = path
@@ -139,6 +142,7 @@ private func process(_ pid: pid_t) -> [String: Any] {
         ancestry.append(entry)
         if next == 1 { complete = true; break }
         next = parent.ppid
+        childBirth = parent.birth
     }
     out["ancestry"] = ancestry
     out["ancestry_complete"] = complete

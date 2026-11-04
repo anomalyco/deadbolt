@@ -215,7 +215,7 @@ while True:
         why = refusal(req)
         write({"id": rid, "type": "error", "code": why, "message": "No strong password fits."} if why else {"id": rid, "type": "generate-check"})
     elif kind == "hello":
-        write({"id": rid, "type": "hello", "protocol": 4, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms", "save-form", "learn"]})
+        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms", "save-form", "learn"]})
     elif kind == "learn":
         # As the host: it works locked too, and keeps no values (the log has the line).
         write({"id": rid, "type": "learned"})

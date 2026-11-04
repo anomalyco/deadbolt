@@ -116,7 +116,7 @@ export class Host implements VaultBackend {
       const error = reply as ErrorReply
       // A locked reply means the vault locked under us; follow it.
       if (error.code === "locked" && this.status.state === "ready") void this.hello()
-      throw new HostError(error.code, error.code === "forbidden" ? "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from the Dock." : error.message)
+      throw new HostError(error.code, error.message)
     }
     const expected = REPLY_TYPE[body.type as T]
     if (reply.type !== expected) throw new HostError("failed", `Expected a ${expected} reply, got ${reply.type}.`)

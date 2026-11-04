@@ -3,7 +3,7 @@
 // u32 length, then UTF-8 JSON); this file is the JSON.
 
 export const NATIVE_HOST = "pw.deadbolt.browser"
-export const PROTOCOL = 4
+export const PROTOCOL = 3
 
 export type Want = "username" | "password" | "totp"
 export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
