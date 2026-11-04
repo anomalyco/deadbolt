@@ -82,6 +82,3 @@ export function showRing(target: Element, label: string) {
     removeEventListener("keydown", onKey, true)
   }
 }
-
-/** Whether a ring is showing (for tests and the content script). */
-export const ringShown = () => host !== null
