@@ -137,12 +137,6 @@ function eligible(el: Element): el is HTMLInputElement {
   return el instanceof HTMLInputElement && !SKIP_INPUT_TYPES.has((el.getAttribute("type") || "text").toLowerCase())
 }
 
-/** Role of a single field on its own, without page context. */
-export function classifyInput(el: Element): FieldRole | null {
-  if (!eligible(el)) return null
-  return bestRole(scoreField(factsFor(el)))
-}
-
 // ---- The page ------------------------------------------------------------------
 
 interface ScannedField {

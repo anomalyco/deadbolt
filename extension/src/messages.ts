@@ -12,7 +12,6 @@ export type FieldRole = "username" | "email" | "phone" | "password" | "new-passw
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
 /** What Deadbolt's in-page surface shows: the account list, a pill on a field or at the top right, or the save offer. */
 export type SurfaceMode = "accounts" | "pill" | "save" | "signin"
-export const SURFACE_MODES: SurfaceMode[] = ["accounts", "pill", "save", "signin"]
 
 /** Roles the inline menu opens on; on a new-password box, only in sign-up and change-password forms. */
 export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password", "otp", "new-password"]

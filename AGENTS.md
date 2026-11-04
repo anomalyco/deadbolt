@@ -21,6 +21,14 @@ Clippy (warnings are errors), workspace tests and `cargo deny check`. Install
 stable Rust with rustfmt/Clippy and cargo-deny first. CI runs the same steps, with
 cargo-deny and the extension in their own jobs and Rust on Linux and macOS.
 
+For file sizes, `bash scripts/file-size.sh` counts non-test lines per tracked
+`.rs` file under `crates/` and `.ts` file under `extension/src` (inline
+`#[cfg(test)]` items and test files excluded), and runs in `bun run check` and
+CI. It warns above 800 lines and fails above 1,500 unless
+`scripts/file-size-exceptions.txt` lists `<path> <ceiling>`; test files over
+1,000 lines warn. `--update-exceptions` rewrites the list to current sizes, but
+only lowers a ceiling unless given `--allow-raise`; `--warn-only` always exits 0.
+
 See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 `DEADBOLT_SIM_SEED`, `DEADBOLT_SIM_SEEDS`, `DEADBOLT_SIM_TRACE`,
 `DEADBOLT_SIM_TIMING`. Membership tests use `DEADBOLT_MEMBERSHIP_CASES` and

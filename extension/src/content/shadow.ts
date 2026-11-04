@@ -68,11 +68,6 @@ export function deepQueryAll<E extends Element = Element>(selector: string, root
   return roots.flatMap((r) => Array.from(r.querySelectorAll<E>(selector)))
 }
 
-/** True when the page uses any shadow roots (cheap pre-check). */
-export function hasShadowRoots(): boolean {
-  return openRoots().length > 1
-}
-
 /** The focused element, looking inside shadow roots (document.activeElement stops at the host). */
 export function deepActiveElement(): Element | null {
   let el: Element | null = document.activeElement

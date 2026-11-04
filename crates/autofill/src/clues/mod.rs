@@ -532,10 +532,6 @@ impl Rules {
             form_matcher,
         })
     }
-
-    pub fn field_table(&self, ty: FieldType) -> &FieldTable {
-        &self.fields[ty as usize]
-    }
 }
 
 #[cfg(test)]

@@ -21,8 +21,6 @@ use crate::model::{App, Screen};
 use crate::view::{Notice, Severity};
 use worker::{NewDevice, Progress, Stage, Worker};
 
-/// Shortest passphrase the form accepts.
-pub const MIN_PASSPHRASE: usize = 8;
 /// How long a copied command's button shows a check, in seconds.
 pub const COPIED_FOR: f64 = 1.6;
 /// How long a copied code stays on the clipboard: as long as it works.

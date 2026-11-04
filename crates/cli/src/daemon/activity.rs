@@ -149,12 +149,28 @@ fn named(vault: &Option<String>, query: &[String]) -> Vec<ActivityItem> {
     }]
 }
 
+/// One item, named by text, in no vault: a page or a name a request gave.
+fn titled(title: &str) -> Vec<ActivityItem> {
+    vec![ActivityItem {
+        vault: None,
+        id: None,
+        title: title.into(),
+    }]
+}
+
 fn login(vault: &str, item: &str, title: &str) -> Vec<ActivityItem> {
     vec![ActivityItem {
         vault: Some(vault.into()),
         id: Some(item.into()),
         title: title.into(),
     }]
+}
+
+/// Adds `value` to `list` unless it is already there.
+fn push_once<T: PartialEq>(list: &mut Vec<T>, value: T) {
+    if !list.contains(&value) {
+        list.push(value);
+    }
 }
 
 fn fill_name(fill: &Fill) -> String {
@@ -168,16 +184,16 @@ fn fill_name(fill: &Fill) -> String {
 
 /// The draft of an entry for `command` from a `class` peer, or `None` when
 /// it isn't recorded: the app's own requests (it reports its reveals and
-/// copies), a caller's `status` and `watch` (every command starts with a
-/// status) and `app-activate` (every `deadbolt app`), and the browser host's
-/// look-ups, which come with every page (and its generator checks and drops,
-/// asked before anyone chose a password, and its form look-ups), and its
-/// form fills from an identity (a card fill is an entry; see
-/// [`Draft::recorded`]). Anything else the browser host
-/// asks is recorded as a caller's would be: its class rests on arguments a
-/// process can rewrite, so it never hides a request.
-/// Reading Activity is never an entry, so a client that reads it on every
-/// change can't feed itself.
+/// copies); the `status` every command starts with and the `watch` and
+/// `app-activate` that follow from it; the browser host's look-ups, which
+/// come with every page (and its generator checks and drops, asked before
+/// anyone chose a password, and its form look-ups); and its form fills from
+/// an identity (a card fill is an entry; see [`Draft::recorded`]).
+///
+/// Anything else the browser host asks is recorded as a caller's would be:
+/// its class rests on arguments a process can rewrite, so it never hides a
+/// request. Reading Activity is never an entry, so a client that reads it on
+/// every change can't feed itself.
 pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
     if matches!(command, Command::ActivityList { .. }) {
         return None;
@@ -195,37 +211,36 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             | Command::Resolve { .. }
             | Command::SecretGrantSet { .. }
     );
-    let always = matches!(
-        command,
-        Command::Status | Command::Watch { .. } | Command::AppActivate { .. }
-    );
-    let recorded = daemon
-        || match class {
-            CallerClass::App => false,
-            CallerClass::BrowserHost => {
-                !always
-                    && !matches!(
-                        command,
-                        Command::SiteLogins { .. }
-                            | Command::SiteCheck { .. }
-                            | Command::FormItems { .. }
-                            | Command::PasskeyList { .. }
-                            | Command::SiteGenerateCheck { .. }
-                            | Command::SiteGenerateDrop { .. }
-                    )
-            }
-            CallerClass::AutoFill => {
-                !always
-                    && !matches!(
-                        command,
-                        Command::AutofillStatus
-                            | Command::AutofillIdentities
-                            | Command::AutofillList { .. }
-                    )
-            }
-            CallerClass::Caller => !always,
-        };
-    if !recorded {
+    // What a class asks without it being a request of its own.
+    let quiet = match class {
+        CallerClass::App => true,
+        CallerClass::BrowserHost => matches!(
+            command,
+            Command::Status
+                | Command::Watch { .. }
+                | Command::AppActivate { .. }
+                | Command::SiteLogins { .. }
+                | Command::SiteCheck { .. }
+                | Command::FormItems { .. }
+                | Command::PasskeyList { .. }
+                | Command::SiteGenerateCheck { .. }
+                | Command::SiteGenerateDrop { .. }
+        ),
+        CallerClass::AutoFill => matches!(
+            command,
+            Command::Status
+                | Command::Watch { .. }
+                | Command::AppActivate { .. }
+                | Command::AutofillStatus
+                | Command::AutofillIdentities
+                | Command::AutofillList { .. }
+        ),
+        CallerClass::Caller => matches!(
+            command,
+            Command::Status | Command::Watch { .. } | Command::AppActivate { .. }
+        ),
+    };
+    if quiet && !daemon {
         return None;
     }
     let (tier, name) = describe(command);
@@ -275,10 +290,18 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::HealthIgnore {
             vault, query, kind, ..
         } => (named(vault, query), vec![kind.as_str().into()]),
+        // The page or app the browser host looked at, and the login it filled:
+        // the login's, under that page. An agent's fill is the same.
         Command::SiteFill {
             origin,
             login: target,
             want,
+        }
+        | Command::AgentFill {
+            origin,
+            login: target,
+            want,
+            ..
         } => (
             login(&target.vault, &target.item, origin),
             want.iter().map(fill_name).collect(),
@@ -291,7 +314,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             target
                 .as_ref()
                 .map(|t| login(&t.vault, &t.item, title))
-                .unwrap_or_else(|| named(&None, std::slice::from_ref(title))),
+                .unwrap_or_else(|| titled(title)),
             vec!["username".into(), "password".into()],
         ),
         // The new login, then the provider login it signs in with.
@@ -301,7 +324,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             account,
             ..
         } => (
-            named(&None, std::slice::from_ref(title))
+            titled(title)
                 .into_iter()
                 .chain(login(&account.vault, &account.item, provider))
                 .collect(),
@@ -310,29 +333,25 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::PasskeyGet {
             origin, passkey, ..
         } => (login(&passkey.vault, &passkey.item, origin), Vec::new()),
-        Command::FormItems { origin, .. } => {
-            (named(&None, std::slice::from_ref(origin)), Vec::new())
-        }
+        Command::FormItems { origin, .. }
+        | Command::PasskeyCreate { origin, .. }
+        | Command::AgentLogins { origin, .. } => (titled(origin), Vec::new()),
         Command::FormFill {
             origin,
             item,
             fields,
         } => (login(&item.vault, &item.item, origin), fields.clone()),
-        Command::PasskeyCreate { origin, .. } => {
-            (named(&None, std::slice::from_ref(origin)), Vec::new())
-        }
         Command::AutofillFill {
             service,
             login: target,
             want,
             ..
         } => {
-            let where_label = service
+            let page = service
                 .as_ref()
-                .map(|s| s.identifier.as_str())
-                .unwrap_or("unassociated app");
+                .map_or("unassociated app", |s| s.identifier.as_str());
             (
-                login(&target.vault, &target.item, where_label),
+                login(&target.vault, &target.item, page),
                 want.iter().map(fill_name).collect(),
             )
         }
@@ -340,15 +359,10 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             login(&passkey.vault, &passkey.item, rp_id),
             vec!["passkey".into()],
         ),
-        Command::AutofillPasskeyCreate { rp_id, .. } => (
-            named(&None, std::slice::from_ref(rp_id)),
-            vec!["passkey".into()],
-        ),
-        Command::AgentClientAdd { name, .. } => {
-            (named(&None, std::slice::from_ref(name)), Vec::new())
-        }
+        Command::AutofillPasskeyCreate { rp_id, .. } => (titled(rp_id), vec!["passkey".into()]),
+        Command::AgentClientAdd { name, .. } => (titled(name), Vec::new()),
         Command::AgentClientRemove { id } | Command::AgentGrantRemove { id } => {
-            (named(&None, std::slice::from_ref(id)), Vec::new())
+            (titled(id), Vec::new())
         }
         Command::AgentGrantSet {
             site,
@@ -366,29 +380,16 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             if *passkeys {
                 names.push("passkey".into());
             }
-            (named(&None, &[what]), names)
+            (titled(&what), names)
         }
-        Command::AgentLogins { origin, .. } => {
-            (named(&None, std::slice::from_ref(origin)), Vec::new())
-        }
-        Command::AgentFill {
-            origin,
-            login: target,
-            want,
-            ..
-        } => (
-            login(&target.vault, &target.item, origin),
-            want.iter().map(fill_name).collect(),
-        ),
         Command::AgentPasskeyGet {
             origin,
             login: target,
             ..
         } => (
-            match target {
-                Some(t) => login(&t.vault, &t.item, origin),
-                None => named(&None, std::slice::from_ref(origin)),
-            },
+            target
+                .as_ref()
+                .map_or_else(|| titled(origin), |t| login(&t.vault, &t.item, origin)),
             vec!["passkey".into()],
         ),
         // The items and fields named, as given; the reply names what was
@@ -405,12 +406,8 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
                     id: None,
                     title: reference.item.clone(),
                 };
-                if !items.contains(&item) {
-                    items.push(item);
-                }
-                if !fields.contains(&reference.field) {
-                    fields.push(reference.field);
-                }
+                push_once(&mut items, item);
+                push_once(&mut fields, reference.field);
             }
             (items, fields)
         }
@@ -435,10 +432,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::SiteGenerate { origin, .. }
         | Command::SiteGenerateKeep { origin, .. }
         | Command::SiteGenerateCheck { origin, .. }
-        | Command::SiteGenerateDrop { origin, .. } => (
-            named(&None, std::slice::from_ref(origin)),
-            vec!["password".into()],
-        ),
+        | Command::SiteGenerateDrop { origin, .. } => (titled(origin), vec!["password".into()]),
         _ => (Vec::new(), Vec::new()),
     };
     let client = match command {
@@ -547,12 +541,8 @@ impl Draft {
                         id: Some(secret.item.clone()),
                         title: secret.title.clone(),
                     };
-                    if !self.items.contains(&item) {
-                        self.items.push(item);
-                    }
-                    if !self.fields.contains(&secret.field) {
-                        self.fields.push(secret.field.clone());
-                    }
+                    push_once(&mut self.items, item);
+                    push_once(&mut self.fields, secret.field.clone());
                 }
             }
             Reply::SecretGrants { grants } => {
@@ -647,66 +637,32 @@ impl Daemon {
                 .await
                 .unwrap_or_else(|_| caller::nobody());
         let draft = draft(&request.command, caller.class);
-        let mut result =
-            match super::macos_autofill::check_access(socket, &caller, &request.command) {
-                Err(error) => Err(error),
-                Ok(()) => match request.command {
-                    command @ Command::ActivityReport { .. } => self.report(&caller, command),
-                    command @ (Command::AgentClientAdd { .. }
-                    | Command::AgentGrantSet { .. }
-                    | Command::SecretGrantSet { .. }) => {
-                        self.agents_admin(&caller, command, conv).await
+        let command = request.command;
+        let mut result = match super::macos_autofill::check_access(socket, &caller, &command) {
+            Err(error) => Err(error),
+            Ok(()) => match command {
+                command @ Command::ActivityReport { .. } => self.report(&caller, command),
+                command @ (Command::AgentClientAdd { .. }
+                | Command::AgentGrantSet { .. }
+                | Command::SecretGrantSet { .. }) => {
+                    self.agents_admin(&caller, command, conv).await
+                }
+                Command::Resolve { refs, purpose } => {
+                    self.resolve(&caller, &refs, purpose, conv).await
+                }
+                command @ (Command::Health { .. }
+                | Command::HealthIgnore { .. }
+                | Command::BreachChecksSet { .. }) => self.health_command(&caller, command).await,
+                // Exporting an SSH private key asks the user each time.
+                command @ Command::ItemGet { .. } => {
+                    match self.verify_ssh_export(&caller, &command, conv).await {
+                        Ok(()) => self.clone().dispatch(&caller, command, conv).await,
+                        Err(error) => Err(error),
                     }
-                    Command::Resolve { refs, purpose } => {
-                        self.resolve(&caller, &refs, purpose, conv).await
-                    }
-                    command @ (Command::Health { .. }
-                    | Command::HealthIgnore { .. }
-                    | Command::BreachChecksSet { .. }) => {
-                        self.health_command(&caller, command).await
-                    }
-                    Command::ItemGet {
-                        vault,
-                        query,
-                        otp,
-                        ssh_private,
-                        files,
-                        deleted,
-                    } => {
-                        async {
-                            if ssh_private
-                                && caller.class != CallerClass::App
-                                && !caller::is_ai(&caller)
-                            {
-                                self.verify_ssh_export(
-                                    &caller,
-                                    vault.as_deref(),
-                                    &query,
-                                    deleted,
-                                    conv,
-                                )
-                                .await?;
-                            }
-                            self.clone()
-                                .dispatch(
-                                    &caller,
-                                    Command::ItemGet {
-                                        vault,
-                                        query,
-                                        otp,
-                                        ssh_private,
-                                        files,
-                                        deleted,
-                                    },
-                                    conv,
-                                )
-                                .await
-                        }
-                        .await
-                    }
-                    command => self.clone().dispatch(&caller, command, conv).await,
-                },
-            };
+                }
+                command => self.clone().dispatch(&caller, command, conv).await,
+            },
+        };
         // Display limits must not hide an AI ancestor from the gate.
         ledger::bound_caller(&mut caller);
         if let Ok(Reply::Status(status)) = &mut result {
@@ -756,11 +712,11 @@ impl Daemon {
         if entries.is_empty() {
             return;
         }
-        let rows: Result<Vec<(u64, Vec<u8>)>, _> = entries
+        let rows = entries
             .iter()
-            .map(|e| serde_json::to_vec(e).map(|bytes| (e.time, bytes)))
-            .collect();
-        let stored = rows.map_err(anyhow::Error::from).and_then(|rows| {
+            .map(|entry| Ok((entry.time, serde_json::to_vec(entry)?)))
+            .collect::<Result<Vec<_>>>();
+        let stored = rows.and_then(|rows| {
             let keep_from = session::now().saturating_sub(KEEP_SECS);
             let rows = rows.iter().map(|(time, bytes)| (*time, bytes.as_slice()));
             Ok(store.activity_append(rows, keep_from, BUDGET)?)
@@ -829,20 +785,34 @@ impl Daemon {
         Ok(Reply::Done)
     }
 
+    /// Exporting an SSH private key asks Touch ID each time, for anyone but
+    /// the app and an AI; anything else gets no further check here.
     async fn verify_ssh_export(
         &self,
         caller: &CallerInfo,
-        vault: Option<&str>,
-        query: &[String],
-        deleted: bool,
+        command: &Command,
         conv: &Conversation,
     ) -> Result<()> {
-        let ssh_title = self.with(|s| {
-            let listing = super::items::Listing::pick(s.vault(&s.resolve(vault)?), deleted);
+        let Command::ItemGet {
+            vault,
+            query,
+            ssh_private,
+            deleted,
+            ..
+        } = command
+        else {
+            return Ok(());
+        };
+        if !ssh_private || caller.class == CallerClass::App || caller::is_ai(caller) {
+            return Ok(());
+        }
+        let Some(title) = self.with(|s| {
+            let listing =
+                super::items::Listing::pick(s.vault(&s.resolve(vault.as_deref())?), *deleted);
             let item = listing.find(query)?;
             Ok((item.kind == "ssh").then(|| deadbolt_core::listing::label(item)))
-        })?;
-        let Some(title) = ssh_title else {
+        })?
+        else {
             return Ok(());
         };
         if caller::is_ai(caller) && !self.can_verify() {

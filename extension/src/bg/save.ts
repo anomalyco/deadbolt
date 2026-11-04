@@ -145,6 +145,9 @@ interface Offer {
 
 type Pending = { offer: Omit<SaveOffer, "id">; save: Offer["save"]; fallback?: Pending; abort?: AbortController }
 
+/** What a check found to offer; `asked` says whether the host was asked at all. */
+type Decision = { asked: boolean; pending?: Pending }
+
 /** The save offer shown in a page: the document it's for, and the offer it answers. */
 interface Surface {
   target: FrameTarget
@@ -191,7 +194,8 @@ const FACTS: Array<keyof PageFacts> = ["loginForm", "passwordEmpty", "mfa", "err
 export function cleanFacts(reply: unknown): PageFacts | null {
   if (!reply || typeof reply !== "object") return null
   const r = reply as Record<string, unknown>
-  return FACTS.every((k) => typeof r[k] === "boolean") ? (Object.fromEntries(FACTS.map((k) => [k, r[k]])) as unknown as PageFacts) : null
+  if (!FACTS.every((k) => typeof r[k] === "boolean")) return null
+  return Object.fromEntries(FACTS.map((k) => [k, r[k]])) as unknown as PageFacts
 }
 
 let salting: Promise<string> | undefined
@@ -220,6 +224,9 @@ async function neverSites(): Promise<string[]> {
 }
 
 const clip = (value: unknown, max: number) => (typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined)
+
+/** A content script's count of submits, if it gave one. */
+const submissionOf = (raw: unknown) => (Number.isSafeInteger(raw) ? raw as number : undefined)
 
 /** The new password a capture names, typed or generated. */
 function newSecret(c: Capture): PasswordValue | undefined {
@@ -304,8 +311,26 @@ const IDENTITY_GROUPS: Array<[string, IdentityField[]]> = [
   ["birthday", ["birthday"]],
 ]
 const UPDATED: Record<SaveWhat, string> = { card: "Card updated", address: "Address updated", details: "Details updated" }
+/** The answer to an offer that has gone already: answered, expired, or another tab's. */
+const expired = (): ChooseReply => ({ ok: false, message: "This offer has expired.", gone: true })
+/** Why a save the host turned down for now says, by the host's error code. */
+const SAVE_FAILED = new Map<string, string>([
+  ["locked", "Deadbolt is locked. Unlock it, then save again."],
+  ["cancelled", "Deadbolt didn't get your passphrase. Nothing was saved."],
+  ["rate_limited", "Deadbolt is busy. Try again in a moment."],
+])
 /** The most of a brand a card's label shows. */
 const MAX_BRAND = 20
+
+/** What a content script kept of a submitted card or identity, and which of its fields were typed or filled. */
+type FormReport = { card?: unknown; identity?: unknown; typed?: unknown; filled?: unknown; submission?: unknown }
+
+/** Adds what a content script says was typed or filled, of the kinds it may give. */
+function addTrust(got: FormReport, cards: boolean, identities: boolean, typed: Set<string>, filled: Set<string>) {
+  const may = (n: string) => ((CARD_KEYS as readonly string[]).includes(n) ? cards : identities)
+  for (const n of cleanNames(got.typed)) if (may(n)) typed.add(n)
+  for (const n of cleanNames(got.filled)) if (may(n)) filled.add(n)
+}
 
 /** A content script's values of `keys`, trimmed, nothing else. */
 function cleanValues<K extends string>(raw: unknown, keys: readonly K[]): Partial<Record<K, string>> | undefined {
@@ -520,8 +545,7 @@ export class Saver {
   /** Nothing has moved the tab on since `t`, Deadbolt is unlocked, and the tab's top page is still on `site`. */
   private async still(tabId: number, t: Ticket, site: string): Promise<boolean> {
     if (!this.fresh(tabId, t)) return false
-    const frame = await chrome.webNavigation.getFrame({ tabId, frameId: 0 }).catch(() => null)
-    return siteOfUrl(frame?.url) === site && this.fresh(tabId, t)
+    return (await this.topSite(tabId)) === site && this.fresh(tabId, t)
   }
 
   async capture(
@@ -534,7 +558,7 @@ export class Saver {
     const target = await targetFor(sender)
     const page = senderOrigin(sender)
     if (!target || !page || !this.fresh(tabId, ticket)) return
-    const site = siteOf(new URL(target.origin).hostname)
+    const site = siteOfUrl(target.origin)
     if (!site) return
     // Never for this site: what was typed isn't even kept.
     if ((await neverSites()).includes(site) || !this.fresh(tabId, ticket)) return
@@ -552,11 +576,12 @@ export class Saver {
     const submitted = {
       form: saveUrl(page),
       document: sender.documentId,
-      submission: Number.isSafeInteger(raw.submission) ? (raw.submission as number) : undefined,
+      submission: submissionOf(raw.submission),
       kind,
       secrets: Array.isArray(raw.roles) ? SECRET_ROLES.filter((r) => (raw.roles as unknown[]).includes(r)) : [],
     }
     const usernameFrom = { usernameOrigin: target.origin, usernameStep: sender.frameId === 0 && (kind === "login" || kind === "signup") }
+    const base = { site, ...here, since: now, until: now + this.ttl.capture, failed: false, ...submitted }
     if (!password && !fresh) {
       if (!username) return
       // A username on its own. With a password held, it joins only one from
@@ -570,7 +595,7 @@ export class Saver {
         return
       }
       // Else it waits for the password, as an email-first step's does.
-      this.keep(tabId, { site, ...here, username, ...usernameFrom, since: now, until: now + this.ttl.capture, failed: false, ...submitted })
+      this.keep(tabId, { ...base, username, ...usernameFrom })
       return
     }
     // Passwords stay with the origin they were submitted on: one from another
@@ -583,18 +608,13 @@ export class Saver {
     const step = !held && same?.username && (same.usernameOrigin === target.origin || (same.usernameStep && sender.frameId === 0)) ? same : undefined
     const from = username ? { username, ...usernameFrom } : (kept ?? step)
     this.keep(tabId, {
-      site,
-      ...here,
+      ...base,
       username: from?.username,
       usernameOrigin: from?.usernameOrigin,
       usernameStep: from?.usernameStep,
       password: password ?? kept?.password,
       newPassword: fresh ? newPassword : kept?.newPassword,
       generated: fresh ? generated : kept?.generated,
-      since: now,
-      until: now + this.ttl.capture,
-      failed: false,
-      ...submitted,
     })
   }
 
@@ -615,8 +635,8 @@ export class Saver {
     const tabId = sender.tab?.id
     const page = senderOrigin(sender)
     const c = tabId === undefined ? undefined : this.captures.get(tabId)
-    if (!c || !page || saveUrl(page) !== c.form || !sender.documentId || sender.documentId !== c.document) return
-    if (Number.isSafeInteger(submission) && submission === c.submission) this.dropFailed(tabId!, c)
+    if (tabId === undefined || !c || !page || saveUrl(page) !== c.form || !sender.documentId || sender.documentId !== c.document) return
+    if (Number.isSafeInteger(submission) && submission === c.submission) this.dropFailed(tabId, c)
   }
 
   /** A page reported its form. The one just submitted, posted back to the same page as a new document, means the sign-in failed. */
@@ -624,8 +644,8 @@ export class Saver {
     const tabId = sender.tab?.id
     const page = senderOrigin(sender)
     const c = tabId === undefined ? undefined : this.captures.get(tabId)
-    if (!c || !page || !kind || kind !== c.kind || sender.documentId === c.document || saveUrl(page) !== c.form) return
-    if (c.secrets.some((r) => roles.includes(r))) this.dropFailed(tabId!, c)
+    if (tabId === undefined || !c || !page || !kind || kind !== c.kind || sender.documentId === c.document || saveUrl(page) !== c.form) return
+    if (c.secrets.some((r) => roles.includes(r))) this.dropFailed(tabId, c)
   }
 
   /** The sign-in `c` failed: nothing of it is offered; only its username is kept, for the menu. */
@@ -679,20 +699,13 @@ export class Saver {
     this.rounds.set(tabId, round)
     const target = await targetFor(sender)
     const c = this.captures.get(tabId)
-    if (!target || !c || !this.fresh(tabId, ticket) || siteOf(new URL(target.origin).hostname) !== c.site) return
+    if (!target || !c || !this.fresh(tabId, ticket) || siteOfUrl(target.origin) !== c.site) return
     // A username on its own is the first step of a sign-in, not its end:
     // nothing to judge (and no "failed" to keep) until a password comes.
     if (!c.password && !newSecret(c)) return
     const current = () => this.captures.get(tabId) === c && this.rounds.get(tabId) === round && this.fresh(tabId, ticket)
     const created = !!newSecret(c)
-    let facts = await this.probe(target, c)
-    let outcome = facts ? judge(facts, false, created) : "undecided"
-    if (outcome === "undecided" && facts) {
-      await new Promise((resolve) => setTimeout(resolve, this.ttl.reprobe))
-      if (!current()) return
-      facts = await this.probe(target, c)
-      outcome = facts ? judge(facts, true, created) : "undecided"
-    }
+    const outcome = await this.look(target, c, created, current)
     if (!current()) return
     if (outcome === "pending") this.hold(tabId, c)
     if (outcome === "failed") c.failed = true
@@ -705,7 +718,7 @@ export class Saver {
     if (c.until <= this.now()) return
     if ((await neverSites()).includes(c.site)) return
     if (c.username && !newSecret(c) && (await this.heldBack(c.site, c.username))) return
-    const decided = await this.decide(c).catch((): { asked: boolean; pending?: Pending } => ({ asked: true }))
+    const decided = await this.decide(c).catch((): Decision => ({ asked: true }))
     // The page may be watching for the popup: a finished check uses up the
     // site's turn whether or not there's anything to offer. Only a confirmed
     // sign-in may open the popup, so only its check takes the turn.
@@ -720,28 +733,42 @@ export class Saver {
     return cleanFacts(await sendToFrame(target, { type: "db:probe", ...(c.username ? { username: c.username } : {}) }))
   }
 
+  /** How the sign-in went, from what the page shows: looked at again when it shows nothing either way. */
+  private async look(target: FrameTarget, c: Capture, created: boolean, current: () => boolean): Promise<Outcome> {
+    const first = await this.probe(target, c)
+    if (!first) return "undecided"
+    const outcome = judge(first, false, created)
+    if (outcome !== "undecided") return outcome
+    await new Promise((resolve) => setTimeout(resolve, this.ttl.reprobe))
+    if (!current()) return "undecided"
+    const second = await this.probe(target, c)
+    return second ? judge(second, true, created) : "undecided"
+  }
+
+  /** What Not now holds, by the salted hash of site and login: until when. */
+  private async notNow(): Promise<Record<string, unknown>> {
+    const held = (await chrome.storage.session.get(NOT_NOW_KEY).catch(() => ({})) as Record<string, unknown>)[NOT_NOW_KEY]
+    return held && typeof held === "object" ? held as Record<string, unknown> : {}
+  }
+
   /** Not now was said to this login on this site in the last day. */
   private async heldBack(site: string, username: string): Promise<boolean> {
-    const held = (await chrome.storage.session.get(NOT_NOW_KEY).catch(() => ({})) as Record<string, unknown>)[NOT_NOW_KEY]
-    if (!held || typeof held !== "object") return false
-    const until = (held as Record<string, unknown>)[await hashLogin(site, username)]
+    const until = (await this.notNow())[await hashLogin(site, username)]
     return typeof until === "number" && until > this.now()
   }
 
   private async holdBack(site: string, username: string) {
-    const stored = (await chrome.storage.session.get(NOT_NOW_KEY).catch(() => ({})) as Record<string, unknown>)[NOT_NOW_KEY]
     const now = this.now()
-    const held: Record<string, number> = {}
-    if (stored && typeof stored === "object") for (const [k, v] of Object.entries(stored)) if (typeof v === "number" && v > now) held[k] = v
-    held[await hashLogin(site, username)] = now + NOT_NOW_MS
-    await chrome.storage.session.set({ [NOT_NOW_KEY]: held }).catch(() => {})
+    const held = Object.entries(await this.notNow()).filter((e): e is [string, number] => typeof e[1] === "number" && e[1] > now)
+    held.push([await hashLogin(site, username), now + NOT_NOW_MS])
+    await chrome.storage.session.set({ [NOT_NOW_KEY]: Object.fromEntries(held) }).catch(() => {})
   }
 
   /**
    * Asks the host what to offer. Throws when the host does (locked, rate
    * limited or gone): offer nothing. `asked` says whether a check was sent.
    */
-  private async decide(c: Capture): Promise<{ asked: boolean; pending?: Pending }> {
+  private async decide(c: Capture): Promise<Decision> {
     const next = newSecret(c)
     if (next && c.password) return { asked: true, pending: await this.passwordChange(c, next, c.password) }
     const secret = next ?? (c.password ? { password: c.password } : undefined)
@@ -765,7 +792,7 @@ export class Saver {
    * frame joins the name typed in the page, as one offer. Nothing is kept
    * for a site saving is off for, or a vault that can't save forms.
    */
-  async formCapture(sender: chrome.runtime.MessageSender, raw: { card?: unknown; identity?: unknown; typed?: unknown; filled?: unknown; submission?: unknown }) {
+  async formCapture(sender: chrome.runtime.MessageSender, raw: FormReport) {
     const tabId = sender.tab?.id
     if (tabId === undefined || !sender.documentId || !this.host.capabilities.includes("save-form")) return
     const ticket = this.ticket(tabId)
@@ -783,24 +810,11 @@ export class Saver {
     let identity = identityFrom ? cleanIdentity(raw.identity) : undefined
     const typed = new Set<string>()
     const filled = new Set<string>()
-    /** What a frame says was typed or filled, of the kinds it may give. */
-    const trusted = (got: { typed?: unknown; filled?: unknown }, cards: boolean, identities: boolean) => {
-      const may = (n: string) => ((CARD_KEYS as readonly string[]).includes(n) ? cards : identities)
-      for (const n of cleanNames(got.typed)) if (may(n)) typed.add(n)
-      for (const n of cleanNames(got.filled)) if (may(n)) filled.add(n)
-    }
-    trusted(raw, !!cardFrom, !!identityFrom)
+    addTrust(raw, !!cardFrom, !!identityFrom, typed, filled)
     if (sender.frameId === 0) {
-      for (const frame of this.formFrames?.(tabId) ?? []) {
-        if (frame.frameId === 0) continue
-        const got = await sendToFrame<{ card?: unknown; identity?: unknown; typed?: unknown; filled?: unknown }>(frame, { type: "db:forms-read" })
-        if (!got) continue
-        const cards = frame.kinds.includes("card")
-        const identities = !frame.provider && frame.kinds.includes("identity")
-        if (cards) card = merged(card, cleanCard(got.card))
-        if (identities) identity = merged(identity, cleanIdentity(got.identity))
-        trusted(got, cards, identities)
-      }
+      const below = await this.frameForms(tabId, typed, filled)
+      card = merged(card, below.card)
+      identity = merged(identity, below.identity)
       if (!this.fresh(tabId, ticket)) return
     }
     const now = this.now()
@@ -809,7 +823,7 @@ export class Saver {
     card = merged(same?.card, card)
     identity = merged(same?.identity, identity)
     for (const n of same?.typed ?? []) typed.add(n)
-    for (const n of same?.filled ?? []) if (!typed.has(n)) filled.add(n)
+    for (const n of same?.filled ?? []) filled.add(n)
     for (const n of typed) filled.delete(n)
     // The brand only from the number, whoever gave which.
     if (card) {
@@ -820,17 +834,34 @@ export class Saver {
     if (!card && !identity) return
     this.dropFormCapture(tabId)
     const timer = setTimeout(() => this.dropFormCapture(tabId), this.ttl.capture)
-    const submission = Number.isSafeInteger(raw.submission) ? (raw.submission as number) : undefined
+    const submission = submissionOf(raw.submission)
     this.formCaptures.set(tabId, { site, origin: url.origin, page: saveUrl(url), card, identity, typed, filled, filledFrom: same?.filledFrom ?? filledFrom, document, from: { document: sender.documentId, submission }, until: now + this.ttl.capture, timer })
+  }
+
+  /** What every frame below the top reported of cards and identities (bg/forms.ts), merged. */
+  private async frameForms(tabId: number, typed: Set<string>, filled: Set<string>) {
+    let card: CardValues | undefined
+    let identity: IdentityValues | undefined
+    for (const frame of this.formFrames?.(tabId) ?? []) {
+      if (frame.frameId === 0) continue
+      const got = await sendToFrame<FormReport>(frame, { type: "db:forms-read" })
+      if (!got) continue
+      const cards = frame.kinds.includes("card")
+      const identities = !frame.provider && frame.kinds.includes("identity")
+      if (cards) card = merged(card, cleanCard(got.card))
+      if (identities) identity = merged(identity, cleanIdentity(got.identity))
+      addTrust(got, cards, identities, typed, filled)
+    }
+    return { card, identity }
   }
 
   /** The document that submitted says how it went: its fields went away (it went through), or it shows it was turned down. */
   async formOutcome(sender: chrome.runtime.MessageSender, submission: unknown, ok: boolean) {
     const tabId = sender.tab?.id
     const c = tabId === undefined ? undefined : this.formCaptures.get(tabId)
-    if (!c || !sender.documentId || sender.documentId !== c.from.document || submission !== c.from.submission) return
-    if (!ok) return this.dropFormCapture(tabId!)
-    await this.offerForm(tabId!, c)
+    if (tabId === undefined || !c || !sender.documentId || sender.documentId !== c.from.document || submission !== c.from.submission) return
+    if (!ok) return this.dropFormCapture(tabId)
+    await this.offerForm(tabId, c)
   }
 
   /**
@@ -860,7 +891,7 @@ export class Saver {
     this.dropFormCapture(tabId)
     const ticket = this.ticket(tabId)
     if (c.until <= this.now() || (await neverSites()).includes(c.site) || !this.fresh(tabId, ticket)) return
-    const decided = await this.decideForm(c, tabId).catch((): { asked: boolean; pending?: Pending } => ({ asked: true }))
+    const decided = await this.decideForm(c, tabId).catch((): Decision => ({ asked: true }))
     const turn = decided.asked ? await this.openTurn(c.site).catch(() => false) : false
     if (!decided.pending || !(await this.still(tabId, ticket, c.site))) return
     if (await this.heldBack(c.site, heldKey(decided.pending.offer))) return
@@ -874,7 +905,7 @@ export class Saver {
    * by the values of the fields typed, for a few identities that have them.
    * A card comes first; its offer leaves the identity's for the next submit.
    */
-  private async decideForm(c: FormCapture, tabId: number): Promise<{ asked: boolean; pending?: Pending }> {
+  private async decideForm(c: FormCapture, tabId: number): Promise<Decision> {
     const listed = await this.host.send({ type: "forms", origin: c.origin, kinds: ["identity", "card"] })
     const trust = (from?: string): Trust => ({ typed: c.typed, filled: c.filled, from })
     const card = c.card ? cardPlan(c.card, listed.cards, trust(c.filledFrom.card)) : null
@@ -961,7 +992,6 @@ export class Saver {
     return { offer: { site: c.site, username: username || c.site, update: true }, save: () => this.host.send({ type: "save", origin: c.origin, ref, entry }) }
   }
 
-  /** Hold the offer for the tab under a new id, badge the toolbar button, and open the popup if the site had its turn. */
   /**
    * Hold the offer for the tab under a new id and badge the toolbar button.
    * If the site had its turn, show it in the page that settled (`target`),
@@ -1029,12 +1059,12 @@ export class Saver {
    */
   async surfaceChoose(token: string, sender: chrome.runtime.MessageSender, choice: OfferChoice): Promise<ChooseReply> {
     const s = await this.surface(token, sender)
-    if (!s) return { ok: false, message: "This offer has expired.", gone: true }
+    if (!s) return expired()
     if (choice === "later") {
       this.surfaces.delete(token)
       return { ok: true, message: "" }
     }
-    if (s.answered) return { ok: false, message: "This offer has expired.", gone: true }
+    if (s.answered) return expired()
     if (s.answering) return { ok: false, message: "Saving…" }
     s.answering = true
     const reply = await this.choose(s.target.tabId, s.offer, choice)
@@ -1118,7 +1148,7 @@ export class Saver {
   /** The user answered the offer with this id, the one the popup showed. Any other offer is untouched. */
   async choose(tabId: number, id: string, choice: OfferChoice): Promise<ChooseReply> {
     const o = this.offers.get(tabId)
-    if (!o || o.offer.id !== id) return { ok: false, message: "This offer has expired.", gone: true }
+    if (!o || o.offer.id !== id) return expired()
     if (o.saving) return { ok: false, message: "Saving…" }
     if (choice === "later" || choice === "never") {
       this.moveOn(tabId)
@@ -1132,11 +1162,11 @@ export class Saver {
     }
     // Save as new: an update's other choice.
     const asNew = choice === "new"
-    if (asNew && !o.fallback) return { ok: false, message: "This offer has expired.", gone: true }
+    if (asNew && !o.fallback) return expired()
     o.saving = true
     if (!(await this.still(tabId, o.ticket, o.offer.site)) || this.offers.get(tabId) !== o) {
       this.dropOffer(tabId, id)
-      return { ok: false, message: "This offer has expired.", gone: true }
+      return expired()
     }
     try {
       const reply = await (asNew ? o.fallback!.save() : o.save())
@@ -1147,9 +1177,8 @@ export class Saver {
       // The browser-only vault compared the typed number with the card's and
       // it's another card: offer to save it as a new one instead.
       if (!asNew && o.offer.what === "card" && o.offer.update && o.fallback && err instanceof HostError && err.code === "not_found" && this.offers.get(tabId) === o) return this.fallBack(tabId, o)
-      if (err instanceof HostError && err.code === "locked") return { ok: false, message: "Deadbolt is locked. Unlock it, then save again." }
-      if (err instanceof HostError && err.code === "cancelled") return { ok: false, message: "Deadbolt didn't get your passphrase. Nothing was saved." }
-      if (err instanceof HostError && err.code === "rate_limited") return { ok: false, message: "Deadbolt is busy. Try again in a moment." }
+      const said = err instanceof HostError ? SAVE_FAILED.get(err.code) : undefined
+      if (said) return { ok: false, message: said }
       return { ok: false, message: (err as Error).message || "Couldn't save." }
     }
   }
@@ -1203,7 +1232,7 @@ export class Saver {
     this.dropTabSurfaces(tabId)
     const site = siteOfUrl(url)
     const byHand = !!transition && BY_HAND.has(transition)
-    if (!this.sites.has(tabId) || this.sites.get(tabId) !== site || byHand) this.moveOn(tabId)
+    if (this.sites.get(tabId) !== site || byHand) this.moveOn(tabId)
     this.sites.set(tabId, site)
     if (this.captures.get(tabId)?.site !== site || byHand) this.dropCapture(tabId)
     if (this.formCaptures.get(tabId)?.site !== site || byHand) this.dropFormCapture(tabId)
