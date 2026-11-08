@@ -983,18 +983,29 @@ async fn dispatch(body: Value) -> Result<Value> {
 
 async fn answer(mut body: Value) -> Result<Value> {
     // Apply trusted preset changes only after the command succeeds.
-    let preset = policy::accepts_preset(text(&body, "type")?)
-        .then(|| {
-            body.get("preset")
-                .and_then(Value::as_str)
-                .and_then(Preset::parse)
-        })
-        .flatten();
+    let preset = policy::preset_from(
+        text(&body, "type")?,
+        body.get("preset").and_then(Value::as_str),
+    );
     let reply = match text(&body, "type")? {
-        "device-preset" => Ok(json!({"type": "device-preset", "ok": true})),
+        "device-preset" => {
+            // Ending idle and screen locking takes the passphrase or Touch ID,
+            // checked against this store, not the service worker's word. A
+            // proof sent anyway is always checked, so a right answer is never
+            // claimed for one nobody checked.
+            let needs = preset.is_some_and(|to| PRESET.with(Cell::get).change_needs_proof(to));
+            if needs || body.get("passphrase").is_some() || body.get("prf").is_some() {
+                reauthenticate(&mut body, true)?;
+            }
+            Ok(json!({"type": "device-preset", "ok": true}))
+        }
         "device-generate" => generate(&body),
         "hello" | "device-status" => {
-            let status = if state().with(|_| Ok(())).is_ok() {
+            // Open: whether another device removed this one from the vault.
+            let removed = state()
+                .with(|s| Ok(!s.vault.is_member(&s.secret.device_id())))
+                .ok();
+            let status = if removed.is_some() {
                 "ready"
             } else if storage_exists()
                 .await
@@ -1007,7 +1018,7 @@ async fn answer(mut body: Value) -> Result<Value> {
                 "not-set-up"
             };
             Ok(
-                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms", "save-form", "save-form-match", "passkeys"]}),
+                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "preset":PRESET.with(Cell::get).as_str(), "removed":removed == Some(true), "capabilities":["list", "fill", "check", "save", "generate", "forms", "save-form", "save-form-match", "passkeys"]}),
             )
         }
         "device-create" => {
@@ -1110,6 +1121,9 @@ async fn answer(mut body: Value) -> Result<Value> {
         "device-rename" => rename_vault(&body),
         "device-devices" => devices(),
         "device-pair" => {
+            // Admitting a device gives it every item for good: the
+            // passphrase or Touch ID first, whatever the preset.
+            reauthenticate(&mut body, true)?;
             wait_ready().await?;
             let node = node()?;
             if !node.online(Duration::from_secs(20)).await {

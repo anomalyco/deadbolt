@@ -1618,7 +1618,7 @@ async function pair(device: Page) {
   // Keep draining so the child can finish after the code is consumed.
   const drained = (async () => { while (!(await reader.read()).done) {} })()
   const joinError = new Response(joining.stderr as ReadableStream<Uint8Array>).text()
-  await request(device, { type: "device-pair", code })
+  await request(device, { type: "device-pair", code, passphrase })
   const joined = await joining.exited
   await joinError // Drain diagnostics without logging the one-time pairing code.
   check(joined === 0, "CLI joins the browser vault")
@@ -1684,11 +1684,158 @@ async function joinExistingVault(device: Page, worker: Worker) {
   return fixtures.length
 }
 
+/** Why the vault last locked, as the service worker keeps it for the locked popup. */
+async function lockedBy(page: Page) {
+  return (await request(page, { type: "device-settings" })).reply.lockedBy as { reason: string; idleMs?: number } | undefined
+}
+
+/**
+ * Stops the extension's service worker over DevTools, as Chrome does after
+ * 30 s without events, and wakes a new one by asking the vault's status.
+ * The offscreen document and its worker aren't the service worker's: they
+ * stay. Answers the new service worker, guarded against native messaging.
+ */
+async function restartServiceWorker(page: Page): Promise<Worker> {
+  const cdp = await context!.newCDPSession(page)
+  let version: string | undefined
+  let stopped = false
+  cdp.on("ServiceWorker.workerVersionUpdated", ({ versions }) => {
+    for (const v of versions) if (v.scriptURL === `chrome-extension://${ID}/background.js`) {
+      if (v.runningStatus === "running") version = v.versionId
+      if (v.runningStatus === "stopped") stopped = true
+    }
+  })
+  await cdp.send("ServiceWorker.enable")
+  const versionId = await until("running extension service worker", async () => version)
+  await cdp.send("ServiceWorker.stopWorker", { versionId })
+  await until("extension service worker stopped", async () => stopped)
+  await cdp.detach()
+  await state(page)
+  const worker = context!.serviceWorkers()[0] ?? await context!.waitForEvent("serviceworker")
+  await worker.evaluate(() => {
+    const global = globalThis as unknown as { nativeCalls: number }
+    global.nativeCalls = 0
+    chrome.runtime.connectNative = () => { global.nativeCalls++; throw new Error("Native host forbidden by standalone proof") }
+  })
+  return worker
+}
+
+/** The toolbar popup's locked view, in a tab of the popup's size: its "Locked · …" line, with stills in light and dark under --video. */
+async function lockedPopupLine(shots?: string): Promise<string> {
+  const popup = await newPage("locked-popup")
+  await popup.setViewportSize({ width: 380, height: 560 })
+  await popup.goto(`chrome-extension://${ID}/popup.html`)
+  const line = popup.locator(".lock-reason")
+  await line.waitFor()
+  const text = await line.innerText()
+  if (video && shots) {
+    await mkdir(video, { recursive: true })
+    for (const scheme of ["light", "dark"] as const) {
+      await popup.emulateMedia({ colorScheme: scheme })
+      await Bun.sleep(150)
+      await popup.screenshot({ path: join(video, `${shots}-${scheme}.png`) })
+    }
+  }
+  await popup.close()
+  return text
+}
+
+/**
+ * Until you quit the browser: choosing it takes the passphrase, which the
+ * vault's worker checks itself and won't take from any other command; it
+ * stays open through a faked 13 h idle (Comfortable doesn't) and through
+ * service worker restarts under every preset, and locks on Lock. The
+ * locked popup says why it locked. Answers the service worker running now.
+ */
+async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
+  for (const type of ["hello", "device-status", "device-items", "fill-form"]) await vault(worker, { type, preset: "until-quit" })
+  const smuggled = (await vault(worker, { type: "device-preset", preset: "until-quit" })).reply
+  check(smuggled.type === "error" && smuggled.code === "passphrase_needed", "Rust takes Until you quit from no other command, and asks for the passphrase itself")
+  const wrong = (await vault(worker, { type: "device-preset", preset: "until-quit", passphrase: "wrong fixture passphrase" })).reply
+  check(wrong.type === "error" && wrong.code === "wrong_passphrase", "Rust checks the passphrase for Until you quit against its own store")
+  check((await command(device, { type: "device-preset", preset: "until-quit" })).ok === false, "the service worker asks for it too")
+  const strange = await command(device, { type: "device-preset", preset: "until-quit", prf: "00".repeat(32) })
+  check(!strange.ok && await state(device) === "ready" && (await request(device, { type: "device-settings" })).reply.preset === "comfortable", "a Touch ID key the vault refuses changes nothing and doesn't lock it")
+  const pairing = { type: "device-pair", code: "apple-river-stone-lamp-zoo" }
+  check((await vault(worker, pairing)).reply.code === "passphrase_needed", "Rust asks for the passphrase before approving a device")
+  check((await vault(worker, { ...pairing, passphrase: "wrong fixture passphrase" })).reply.code === "wrong_passphrase", "Rust checks the passphrase for approving a device against its own store")
+
+  // In Settings: picking it asks first, and chooses it once the passphrase is right.
+  await device.bringToFront()
+  await device.reload()
+  await device.getByRole("searchbox", { name: "Search the vault" }).waitFor()
+  await device.getByRole("button", { name: "Settings", exact: true }).click()
+  const presets = device.locator(".presets")
+  await device.getByRole("radio", { name: /^Until you quit the browser/ }).click()
+  const pass = device.getByLabel("Passphrase to stay unlocked", { exact: true })
+  await pass.waitFor()
+  check((await request(device, { type: "device-settings" })).reply.preset === "comfortable" && await device.getByRole("radio", { name: /^Comfortable/ }).isChecked(), "choosing Until you quit asks for the passphrase before anything changes")
+  const stills = async (name: string) => {
+    if (!video) return
+    await mkdir(video, { recursive: true })
+    await presets.evaluate((el) => el.closest(".group")!.scrollIntoView({ block: "start" }))
+    for (const scheme of ["light", "dark"] as const) {
+      await device.emulateMedia({ colorScheme: scheme })
+      await Bun.sleep(150)
+      await device.screenshot({ path: join(video, `${name}-${scheme}.png`) })
+    }
+    await device.emulateMedia({ colorScheme: null })
+  }
+  await stills("lock-presets-asking")
+  await pass.fill(passphrase)
+  await device.getByRole("button", { name: "Choose", exact: true }).click()
+  await until("Until you quit chosen", () => device.getByRole("radio", { name: /^Until you quit the browser/ }).isChecked())
+  check((await request(device, { type: "device-settings" })).reply.preset === "until-quit", "the passphrase chooses Until you quit")
+  const unasked = (await vault(worker, { type: "device-preset", preset: "until-quit", passphrase: "wrong fixture passphrase" })).reply
+  check(unasked.type === "error" && unasked.code === "wrong_passphrase", "Rust checks a passphrase sent with a preset even when the change needs none")
+  check(await device.locator(".preset", { hasText: "Until you quit the browser" }).locator(".sub").innerText() === "Stays unlocked, even through sleep and screen lock, until you quit the browser (Ctrl+Q / closing every window). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.", "Settings warns what Until you quit means")
+  await stills("lock-presets")
+  await device.getByRole("button", { name: "Settings", exact: true }).click()
+
+  // Chrome stopping the service worker locks no preset.
+  for (const preset of ["until-quit", "relaxed", "comfortable", "strict"] as const) {
+    if (preset !== "until-quit") await request(device, { type: "device-preset", preset })
+    worker = await restartServiceWorker(device)
+    check(await state(device) === "ready", `${preset}: a service worker restart keeps the vault open`)
+  }
+
+  // 13 hours without use, as a service worker that wakes for the idle alarm finds it.
+  const idle = async () => {
+    await worker.evaluate(() => chrome.storage.session.set({ "deadbolt.lastUse": Date.now() - 13 * 60 * 60_000 }))
+    worker = await restartServiceWorker(device)
+    await worker.evaluate(() => chrome.alarms.create("deadbolt-idle", { when: Date.now() + 50, periodInMinutes: 1 }))
+    await until("idle alarm fires", () => worker.evaluate(async () => ((await chrome.alarms.get("deadbolt-idle"))?.scheduledTime ?? 0) > Date.now() + 30_000), 10_000)
+    await Bun.sleep(500)
+  }
+  await request(device, { type: "device-preset", preset: "until-quit", passphrase })
+  await idle()
+  check(await state(device) === "ready", "Until you quit stays unlocked after 13 h idle")
+  await request(device, { type: "device-preset", preset: "comfortable" })
+  // A content script can write chrome.storage.local, where the preset used to be: it's never read now.
+  await worker.evaluate(() => chrome.storage.local.set({ "deadbolt.lockPreset": "until-quit" }))
+  await idle()
+  check((await request(device, { type: "device-settings" })).reply.preset === "comfortable", "a preset written to chrome.storage.local isn't the extension's")
+  check(await state(device) === "locked", "Comfortable locks after the same 13 h idle, whatever chrome.storage.local says")
+  check((await lockedBy(device))?.reason === "idle", "the vault keeps that it locked for being idle")
+  check(await lockedPopupLine("locked-popup-idle") === "Locked · 1 h idle", "the locked popup says Locked · 1 h idle")
+
+  await request(device, { type: "device-unlock", passphrase })
+  check(await lockedBy(device) === undefined, "unlocking forgets why it locked")
+  await request(device, { type: "device-preset", preset: "until-quit", passphrase })
+  await request(device, { type: "device-lock" })
+  check(await state(device) === "locked", "Until you quit locks on Lock")
+  check(await lockedPopupLine() === "Locked · you locked it", "the locked popup says Locked · you locked it")
+  await request(device, { type: "device-unlock", passphrase })
+  await request(device, { type: "device-preset", preset: "comfortable" })
+  return worker
+}
+
 async function unlockLifetime(device: Page, worker: Worker) {
-  for (const preset of ["comfortable", "relaxed", "strict"] as const) {
-    await request(device, { type: "device-preset", preset })
+  for (const preset of ["comfortable", "relaxed", "strict", "until-quit"] as const) {
+    await request(device, { type: "device-preset", preset, ...(preset === "until-quit" ? { passphrase } : {}) })
     await worker.evaluate(() => chrome.offscreen.closeDocument())
     check(await state(device) === "locked", `${preset}: offscreen loss locks the vault`)
+    check((await lockedBy(device))?.reason === "offscreen", `${preset}: the vault keeps that its offscreen document was lost`)
     await request(device, { type: "device-unlock", passphrase })
   }
   await request(device, { type: "device-preset", preset: "comfortable" })
@@ -2013,6 +2160,7 @@ try {
   }
 
   const keptPasskeys = (await devicePasskeys(device)).map((k) => k.credentialId).sort()
+  worker = await untilQuit(device, worker)
   await unlockLifetime(device, worker)
   worker = await inlineUnlock(device, worker)
   await biometricUnlock(device, worker)
@@ -2040,11 +2188,16 @@ try {
   await request(device, { type: "device-unlock", passphrase })
   check((await logins(device)).length === count, "immediate lock/unlock reopens the exclusive OPFS handle")
   check(await worker.evaluate(() => (globalThis as unknown as { nativeCalls: number }).nativeCalls) === 0, "no native messaging connection attempted")
+  // Until you quit locks when the browser quits, and says so.
+  await request(device, { type: "device-preset", preset: "until-quit", passphrase })
 
   await context!.close()
   context = undefined
   const restarted = await launch()
-  check(await state(restarted.device) === "locked", "browser restart starts locked")
+  check(await state(restarted.device) === "locked", "browser restart starts locked, even Until you quit")
+  check((await lockedBy(restarted.device))?.reason === "quit", "the vault keeps that the browser quit")
+  check(await lockedPopupLine("locked-popup-restarted") === "Locked · browser restarted", "the locked popup says Locked · browser restarted")
+  await request(restarted.device, { type: "device-preset", preset: "comfortable" })
   await request(restarted.device, { type: "device-unlock", passphrase })
   await until("encrypted vault survives browser restart", async () => (await logins(restarted.device)).length === count, 60_000)
   check(true, "encrypted vault survives browser restart")

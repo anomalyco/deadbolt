@@ -4,7 +4,7 @@
 // worker, so a popup that closes, or a reloaded page, asks for it again and
 // carries on where it was.
 
-import { describePreset, duration, PRESETS, VAULT_NAME } from "../device-rules"
+import { describePreset, duration, isLockedBy, lockedLine, PRESETS, VAULT_NAME } from "../device-rules"
 import type { JoinStatus, Reauth } from "../messages"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
@@ -350,6 +350,9 @@ export function unlockView(app: App): View {
   label.dataset.text = "Unlock"
   const submit = h("button", { class: "btn primary wide", type: "submit" }, label)
   const preset = PRESETS[app.preset]
+  // Why it locked, quietly, once the service worker says.
+  const why = h("p", { class: "preset-note lock-reason" })
+  why.hidden = true
   const form = h(
     "form",
     { class: "view center unlock", novalidate: "" },
@@ -357,7 +360,8 @@ export function unlockView(app: App): View {
     input,
     error,
     submit,
-    h("p", { class: "preset-note", title: describePreset(app.preset) }, icon("clock"), h("span", {}, `${preset.name} · locks after ${duration(preset.idleMs)} idle`)),
+    h("p", { class: "preset-note", title: describePreset(app.preset) }, icon("clock"), h("span", {}, Number.isFinite(preset.idleMs) ? `${preset.name} · locks after ${duration(preset.idleMs)} idle` : preset.name)),
+    why,
   )
   input.addEventListener("input", () => {
     input.classList.remove("invalid")
@@ -401,6 +405,10 @@ export function unlockView(app: App): View {
   })
   void app.ask({ type: "device-settings" }).then((r) => {
     if (r.ok && typeof r.reply.retryAt === "number" && r.reply.retryAt > Date.now() && form.isConnected) backoff(r.reply.retryAt)
+    if (r.ok && isLockedBy(r.reply.lockedBy)) {
+      why.textContent = lockedLine(r.reply.lockedBy)
+      why.hidden = false
+    }
   })
   return { el: form, focus: () => input.focus(), leave: () => clearTimeout(timer) }
 }

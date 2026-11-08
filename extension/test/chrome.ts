@@ -46,6 +46,14 @@ export interface FakeChrome {
   /** URLs opened with chrome.tabs.create. */
   opened: string[]
   offscreenOpen: boolean
+  /** The open offscreen document's id: a new one each time it's created. */
+  offscreenDoc: number
+  /** chrome.runtime.onInstalled listeners. */
+  installedListeners: Array<(details: { reason: string }) => void>
+  /** This build's manifest version. */
+  version: string
+  /** IndexedDB, as the fake indexedDB keeps it: database, then object store, then key. */
+  idb: Record<string, Record<string, Record<string, unknown>>>
 }
 
 /** A message to the extension from `sender`, answered by the first listener that responds (null if none does). */
@@ -92,7 +100,12 @@ export function installChrome(): FakeChrome {
     idleListeners: [],
     opened: [],
     offscreenOpen: true,
+    offscreenDoc: 1,
+    installedListeners: [],
+    version: "1.0.0",
+    idb: {},
   }
+  ;(globalThis as unknown as { indexedDB: unknown }).indexedDB = fakeIndexedDB(fake)
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
     runtime: {
       id: ID,
@@ -102,10 +115,15 @@ export function installChrome(): FakeChrome {
         return fake.runtimeAnswer(message)
       },
       onMessage: { addListener: (l: FakeChrome["listeners"][number]) => void fake.listeners.push(l) },
-      getContexts: async () => (fake.offscreenOpen ? [{ contextType: "OFFSCREEN_DOCUMENT" }] : []),
+      getContexts: async () => (fake.offscreenOpen ? [{ contextType: "OFFSCREEN_DOCUMENT", documentId: `offscreen-${fake.offscreenDoc}` }] : []),
+      onInstalled: { addListener: (l: (details: { reason: string }) => void) => void fake.installedListeners.push(l) },
+      getManifest: () => ({ version: fake.version }),
     },
     offscreen: {
-      createDocument: async () => void (fake.offscreenOpen = true),
+      createDocument: async () => {
+        fake.offscreenOpen = true
+        fake.offscreenDoc++
+      },
       closeDocument: async () => void (fake.offscreenOpen = false),
     },
     alarms: {
@@ -146,6 +164,7 @@ export function installChrome(): FakeChrome {
       local: {
         get: async (key: string | string[]) => Object.fromEntries((Array.isArray(key) ? key : [key]).filter((k) => k in fake.local).map((k) => [k, fake.local[k]])),
         set: async (items: Record<string, unknown>) => void Object.assign(fake.local, structuredClone(items)),
+        remove: async (key: string | string[]) => void (Array.isArray(key) ? key : [key]).forEach((k) => delete fake.local[k]),
       },
     },
     action: {
@@ -155,6 +174,45 @@ export function installChrome(): FakeChrome {
     },
   }
   return fake
+}
+
+/** Just enough IndexedDB for a key-value store: open (with its upgrade), get, put, delete and clear, answered asynchronously. */
+function fakeIndexedDB(fake: FakeChrome) {
+  const answer = <T>(result: () => T) => {
+    const req = { result: undefined as T | undefined, error: null, onsuccess: null as null | (() => void), onerror: null as null | (() => void) }
+    queueMicrotask(() => {
+      req.result = result()
+      req.onsuccess?.()
+    })
+    return req
+  }
+  return {
+    open(name: string) {
+      const req = { result: null as unknown, error: null, onupgradeneeded: null as null | (() => void), onsuccess: null as null | (() => void), onerror: null as null | (() => void) }
+      queueMicrotask(() => {
+        const fresh = !fake.idb[name]
+        const stores = (fake.idb[name] ??= {})
+        req.result = {
+          createObjectStore: (store: string) => (stores[store] ??= {}),
+          transaction: (store: string) => ({
+            objectStore: () => {
+              const map = (stores[store] ??= {})
+              return {
+                get: (key: string) => answer(() => structuredClone(map[key])),
+                put: (value: unknown, key: string) => answer(() => ((map[key] = structuredClone(value)), key)),
+                delete: (key: string) => answer(() => void delete map[key]),
+                clear: () => answer(() => void Object.keys(map).forEach((k) => delete map[k])),
+              }
+            },
+          }),
+          close: () => {},
+        }
+        if (fresh) req.onupgradeneeded?.()
+        req.onsuccess?.()
+      })
+      return req
+    },
+  }
 }
 
 /** A page that shows nothing either way. */

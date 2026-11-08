@@ -635,6 +635,10 @@ main.vault.popup {
   height: 13px;
 }
 
+.preset-note.lock-reason {
+  margin-top: 2px;
+}
+
 .state-icon.pulse {
   animation: breathe 1.6s ease-in-out infinite;
 }
@@ -1303,6 +1307,13 @@ main.vault.popup {
 
 .preset input {
   margin: 2px 0 0;
+}
+
+.preset-proof form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .preset .text {
