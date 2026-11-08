@@ -29,6 +29,7 @@ import { BUSY, CAPTCHA, controlText, deliveredCode, findAccountTile, findProvide
 import { clippedBox, fillable, fillFields, fits, hiddenByStyle } from "./fill"
 import { send, type PageState } from "./inline"
 import { deepActiveElement, deepQueryAll, markOwnHost, openRoots } from "./shadow"
+import { SUBMIT_LABEL } from "./signin-submit"
 
 export interface ChainHooks {
   /** The top page, with "Offer to sign in" on. */
@@ -52,8 +53,6 @@ const SUBMIT_DELAY_MS = 150
 /** A finished chain's last word stays this long, then fades (within 1.5 s in all). */
 const DONE_HOLD_MS = 900
 const INSET = 12
-
-const SUBMIT_LABEL = /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i
 const PASSKEY_LABEL = /^(?:use (?:a|your) passkey|sign in with (?:a|your) passkey)$/i
 /**
  * OAuth consent on a provider page: hard evidence that stops the chain before

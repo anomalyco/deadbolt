@@ -322,8 +322,12 @@ export type ToContent =
   | { type: "db:signin-offer"; token: string }
   | { type: "db:auth-probe"; fresh?: boolean }
   | { type: "db:signin-go"; action: string }
-  /** `first`: an automatic session's first step, held to a sign-in's own (see content.ts). */
-  | { type: "db:signin-submit"; form: number; first?: true }
+  /**
+   * `first`: an automatic session's first step, held to a sign-in's own;
+   * `account`: the session's username, which the page may show as its
+   * account chip (see content/signin-submit.ts).
+   */
+  | { type: "db:signin-submit"; form: number; first?: true; account?: string }
   // Can the user see a frame's form? (see shownInPage)
   /**
    * To the frame above: where those boxes show in it, through the element

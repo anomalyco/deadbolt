@@ -905,24 +905,24 @@ export class Autofill {
     if (!reply.ok) return reply
     this.filled?.(target.tabId, site)
     if (generation !== this.generation(target.tabId)) return reply
-    return { ok: true, submitted: await this.submitStep(target, s, roles, form, generation, next, true) }
+    return { ok: true, submitted: await this.submitStep(target, s, roles, form, generation, next, true, account.username) }
   }
 
   /**
    * After an automatic session's step filled: arm its next step, then submit
-   * this one, unless it's a code step and the site's learned Flow has no
-   * code step (the content script also refuses a code it says was sent by
-   * SMS or email, and a form that doesn't post to its own origin and tab).
-   * At most four submits a session. True if the content script submitted.
-   * Call inside `serial`.
+   * this one through the content script's checks (see
+   * content/signin-submit.ts: a sign-in's own button, every value in, no
+   * CAPTCHA or error, a form that posts to its own origin and tab or a
+   * form-less step's sole Next, a code it doesn't say came by SMS or email).
+   * A code step is submitted only right after this session's password step
+   * went. `account`, the login's username, lets content read past the page's
+   * account chip. At most four submits a session. True if the content script
+   * submitted. Call inside `serial`.
    */
-  private async submitStep(target: FrameTarget, s: Pick<Session, "site" | "automaticSubmits" | "passwordSubmittedAt">, roles: FieldRole[], form: number, generation: number, next: Session | null | undefined, first = false): Promise<boolean> {
-    // A saved TOTP can fill an unfamiliar code step, but only a learned code
-    // flow authorizes submitting it, and only right after this session's
-    // password step went (a code box shown later, by anyone, isn't that
-    // step). Content also vetoes SMS/email prompts.
+  private async submitStep(target: FrameTarget, s: Pick<Session, "site" | "automaticSubmits" | "passwordSubmittedAt">, roles: FieldRole[], form: number, generation: number, next: Session | null | undefined, first = false, account?: string): Promise<boolean> {
+    // A code box shown later, by anyone, isn't the step after this session's password.
     const now = Date.now()
-    const submit = !roles.includes("otp") || ((await flowFor(s.site))?.code === true && now - (s.passwordSubmittedAt ?? -Infinity) <= AUTOMATIC_STEP_MS)
+    const submit = !roles.includes("otp") || now - (s.passwordSubmittedAt ?? -Infinity) <= AUTOMATIC_STEP_MS
     if (generation !== this.generation(target.tabId)) return false
     if (!(await signInEnabled())) {
       await this.endSession(target.tabId)
@@ -935,7 +935,7 @@ export class Autofill {
     if (next !== undefined) await this.arm(target.tabId, generation, next && submit ? stepped(next) : next)
     if (!submit || generation !== this.generation(target.tabId)) return false
     this.submits.set(target.tabId, { documentId: target.documentId, at: now })
-    const submitted = await sendToFrame(target, { type: "db:signin-submit", form, ...(first ? { first: true as const } : {}) })
+    const submitted = await sendToFrame(target, { type: "db:signin-submit", form, ...(first ? { first: true as const } : {}), ...(account ? { account } : {}) })
     if (generation !== this.generation(target.tabId)) return false
     // Four attempts are enough: leave any further step to a fresh user pick.
     if (!submitted || automaticSubmits >= MAX_AUTOMATIC_SUBMITS) await this.endSession(target.tabId)
@@ -1173,6 +1173,13 @@ export class Autofill {
       if (s.automatic && !account.urls.some((u) => exactSignInOrigin(u, target.origin))) return this.endSession(target.tabId)
       const step = (first ? clean : stepRoles(clean, account, idEmpty)).filter((r) => allowed.includes(r)).filter((r) => !s.filled.includes(r) || (IDENTIFIER_ROLES.includes(r) && (!s.automatic || !s.filled.includes("password"))))
       if (!step.length) return
+      // A step still coming into view (Google's password box fades in) isn't
+      // the step yet: the page reports it again once it shows (content.ts
+      // scans when a transition ends), and only then is it used.
+      if (!framed) {
+        const ready = cleanApproved(await sendToFrame(target, { type: "db:approve", form: form as number, measure: false }))
+        if (!ready || !step.every((r) => ready.roles.includes(r)) || generation !== this.generation(target.tabId)) return
+      }
       const shown = framed ? await this.measured(target.tabId, () => shownInPage(target, form as number, true), null) : undefined
       // A frame's step fills only fields that show through every frame above. One
       // that shows none of them yet (a password box still collapsed) isn't the
@@ -1184,7 +1191,7 @@ export class Autofill {
       if (generation !== this.generation(target.tabId)) return
       if (!s.automatic) return void (next !== undefined && (await this.arm(target.tabId, generation, next)))
       if (!filled.ok) return this.endSession(target.tabId)
-      await this.submitStep(target, s, clean, form as number, generation, next, first)
+      await this.submitStep(target, s, clean, form as number, generation, next, first, account.username)
     })
   }
 

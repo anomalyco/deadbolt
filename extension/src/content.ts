@@ -4,13 +4,13 @@
 // submit tracking are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
-import { asksNewPassword, deliveredCode, isVisible, scanPage, type Field } from "./content/detect"
+import { asksNewPassword, isVisible, scanPage, type Field } from "./content/detect"
 import { SIGNIN_SETTING, signInOn } from "./auth-state"
 import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
 import { readSubmitted } from "./content/formfill"
-import { fillable, ownValue, rendered, trackUserInput } from "./content/fill"
+import { ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
@@ -18,6 +18,7 @@ import { formFailed, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { chainActive, initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
+import { SETTLE_MS, submitPlan, type SubmitPlan } from "./content/signin-submit"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 import { paymentProvider } from "./payments"
 
@@ -32,16 +33,6 @@ if (isTop) {
 const SCAN_INTERVAL_MS = 750
 /** How soon an unchanged sign-in signal is sent again when the background couldn't decide on it. */
 const RETRY_SIGNAL_MS = 5000
-/** A first automatic step's button: signing in or going on, never confirming something. */
-const FIRST_LABEL = /^(sign\s?in|log\s?in|login|continue|next)$/i
-/** Words of re-authentication or of an action to confirm, which a sign-in's first step doesn't carry. */
-const NOT_SIGN_IN = /\b(confirm (?:your )?(?:access|identity|password)|re-?enter|re-?authenticat\w*|sudo|delete|deleting|remove|close (?:your )?account|deactivate|withdraw\w*|transfer|payment|disable|turn off|unlink)\b/i
-
-/** Whether the form, or the page's title and headings, say it's for something other than signing in. */
-function notSignIn(form: HTMLFormElement | null | undefined): boolean {
-  const text = [document.title, ...Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, [role=heading]"), (el) => el.innerText), form?.innerText ?? ""]
-  return text.some((t) => t.length > 20_000 || NOT_SIGN_IN.test(t))
-}
 const QUIET_AFTER_MS = 2500
 /** A submitted form still showing this long after means the sign-in failed. */
 const FAILED_AFTER_MS = 5000
@@ -233,42 +224,8 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     return
   }
   if (message?.type === "db:signin-submit") {
-    refresh()
-    const button = submitControl
-    const control = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button : null
-    const form = control ? control.form : fields[0]?.el.form
-    const label = button?.textContent?.trim() || (button instanceof HTMLInputElement ? button.value : "")
-    const destination = button?.getAttribute("formaction") ?? form?.getAttribute("action") ?? location.href
-    // The browsing context it goes to: the submitter's, the form's, else the document's <base target>.
-    const target = button?.getAttribute("formtarget") ?? form?.getAttribute("target") ?? document.querySelector("base[target]")?.getAttribute("target") ?? ""
-    // A sign-in posts; a GET form puts what it sends in the URL.
-    const method = control?.hasAttribute("formmethod") ? control.formMethod : form?.method
-    // An automatic session's first step must be a sign-in's own: a username
-    // box, a sign-in or continue button, and no words of re-authentication
-    // or of something else to confirm (Confirm access, delete, withdraw,
-    // turn off two-factor) on the form or the page's headings.
-    const first = message.first !== true || (FIRST_LABEL.test(label) && fields.some((f) => IDENTIFIER_ROLES.includes(f.role)) && !notSignIn(form))
-    // A remembered code step is not permission to send a TOTP into a prompt
-    // that currently describes delivery by SMS or email.
-    const delivered = deliveredCode(fields, form)
-    // The fields passed the full check, paint included, as each was written;
-    // this one is about submitting, so it leaves the costly paint check out.
-    const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
-      (kind === "login" || kind === "mfa") && button instanceof HTMLElement && isVisible(button) &&
-      !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
-      form instanceof HTMLFormElement && fields.length > 0 && method === "post" && first &&
-      !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el, null, false)) &&
-      !delivered &&
-      new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
-    respond(!!safe)
-    if (safe) {
-      // The guarded extension pick explicitly authorized this submit. Other
-      // script-generated submit events still cannot advance a session.
-      captured()
-      stepSubmitted()
-      if (submittedForm !== form) button.click()
-    }
-    return
+    void sessionSubmit(message).then(respond, () => respond(false))
+    return true
   }
   if (message?.type === "db:forms-frames") {
     if (isTop) cardFrames = message.on === true
@@ -530,6 +487,40 @@ function captured() {
 function stepSubmitted() {
   markSubmitted()
   void send({ type: "db:submitted" })
+}
+
+/** The step (formId) an automatic session last submitted here: each is submitted once. */
+let sessionSubmitted = -1
+
+/**
+ * An automatic session's submit of the step it just filled (see
+ * content/signin-submit.ts), checked now and again after a short settle.
+ * The guarded extension pick explicitly authorized it; other
+ * script-generated submits still can't advance a session.
+ */
+async function sessionSubmit(message: Extract<ToContent, { type: "db:signin-submit" }>): Promise<boolean> {
+  const plan = (): SubmitPlan | null => {
+    refresh()
+    if (!isTop || !offerSignIn || document.hidden || formId !== message.form || sessionSubmitted === formId) return null
+    const p = submitPlan({ kind, fields, submit: submitControl, first: message.first === true, account: message.account })
+    return typeof p === "string" ? null : p
+  }
+  const before = plan()
+  if (!before) return false
+  // The page submitted the form itself as the last value went in: that's the step's submit.
+  if (before.form && submittedForm === before.form) {
+    sessionSubmitted = formId
+    stepSubmitted()
+    return true
+  }
+  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
+  const after = plan()
+  if (!after || after.button !== before.button) return false
+  sessionSubmitted = formId
+  captured()
+  stepSubmitted()
+  if (!after.form || submittedForm !== after.form) after.button.click()
+  return true
 }
 
 /** The user's own click on a submit control or Enter in a field. */
