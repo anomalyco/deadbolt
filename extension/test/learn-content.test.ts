@@ -1,12 +1,12 @@
 import { beforeAll, describe, expect, test } from "bun:test"
 import { initLearn, learnScanned, learning } from "../src/content/learn"
-import type { LearnSession, LearnStep, TimelineEvent } from "../src/learn"
+import { wordDigest, type LearnSession, type LearnStep, type TimelineEvent } from "../src/learn"
 
 // The content side of Record, in one frame shaped like Apple's sign-in
 // widget: the username box shows, the password box waits hidden.
 
-const session: LearnSession = { id: "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", salt: "pepper", startedAt: Date.now(), until: Date.now() + 60_000 }
-const sent: Array<{ type: string; session?: string; step?: LearnStep; events?: TimelineEvent[] }> = []
+const session: LearnSession = { id: "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", salt: "pepper", startedAt: Date.now(), until: Date.now() + 60_000, words: [] }
+const sent: Array<{ type: string; session?: string; step?: LearnStep; events?: TimelineEvent[]; words?: string[] }> = []
 const listeners: Array<(m: unknown) => void> = []
 /** What the background answers to a step. */
 let stepReply: unknown = true
@@ -30,7 +30,7 @@ beforeAll(async () => {
     runtime: {
       sendMessage: async (m: { type: string }) => {
         sent.push(m)
-        return m.type === "db:learn-ask" ? session : stepReply
+        return stepReply
       },
       onMessage: { addListener: (f: (m: unknown) => void) => listeners.push(f) },
     },
@@ -43,8 +43,23 @@ beforeAll(async () => {
     <div hidden><input id="password_text_field" type="password" autocomplete="current-password" tabindex="-1"></div>
     <button id="continue">Continue</button>`
   initLearn()
+  // A frame asks nothing: it waits to be told.
+  await settle()
+  expect(sent).toEqual([])
+  join(session)
   await settle()
 })
+
+/** The background tells the frame its tab records (on DOMContentLoaded, or as it starts). */
+const join = (s: LearnSession | null) => {
+  for (const f of listeners) f({ type: "db:learn", session: s })
+}
+let next = 0x40
+/** A new recording, each with its own id. */
+const fresh = (over: Partial<LearnSession> = {}): LearnSession => ({ ...session, id: `${(next++).toString(16)}5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b`, startedAt: Date.now(), ...over })
+/** This recording's timeline as the frame sent it. */
+const timelineOf = (id: string) => sent.filter((m) => m.type === "db:learn-events" && m.session === id).flatMap((m) => m.events!)
+const down = (el: Element, key: string, init: KeyboardEventInit = {}) => el.dispatchEvent(trusted(new KeyboardEvent("keydown", { key, bubbles: true, composed: true, ...init })))
 
 describe("a learning frame", () => {
   test("joins the tab's session and records where it starts", () => {
@@ -127,9 +142,9 @@ describe("a learning frame", () => {
     for (const f of listeners) f({ type: "db:learn", session: { ...session, id: "2b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b" } })
     await settle()
     const start = steps().findLast((s) => s.trigger === "start")!
-    expect(start.frame).toMatchObject({ path: "/u/<email>/login", queryKeys: ["<email>", "token<n>"] })
+    expect(start.frame).toMatchObject({ path: "/u/<seg>/login", queryKeys: ["<email>", "token<n>"] })
     expect(start.inputs[0]).toMatchObject({ id: "<email>", name: "otp-<n>", autocomplete: "one-time-code", inputMode: "numeric" })
-    expect(start.iframes[0]).toMatchObject({ host: "chat.example.net", path: "/w/<email>/<n>" })
+    expect(start.iframes[0]).toMatchObject({ host: "chat.example.net", path: "/w/<seg>/<seg>" })
     expect(JSON.stringify(start)).not.toContain("kit@")
   })
 
@@ -182,7 +197,148 @@ describe("a learning frame", () => {
     for (const never of ["kit@example.com", "correct horse battery", "kit@"]) expect(all).not.toContain(never)
   })
 
+  test("a PIN pad's keys log no digits, text or place", async () => {
+    const s = fresh()
+    join(s)
+    document.body.innerHTML = `<div id="pad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 0].map((n) => `<button class="key key-${n}" aria-label="${n}">${n}</button>`).join("")}</div>
+      <div id="imgs">${[1, 9, 8, 4].map((n) => `<div class="k" role="button" tabindex="0"><img src="/k${n}.png" alt=""></div>`).join("")}</div>`
+    // happy-dom lays nothing out: the image keys are four small same-size controls.
+    const rects = new Map<Element, DOMRect>()
+    for (const el of Array.from(document.querySelectorAll("#imgs .k"))) rects.set(el, { x: 0, y: 0, width: 48, height: 48, top: 0, left: 0, right: 48, bottom: 48, toJSON: () => ({}) } as DOMRect)
+    const real = Element.prototype.getBoundingClientRect
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      return rects.get(this) ?? real.call(this)
+    }
+    try {
+      for (const n of [1, 9, 8, 4]) {
+        const key = $(`#pad .key-${n}`)
+        for (const type of ["pointerdown", "pointerup", "click"]) key.dispatchEvent(trusted(new MouseEvent(type, { bubbles: true, composed: true, clientX: 10 * n, clientY: 20 })))
+      }
+      for (const key of Array.from(document.querySelectorAll("#imgs .k img"))) key.dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true, clientX: 5, clientY: 5 })))
+      await new Promise((r) => setTimeout(r, 650))
+    } finally {
+      Element.prototype.getBoundingClientRect = real
+    }
+    const timeline = timelineOf(s.id)
+    expect(timeline.length).toBe(16)
+    expect(timeline.every((e) => e.target?.keypad === true && e.x === undefined && e.y === undefined && !e.target.text && !e.target.label)).toBe(true)
+    expect(timeline[0].target).toEqual({ tag: "button", path: "div#pad > button.key", keypad: true })
+    expect(JSON.stringify(timeline.map((e) => e.target))).not.toMatch(/\d/)
+    expect(JSON.stringify(sent.filter((m) => m.session === s.id))).not.toMatch(/"(text|label)":"[^"]*\d/)
+  })
+
+  test("a password box in a closed shadow root logs only Enter, Tab and Escape", async () => {
+    const s = fresh()
+    join(s)
+    document.body.innerHTML = `<pw-box id="host"></pw-box><input id="after">`
+    const host = $("#host")
+    const root = host.attachShadow({ mode: "closed" })
+    root.innerHTML = `<input type="password" id="inner">`
+    for (const [key, init] of [["Shift", { shiftKey: true }], ["C", { shiftKey: true }], ["o", {}], ["Backspace", {}], ["v", { ctrlKey: true }], ["ArrowLeft", {}], ["Enter", {}], ["Tab", {}], ["Escape", {}], ["Enter", { ctrlKey: true }]] as const) down(host, key, init)
+    host.dispatchEvent(trusted(new Event("input", { bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 650))
+    const timeline = timelineOf(s.id)
+    expect(timeline.map((e) => [e.type, e.key, e.mods ?? ""])).toEqual([
+      ["key", "Enter", ""],
+      ["key", "Tab", ""],
+      ["key", "Escape", ""],
+    ])
+    expect(timeline.some((e) => e.length)).toBe(false)
+  })
+
+  test("Ctrl+Alt+Q and other chords in a password box log nothing, and its typing stays one event", async () => {
+    const s = fresh()
+    join(s)
+    document.body.innerHTML = `<input id="pw" type="password"><input id="user">`
+    const pw = $<HTMLInputElement>("#pw")
+    pw.dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+    type(pw, "ab")
+    down(pw, "q", { ctrlKey: true, altKey: true })
+    down(pw, "@", { altKey: true, ctrlKey: true })
+    down(pw, "Enter", { altKey: true })
+    down(pw, "Tab", { metaKey: true })
+    type(pw, "abcd")
+    pw.dispatchEvent(trusted(new FocusEvent("focusout", { bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 650))
+    expect(timelineOf(s.id).map((e) => e.type)).toEqual(["focus", "input", "blur"])
+  })
+
+  test("textarea and editable text, and labels that show it, are scrubbed", async () => {
+    const s = fresh()
+    join(s)
+    document.body.innerHTML = `
+      <label>Note <textarea id="note"></textarea></label>
+      <div id="live" aria-live="polite"></div>
+      <label for="reply" id="lab">Reply</label><input id="reply" aria-labelledby="live lab">
+      <button id="send">Send</button>`
+    const note = $<HTMLTextAreaElement>("#note")
+    note.value = "meet me at the blue door"
+    note.dispatchEvent(trusted(new Event("input", { bubbles: true, composed: true })))
+    $("#live").textContent = "Saved meet me at the blue door"
+    document.body.insertAdjacentHTML("beforeend", `<label for="x">Re: meet me at the blue door</label><input id="x">`)
+    learnScanned()
+    $("#reply").dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+    $("#note").dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 650))
+    const all = JSON.stringify(sent.filter((m) => m.session === s.id))
+    expect(all).not.toContain("blue door")
+    expect(all).toContain("Re: <typed>")
+    const focus = timelineOf(s.id).filter((e) => e.type === "focus")
+    expect(focus.map((e) => e.target?.label)).toEqual(["Reply", "Note"])
+    // The typed words go to the background as salted digests, never as words.
+    const words = sent.filter((m) => m.session === s.id).flatMap((m) => m.words ?? [])
+    expect(words).toContain(await wordDigest(s.salt, "door"))
+    expect(all).not.toMatch(/"meet"|"door"/)
+  })
+
+  test("a later page's address and title are scrubbed of words typed before it", async () => {
+    history.replaceState(null, "", "/search/Kittens/results?kittens=1")
+    document.title = "Kittens - Example Search"
+    document.body.innerHTML = `<input id="q">`
+    const s = fresh({ words: [await wordDigest(session.salt, "kittens")] })
+    join(s)
+    await settle()
+    const start = steps().findLast((st) => st.trigger === "start")!
+    expect(start.frame).toMatchObject({ path: "/search/<seg>/results", queryKeys: ["<typed>"] })
+    expect(start.title).toBe("<typed> - Example Search")
+    history.replaceState(null, "", "/search/kittens")
+    $<HTMLInputElement>("#q").dispatchEvent(trusted(new Event("input", { bubbles: true, composed: true })))
+    document.body.innerHTML = `<input id="q2">`
+    learnScanned()
+    await settle()
+    const change = steps().findLast((st) => st.trigger === "change")!
+    expect(change.frame.path).toBe("/search/<typed>")
+    // Only a page's first step has its title.
+    expect(change.title).toBeUndefined()
+  })
+
+  test("a pagehide a page dispatches itself isn't an unload", async () => {
+    const s = fresh()
+    join(s)
+    window.dispatchEvent(new Event("pagehide"))
+    window.dispatchEvent(trusted(new Event("pagehide")))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(timelineOf(s.id).filter((e) => e.type === "unload").length).toBe(1)
+  })
+
+  test("a full recording doesn't end the frame: it stops sending, the tab still records", async () => {
+    const s = fresh()
+    join(s)
+    stepReply = "full"
+    document.body.innerHTML = `<button id="b">Go</button>`
+    $("#b").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 650))
+    expect(learning()).toBe(true)
+    const before = sent.filter((m) => m.type === "db:learn-events").length
+    $("#b").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 650))
+    expect(sent.filter((m) => m.type === "db:learn-events").length).toBe(before)
+    expect(learning()).toBe(true)
+    stepReply = true
+  })
+
   test("ends here when the background no longer has the session", async () => {
+    join(fresh())
     expect(learning()).toBe(true)
     stepReply = null
     document.body.innerHTML = `<input id="next" type="text"><button>Next</button>`

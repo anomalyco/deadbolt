@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { Learner } from "../src/bg/learn"
-import { keyName, LEARN_TTL_MS, lengthBand, MAX_EVENTS, scrub, shapeOf, truthOf, usernameDigest, type LearnSession, type LearnStep } from "../src/learn"
+import { frameOf, IDLE_MS, keyName, LEARN_TTL_MS, lengthBand, MAX_CROSS_EVENTS, MAX_EVENTS, scrub, shapeOf, truthOf, usernameDigest, wordDigest, type LearnSession, type LearnStep } from "../src/learn"
 import type { RequestBody as Request } from "../src/protocol"
 import { fakeHost, installChrome, pageSender, type FakeChrome } from "./chrome"
 
@@ -74,12 +74,21 @@ describe("Learner", () => {
 
   /** The service worker stops: its timers and memory go, storage stays. */
   function kill(l: Learner) {
-    const tabs = (l as unknown as { tabs: Map<number, { timer: ReturnType<typeof setTimeout>; flushing?: ReturnType<typeof setTimeout> }> }).tabs
+    const tabs = (l as unknown as { tabs: Map<number, { timer: ReturnType<typeof setTimeout>; idle: ReturnType<typeof setTimeout>; flushing?: ReturnType<typeof setTimeout> }> }).tabs
     for (const a of tabs.values()) {
       clearTimeout(a.timer)
+      clearTimeout(a.idle)
       clearTimeout(a.flushing)
     }
     tabs.clear()
+  }
+
+  /** A frame of `tabId` loads its document: the recording it's told to join, or null. */
+  async function joins(l: Learner, tabId = 1): Promise<LearnSession | null> {
+    const before = fake.delivered.length
+    await l.loaded({ tabId, frameId: 3, documentId: "frame-doc" })
+    const d = fake.delivered.slice(before).find((x) => x.message.type === "db:learn")
+    return d ? (d.message.session as LearnSession) : null
   }
 
   const broadcast = () => fake.delivered.filter((d) => d.message.type === "db:learn").map((d) => d.message.session as LearnSession | null)
@@ -113,8 +122,11 @@ describe("Learner", () => {
     expect(LEARN_TTL_MS).toBe(10 * 60_000)
     // Sent to the whole tab, not one document.
     expect(fake.delivered.find((d) => d.message.type === "db:learn")?.options).toBeUndefined()
-    expect(await learner.ask(pageSender({ frameId: 3, documentId: "frame-doc" }))).toEqual(session)
-    expect(await learner.ask(pageSender({ tab: { id: 2 } as chrome.tabs.Tab }))).toBeNull()
+    expect(session?.words).toEqual([])
+    // A frame that loads later is told; one of another tab isn't, and a frame never asks.
+    expect(await joins(learner)).toEqual(session)
+    expect(fake.delivered.at(-1)?.options).toEqual({ documentId: "frame-doc" })
+    expect(await joins(learner, 2)).toBeNull()
   })
 
   test("a step says whether the typed value was a saved username, then drops the digest", async () => {
@@ -132,6 +144,89 @@ describe("Learner", () => {
     expect(second.inputs[0].typed.savedUsername).toBe(false)
     expect(third).toMatchObject({ seq: 3, frameId: 6, sameSite: false })
     expect(lines.length).toBe(4)
+    // A frame doesn't get to say the background's fields.
+    await learner.step(pageSender({ frameId: 6, origin: "https://ads.other.net", url: "https://ads.other.net/x" }), id, { ...step({}), seq: 99, frameId: 0, sameSite: true } as LearnStep)
+    expect(lines.at(-1)?.line).toMatchObject({ seq: 4, frameId: 6, sameSite: false })
+  })
+
+  test("a keypad's keys keep no digits, text or place, however a frame sends them", async () => {
+    await learner.start(1)
+    const { id } = broadcast()[0]!
+    await learner.events(pageSender(), id, [
+      { t: 1, type: "click", target: { tag: "button", text: "1", path: "div#pad > button" }, x: 10, y: 10 },
+      { t: 2, type: "click", target: { tag: "button", label: "9", path: "div.key-9" }, x: 40, y: 10 },
+      { t: 3, type: "click", target: { tag: "img", keypad: true, id: "k8", path: "div > img.d8" }, x: 70, y: 10 },
+      { t: 4, type: "click", target: { tag: "button", text: "Pay 1984 now", id: "pay-4", path: "form > button" }, x: 9, y: 9 },
+    ])
+    await learner.stop(1, "stopped")
+    const events = lines.filter((l) => (l.line as { event: string }).event === "timeline").flatMap((l) => (l.line as { events: Array<Record<string, unknown>> }).events)
+    expect(events.map((e) => e.target)).toEqual([
+      { tag: "button", path: "div#pad > button", keypad: true },
+      { tag: "button", path: "div.key-<n>", keypad: true },
+      { tag: "img", id: "k<n>", path: "div > img.d<n>", keypad: true },
+      { tag: "button", id: "pay-<n>", text: "Pay <n> now", path: "form > button" },
+    ])
+    expect(events.slice(0, 3).every((e) => e.x === undefined && e.y === undefined)).toBe(true)
+    expect(JSON.stringify(lines)).not.toMatch(/1984|"[19]"/)
+  })
+
+  test("typed words scrub the addresses Chrome reports, and later pages are told them", async () => {
+    await learner.start(1)
+    const { id, salt } = broadcast()[0]!
+    const typed = await wordDigest(salt, "Kittens")
+    expect(await learner.events(pageSender(), id, [{ t: 1, type: "key", key: "Enter" }], [typed, "not-a-digest"])).toBe(true)
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/search/kittens?kittens=1&page=2", transitionType: "form_submit" })
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/reset/Zm9vYmFy0123/confirm", transitionType: "link" })
+    expect((await joins(learner))?.words).toEqual([typed])
+    await learner.stop(1, "stopped")
+    const navs = lines.filter((l) => (l.line as { event: string }).event === "timeline").flatMap((l) => (l.line as { events: Array<{ type: string; frame?: { path: string; queryKeys: string[] } }> }).events.filter((e) => e.type === "navigate"))
+    expect(navs.map((e) => e.frame)).toEqual([
+      expect.objectContaining({ path: "/search/<typed>", queryKeys: ["<typed>", "page"] }),
+      expect.objectContaining({ path: "/reset/<seg>/confirm", queryKeys: [] }),
+    ])
+    expect(JSON.stringify(lines).toLowerCase()).not.toContain("kittens")
+    // Paths are decoded first: an encoded word is still the word.
+    expect((await frameOf(new URL("https://x.test/search/%6Bittens/caf%C3%A9-list"), true, 0, [], { salt, digests: new Set([typed]) })).path).toBe("/search/<typed>/<seg>")
+  })
+
+  test("a page taken to another site by hand ends the recording; a provider's redirect doesn't", async () => {
+    await learner.start(1)
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://accounts.google.com/o/oauth2/auth", transitionType: "link", transitionQualifiers: ["server_redirect"] })
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/callback", transitionType: "link", transitionQualifiers: ["client_redirect"] })
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/home", transitionType: "typed" })
+    expect(await learner.status(1)).toMatchObject({ state: "on" })
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://news.other.net/", transitionType: "typed", transitionQualifiers: ["from_address_bar"] })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(await learner.status(1)).toMatchObject({ state: "done" })
+    expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "left" })
+    expect(fake.badges[1]).toBe("")
+  })
+
+  test("two minutes without input end a recording", async () => {
+    expect(IDLE_MS).toBe(2 * 60_000)
+    await learner.start(1)
+    const key = Object.keys(fake.session)[0]
+    ;(fake.session[key] as { lastInput: number }).lastInput = Date.now() - IDLE_MS - 1
+    kill(learner)
+    const again = new Learner(h.host)
+    await again.status(1)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "idle" })
+    expect(await again.status(1)).toMatchObject({ state: "done" })
+  })
+
+  test("a full cross-site frame is told so, and the page's frames go on", async () => {
+    await learner.start(1)
+    const { id } = broadcast()[0]!
+    const ad = pageSender({ frameId: 9, origin: "https://ads.other.net", url: "https://ads.other.net/x" })
+    const burst = () => Array.from({ length: 200 }, (_, t) => ({ t, type: "scroll", x: 0, y: t }))
+    const answers = [await learner.events(ad, id, burst()), await learner.events(ad, id, burst()), await learner.events(ad, id, burst())]
+    expect(answers).toEqual([true, true, "full"])
+    expect(await learner.events(pageSender(), id, [{ t: 1, type: "click" }])).toBe(true)
+    for (let i = 0; i < 25; i++) await learner.step(ad, id, step({}))
+    expect(await learner.step(ad, id, step({}))).toBe("full")
+    expect(await learner.step(pageSender(), id, step({}))).toBe(true)
+    expect(await learner.status(1)).toMatchObject({ state: "on", steps: MAX_CROSS_EVENTS + 1 })
   })
 
   test("refuses steps of another session or tab", async () => {
@@ -147,7 +242,7 @@ describe("Learner", () => {
     expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "stopped", steps: 0, events: 0 })
     expect(broadcast().at(-1)).toBeNull()
     expect(await learner.status(1)).toEqual({ state: "done", host: "www.example.com", session: lines[0].session, steps: 0 })
-    expect(await learner.ask(pageSender())).toBeNull()
+    expect(await joins(learner)).toBeNull()
     expect(Object.keys(fake.session)).toEqual(["learned:1"])
   })
 
@@ -165,16 +260,19 @@ describe("Learner", () => {
   test("the record shortcut starts and stops recording the tab it's pressed in", async () => {
     learner.listen()
     expect(commands.length).toBe(1)
-    commands[0]("record", { id: 1 } as chrome.tabs.Tab)
+    commands[0]("record", { id: 1, windowId: 7 } as chrome.tabs.Tab)
     await new Promise((r) => setTimeout(r, 50))
     expect(await learner.status(1)).toMatchObject({ state: "on" })
     expect(fake.badges[1]).toBe("REC")
+    // Started by the shortcut, the popup opens: a cue even when the button isn't pinned.
+    expect(fake.popups).toEqual([7])
     commands[0]("something-else", { id: 1 } as chrome.tabs.Tab)
     commands[0]("record", { id: 1 } as chrome.tabs.Tab)
     await new Promise((r) => setTimeout(r, 50))
     expect(await learner.status(1)).toMatchObject({ state: "done" })
     expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "stopped" })
     expect(fake.badges[1]).toBe("")
+    expect(fake.popups).toEqual([7])
   })
 
   test("the timeline: frames' events, checked and bounded, then Chrome's navigations and popups, in batches", async () => {
@@ -203,7 +301,7 @@ describe("Learner", () => {
       { t: 30, type: "key", frameId: 0, sameSite: true },
       { t: 40, type: "input", target: { tag: "input", type: "password", path: "input#pw" }, shape: "secret", inputType: "insertFromPaste", frameId: 0, sameSite: true },
       expect.objectContaining({ type: "navigate", frameId: 0, transition: "form_submit", frame: { top: true, depth: 0, origin: "https://www.example.com", path: "/next", queryKeys: ["token", "step"] } }),
-      expect.objectContaining({ type: "popup", frame: expect.objectContaining({ origin: "https://accounts.google.com", queryKeys: ["client_id"] }) }),
+      expect.objectContaining({ type: "popup", frame: expect.objectContaining({ origin: "https://accounts.google.com", path: "/o/<seg>", queryKeys: ["client_id"] }) }),
       expect.objectContaining({ type: "signed-in" }),
     ])
     const all = JSON.stringify(lines)
@@ -245,7 +343,7 @@ describe("Learner", () => {
     await learner.start(1)
     expect(lines.map((l) => (l.line as { event: string }).event)).toEqual(["start", "end", "start"])
     expect(lines[1].line).toMatchObject({ reason: "replaced" })
-    expect((await learner.ask(pageSender()))?.id).not.toBe(first)
+    expect((await joins(learner))?.id).not.toBe(first)
   })
 
   test("a service worker that restarts picks the session up where it was", async () => {
@@ -254,7 +352,7 @@ describe("Learner", () => {
     await learner.step(pageSender(), id, step({}))
     kill(learner)
     const again = new Learner(h.host)
-    expect(await again.ask(pageSender())).toEqual({ id, salt, startedAt: expect.any(Number), until: expect.any(Number) })
+    expect(await joins(again)).toEqual({ id, salt, startedAt: expect.any(Number), until: expect.any(Number), words: [] })
     expect(await again.status(1)).toMatchObject({ state: "on", host: "www.example.com" })
     const saved = await usernameDigest(salt, "admin")
     expect(await again.step(pageSender(), id, step({ order: 1, shape: "text", length: "4-8", digest: saved, truth: "username" }))).toBe(true)
@@ -275,7 +373,7 @@ describe("Learner", () => {
     ;(fake.session[key] as { until: number }).until = Date.now() + 50
     kill(learner)
     const again = new Learner(h.host)
-    expect(await again.ask(pageSender())).not.toBeNull()
+    expect(await joins(again)).not.toBeNull()
     await new Promise((r) => setTimeout(r, 120))
     expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "timeout" })
     expect(broadcast().at(-1)).toBeNull()
@@ -289,7 +387,7 @@ describe("Learner", () => {
     ;(fake.session[key] as { until: number }).until = Date.now() - 1
     kill(learner)
     const again = new Learner(h.host)
-    expect(await again.ask(pageSender())).toBeNull()
+    expect(await joins(again)).toBeNull()
     await new Promise((r) => setTimeout(r, 10))
     expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "timeout" })
     expect(await again.status(1)).toMatchObject({ state: "done" })

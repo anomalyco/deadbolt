@@ -82,9 +82,9 @@ export function recordControl(tab: () => number | undefined, announce: (text: st
       const done = rec
       const download = h("button", { class: "btn", type: "button" }, "Download")
       download.addEventListener("click", () =>
+        // The recording stays, to share the file and still Delete it after.
         void act(download, { type: "db:popup-recorded", action: "download" }, (reply) => {
           save(reply.text ?? "", `deadbolt-recording-${done.host}-${new Date().toISOString().slice(0, 10)}.jsonl`)
-          void send({ type: "db:popup-recorded", tabId: tab(), action: "dismiss" })
           announce("Downloaded the recording.")
         }),
       )

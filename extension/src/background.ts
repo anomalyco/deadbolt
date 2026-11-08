@@ -118,12 +118,10 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return autofill.menuAway(sender, message.dismissed === true)
     case "db:menu-move":
       return autofill.menuMove(sender, message.box)
-    case "db:learn-ask":
-      return learner.ask(sender)
     case "db:learn-step":
       return learner.step(sender, String(message.session), message.step)
     case "db:learn-events":
-      return learner.events(sender, String(message.session), message.events)
+      return learner.events(sender, String(message.session), message.events, message.words)
     // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
       if (universal.owns(message.token)) return universal.closed(message.token, sender, message.dismissed === true)
@@ -261,6 +259,8 @@ chrome.webNavigation.onCommitted.addListener((d) => {
   void autofill.navigated(d)
   forms.navigated(d)
   learner.navigated(d)
+  // A page back from the back/forward cache has no DOMContentLoaded: it's told here.
+  void learner.loaded(d)
   if (d.frameId === 0) {
     void universal.closeTab(d.tabId)
     saver.navigated(d.tabId, d.url, d.transitionType)
@@ -274,6 +274,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => {
   else signInWith.opened(d.sourceTabId, d.tabId)
 })
 chrome.webNavigation.onDOMContentLoaded.addListener((d) => {
+  void learner.loaded(d)
   if (providers.active(d.tabId)) void providers.loaded(d)
   else void signInWith.loaded(d)
 })

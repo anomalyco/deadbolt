@@ -571,12 +571,14 @@ Record works as in the native build: the background's `Learner`
 values, and `learn` writes it. The native host appends to
 `~/.local/state/deadbolt/learn/<session>.jsonl`.
 The standalone build keeps the same lines in this extension's IndexedDB
-(bg/learn-log.ts), with the host's session-id rule and limits: at most 4 MiB
-a log, the newest 50 logs, none past 30 days, and 100 lines at once, then
+(bg/learn-log.ts): a log's record in `logs`, its lines in `lines`, each
+added on its own (version 1 kept the lines in the record and rewrote it per
+line; opening moves them over). It has the host's session-id rule and limits: at most 4 MiB
+a log, the newest 10 logs, none past 7 days, and 100 lines at once, then
 10 a second. Like the host's log, it lives outside the vault, works while it's
 locked, and never reaches the wasm worker. `learn-read` and `learn-delete`
 read and delete one log there, for the popup's Download and Delete after a
-recording. Settings › Recordings downloads every recording as one JSONL file,
+recording; like `learn`, they aren't gated. Settings › Recordings downloads every recording as one JSONL file,
 each line with its `session`, for `bun corpus/learned.ts --file <download>`,
 or deletes them. Settings › Saving
 lists the sites "Never for this site" turned off (the same

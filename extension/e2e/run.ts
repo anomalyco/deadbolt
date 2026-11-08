@@ -5476,11 +5476,51 @@ async function learnLines(run: Run): Promise<Array<Record<string, unknown>>> {
     return await page.evaluate(
       () =>
         new Promise<Array<Record<string, unknown>>>((resolve) => {
+          const req = indexedDB.open("deadbolt-learn", 2)
+          req.onupgradeneeded = () => {
+            req.result.createObjectStore("logs", { keyPath: "session" })
+            req.result.createObjectStore("lines", { autoIncrement: true }).createIndex("session", "session")
+          }
+          req.onsuccess = () => {
+            const all = req.result.transaction("lines").objectStore("lines").getAll()
+            all.onsuccess = () => {
+              req.result.close()
+              resolve((all.result as Array<{ session: string; text: string }>).map((l) => ({ session: l.session, ...JSON.parse(l.text) })))
+            }
+          }
+        }),
+    )
+  } finally {
+    await page.close()
+  }
+}
+
+/**
+ * The browser-only vault's store already holds eleven recordings, one eight
+ * days old, ten an hour old, in version 1's layout (each log's lines in its
+ * record): the extension's first write moves them to version 2's.
+ */
+async function seedRecordings(run: Run) {
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`chrome-extension://${ID}/device.html`)
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve, reject) => {
           const req = indexedDB.open("deadbolt-learn", 1)
           req.onupgradeneeded = () => req.result.createObjectStore("logs", { keyPath: "session" })
           req.onsuccess = () => {
-            const all = req.result.transaction("logs").objectStore("logs").getAll()
-            all.onsuccess = () => resolve((all.result as Array<{ session: string; lines: string[] }>).flatMap((l) => l.lines.map((x) => ({ session: l.session, ...JSON.parse(x) }))))
+            const tx = req.result.transaction("logs", "readwrite")
+            const now = Date.now()
+            for (let i = 0; i < 11; i++) {
+              const session = `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`
+              tx.objectStore("logs").put({ session, updated: i === 0 ? now - 8 * 86_400_000 : now - 3_600_000 + i, bytes: 30, lines: [JSON.stringify({ event: "start", site: "seeded" })] })
+            }
+            tx.oncomplete = () => {
+              req.result.close()
+              resolve()
+            }
+            tx.onerror = () => reject(tx.error)
           }
         }),
     )
@@ -5551,6 +5591,8 @@ async function learnAndNever() {
     const shortcut = (await run.worker.evaluate(() => chrome.commands.getAll())).find((c) => c.name === "record")?.shortcut ?? ""
     check(/^(Alt\+Shift\+[A-Z]|⌥⇧[A-Z])$/.test(shortcut), `the record command has its shortcut (${shortcut || "none"})`)
 
+    // The browser keeps the newest 10 recordings for 7 days: a new one prunes the rest.
+    if (standalone) await seedRecordings(run)
     await page.goto(`${site}/login?next=home`)
     await formFound(page)
     const p = await popup(run, site)
@@ -5578,10 +5620,16 @@ async function learnAndNever() {
     await Bun.sleep(1200)
     await recordShortcut(run)
     check(!!(await until("the shortcut stops it", async () => (await badge(run)) === "")), "the shortcut stops recording, and REC goes")
-    const lines = await until("the log ends", async () => {
+    const logged = await until("the log ends", async () => {
       const got = await learnLines(run)
       return got.some((l) => l.event === "end") ? got : null
     }, 15_000)
+    const recorded = logged?.find((l) => l.event === "start" && l.site === "localhost")?.session
+    const lines = logged?.filter((l) => l.session === recorded) ?? null
+    if (standalone) {
+      const kept = new Set(logged?.map((l) => l.session))
+      check(kept.size === 10 && !kept.has("00000000-0000-4000-8000-000000000000") && !kept.has("00000001-0000-4000-8000-000000000000"), `version 1's logs move over, and a new recording keeps the newest 10, none past 7 days (${kept.size})`)
+    }
     const events = (lines ?? []).map((l) => l.event)
     check(events[0] === "start" && events.includes("step") && events.includes("timeline") && (lines ?? []).at(-1)?.reason === "stopped", `the log has the start, steps, the timeline and the end (${[...new Set(events)].join(",")})`)
     const timeline = (lines ?? []).filter((l) => l.event === "timeline").flatMap((l) => l.events as Array<{ type: string; key?: string; target?: { id?: string }; frame?: { path: string } }>)
@@ -5598,26 +5646,24 @@ async function learnAndNever() {
     const [download] = await Promise.all([done.waitForEvent("download"), done.locator(".record-bar[data-state=done] button", { hasText: "Download" }).click()])
     const file = await readFile((await download.path()) ?? "", "utf8").catch(() => "")
     check(file.includes('"event":"timeline"') && file.includes('"event":"end"') && !file.includes("typed-by-hand-secret") && !file.includes("pasted-clipboard-secret"), "Download hands back the log with its timeline")
-    check(!!(await until("the bar goes after Download", async () => (await done.locator(".record-bar[data-state=done]").count()) === 0)), "and the popup puts it away")
+    // Downloading is to share it: the recording stays, Delete beside Download.
+    await Bun.sleep(1200)
+    check((await done.locator(".record-bar[data-state=done] button", { hasText: "Delete" }).count()) === 1, "and keeps it, with Delete next to Download")
     await done.close()
     if (standalone) {
       const s = await popup(run, site)
       await s.getByRole("button", { name: "Settings", exact: true }).click()
-      check(!!(await until("Settings lists the recording", async () => (await s.locator(".settings").textContent())?.includes("1 recording"))), "Settings › Recordings keeps it, with Download")
+      check(!!(await until("Settings lists the recordings", async () => (await s.locator(".settings").textContent())?.includes("10 recordings"))), "Settings › Recordings keeps it, with Download")
       await s.close()
     }
 
-    // Another, stopped from the popup, then deleted.
-    await (await popup(run, site)).locator(".top button.record").click()
-    await until("recording again", async () => (await badge(run)) === "REC")
     const again = await popup(run, site)
-    await again.locator(".record-bar[data-state=on] button", { hasText: "Stop" }).click()
     await again.locator(".record-bar[data-state=done] button", { hasText: "Delete" }).click()
     check(!!(await until("Delete removes it", async () => (await again.locator(".record-bar[data-state=done]").count()) === 0)), "Delete removes the recording")
     await again.close()
     const sessions = new Set((await learnLines(run)).map((l) => l.session))
-    if (standalone) check(sessions.size === 1, "and it's gone from the browser's recordings")
-    else check((await hostLog(run)).some((r) => r.type === "learn-delete"), "and the host deletes its log")
+    if (standalone) check(sessions.size === 9 && !sessions.has(recorded), "and it's gone from the browser's recordings")
+    else check((await hostLog(run)).some((r) => r.type === "learn-delete" && r.session === recorded), "and the host deletes its log")
 
     await signIn(run, page, "/login?next=home", "never@acme.test", "never password")
     await page.waitForURL("**/home")

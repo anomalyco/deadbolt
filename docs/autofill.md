@@ -1240,28 +1240,41 @@ fill nothing, and nothing is added to the page or takes its focus.
 - **Starting and stopping.** The header's dot starts a recording of the tab
   and closes the popup; the `record` command does too, and stops it
   (⌥⇧R on a Mac, Alt+Shift+D elsewhere, where Chrome keeps Alt+Shift+R;
-  either can be changed in chrome://extensions/shortcuts). While it runs
-  the toolbar button says `REC` in red (over an offer's `1`, which shows
-  again after) and the popup "Recording · 0:42" with Stop. It ends on Stop,
-  on the shortcut, after 10 minutes, or with the tab. A sign-in the save
-  judge sees work is a `signed-in` mark on the timeline, not an end. It
-  needs no unlocked vault; unlocked, it can also tell a saved username
-  (below). The background keeps its recordings in `chrome.storage.session`
-  too, so a service worker that restarts picks them up (one whose time ran
-  out meanwhile ends then). A frame whose step or events the background
-  refuses ends the recording on its side, so the inline menu doesn't stay
-  away for one nobody logs.
+  either can be changed in chrome://extensions/shortcuts). Started by the
+  shortcut, the popup opens (`chrome.action.openPopup`), so there's a cue
+  even when Deadbolt's button isn't pinned. While it runs the toolbar
+  button says `REC` in red (over an offer's `1`, which shows again after)
+  and the popup "Recording · 0:42" with Stop. It ends on Stop, on the
+  shortcut, after 10 minutes, after 2 minutes with no trusted input from
+  the user in any frame (`idle`), with the tab, or when the user takes the
+  top page to another site themselves (`left`: the address bar, a
+  bookmark, a keyword, a start page; links and redirects, a provider's
+  sign-in among them, are followed). A sign-in the save judge sees work
+  is a `signed-in` mark on the timeline, not an end. It needs no unlocked
+  vault; unlocked, it can also tell a saved username (below). The
+  background keeps its recordings in `chrome.storage.session` too, so a
+  service worker that restarts picks them up (one whose time ran out, or
+  that went idle, meanwhile ends then). A frame whose step or events the
+  background refuses ends the recording on its side, so the inline menu
+  doesn't stay away for one nobody logs; one whose share is used up is
+  told `full` and only stops sending.
 - **After.** The popup says "Recorded 38 steps on accounts.example.com" (the
   timeline's events) with **Download**, the recording's log as one JSONL
   file in Settings' format (each line with its `session`, timeline
   included), and **Delete**, which removes the log (`learn-read` and
-  `learn-delete` under Host messages). Either puts the note away; so does
-  the next recording, or closing the tab.
-- **Every frame** of the tab joins, from any site, including frames that load
-  later (they ask the background on load, the one thing a frame does while
-  nothing records). Steps and events from frames on another site than the
+  `learn-delete` under Host messages). Download keeps the recording and
+  the note, to share the file and still delete it; Delete puts the note
+  away, as do the next recording and closing the tab.
+- **Every frame** of the tab joins, from any site, including frames that
+  load later: the background tells each frame of a recording tab on its
+  DOMContentLoaded (and a page back from the back/forward cache on its
+  commit). A frame never asks, so a page nobody records sends no message:
+  on a page with ten iframes that was eleven `db:learn-ask` messages per
+  load, now none. Steps and events from frames on another site than the
   top page are marked `sameSite: false`, judged from the frame's origin as
-  Chrome reports it, not from what the frame says.
+  Chrome reports it, not from what the frame says, and share caps of
+  their own: 500 events and 20 steps a recording. The background's own
+  fields (`seq`, `frameId`, `sameSite`) are set after a frame's.
 - **A step** is recorded when the recording starts, when the inputs a frame
   shows or the detector's verdict change, and when the user submits: a
   trusted click on a button, Enter in an input or a trusted submit event,
@@ -1271,7 +1284,8 @@ fill nothing, and nothing is added to the page or takes its focus.
   placeholder, size and place, shadow root, form), the detector's role for
   it and the page's kind, the submit control it picked, what the user
   clicked and whether that was the same control, the frame's place (origin,
-  path, the query's parameter names, never values) and its iframes.
+  path, the query's parameter names, never values) and its iframes. Only a
+  page's first step (`start`) has its title.
 - **The timeline** is what the user did, `t` milliseconds after the start:
   pointer down and up, clicks and double-clicks with viewport `x` and `y`;
   keys by name only (Enter, Tab, Escape, arrows, Backspace, Delete, Home,
@@ -1286,12 +1300,21 @@ fill nothing, and nothing is added to the page or takes its focus.
   autocomplete, the text of a button or link (40 characters), a selector
   path of up to four elements, whether it's in a shadow root, the
   detector's role for a field as of the frame's last step, and the frame
-  (`frameId`). Typing into a field isn't a key per character: printable
-  keys there are left out, and typing in one field less than a second apart
-  is one event with no count (that would be the value's length); in a
-  password box the typing is one event until the user moves on, and only
-  Enter, Tab and Escape are kept, so neither its length nor its capitals
-  show. A frame sends its events every half second, at most 50 at once,
+  (`frameId`); the element is found inside closed shadow roots too
+  (`eventTarget`, content/shadow.ts). Every digit in a target's text,
+  label, id, name and path is `<n>`. A keypad's key (text or label of one
+  or two characters, or, clicked, one of four or more small controls of
+  its size in its row or pad, image keys too) is `keypad: true` with no
+  text, label, `x` or `y`: a PIN would otherwise be its keys in order.
+  Typing into a field isn't a key per character: printable keys there are
+  left out, and typing in one field less than a second apart is one event
+  with no count (that would be the value's length). In a password box,
+  and, failing closed, in an element that isn't editable but hosts a
+  shadow root (a closed one, where the box can't be seen) or is a custom
+  element, the typing is one event until the user moves on (blur, Enter,
+  Tab, a submit, the page going), and only Enter, Tab and Escape are kept,
+  with no Ctrl, Meta, Alt or AltGr, so neither its length nor its capitals
+  nor its chords show. A frame sends its events every half second, at most 50 at once,
   and at most a burst of 60, then 20 a second (more are counted as
   `dropped`); the background takes at most 4,000 a recording, rebuilds
   each from the fields above only, and writes them a second apart as
@@ -1319,17 +1342,32 @@ fill nothing, and nothing is added to the page or takes its focus.
   and inputmode, selector paths, the form's action host, iframe hosts and
   paths, the frame's path and query parameter names) has email addresses,
   runs of four or more digits and the values typed into the frame's
-  non-password fields replaced (`<email>`, `<n>`, `<typed>`), since a step
-  2 often names the account.
+  non-password fields, textareas and editable elements (256 characters
+  each) replaced (`<email>`, `<n>`, `<typed>`), since a step 2 often names
+  the account. Labels count only their own text: what's in a field, an
+  editable, or a live region (`aria-live`, `status`, `alert`, `log`,
+  `output`) inside or named by `aria-labelledby` is left out.
+- **Addresses** are decoded, then each path segment kept only if it reads
+  as a route word (lowercase letters, `-` or `_`, at most 24, no digits)
+  and isn't a typed word; anything else (an id, a reset or magic-link
+  token, a search) is `<seg>`. Frames send salted SHA-256 digests (the
+  recording's salt) of each word of three or more letters typed outside
+  password boxes, with their next batch, at once on Enter or a submit. The
+  background keeps up to 500 a recording, never logs them, scrubs the
+  navigations it reports (path segments, parameter names) of them as their
+  lines are written, and passes them to frames that load later, so a next
+  page scrubs its own address and title of what was typed before it
+  (`<typed>`).
 - **The log** is `~/.local/state/deadbolt/learn/<session>.jsonl` (beside the
   daemon's log), one `start` line, then `step` and `timeline` lines, then an
   `end` line with its reason and how many steps and events it kept. The
   native host writes it (see `learn` under Host messages); the daemon and
   the vault are never involved, and nothing syncs. Starting a recording's
-  log removes logs older than 30 days, then the oldest beyond the newest 50.
+  log removes logs older than 7 days, then the oldest beyond the newest 10.
   `bun corpus/learned.ts` reports on the logs (it reads the steps). The
   browser-only build keeps the same lines in the extension's IndexedDB
-  under the same limits, and Settings › Recordings downloads them for
+  under the same limits (each line added on its own, never the whole log
+  rewritten), and Settings › Recordings downloads them for
   `bun corpus/learned.ts --file` (docs/extension-device.md, Recordings).
 
 ## Which logins a page gets
@@ -2473,7 +2511,7 @@ Appends `line`, a JSON object, as one line of
 `~/.local/state/deadbolt/learn/<session>.jsonl` (see Recording a site).
 `session` is a lowercase UUID, since it names the file; the directory is
 `0700` (set again on every line) and the file `0600`. A session's first line
-prunes the directory: logs older than 30 days go, then the oldest until 50
+prunes the directory: logs older than 7 days go, then the oldest until 10
 are left with the new one. The host doesn't read the line: the extension
 puts no values in it. Lines come at most 100 at once, then one per 100 ms
 (`rate_limited`), and a session's log stops at 4 MiB (`bad_request`). It
@@ -2493,7 +2531,9 @@ For the popup's Download and Delete after a recording (capability
 `offset` (0 when left out), whole lines only, and `next`, where the rest
 starts, or null at the end; a log that isn't there is `not_found`.
 `learn-delete` removes it; `found` says whether it was there. `session` is a
-lowercase UUID as for `learn`, and `learn-read` shares its rate.
+lowercase UUID as for `learn`, and `learn-read` shares its rate. Like
+`learn`, neither is gated: no unlock, Touch ID or approval, since a log
+holds no values and only the extension reaches the host.
 
 ### changed (pushed)
 

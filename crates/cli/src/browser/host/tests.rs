@@ -465,8 +465,8 @@ async fn learn_logs_are_pruned_when_a_session_starts() {
     let now = std::time::UNIX_EPOCH + Duration::from_secs(crate::config::now());
     let day = Duration::from_secs(24 * 60 * 60);
     let log = |i: u32| learn.join(format!("{i:08x}-0000-4000-8000-000000000000.jsonl"));
-    // 60 logs, log(i) i days old, plus something that isn't a log.
-    for i in 0..60 {
+    // 12 logs, log(i) i days old, plus something that isn't a log.
+    for i in 0..12 {
         let file = std::fs::File::create(log(i)).unwrap();
         file.set_modified(now - day * i - Duration::from_secs(60))
             .unwrap();
@@ -484,25 +484,25 @@ async fn learn_logs_are_pruned_when_a_session_starts() {
         assert_eq!(json(&reply)["type"], "learned");
     };
     // An ongoing session prunes nothing.
-    send(log(45).file_stem().unwrap().to_str().unwrap().to_owned()).await;
-    assert!(log(59).exists());
+    send(log(9).file_stem().unwrap().to_str().unwrap().to_owned()).await;
+    assert!(log(11).exists());
     let fresh = "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b";
     send(fresh.to_owned()).await;
 
     let mode = std::fs::metadata(&learn).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700);
-    // Past 30 days: gone, though 50 weren't reached.
-    let kept: Vec<u32> = (0..60).filter(|i| log(*i).exists()).collect();
-    assert_eq!(kept, (0..30).chain([45]).collect::<Vec<_>>());
+    // Past 7 days: gone, though 10 weren't reached.
+    let kept: Vec<u32> = (0..12).filter(|i| log(*i).exists()).collect();
+    assert_eq!(kept, (0..7).chain([9]).collect::<Vec<_>>());
     assert!(learn.join(format!("{fresh}.jsonl")).exists());
     assert!(learn.join("notes.txt").exists());
 
-    // Then at most 50, oldest first: 49 more recent ones push out the 30
+    // Then at most 10, oldest first: 9 more recent ones push out the 7
     // left from before and the two oldest of them.
     let recent = |i: u32| learn.join(format!("{i:08x}-1111-4000-8000-000000000000.jsonl"));
-    for i in 0..49u32 {
+    for i in 0..9u32 {
         let file = std::fs::File::create(recent(i)).unwrap();
-        file.set_modified(now - Duration::from_secs(u64::from(49 - i)))
+        file.set_modified(now - Duration::from_secs(u64::from(9 - i)))
             .unwrap();
     }
     send("ffffffff-2222-4000-8000-000000000000".to_owned()).await;
@@ -517,9 +517,9 @@ async fn learn_logs_are_pruned_when_a_session_starts() {
         })
         .count();
     assert_eq!(logs, MAX_LEARN_LOGS);
-    assert!((0..60).all(|i| i == 45 || !log(i).exists()));
+    assert!((0..12).all(|i| i == 9 || !log(i).exists()));
     assert!(!recent(0).exists() && !recent(1).exists() && recent(2).exists());
-    assert!(log(45).exists() && learn.join(format!("{fresh}.jsonl")).exists());
+    assert!(log(9).exists() && learn.join(format!("{fresh}.jsonl")).exists());
 }
 
 fn framed(request: Value) -> Vec<u8> {

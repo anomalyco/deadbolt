@@ -200,12 +200,10 @@ export type ToBackground =
   | { type: "db:forms-query"; kind: FormKind; form: number; section: string; roles: FormRole[]; explicit?: boolean; box?: Box }
   /** The identity and card sections this frame's forms have now, for card fills that span frames. */
   | { type: "db:forms-page"; kinds: FormKind[]; form: number }
-  /** A frame that just loaded asks whether its tab is recording (see src/learn.ts): a LearnSession or null. */
-  | { type: "db:learn-ask" }
-  /** A step of the recording `session`, from this frame. */
+  /** A step of the recording `session`, from this frame. Answers a LearnTaken. */
   | { type: "db:learn-step"; session: string; step: LearnStep }
-  /** What the user did in this frame since its last batch, for the recording's timeline. */
-  | { type: "db:learn-events"; session: string; events: TimelineEvent[] }
+  /** What the user did in this frame since its last batch, for the recording's timeline, and salted digests of words typed since (see Words). Answers a LearnTaken. */
+  | { type: "db:learn-events"; session: string; events: TimelineEvent[]; words?: string[] }
   // inline menu
   /** `parent`: the origin of the parent window that handed the menu its token. */
   | { type: "db:menu-load"; token: string; parent: string }

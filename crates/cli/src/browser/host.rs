@@ -60,8 +60,8 @@ const LEARNS: (u32, Duration) = (100, Duration::from_millis(100));
 /// The most one learning session's log grows to; past it lines are refused.
 const MAX_LEARN_LOG: u64 = 4 * 1024 * 1024;
 /// How many session logs are kept, and for how long; a new session prunes the rest, oldest first.
-const MAX_LEARN_LOGS: usize = 50;
-const LEARN_LOG_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const MAX_LEARN_LOGS: usize = 10;
+const LEARN_LOG_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The most of a log one `learn-read` answers: escaped, well under `MAX_REPLY`.
 const LEARN_READ: u64 = 256 * 1024;
 

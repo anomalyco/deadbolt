@@ -11,6 +11,8 @@
 
 /** How long a recording lasts unless it's stopped first. */
 export const LEARN_TTL_MS = 10 * 60_000
+/** A recording with no trusted input from the user for this long ends. */
+export const IDLE_MS = 2 * 60_000
 /** Caps that keep one step well under the host's 64 KiB request limit. */
 export const MAX_INPUTS = 80
 export const MAX_FRAMES = 20
@@ -18,6 +20,11 @@ export const MAX_TEXT = 80
 export const MAX_STEPS = 200
 /** A recording's timeline holds at most this many events; later ones are counted, not kept. */
 export const MAX_EVENTS = 4000
+/** Frames on another site than the page (ads, chat widgets) share their own, smaller caps. */
+export const MAX_CROSS_EVENTS = 500
+export const MAX_CROSS_STEPS = 20
+/** Digests of typed words a recording keeps, to scrub later pages' addresses and titles. */
+export const MAX_WORDS = 500
 /** What a frame sends of its timeline at once, and how often. */
 export const EVENTS_PER_BATCH = 50
 export const BATCH_MS = 500
@@ -30,7 +37,10 @@ export type LengthBand = "1-3" | "4-8" | "9-16" | "17-32" | "33+"
 export type Truth = "username" | "email" | "phone" | "password" | "otp" | "other"
 export type LearnTrigger = "start" | "change" | "submit"
 export type SubmitBy = "click" | "enter" | "submit"
-export type LearnEnd = "stopped" | "timeout" | "closed" | "replaced"
+/** `left`: the user took the tab to another site themselves; `idle`: no input for IDLE_MS. */
+export type LearnEnd = "stopped" | "timeout" | "idle" | "left" | "closed" | "replaced"
+/** What the background answers a frame's step or events: taken, refused (the recording is gone), or full (it goes on, this frame's share isn't kept). */
+export type LearnTaken = true | false | "full"
 
 export interface LearnRect {
   x: number
@@ -39,12 +49,18 @@ export interface LearnRect {
   h: number
 }
 
-/** What a recording's frames are told: its id, the salt for username digests, when it started (timeline times count from it) and when it ends. */
+/**
+ * What a recording's frames are told: its id, the salt for username and
+ * word digests, when it started (timeline times count from it), when it
+ * ends, and the digests of the words typed in it so far, so a page that
+ * loads later scrubs its own address and title of them.
+ */
 export interface LearnSession {
   id: string
   salt: string
   startedAt: number
   until: number
+  words: string[]
 }
 
 /**
@@ -65,6 +81,8 @@ export interface Target {
   inShadow?: boolean
   /** The detector's role for a field, as of the frame's last step. */
   detected?: string
+  /** A key of a keypad (one or two characters, or one of a cluster of small same-size controls): its text and label, and the pointer's place, are left out. */
+  keypad?: boolean
 }
 
 export type TimelineType =
@@ -183,7 +201,8 @@ export interface LearnStep {
   /** Milliseconds since the frame joined the session. */
   at: number
   frame: LearnFrame
-  title: string
+  /** The page's title, on a frame's start step only, scrubbed of typed words. */
+  title?: string
   kind: string | null
   submit: { tag: string; type: string; text: string; rect: LearnRect } | null
   submitted?: { by: SubmitBy; text: string; detected: boolean }
@@ -240,6 +259,9 @@ export const clip = (s: string | null | undefined, n = MAX_TEXT) => (s ?? "").re
  */
 export const scrub = (text: string, typed: Iterable<string> = []): string => scrubber(typed)(text)
 
+/** A target's text: scrubbed, then with every digit taken out, since a keypad's keys are digits one at a time. */
+export const noDigits = (text: string) => text.replace(/\d+/g, "<n>")
+
 /** `scrub` for many texts and the same typed values: their pattern is built once, longest first. */
 export function scrubber(typed: Iterable<string> = []): (text: string) => string {
   const values = [...new Set([...typed].map((v) => v.trim()).filter((v) => v.length >= 3))].sort((a, b) => b.length - a.length)
@@ -247,15 +269,63 @@ export function scrubber(typed: Iterable<string> = []): (text: string) => string
   return (text) => (own ? text.replace(own, "<typed>") : text).replace(/[\w.+%'-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>").replace(/\d{4,}/g, "<n>")
 }
 
-/** Where a frame is, without the query's values or the fragment, its path and parameter names scrubbed like page text. */
-export function frameOf(url: URL, top: boolean, depth: number, typed: Iterable<string> = []): LearnFrame {
-  const values = [...typed]
+/** Typed words, by salted digest: `salt` is the recording's. */
+export interface Words {
+  salt: string
+  digests: ReadonlySet<string>
+}
+
+/** The digest a typed word and a word of a later page's address or title are compared by. */
+export const wordDigest = (salt: string, word: string) => sha256(`${salt}\u0002${word.toLowerCase()}`)
+
+/** The words of a typed value worth a digest: three letters or digits or more, at most 20 of them. */
+export const wordsOf = (value: string) => [...new Set(value.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])].slice(0, 20)
+
+/** `text` with each word whose digest is a typed word's replaced by `<typed>`. */
+export async function scrubWords(text: string, words?: Words): Promise<string> {
+  if (!words?.digests.size || !text) return text
+  const found = text.match(/[\p{L}\p{N}]{3,}/gu) ?? []
+  const typed = new Set<string>()
+  for (const w of new Set(found.slice(0, 40))) if (words.digests.has(await wordDigest(words.salt, w))) typed.add(w)
+  return typed.size ? text.replace(/[\p{L}\p{N}]{3,}/gu, (w) => (typed.has(w) ? "<typed>" : w)) : text
+}
+
+const decode = (s: string) => {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
+/** A path segment is kept only if it reads as a route word; anything else (an id, a token, a search) is `<seg>`. */
+export const ROUTE_WORD = /^[a-z_-]{1,24}$/
+
+/**
+ * Where a frame is, without the query's values or the fragment. The path is
+ * decoded, then each segment kept only if it reads as a route word and isn't
+ * a typed word; parameter names are scrubbed like page text and of typed words.
+ */
+export async function frameOf(url: URL, top: boolean, depth: number, typed: Iterable<string> = [], words?: Words): Promise<LearnFrame> {
+  const own = scrubber(typed)
+  const segments = await Promise.all(
+    url.pathname
+      .split("/")
+      .slice(0, 30)
+      .map(async (raw, i) => {
+        if (i === 0 || raw === "") return raw
+        const seg = decode(raw)
+        if (!ROUTE_WORD.test(seg) || own(seg) !== seg) return "<seg>"
+        return (await scrubWords(seg, words)) === seg ? seg : "<typed>"
+      }),
+  )
+  const keys = [...new Set(url.searchParams.keys())].slice(0, 30)
   return {
     top,
     depth,
     origin: url.origin,
-    path: scrub(clip(url.pathname, 200), values),
-    queryKeys: [...new Set(url.searchParams.keys())].slice(0, 30).map((k) => scrub(clip(k, 40), values)),
+    path: segments.join("/").slice(0, 200),
+    queryKeys: await Promise.all(keys.map(async (k) => noDigits(await scrubWords(own(clip(k, 40)), words)))),
   }
 }
 

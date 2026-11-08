@@ -5,7 +5,10 @@
 // what recording is for. It also keeps a timeline of what the user does here
 // (pointer, named keys, focus, typing by shape, submits, scrolls), sent in
 // batches. Its listeners are only on while the tab records, passive, and do
-// little per event: no layout reads beyond a scrolled element's offset.
+// little per event: no layout reads beyond a scrolled element's offset and,
+// for a click, the size of the controls around it (a keypad's). A frame
+// sends nothing until the background tells it the tab records (on its
+// DOMContentLoaded), so a page nobody records costs no message.
 //
 // Nothing typed leaves the frame. For each field the user typed into it keeps
 // two digests from the last trusted keystroke (to tell a repeated value and,
@@ -13,13 +16,15 @@
 // boxes, the value itself in memory only, to scrub it out of page text. Both
 // go when the session ends. A field that was a password box at any point of
 // the session, or that the detector takes for one, stays secret: a
-// show-password toggle doesn't turn it into a username.
+// show-password toggle doesn't turn it into a username. Words typed outside
+// password boxes also go to the background as salted digests, so it, and
+// the pages that load after, scrub addresses and titles of them.
 
-import type { LearnSession, LearnStep, LearnInput, LearnTrigger, SubmitBy, Target, TimelineEvent, TimelineType, Typed } from "../learn"
-import { BATCH_MS, clip, EVENTS_PER_BATCH, frameOf, keyName, lengthBand, MAX_FRAMES, MAX_INPUTS, modsOf, scrubber, sha256, shapeOf, truthOf, usernameDigest } from "../learn"
+import type { LearnSession, LearnStep, LearnInput, LearnTaken, LearnTrigger, SubmitBy, Target, TimelineEvent, TimelineType, Typed, Words } from "../learn"
+import { BATCH_MS, clip, EVENTS_PER_BATCH, frameOf, keyName, lengthBand, MAX_FRAMES, MAX_INPUTS, modsOf, noDigits, scrubber, scrubWords, sha256, shapeOf, truthOf, usernameDigest, wordDigest, wordsOf } from "../learn"
 import type { ToBackground, ToContent } from "../messages"
 import { controlText, isVisible, masked, scanPage } from "./detect"
-import { deepQueryAll, openRoots } from "./shadow"
+import { deepQueryAll, eventTarget, openRoots, shadowRootOf } from "./shadow"
 
 const SKIP = new Set(["hidden", "submit", "button", "image", "reset", "checkbox", "radio", "file", "range", "color"])
 const CLICKABLE = 'button, [role=button], input[type=submit], input[type=button], input[type=image], a[href^="javascript"], a[href="#"]'
@@ -28,8 +33,15 @@ const SUBMIT_DEDUPE_MS = 800
 const INTERACTIVE = 'a[href], button, input, select, textarea, label, summary, [role], [contenteditable=""], [contenteditable="true"], [tabindex]'
 const TEXTUAL = new Set(["a", "button", "summary"])
 const TEXT_ROLES = new Set(["button", "link", "tab", "menuitem", "option", "checkbox", "radio", "switch"])
-/** Keys a password box gets recorded: the rest would tell its length or where its capitals are. */
+/** Keys a password box gets recorded, unmodified: the rest would tell its length or where its capitals are. */
 const SECRET_KEYS = new Set(["Enter", "Tab", "Escape"])
+/** Typed text kept to scrub page text, per field: a textarea or an editable element's, this much. */
+const MAX_TYPED = 256
+/** Text that may be what the user is typing, or what the page says back: never a label's. */
+const LIVE = 'input, textarea, select, output, [contenteditable=""], [contenteditable="true"], [aria-live], [role="status"], [role="alert"], [role="log"]'
+/** A keypad: at least this many small controls of one size around the one clicked. */
+const KEYPAD_KEYS = 4
+const KEYPAD_SIZE = 120
 /** Typing in one field this close together is one input event. */
 const INPUT_MERGE_MS = 1000
 const SCROLL_EVERY_MS = 500
@@ -54,6 +66,13 @@ let secrets = new WeakSet<HTMLInputElement>()
 /** Values typed into fields that aren't password boxes, to scrub page text; and their pattern, built when they change. */
 let identifiers = new Set<string>()
 let scrubTyped: ((text: string) => string) | null = null
+/** Each field's latest typed value, and the salted digests of typed words (sent: the background has them). */
+let latest = new Map<Element, string>()
+let wordDigests = new Map<string, string>()
+let sentWords = new Set<string>()
+/** The background said the recording is full: this frame stops sending events, or steps. */
+let eventsFull = false
+let stepsFull = false
 let lastSignature = ""
 let lastSubmitAt = -Infinity
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -94,13 +113,27 @@ function rectOf(el: Element) {
   return { x: Math.round(r.left + scrollX), y: Math.round(r.top + scrollY), w: Math.round(r.width), h: Math.round(r.height) }
 }
 
-function labelOf(el: HTMLInputElement): string {
+/** An element's own text, without what's in fields, editable or live parts of it: what the user typed, or the page echoes. */
+function staticText(el: Element | null | undefined, max = 200): string {
+  if (!el || el.matches(LIVE)) return ""
+  let out = ""
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  for (let n = walk.nextNode(); n && out.length < max; n = walk.nextNode()) {
+    const parent = n.parentElement
+    if (parent && parent !== el && parent.closest(LIVE) && el.contains(parent.closest(LIVE))) continue
+    out += n.nodeValue ?? ""
+  }
+  return out.slice(0, max)
+}
+
+/** A field's labels and the elements that label it, by their own text only (see staticText). */
+function labelOf(el: Element): string {
   const parts: string[] = []
-  for (const l of Array.from(el.labels ?? [])) parts.push((l as HTMLElement).innerText ?? l.textContent ?? "")
+  for (const l of Array.from((el as HTMLInputElement).labels ?? [])) parts.push(staticText(l))
   const by = el.getAttribute("aria-labelledby")
   const root = el.getRootNode() as Document | ShadowRoot
-  if (by) for (const id of by.split(/\s+/)) parts.push(root.getElementById?.(id)?.textContent ?? "")
-  return clip(parts.filter(Boolean).join(" "))
+  if (by) for (const id of by.split(/\s+/).slice(0, 3)) parts.push(staticText(root.getElementById?.(id)))
+  return clip([...new Set(parts.map((p) => clip(p)).filter(Boolean))].join(" "))
 }
 
 function hostOf(url: string): string {
@@ -125,13 +158,37 @@ function makeSecret(el: HTMLInputElement) {
   const k = keyed.get(el)
   if (k?.digest) keyed.set(el, { order: k.order, exact: k.exact })
   identifiers.delete(el.value.trim())
+  latest.delete(el)
+  // Words of it not sent yet stay here; sent ones only ever scrub.
+  for (const w of wordsOf(el.value)) if (!sentWords.has(wordDigests.get(w) ?? "")) wordDigests.delete(w)
   scrubTyped = null
 }
 
+/**
+ * A field's typed text, to scrub page text of and to send as word digests.
+ * Typing on keeps only the newest value; one that doesn't go on from the last
+ * (an edit) keeps both.
+ */
+function remember(el: Element, raw: string) {
+  const value = raw.trim().slice(0, MAX_TYPED)
+  const prev = latest.get(el)
+  if (prev && prev.length >= 3 && !value.startsWith(prev)) identifiers.add(prev)
+  latest.set(el, value)
+  scrubTyped = null
+  if (!session) return
+  const salt = session.salt
+  for (const w of wordsOf(value)) if (!wordDigests.has(w)) void wordDigest(salt, w).then((d) => session?.salt === salt && wordDigests.set(w, d))
+}
+
+/** Every typed value still to scrub page text of: the fields' latest, and earlier ones edited away. */
+const typedValues = () => [...identifiers, ...latest.values()]
+
 function onInput(event: Event) {
   if (!session || !event.isTrusted) return
-  const el = event.composedPath()[0]
+  const el = eventTarget(event)
   typedInto(event, el)
+  if (el instanceof HTMLTextAreaElement) return remember(el, el.value)
+  if (el instanceof HTMLElement && el.isContentEditable) return remember(el, el.textContent ?? "")
   if (!(el instanceof HTMLInputElement) || !eligible(el)) return
   const salt = session.salt
   if (masked(el)) secrets.add(el)
@@ -143,10 +200,7 @@ function onInput(event: Event) {
     exact: sha256(`${salt}\u0001${value}`),
     ...(secret ? {} : { digest: usernameDigest(salt, value) }),
   })
-  if (!secret && value.trim().length >= 3 && !identifiers.has(value.trim())) {
-    identifiers.add(value.trim())
-    scrubTyped = null
-  }
+  if (!secret) remember(el, value)
 }
 
 /** Whether the typed value repeats an earlier field's: the order of that field. */
@@ -182,7 +236,8 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
   for (const f of result?.fields ?? []) if (f.role) detected.set(f.el, f.role)
   for (const f of result?.fields ?? []) if (f.role === "password" || f.role === "new-password") makeSecret(f.el)
   const form = result?.fields.find((f) => f.owner.form)?.owner.form ?? null
-  const values = [...identifiers, ...typedEls.filter((el) => !secrets.has(el)).map((el) => el.value)]
+  const values = [...typedValues(), ...typedEls.filter((el) => !secrets.has(el)).map((el) => el.value)]
+  const words = known()
   const scrubValues = scrubber(values)
   const text = (s: string | null | undefined, n?: number) => scrubValues(clip(s, n))
 
@@ -240,35 +295,51 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
       } catch {
         url = null
       }
-      return { host: text(url?.hostname), path: text(url?.pathname, 120), visible: isVisible(f), rect: rectOf(f) }
+      return { url, visible: isVisible(f), rect: rectOf(f) }
     })
+  const iframePaths = await Promise.all(iframes.map((f) => (f.url ? frameOf(f.url, false, 0, values, words) : null)))
+  // A control's text, unless it's a keypad's key: one or two characters, digits out.
+  const controlOf = (el: Element) => {
+    const t = text(controlText(el), 40)
+    return t.length <= 2 ? "" : noDigits(t)
+  }
 
   return {
     trigger,
     at: Math.round(performance.now() - joinedAt),
-    frame: frameOf(new URL(location.href), isTop, depth(), values),
-    title: text(document.title, 120),
+    frame: await frameOf(new URL(location.href), isTop, depth(), values, words),
+    // A later step's title may name what was just typed elsewhere: only the page's first.
+    ...(trigger === "start" ? { title: await scrubWords(text(document.title, 120), words) } : {}),
     kind: result?.kind ?? null,
     submit: submit
-      ? { tag: submit.tagName.toLowerCase(), type: clip(submit.getAttribute("type"), 20), text: text(controlText(submit), 40), rect: rectOf(submit) }
+      ? { tag: submit.tagName.toLowerCase(), type: clip(submit.getAttribute("type"), 20), text: controlOf(submit), rect: rectOf(submit) }
       : null,
     ...(submitted
-      ? { submitted: { by: submitted.by, text: submitted.control ? text(controlText(submitted.control), 40) : "", detected: !!submitted.control && submitted.control === submit } }
+      ? { submitted: { by: submitted.by, text: submitted.control ? controlOf(submitted.control) : "", detected: !!submitted.control && submitted.control === submit } }
       : {}),
     inputs,
     shadowRoots: roots.length - 1,
-    iframes,
+    iframes: iframes.map((f, i) => ({ host: text(f.url?.hostname), path: iframePaths[i]?.path ?? "", visible: f.visible, rect: f.rect })),
   }
 }
 
+/** The typed words this recording knows of, by digest: the background's (other pages') and this frame's. */
+function known(): Words | undefined {
+  if (!session) return undefined
+  return { salt: session.salt, digests: new Set([...session.words, ...wordDigests.values()]) }
+}
+
 async function record(trigger: LearnTrigger, submitted?: { by: SubmitBy; control: Element | null }) {
+  if (stepsFull) return
   const step = await snapshot(trigger, submitted).catch(() => null)
   if (!step || !session) return
   const id = session.id
-  const taken = await send({ type: "db:learn-step", session: id, step })
+  const taken = (await send({ type: "db:learn-step", session: id, step })) as LearnTaken | null
+  // Full: the recording goes on, this frame's steps aren't kept.
+  if (taken === "full") stepsFull = true
   // The background no longer has the session (it ended, or the service worker
   // lost it): end it here too, so the inline menu comes back.
-  if (taken !== true && session?.id === id) end()
+  else if (taken !== true && session?.id === id) end()
 }
 
 /** The inputs that show and the detector's verdict: a new one is a new step. */
@@ -302,12 +373,16 @@ function submittedBy(by: SubmitBy, control: Element | null) {
   void record("submit", { by, control })
 }
 
-const realTarget = (event: Event) => (event.composedPath()[0] ?? event.target) as Element | null
+/** What the event is about, inside closed shadow roots too (see shadow.ts). */
+const realTarget = (event: Event) => {
+  const t = eventTarget(event)
+  return t instanceof Element ? t : t instanceof Node ? t.parentElement : null
+}
 
 // ---- The timeline -------------------------------------------------------------
 
-/** Page text in a timeline, scrubbed of what the user typed here, then clipped (so no clipped address escapes). */
-const said = (s: string | null | undefined, n = 80) => clip((scrubTyped ??= scrubber(identifiers))(clip(s, 1000)), n)
+/** Page text in a timeline, scrubbed of what the user typed here and of every digit, then clipped (so no clipped address escapes). */
+const said = (s: string | null | undefined, n = 80) => clip(noDigits((scrubTyped ??= scrubber(typedValues()))(clip(s, 1000))), n)
 
 /** `form#login > div.row > input[name=email]`: up to four elements, in the element's own root. */
 function pathOf(el: Element): string {
@@ -322,18 +397,31 @@ function pathOf(el: Element): string {
   return parts.join(" > ")
 }
 
-function labelText(el: Element): string {
-  const parts: string[] = []
-  const labels = (el as HTMLInputElement).labels
-  if (labels) for (const l of Array.from(labels)) parts.push(l.textContent ?? "")
-  const by = el.getAttribute("aria-labelledby")
-  const root = el.getRootNode() as Document | ShadowRoot
-  if (by) for (const id of by.split(/\s+/).slice(0, 3)) parts.push(root.getElementById?.(id)?.textContent ?? "")
-  return parts.join(" ") || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || ""
+const labelText = (el: Element) => labelOf(el) || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || el.getAttribute("alt") || ""
+
+/** Whether `el` is one of a cluster of small controls of its size in one container: a keypad, its keys images perhaps. */
+function inKeypad(el: Element): boolean {
+  const r = el.getBoundingClientRect()
+  if (r.width < 2 || r.height < 2 || r.width > KEYPAD_SIZE || r.height > KEYPAD_SIZE) return false
+  // The row it's in, or the pad around the rows.
+  for (let box = el.parentElement, up = 0; box && up < 2; box = box.parentElement, up++) {
+    let same = 0
+    for (const other of Array.from(box.querySelectorAll(el.tagName)).slice(0, 40)) {
+      const o = other.getBoundingClientRect()
+      if (Math.abs(o.width - r.width) <= 1 && Math.abs(o.height - r.height) <= 1) same++
+    }
+    if (same >= KEYPAD_KEYS) return true
+  }
+  return false
 }
 
-/** The element acted on, in the probe's terms: never its value, text only for a button or link. */
-function describe(node: EventTarget | null | undefined): Target | undefined {
+/**
+ * The element acted on, in the probe's terms: never its value, text only for
+ * a button or link, every digit out. A keypad's key (one or two characters
+ * of text or label, or, for `pointer` events, one of a cluster of small
+ * same-size controls) keeps neither: a PIN would be its keys in order.
+ */
+function describe(node: EventTarget | null | undefined, pointer = false): Target | undefined {
   const hit = node instanceof Element ? node : node instanceof Node ? node.parentElement : null
   if (!hit) return undefined
   const el = hit.closest(INTERACTIVE) ?? hit
@@ -347,13 +435,16 @@ function describe(node: EventTarget | null | undefined): Target | undefined {
   if (el.id) t.id = said(el.id)
   const role = attr("role")
   if (role) t.role = role
-  const label = said(labelText(el))
-  if (label) t.label = label
   const autocomplete = attr("autocomplete").toLowerCase()
   if (autocomplete) t.autocomplete = autocomplete
-  const button = el instanceof HTMLInputElement && (type === "submit" || type === "button")
-  if (TEXTUAL.has(tag) || TEXT_ROLES.has(role) || button) {
-    const text = said(button ? (el as HTMLInputElement).value : el.textContent, 40)
+  const button = el instanceof HTMLInputElement && (type === "submit" || type === "button" || type === "image")
+  const rawLabel = clip(labelText(el))
+  const rawText = TEXTUAL.has(tag) || TEXT_ROLES.has(role) || button ? clip(button ? (el as HTMLInputElement).value : staticText(el), 40) : ""
+  if ((rawText && rawText.length <= 2) || (rawLabel && rawLabel.length <= 2) || (pointer && inKeypad(el))) t.keypad = true
+  else {
+    const label = said(rawLabel)
+    if (label) t.label = label
+    const text = said(rawText, 40)
     if (text) t.text = text
   }
   if (el.getRootNode() instanceof ShadowRoot) t.inShadow = true
@@ -370,7 +461,14 @@ function shapeFor(el: Element): Pick<TimelineEvent, "shape" | "length"> {
   return secret ? { shape: "secret" } : { shape: shapeOf(el.value, el.getAttribute("type") || "text"), length: lengthBand(el.value) }
 }
 
-const isSecret = (el: Element | null) => el instanceof HTMLInputElement && (secrets.has(el) || el.type === "password")
+/**
+ * A password box, or, failing closed, an element the keys go to that isn't
+ * editable itself but hosts a shadow root (closed, perhaps, so what's in it
+ * can't be seen): its keys are a password's until shown otherwise.
+ */
+const isSecret = (el: Element | null) =>
+  (el instanceof HTMLInputElement && (secrets.has(el) || el.type === "password")) ||
+  (el instanceof HTMLElement && !editable(el) && (shadowRootOf(el) !== null || el.tagName.includes("-")))
 const editable = (el: Element | null) =>
   (el instanceof HTMLInputElement && eligible(el)) || el instanceof HTMLTextAreaElement || (el instanceof HTMLElement && el.isContentEditable)
 
@@ -387,9 +485,12 @@ function take(): boolean {
   return true
 }
 
+/** What ends a password box's typing: the user moving on from it. */
+const MOVES_ON = new Set<TimelineType>(["blur", "submit", "unload"])
+
 function push(type: TimelineType, more: Omit<TimelineEvent, "t" | "type"> = {}) {
-  if (!session) return
-  commitTyping()
+  if (!session || eventsFull) return
+  commitTyping(MOVES_ON.has(type))
   if (!take()) return
   queue.push({ t: Date.now() - session.startedAt, type, ...more })
   schedule()
@@ -400,9 +501,9 @@ function schedule() {
   flushTimer ??= setTimeout(flush, BATCH_MS)
 }
 
-/** Typing held back to be merged goes on the timeline. */
-function commitTyping() {
-  if (!typing) return
+/** Typing held back to be merged goes on the timeline; a password box's only once the user moves on (`force`), so it stays one event. */
+function commitTyping(force = false) {
+  if (!typing || (typing.secret && !force)) return
   const t = typing
   typing = null
   if (take()) queue.push(t.event)
@@ -415,21 +516,24 @@ function flush() {
   if (!session) return
   // Typing in one field merges until it pauses; a password box's until the user moves on.
   if (typing && !typing.secret && performance.now() - typing.at > INPUT_MERGE_MS) commitTyping()
-  if (typing && !queue.length) return schedule()
-  if (!queue.length) return
+  // The digests of words typed since, for the background to scrub addresses and titles of.
+  const words = [...wordDigests.values()].filter((d) => !sentWords.has(d)).slice(0, 50)
+  for (const d of words) sentWords.add(d)
+  if (!queue.length && !words.length) return void (typing && schedule())
   const events = queue.splice(0)
-  if (dropped) {
+  if (dropped && events.length) {
     events[0] = { ...events[0], dropped }
     dropped = 0
   }
   const id = session.id
-  void send({ type: "db:learn-events", session: id, events }).then((taken) => {
-    if (taken !== true && session?.id === id) end()
+  void send({ type: "db:learn-events", session: id, events, ...(words.length ? { words } : {}) }).then((taken) => {
+    if (taken === "full") eventsFull = true
+    else if (taken !== true && session?.id === id) end()
   })
-  if (typing) schedule()
+  if (typing || wordDigests.size > sentWords.size) schedule()
 }
 
-function typedInto(event: Event, el: EventTarget | undefined) {
+function typedInto(event: Event, el: EventTarget | null) {
   if (!(el instanceof Element) || !editable(el)) return
   const now = performance.now()
   const secret = isSecret(el) || (el instanceof HTMLInputElement && masked(el))
@@ -439,16 +543,18 @@ function typedInto(event: Event, el: EventTarget | undefined) {
     typing.at = now
     return
   }
-  commitTyping()
-  if (!session) return
+  commitTyping(true)
+  if (!session || eventsFull) return
   typing = { el, at: now, secret, event: { t: Date.now() - session.startedAt, type: "input", target: describe(el), ...shapeFor(el), ...(inputType ? { inputType } : {}) } }
   schedule()
 }
 
 function onPointer(event: MouseEvent) {
-  if (!event.isTrusted) return
+  if (!event.isTrusted || !session || eventsFull) return
   const mods = modsOf(event)
-  push(event.type as TimelineType, { target: describe(realTarget(event)), x: event.clientX, y: event.clientY, ...(mods ? { mods } : {}) })
+  const target = describe(realTarget(event), true)
+  // A keypad's key: where it was pressed would tell which.
+  push(event.type as TimelineType, { target, ...(target?.keypad ? {} : { x: event.clientX, y: event.clientY }), ...(mods ? { mods } : {}) })
 }
 
 function onFocus(event: FocusEvent) {
@@ -471,22 +577,30 @@ function onScroll(event: Event) {
   else push("scroll", { x: Math.round(scrollX), y: Math.round(scrollY) })
 }
 
-function onPagehide() {
+function onPagehide(event: Event) {
+  if (!event.isTrusted) return
   push("unload")
-  commitTyping()
+  commitTyping(true)
   flush()
 }
 
-/** A key by its name only. Typing into a field is its input events; a password box gets only Enter, Tab and Escape. */
+/**
+ * A key by its name only. Typing into a field is its input events; a
+ * password box (see isSecret) gets only Enter, Tab and Escape, with no
+ * Ctrl, Meta or Alt (AltGr is Ctrl and Alt, or its own state).
+ */
 function keyEvent(event: KeyboardEvent) {
   if (event.repeat) return
   const el = realTarget(event)
   const name = keyName(event.key)
   const shortcut = event.ctrlKey || event.metaKey
-  if (editable(el) && name === "char" && !shortcut) return
-  if (isSecret(el) && !SECRET_KEYS.has(name) && !shortcut) return
+  if (isSecret(el)) {
+    if (!SECRET_KEYS.has(name) || event.ctrlKey || event.metaKey || event.altKey || event.getModifierState?.("AltGraph")) return
+  } else if (editable(el) && name === "char" && !shortcut) return
   const modifier = name === "Shift" || name === "Control" || name === "Alt" || name === "Meta"
   const mods = modifier ? "" : modsOf(event)
+  // Enter or Tab in a password box ends its typing, as one event, before the key.
+  if (typing?.secret && typing.el === el && (name === "Enter" || name === "Tab")) commitTyping(true)
   const target = el !== lastKeyTarget ? describe(el) : undefined
   lastKeyTarget = el
   push("key", { key: name, ...(mods ? { mods } : {}), ...(target ? { target } : {}), ...(el && editable(el) && SECRET_KEYS.has(name) ? shapeFor(el) : {}) })
@@ -509,6 +623,8 @@ function onKeydown(event: KeyboardEvent) {
   if (!learning() || !event.isTrusted) return
   keyEvent(event)
   if (event.key !== "Enter") return
+  // Enter often leaves the page: what was typed goes to the background first.
+  flush()
   const target = realTarget(event)
   if (target instanceof HTMLInputElement && eligible(target)) submittedBy("enter", null)
 }
@@ -518,6 +634,7 @@ function onSubmit(event: Event) {
   const form = realTarget(event)
   const submitter = (event as SubmitEvent).submitter ?? null
   push("submit", { target: describe(form), ...(submitter ? { submitter: describe(submitter) } : {}) })
+  flush()
   if (form instanceof HTMLFormElement) submittedBy("submit", submitter)
 }
 
@@ -559,6 +676,11 @@ function begin(next: LearnSession) {
   secrets = new WeakSet()
   identifiers = new Set()
   scrubTyped = null
+  latest = new Map()
+  wordDigests = new Map()
+  sentWords = new Set()
+  eventsFull = false
+  stepsFull = false
   detected = new WeakMap()
   queue = []
   typing = null
@@ -574,7 +696,7 @@ function begin(next: LearnSession) {
 function end() {
   // What waits is sent while the background may still take it.
   if (session) {
-    commitTyping()
+    commitTyping(true)
     flush()
   }
   session = null
@@ -588,26 +710,25 @@ function end() {
   secrets = new WeakSet()
   identifiers = new Set()
   scrubTyped = null
+  latest = new Map()
+  wordDigests = new Map()
+  sentWords = new Set()
   detected = new WeakMap()
   typedCount = 0
   lastSignature = ""
 }
 
-/** Joins the tab's recording, if it's recording, and follows it starting and ending. */
+/**
+ * Joins the tab's recording when the background says so (to every frame as
+ * it starts, and to each frame that loads while it runs, on its
+ * DOMContentLoaded), and leaves it when it ends. A frame asks nothing: a page
+ * nobody records sends no message.
+ */
 export function initLearn() {
   chrome.runtime.onMessage.addListener((message: ToContent) => {
     if (message?.type !== "db:learn") return
-    if (message.session) begin(message.session)
+    const s = message.session
+    if (s && typeof s.id === "string" && typeof s.salt === "string" && typeof s.until === "number" && typeof s.startedAt === "number") begin({ ...s, words: Array.isArray(s.words) ? s.words.filter((w) => typeof w === "string") : [] })
     else end()
   })
-  void ask()
-}
-
-/** Asks the background for the tab's recording: joins it, or ends one the background no longer has. */
-async function ask() {
-  const before = session
-  const s = (await send({ type: "db:learn-ask" })) as LearnSession | null
-  if (s && typeof s.id === "string" && typeof s.salt === "string" && typeof s.until === "number" && typeof s.startedAt === "number") begin(s)
-  // Unless a session started meanwhile.
-  else if (session === before) end()
 }

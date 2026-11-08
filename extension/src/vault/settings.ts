@@ -167,7 +167,7 @@ function learnRows(app: App): HTMLElement {
       app.announce("Deleted the recordings.")
       void paint()
     })
-    box.replaceChildren(h("p", { class: "hint" }, `${logs.length} ${logs.length === 1 ? "recording" : "recordings"} kept in this browser, the newest 50 for 30 days.`), h("div", { class: "buttons" }, download, clear))
+    box.replaceChildren(h("p", { class: "hint" }, `${logs.length} ${logs.length === 1 ? "recording" : "recordings"} kept in this browser, the newest 10 for 7 days.`), h("div", { class: "buttons" }, download, clear))
   }
   void paint()
   return box
