@@ -30,7 +30,7 @@
 // so no transparent area is left over the page to swallow its clicks.
 
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
-import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
+import { epochNow, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import { asksNewPassword, findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
@@ -765,7 +765,7 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
               { opacity: 0, transform: "scale(0.96)" },
               { opacity: 1, transform: "none" },
             ],
-      timing(cornerOffer ? 0.4 : 0.25),
+      timing(cornerOffer ? MENU_MOTION.openCorner : MENU_MOTION.open),
     )
     const restore = () => {
       revealAnim = null
@@ -807,7 +807,7 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
   if (same || !lastTarget) return
   // The offer's first size isn't a change anyone made: it lands there.
   if (first && (mode === "save" || mode === "signin")) return void (lastTarget = targetRect())
-  retarget(changed ? 0.38 : 0.37)
+  retarget(changed ? MENU_MOTION.frameMode : MENU_MOTION.frameSize)
   // The pill inside keeps its place on the page while the frame moves around
   // it: hand the frame the springs, which it steps on its own clock.
   if (mode === "pill" && lastTarget)
@@ -819,7 +819,7 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
     })
   if (changed && frame) {
     const radius = (targetRect()?.height ?? 2 * RADIUS) / 2
-    const anim = frame.animate([{ borderRadius: getComputedStyle(frame).borderRadius }, { borderRadius: `${radius}px` }], { ...timing(0.38), fill: "forwards" })
+    const anim = frame.animate([{ borderRadius: getComputedStyle(frame).borderRadius }, { borderRadius: `${radius}px` }], { ...timing(MENU_MOTION.frameMode), fill: "forwards" })
     anim.finished.then(
       () => {
         if (frame) frame.style.borderRadius = `${radius}px`
@@ -856,7 +856,7 @@ function leave(travel = false) {
           { opacity: 0, transform: "scale(0.96)" },
         ]
   f.style.transformOrigin = travel ? "top right" : "center"
-  const anim = f.animate(keyframes, { ...timing(travel ? 0.5 : 0.25), fill: "forwards" })
+  const anim = f.animate(keyframes, { ...timing(travel ? MENU_MOTION.leaveTravel : MENU_MOTION.leave), fill: "forwards" })
   anim.finished.then(done, done)
   // In case the page stops the animation from finishing (a hidden tab).
   setTimeout(done, 900)
@@ -1358,7 +1358,7 @@ export function stepped(): boolean {
 function roundTo(radius: number) {
   const f = frame
   if (!f) return
-  const anim = f.animate([{ borderRadius: getComputedStyle(f).borderRadius }, { borderRadius: `${radius}px` }], { ...timing(0.37), fill: "forwards" })
+  const anim = f.animate([{ borderRadius: getComputedStyle(f).borderRadius }, { borderRadius: `${radius}px` }], { ...timing(MENU_MOTION.frameSize), fill: "forwards" })
   anim.finished.then(
     () => {
       f.style.borderRadius = `${radius}px`
