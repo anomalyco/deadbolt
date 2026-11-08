@@ -34,6 +34,10 @@ beforeAll(async () => {
       },
       onMessage: { addListener: (f: (m: unknown) => void) => listeners.push(f) },
     },
+    // Other test files' timers share this process and this global: an
+    // autofill session's expiry writes chrome.storage.session while these
+    // tests wait. Give it somewhere to write.
+    storage: { session: { get: async () => ({}), set: async () => {}, remove: async () => {} }, local: { get: async () => ({}), set: async () => {}, remove: async () => {} } },
   }
   history.replaceState(null, "", "/appleauth/auth/signin?widgetKey=secret-ish&language=US-EN")
   document.title = "Sign In - Apple"
