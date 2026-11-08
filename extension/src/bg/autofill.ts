@@ -571,7 +571,7 @@ export class Autofill {
     // provider whose sign-in hosts Deadbolt knows follows it through the
     // provider (see ProviderChain), as the corner offer's pick does. The menu
     // goes first: it mustn't sit over the site's provider button.
-    if (this.providers && account.signIn.account && providerOf(account.signIn.provider).hosts.length && (await this.signInAllowed(t, account)) && (await this.signsInHere(t))) {
+    if (this.providers && account.signIn.account && providerOf(account.signIn.provider).hosts.length && (await this.signInAllowed(t, account, true)) && (await this.signsInHere(t))) {
       await this.cancel(t.tabId)
       this.tokens.delete(token)
       const starting = this.providers.start(t, account)
@@ -842,11 +842,16 @@ export class Autofill {
 
   /**
    * Whether a pick of `account` in `target` may start an automatic sign-in:
-   * Deadbolt ready, "Offer to sign in" on, the top page, and a saved URL of
-   * the login naming its exact origin (scheme, host and port).
+   * Deadbolt ready, "Offer to sign in" on, and the top page. The pick's own
+   * origin is the session's, whatever URL the login was saved with
+   * (`google.com` picked on accounts.google.com): the daemon listed the
+   * login here, the pick fills it here, and once the values are in the
+   * page's fields its script can post them anyway, so submitting them adds
+   * nothing. A `provider` sign-in, which presses a provider's button on the
+   * site, still needs a saved URL naming the exact origin.
    */
-  private async signInAllowed(target: FrameTarget, account: Account): Promise<boolean> {
-    return this.host.status.state === "ready" && target.frameId === 0 && account.urls.some((u) => exactSignInOrigin(u, target.origin)) && (await signInEnabled())
+  private async signInAllowed(target: FrameTarget, account: Account, provider = false): Promise<boolean> {
+    return this.host.status.state === "ready" && target.frameId === 0 && (!provider || account.urls.some((u) => exactSignInOrigin(u, target.origin))) && (await signInEnabled())
   }
 
   /**
@@ -867,7 +872,8 @@ export class Autofill {
    * fills never come here, and nothing a page does can call it.
    */
   async startAutomatic(target: FrameTarget, account: Account, entry: string | { form: number; roles: FieldRole[] }, provider = false): Promise<PickReply> {
-    if (!(await this.signInAllowed(target, account))) return { ok: false, message: "This sign-in isn't available here." }
+    // The corner offer's entry (it may click the site's own sign-in link first) keeps its exact-origin rule, as does a provider's button.
+    if (!(await this.signInAllowed(target, account, typeof entry === "string" || (provider && !!account.signIn)))) return { ok: false, message: "This sign-in isn't available here." }
     await this.cancel(target.tabId)
     const generation = this.generation(target.tabId)
     const site = siteOf(new URL(target.origin).hostname)
@@ -1169,8 +1175,9 @@ export class Autofill {
       // The daemon lists a login for every origin of its saved hosts' sites
       // and their subdomains; a step here fills only on the pick's own origin,
       // or one whose host a saved URL of the login names exactly.
+      // An automatic session's steps stay on the pick's own origin (above), so
+      // they submit where its first step did, whatever URL the login was saved with.
       if (target.origin !== s.origin && !account.urls.some((u) => sameHost(u, target.origin))) return
-      if (s.automatic && !account.urls.some((u) => exactSignInOrigin(u, target.origin))) return this.endSession(target.tabId)
       const step = (first ? clean : stepRoles(clean, account, idEmpty)).filter((r) => allowed.includes(r)).filter((r) => !s.filled.includes(r) || (IDENTIFIER_ROLES.includes(r) && (!s.automatic || !s.filled.includes("password"))))
       if (!step.length) return
       // A step still coming into view (Google's password box fades in) isn't

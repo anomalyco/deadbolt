@@ -123,8 +123,13 @@ off stays off. Off, inline and popup picks only fill, as in Sign-in sessions.
 Page arrival and detector confidence never authorize a fill. The existing
 500 ms visible dwell and fresh 400 ms post-pick visibility check remain
 mandatory for menu picks (the popup is the browser's own surface). A sign-up
-or change-password form, a frame's field and a login with no saved URL naming
-the page's exact origin only fill (see the first-step rules below);
+or change-password form and a frame's field only fill (see the first-step
+rules below). A pick signs in on the origin it was made on, whatever URL the
+login was saved with (an import's `google.com` picked on accounts.google.com):
+the daemon listed it there and the pick fills it there, and once the values are
+in the page's fields its script can post them anyway, so submitting adds
+nothing. The corner offer, which may click the site's own sign-in link, and a
+provider's button keep requiring a saved URL naming the exact origin;
 Browse-agent fills keep manual submit. A top page asks the service worker
 about an offer or a provider chain only when it shows something of a
 sign-in (a login form, a sign-in path, a provider, “Sign in” or “Sign out”
@@ -136,7 +141,7 @@ URL and what of a sign-in it shows) that got no offer isn't probed again
 until the vault changes, and the provider accounts are listed once until it
 does.
 
-The automatic session is bound to the selected account, exact saved origin
+The automatic session is bound to the selected account, the pick's origin
 (scheme, host and port), top frame and current document/form snapshots. Its
 entry window is 20 seconds, followed by the existing bounded sign-in session.
 It permits at most four automatic submit requests. Once a password has filled,

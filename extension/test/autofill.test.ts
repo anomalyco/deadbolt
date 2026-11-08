@@ -160,17 +160,37 @@ describe("automatic sign-in session", () => {
     expect(started).toEqual([])
     expect(delivered("db:point")).toHaveLength(2)
   })
-  test("a pick on a sign-up form, or with no saved URL naming the exact origin, only fills", async () => {
+  test("a pick on a sign-up form only fills", async () => {
     const signup = await loginMenu(1, ["email", "password"], "signup")
     expect(await autofill.menuPick(signup, account.ref, menuSender())).toEqual({ ok: true })
-    const sibling = await loginMenu(2)
-    account.urls = ["https://example.com"]
+    expect(delivered("db:signin-submit")).toHaveLength(0)
+  })
+  test.each([["example.com"], ["https://example.com/login"]])("a login saved as %s, picked on www.example.com (google.com on accounts.google.com), signs in there step by step", async (saved) => {
+    account.urls = [saved]
     try {
-      expect(await autofill.menuPick(sibling, account.ref, menuSender())).toEqual({ ok: true })
+      fake.fillAck = () => ({ filled: ["email"] })
+      expect(await autofill.menuPick(await loginMenu(1, ["email"]), account.ref, menuSender())).toEqual({ ok: true, submitted: true })
+      fake.fillAck = () => ({ filled: ["password"] })
+      await autofill.page(next("password-doc"), "login", ["password"], 2)
+      expect(delivered("db:signin-submit").map((d) => d.message.form)).toEqual([1, 2])
     } finally {
       account.urls = [SITE]
     }
-    expect(delivered("db:signin-submit")).toHaveLength(0)
+  })
+  test("a step on another origin, even one the login names, ends an automatic session unfilled and unsubmitted", async () => {
+    const other = "https://accounts.example.com"
+    account.urls = [SITE, other]
+    try {
+      fake.fillAck = () => ({ filled: ["email"] })
+      expect(await autofill.menuPick(await loginMenu(1, ["email"]), account.ref, menuSender())).toEqual({ ok: true, submitted: true })
+      fake.frames["1:0"] = { url: `${other}/password`, documentId: "other-doc", parentFrameId: -1 }
+      await autofill.page(pageSender({ documentId: "other-doc", url: `${other}/password`, origin: other }), "login", ["password"], 2)
+      expect(fills()).toHaveLength(1)
+      expect(delivered("db:signin-submit")).toHaveLength(1)
+      expect(fake.session).toEqual({})
+    } finally {
+      account.urls = [SITE]
+    }
   })
   test("a page can't pick: only the menu document its token was bound to", async () => {
     const token = await loginMenu()

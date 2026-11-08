@@ -1292,6 +1292,8 @@ interface LaunchOptions {
   reducedMotion?: boolean
   /** Give the first fake account an exact origin for universal sign-in. */
   universal?: boolean
+  /** The first Acme login's only saved URL instead (a bare domain, as an import saves). */
+  saved?: string
   /**
    * "Offer to sign in", on unless turned off: a pick then submits on a
    * login whose saved URL names the page's exact origin (the browser
@@ -1347,7 +1349,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
       DEADBOLT_FAKE_LIST_DELAY: String(options.listDelay ?? 0),
-      DEADBOLT_FAKE_ORIGIN: options.universal ? site : "",
+      DEADBOLT_FAKE_ORIGIN: options.saved ?? (options.universal ? site : ""),
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
       DEADBOLT_FAKE_KEYLOGIN: options.keyLogin ? "1" : "",
@@ -1465,7 +1467,7 @@ async function seedVault(run: Run, options: LaunchOptions) {
       // Also for acme.test, where the same page must narrow nothing (googleAccount).
       for (const u of ["ryan@gmail.com", "ryan@anoma.ly", "kit@gmail.com"]) await login("Google", [...urls([`http://accounts.google.test:${port}`, `http://www.acme.test:${port}`]), { name: "username", value: u }, { name: "password", value: "google password" }])
     } else {
-      await login("Acme", [...urls(sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
+      await login("Acme", [...urls(options.saved ? [options.saved] : sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
       await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
       if (options.keyLogin) await login("Acme API key", [...urls(sites), { name: "password", value: "acme api key" }])
       if (options.signIn) {
@@ -3844,6 +3846,27 @@ async function googleSignIn() {
     await diagnose(run, page, "Google sign-in")
   } finally {
     await close(run)
+  }
+
+  // A login saved under its bare domain, as imports save `google.com`, signs in on accounts.acme.test all the same.
+  // (A secure context, as Google's https is: the page's sign-in probe uses crypto.randomUUID.)
+  const bare = await launch({ saved: "acme.test", offerToSignIn: "default", secure: [`http://accounts.acme.test:${server.port}`] })
+  const tab = await bare.context.newPage()
+  try {
+    const before = flowPosts.length
+    await tab.goto(`http://accounts.acme.test:${server.port}/flow/gmail`)
+    const menu = await menuOn(tab, "#identifierId")
+    if (!menu) throw new Error(`no menu on ${tab.url()}`)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    const signedIn = await until("signed in", async () => (await tab.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
+    const posted = JSON.stringify(flowPosts.slice(before).filter((p) => p.path.startsWith("/flow/gmail/")).map((p) => p.path.slice("/flow/gmail/".length)))
+    check(!!signedIn && posted === JSON.stringify(["identifier", "pwd", "totp"]), `a login saved as "acme.test" signs in on accounts.acme.test with one pick (posted ${posted})`)
+    if (!signedIn) await diagnose(bare, tab, "Google sign-in, bare domain")
+  } catch (err) {
+    check(false, `Google sign-in with a bare saved domain threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(bare, tab, "Google sign-in, bare domain")
+  } finally {
+    await close(bare)
   }
 }
 
