@@ -115,6 +115,28 @@ describe("a learning frame", () => {
     expect(JSON.stringify(sent)).not.toContain("hunter2-plain")
   })
 
+  test("a page that echoes a password into text doesn't get it logged", async () => {
+    for (const f of listeners) f({ type: "db:learn", session: { ...session, id: "3b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b" } })
+    document.body.innerHTML = `
+      <label for="pw">Password</label><input id="pw" type="password">
+      <button>Sign In</button>`
+    learnScanned()
+    await settle()
+    type($("#pw"), "hunter2-plain")
+    // The page reads the password back out of the field and echoes it, as a
+    // "show password" mirror or a page that logs what it was given can.
+    document.title = "hunter2-plain"
+    $("label").textContent = "Re-enter hunter2-plain"
+    await new Promise((r) => setTimeout(r, 850))
+    $("button").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
+    await settle()
+    const submit = steps().findLast((s) => s.trigger === "submit")!
+    expect(submit.title).toBe("<typed>")
+    expect(submit.inputs.find((i) => i.id === "pw")!.label).toBe("Re-enter <typed>")
+    expect(JSON.stringify(sent)).not.toContain("hunter2-plain")
+    document.title = "Sign In - Apple"
+  })
+
   test("page attributes and the address lose what may be the user's", async () => {
     history.replaceState(null, "", "/u/kit@example.com/login?kit@example.com&token123456=1")
     // happy-dom loads no iframe pages, and says so on the console.
