@@ -242,10 +242,8 @@ try {
     await web.waitForFunction(() => (document.querySelector("#password") as HTMLInputElement).value === "synthetic-only-password")
     record("inline pick to filled fields", performance.now() - pick)
     // Ignore the live region / screen-reader copy; time the visible pill's
-    // ring closing green (the arc's draw, not the flash and cool-away after).
-    const filled = menu.locator(".pill.ok .ring.ok .arc")
-    await filled.waitFor()
-    await filled.evaluate((arc) => Promise.all(arc.getAnimations().map((a) => a.finished.catch(() => {}))))
+    // ring turning green (not its speeding away and fading after).
+    await menu.locator(".pill.ok .ring.ok").waitFor()
     record("inline pick to Filled", performance.now() - pick)
     await web.close()
   }

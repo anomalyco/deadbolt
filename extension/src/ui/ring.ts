@@ -1,62 +1,56 @@
-// The ring round a picked avatar while its fill is on the way. It never
-// appears or goes in one frame: its arc draws on from nothing as it starts
-// turning, closes into a green circle when the fill lands (the tile's ground
-// flashes green with it) and then cools away, or draws back to nothing when
-// it doesn't.
+// The ring round a picked avatar while its fill is on the way: a comet, a
+// bright head with a tail that fades behind it, turning round a faint track.
+// It never appears or goes in one frame. When the fill lands it turns green
+// and its head catches its tail, filling the ring in whole (MENU_FEEL.ring
+// adds a light running round it, or a ring of light sinking into the tile;
+// "away" speeds it off and fades it instead). The tile's ground flashes green
+// with it. When the fill doesn't land, it fades and shrinks away.
+//
+// While it turns, everything is rotate, scale and opacity, which the
+// compositor runs, so it stays smooth while the menu's thread folds the
+// frame. Green is a second comet that crossfades in. Only the closing, once
+// the fold is over, draws its gradient anew each frame.
 
-import { MENU_MOTION, reducedMotion, spring, timing } from "./motion"
+import { MENU_FEEL, MENU_MOTION, reducedMotion, spring, timing } from "./motion"
 
-const NS = "http://www.w3.org/2000/svg"
-
-/** How much of the circle the turning arc covers, out of 100. */
-const ARC = 26
-/** One turn of the arc, in milliseconds. */
-const TURN_MS = 900
-/** How long the closed green circle stays before it cools away. */
-const RING_HOLDS_MS = 250
-
-function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string>): SVGElementTagNameMap[K] {
-  const e = document.createElementNS(NS, tag)
-  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v)
-  return e
+const span = (cls: string) => {
+  const s = document.createElement("span")
+  s.className = cls
+  return s
 }
 
 export interface Ring {
-  /** The fill landed: the arc closes into a green circle, the tile flashes green, and the ring cools away. */
-  close(): void
-  /** It didn't: the arc draws back to nothing and the ring goes. */
-  stop(): void
+  /** The fill landed: the comet turns green and closes into a whole ring (or speeds away), and the tile flashes green. `then` runs as it starts. */
+  close(then?: () => void): void
+  /** It didn't: the ring fades and shrinks away. `then` runs as it starts going. */
+  stop(then?: () => void): void
 }
 
 /** Starts the ring on `avatar` (which must be positioned). */
 export function ring(avatar: HTMLElement): Ring {
   const reduced = reducedMotion()
-  const wrap = document.createElement("span")
-  wrap.className = "ring"
+  const lands = MENU_FEEL.ring
+  // wrap: comes and goes. spin: turns steadily. boost: the extra turn as it speeds away. Two comets, crossfaded.
+  const wrap = span("ring")
   wrap.setAttribute("aria-hidden", "true")
-  const svg = el("svg", { class: "ring-turn", viewBox: "0 0 40 40" })
-  const circle = { cx: "20", cy: "20", r: "18.5", pathLength: "100" }
-  const track = el("circle", { ...circle, class: "track" })
-  const arc = el("circle", { ...circle, class: "arc" })
-  svg.append(track, arc)
-  wrap.append(svg)
+  const track = span("ring-track")
+  const spin = span("ring-spin")
+  const boost = span("ring-spin")
+  const comet = span("ring-comet")
+  const lit = span("ring-comet lit")
+  comet.style.setProperty("--tail", `${MENU_FEEL.tail}turn`)
+  lit.style.setProperty("--tail", `${lands === "away" ? Math.min(0.85, MENU_FEEL.tail * 1.8) : MENU_FEEL.tail}turn`)
+  lit.style.opacity = "0"
+  boost.append(comet, lit)
+  spin.append(boost)
+  wrap.append(track, spin)
   avatar.append(wrap)
 
-  const dash = (n: number) => `${n} 100`
-  arc.style.strokeDasharray = dash(reduced ? ARC : 0)
-  const turn = reduced ? null : svg.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], { duration: TURN_MS, iterations: Infinity })
-  wrap.animate(reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: "scale(0.9)" }, { opacity: 1, transform: "none" }], timing(MENU_MOTION.ringIn))
-  // The arc grows from nothing as it turns, so it never pops in at full length.
-  const draw = (to: number, duration: number) => {
-    const from = getComputedStyle(arc).strokeDasharray
-    for (const a of arc.getAnimations()) a.cancel()
-    arc.style.strokeDasharray = dash(to)
-    if (!reduced) arc.animate([{ strokeDasharray: from }, { strokeDasharray: dash(to) }], spring(duration))
-  }
-  if (!reduced) draw(ARC, MENU_MOTION.ringIn)
+  const turn = reduced ? null : spin.animate([{ rotate: "0turn" }, { rotate: "1turn" }], { duration: MENU_FEEL.turn * 1000, iterations: Infinity })
+  wrap.animate(reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, scale: "0.9" }, { opacity: 1, scale: "1" }], timing(MENU_MOTION.ringIn))
 
-  // A fill that lands at once still lets the arc draw on first, so the ring
-  // reads as a beat of its own instead of flashing straight to its end.
+  // A fill that lands at once still lets the comet come in first, so the
+  // ring reads as a beat of its own instead of flashing straight to its end.
   const born = performance.now()
   const after = (go: () => void) => {
     const wait = born + MENU_MOTION.ringIn * 1000 - performance.now()
@@ -64,41 +58,109 @@ export function ring(avatar: HTMLElement): Ring {
     else go()
   }
   let ended = false
-  return {
-    close() {
-      if (ended) return
-      ended = true
-      after(closeNow)
-    },
-    stop() {
-      if (ended) return
-      ended = true
-      after(stopNow)
-    },
+  const end = (go: () => void, then?: () => void) => {
+    if (ended) return
+    ended = true
+    after(() => {
+      go()
+      then?.()
+    })
+  }
+  return { close: (then) => end(lands === "away" ? awayNow : closeNow, then), stop: (then) => end(stopNow, then) }
+
+  /** The tile's ground flashes green and cools; it keeps its logo. */
+  function flashTile(delay = 0) {
+    const ground = getComputedStyle(avatar).backgroundColor
+    avatar.animate(
+      [{ backgroundColor: ground }, { backgroundColor: "color-mix(in srgb, var(--text-success) 32%, transparent)", offset: 0.3 }, { backgroundColor: ground }],
+      { duration: MENU_MOTION.ringFlash * 1000, easing: "ease-out", delay, fill: "backwards" },
+    )
+  }
+
+  /** The grey comet gives way to the green one. */
+  function goGreen(duration: number) {
+    const swap = { duration: reduced ? 180 : duration, easing: "ease-out", fill: "forwards" } as const
+    lit.animate([{ opacity: 0 }, { opacity: 1 }], swap)
+    comet.animate([{ opacity: 1 }, { opacity: 0 }], swap)
   }
 
   function closeNow() {
     wrap.classList.add("ok")
-    draw(100, MENU_MOTION.ringClose)
-    const closed = spring(MENU_MOTION.ringClose).duration
-    // The tile keeps its logo: its ground flashes green as the circle closes, and cools.
-    const ground = getComputedStyle(avatar).backgroundColor
-    avatar.animate(
-      [{ backgroundColor: ground }, { backgroundColor: "color-mix(in srgb, var(--text-success) 32%, transparent)", offset: 0.3 }, { backgroundColor: ground }],
-      { duration: MENU_MOTION.ringFlash * 1000, easing: "ease-out" },
-    )
-    // Whole and green for a moment, then the ring cools away; it stays in place, unseen.
-    const out = wrap.animate(reduced ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.96)" }], {
-      ...timing(MENU_MOTION.ringOut),
-      delay: closed + RING_HOLDS_MS,
+    goGreen(150)
+    // The head runs on and catches its tail; what it leaves behind fills in.
+    const whole = spring(MENU_MOTION.ringWhole)
+    lit.style.setProperty("--tail", "1turn")
+    lit.style.setProperty("--solid", "1")
+    if (!reduced)
+      lit.animate(
+        [
+          { "--tail": `${MENU_FEEL.tail}turn`, "--solid": 0 },
+          { "--tail": "1turn", "--solid": 1 },
+        ],
+        whole,
+      )
+    track.animate([{ opacity: 1 }, { opacity: 0 }], { duration: reduced ? 180 : whole.duration, fill: "forwards" })
+    // Whole, its turning can't be seen: it stops there.
+    if (turn) setTimeout(() => turn.pause(), whole.duration)
+    const closed = reduced ? 0 : whole.duration * 0.6
+    if (lands === "glint" && !reduced) glint(closed)
+    if (lands === "absorb" && !reduced) return absorb(closed)
+    flashTile()
+  }
+
+  /** A short light runs once round the closed ring, and goes. */
+  function glint(delay: number) {
+    const light = span("ring-comet glint")
+    light.style.setProperty("--tail", "0.22turn")
+    light.style.opacity = "0"
+    wrap.append(light)
+    light
+      .animate(
+        [
+          { rotate: "0turn", opacity: 0 },
+          { opacity: 1, offset: 0.2 },
+          { opacity: 1, offset: 0.65 },
+          { rotate: "1turn", opacity: 0 },
+        ],
+        { duration: 750, delay, easing: "cubic-bezier(.45,0,.25,1)" },
+      )
+      .finished.then(() => light.remove(), () => light.remove())
+  }
+
+  /** A ring of light sinks from the closed ring into the tile, which nods as it takes it, and flashes. */
+  function absorb(delay: number) {
+    const ping = span("ring-ping")
+    ping.style.opacity = "0"
+    wrap.append(ping)
+    const sink = 320
+    ping
+      .animate([{ scale: "1", opacity: 0.9 }, { scale: "0.7", opacity: 0 }], { duration: sink, delay, easing: "cubic-bezier(.5,0,.75,0)", fill: "backwards" })
+      .finished.then(() => ping.remove(), () => ping.remove())
+    const marks = Array.from(avatar.children).filter((c) => c !== wrap) as HTMLElement[]
+    for (const m of marks)
+      m.animate([{ scale: "1" }, { scale: "0.84", offset: 0.35, easing: "cubic-bezier(.2,.7,.3,1)" }, { scale: "1" }], { duration: 480, delay: delay + sink * 0.7, easing: "cubic-bezier(.4,0,.6,1)" })
+    flashTile(delay + sink * 0.7)
+  }
+
+  function awayNow() {
+    wrap.classList.add("ok")
+    const away = MENU_MOTION.ringClose * 1000
+    flashTile()
+    goGreen(away * 0.35)
+    // Speeding up from its own pace, never a jump: an extra turn that starts at rest and gathers speed.
+    if (!reduced) boost.animate([{ rotate: "0turn" }, { rotate: `${MENU_FEEL.landTurns}turn` }], { duration: away, easing: "cubic-bezier(.4,0,.8,.5)", fill: "forwards" })
+    // It fades on the move, a light cooling as it goes.
+    const out = wrap.animate(reduced ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, scale: "1" }, { opacity: 0, scale: "1.04" }], {
+      duration: reduced ? 300 : away * 0.7,
+      delay: reduced ? 180 : away * 0.3,
+      easing: "cubic-bezier(.4,0,.6,1)",
       fill: "forwards",
     })
     out.finished.then(() => turn?.cancel(), () => {})
   }
 
   function stopNow() {
-    if (!reduced) draw(0, MENU_MOTION.ringOut)
-    const out = wrap.animate(reduced ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.9)" }], { ...timing(MENU_MOTION.ringOut), fill: "forwards" })
+    const out = wrap.animate(reduced ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, scale: "1" }, { opacity: 0, scale: "0.9" }], { ...timing(MENU_MOTION.ringOut), fill: "forwards" })
     out.finished.then(() => {
       turn?.cancel()
       wrap.remove()

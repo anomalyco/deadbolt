@@ -55,11 +55,13 @@ export const MENU_MOTION = {
   foldIn: 0.38,
   /** The pill's label fading in. */
   pillLabel: 0.3,
-  /** The ring round a picked avatar coming in, its arc drawing on as it turns (ui/ring.ts). */
+  /** The ring round a picked avatar coming in, its comet's tail growing as it turns (ui/ring.ts). */
   ringIn: 0.45,
-  /** The ring closing into a full circle as the fill lands. */
-  ringClose: 0.45,
-  /** The ring going: drawing back when the fill doesn't land, cooling away once it closed when it does. */
+  /** The comet speeding away green and fading as the fill lands (a plain duration: it accelerates). */
+  ringClose: 0.6,
+  /** The green head catching its tail as the ring fills in whole. */
+  ringWhole: 0.5,
+  /** The ring going when the fill doesn't land: the tail draws back into the head as it fades. */
   ringOut: 0.3,
   /** The tile's ground flashing green and cooling as the ring closes. */
   ringFlash: 0.9,
@@ -71,6 +73,33 @@ export const MENU_MOTION = {
   leave: 0.25,
   /** A saved login's surface going toward the toolbar button. */
   leaveTravel: 0.5,
+}
+
+/** What a fill that lands does round the ring closing (menu.ts land). */
+export type Landed = "tile" | "pill" | "pop" | "sweep"
+/** What the ring itself does as the fill lands (ui/ring.ts). */
+export type RingLands = "close" | "glint" | "absorb" | "away"
+
+/** The fold's and the pill's feel, beyond its springs. */
+export const MENU_FEEL = {
+  /** How much of the frame's rise what fades rides as it goes: 0 stays where it was on the page, 1 rides the frame's top. */
+  foldRide: 1,
+  /** tile: the tile's ground flashes green. pill: the whole pill does, and cools. pop: and the pill gives a little as it lands. sweep: and a light passes from the tile across the name. */
+  landed: "pill" as Landed,
+  /** The whole pill's flash, in seconds: up quickly, then cooling. */
+  flash: 1.1,
+  /** One turn of the ring's comet, in seconds. */
+  turn: 0.65,
+  /** How much of the circle the comet's tail covers, in turns (the green one that takes over as it lands is 1.8× as long). */
+  tail: 0.4,
+  /** How many extra turns the comet gathers as it speeds away when the fill lands ("away"). */
+  landTurns: 1.25,
+  /**
+   * close: the green head catches its tail and the ring fills in whole, and stays.
+   * glint: and a light runs once round it. absorb: and a ring of light sinks into the
+   * tile, which nods. away: the comet speeds away green and fades.
+   */
+  ring: "glint" as RingLands,
 }
 
 /** The fade that stands in for travel, scale and blur when motion is reduced. */
@@ -132,8 +161,35 @@ export interface SpringState {
   w: number
 }
 
-/** Milliseconds since the epoch, comparable between documents. */
-export const epochNow = () => performance.timeOrigin + performance.now()
+/** The frame being drawn, in ms since the epoch, while inFrame runs. */
+let drawing: number | null = null
+
+/**
+ * Milliseconds since the epoch, comparable between documents. Inside
+ * inFrame it's the frame's own instant, so two documents that move one
+ * picture between them (the host and the pill inside it) read their springs
+ * at the same moment, not whenever each one's turn in the frame came: off
+ * by a millisecond, a fast fold put the pill a pixel either way, a jiggle.
+ */
+export const epochNow = () => drawing ?? performance.timeOrigin + performance.now()
+
+/**
+ * `v` CSS pixels, on the screen's pixel grid. The host's box and the pill's
+ * offset inside it are both put on it, so the frame's edge (which the
+ * browser snaps to whole device pixels anyway) and the pill's counter-move
+ * cancel exactly, instead of each rounding its own way.
+ */
+export const devicePx = (v: number) => Math.round(v * devicePixelRatio) / devicePixelRatio
+
+/** Runs `go` for the frame at `time` (a requestAnimationFrame time), reading epochNow as that frame's instant. */
+export function inFrame(time: number, go: () => void) {
+  drawing = performance.timeOrigin + time
+  try {
+    go()
+  } finally {
+    drawing = null
+  }
+}
 
 /**
  * A number that springs toward a target, stepped once per frame. Changing

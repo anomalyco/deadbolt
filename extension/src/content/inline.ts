@@ -30,7 +30,7 @@
 // so no transparent area is left over the page to swallow its clicks.
 
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
-import { epochNow, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
+import { devicePx, epochNow, inFrame, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import { asksNewPassword, findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
@@ -116,7 +116,7 @@ let held = false
 let mode: SurfaceMode = "accounts"
 let wanted = { width: 0, height: 0 }
 /** The host's place is its mode's target plus these, which spring to 0 when the mode or size changes. */
-const offset = { left: new Spring(0), top: new Spring(0), width: new Spring(0), height: new Spring(0) }
+const offset = { left: new Spring(0, undefined, epochNow), top: new Spring(0, undefined, epochNow), width: new Spring(0, undefined, epochNow), height: new Spring(0, undefined, epochNow) }
 let lastTarget: Rect | null = null
 /** Where this script last put the host: what it must still be for the host to be taken as Deadbolt's own (see ownPill). */
 let written: Rect | null = null
@@ -554,10 +554,17 @@ function position() {
   placementChanges(placementObserver?.takeRecords() ?? [])
   watchPlacement()
   if (written && !held && !placed()) placementChanged()
-  const to = targetRect()
-  if (!to) return closeMenu()
-  lastTarget = to
-  const at = { left: to.left + offset.left.value, top: to.top + offset.top.value, width: Math.max(1, to.width + offset.width.value), height: Math.max(1, to.height + offset.height.value) }
+  const target = targetRect()
+  if (!target) return closeMenu()
+  lastTarget = target
+  // On the pixel grid, edges and offsets alike: a pill's frame (menu.ts placePill) undoes the same numbers.
+  const to = { left: devicePx(target.left), top: devicePx(target.top), width: devicePx(target.left + target.width) - devicePx(target.left), height: devicePx(target.top + target.height) - devicePx(target.top) }
+  const at = {
+    left: to.left + devicePx(offset.left.value),
+    top: to.top + devicePx(offset.top.value),
+    width: Math.max(1, to.width + devicePx(offset.width.value)),
+    height: Math.max(1, to.height + devicePx(offset.height.value)),
+  }
   written = at
   host.style.cssText = important({
     all: "initial",
@@ -608,7 +615,7 @@ function position() {
   // While it fades out it lets clicks through (and anything under it would
   // read as a cover): only a surface still in use goes back on top.
   if (!closing && !held && covered(host)) raise()
-  if (host) raf = requestAnimationFrame(position)
+  if (host) raf = requestAnimationFrame((time) => inFrame(time, position))
 }
 
 /** The intended size, not a rect the page may have restyled; only the menu gets it. */

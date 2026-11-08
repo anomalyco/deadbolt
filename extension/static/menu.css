@@ -150,39 +150,67 @@ body {
   pointer-events: none;
 }
 
-.avatar .ring .ring-turn {
-  display: block;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
+/* The track and the comet are both a 1.75px band: a disc masked to its rim. */
+.ring-track,
+.ring-spin,
+.ring-comet {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
 }
 
-.ring circle {
-  fill: none;
-  stroke-width: 1.5px;
-  vector-effect: non-scaling-stroke;
-  transition: stroke 300ms ease-out;
+/* Registered so the green comet's closing can animate them (ui/ring.ts closeNow). */
+@property --tail {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0turn;
 }
 
-.ring .track {
-  stroke: color-mix(in srgb, var(--text) 14%, transparent);
+@property --solid {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
 }
 
-.ring .arc {
-  stroke: color-mix(in srgb, var(--text) 70%, transparent);
-  stroke-linecap: round;
-  transform: rotate(-90deg);
-  transform-origin: center;
-  transform-box: fill-box;
+.ring-track,
+.ring-comet,
+.ring-ping {
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.25px), #000 calc(100% - 1.75px), #000 calc(100% - 0.5px), transparent 100%);
 }
 
-/* The track only tints, so the arc can be seen closing round it. */
-.ring.ok .track {
-  stroke: color-mix(in srgb, var(--text-success) 25%, transparent);
+.ring-track {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 
-.ring.ok .arc {
-  stroke: var(--text-success);
+/* The head at the top, bright; the tail fading out behind it, the way it came.
+   Its own layer, so turning it never repaints the gradient. */
+.ring-spin,
+.ring-comet {
+  will-change: transform, opacity;
+}
+
+.ring-comet {
+  --ring-color: color-mix(in srgb, var(--text) 80%, transparent);
+  /* Behind the tail is clear while it turns; `--solid` fills it in as the ring closes. */
+  background: conic-gradient(color-mix(in srgb, var(--ring-color) calc(var(--solid) * 100%), transparent) calc(1turn - var(--tail)), var(--ring-color) 1turn);
+}
+
+.ring-comet.lit {
+  --ring-color: var(--text-success);
+}
+
+/* The light that runs round a closed ring. */
+.ring-comet.glint {
+  --ring-color: color-mix(in srgb, white 85%, var(--text-success));
+}
+
+/* The ring of light that sinks into the tile. */
+.ring-ping {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--text-success);
+  will-change: transform, opacity;
 }
 
 /* While a press is checked, nothing transitions either. */
@@ -288,6 +316,37 @@ body.held *::after {
 .pill .offer-mark {
   width: 22px;
   height: 22px;
+}
+
+/* The pill's flash as its fill lands, or fails (menu.ts land), under its content. */
+.pill-glow {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  --glow: var(--text-success);
+  border-radius: inherit;
+  /* The pill's edge lights up with it: a bright rim, and a little light just inside it. */
+  background: color-mix(in srgb, var(--glow) 16%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--glow) 75%, transparent),
+    inset 0 0 10px color-mix(in srgb, var(--glow) 30%, transparent);
+  pointer-events: none;
+  will-change: opacity;
+}
+
+.pill-glow.failed {
+  --glow: var(--danger);
+}
+
+/* The light that passes across a pill as its fill lands (menu.ts land), under its content. */
+.pill-sheen {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 56px;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--text-success) 30%, transparent), transparent);
+  pointer-events: none;
 }
 
 .pill-label {

@@ -14,7 +14,7 @@ import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, P
 import { provider as providerOf } from "./signin"
 import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
-import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, SHRINK_WAITS_MS, spring, Spring, timing, type SpringState } from "./ui/motion"
+import { animateTo, devicePx, inFrame, MENU_FEEL, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, SHRINK_WAITS_MS, spring, Spring, timing, type SpringState } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
 import { ring } from "./ui/ring"
 import { offerTitle } from "./ui/offer"
@@ -631,8 +631,9 @@ async function pick(i: number) {
     // A passkey's sign-in closes the surface from the background once it's through.
     if (passkey) return
     const going = universal || reply.submitted === true
-    turning?.close()
-    label.parentElement?.classList.add("ok")
+    const pill = label.parentElement
+    turning.close(() => pill && land(pill, true))
+    pill?.classList.add("ok")
     relax()
     announce(going ? "Continuing sign-in" : "Filled")
     return void setTimeout(() => done(), FILLED_STAYS_MS + 450)
@@ -643,9 +644,44 @@ async function pick(i: number) {
   say(message)
   announce(`Couldn't fill. ${message}`)
   label.title = message
-  turning?.stop()
+  turning.stop(() => label.parentElement && land(label.parentElement, false))
   settle(label, "Couldn't fill", false)
   setTimeout(() => done(), FAILED_STAYS_MS)
+}
+
+/**
+ * The pill's own answer as its ring closes, or goes (MENU_FEEL.landed): its
+ * whole ground flashes green, or red, and cools; landing, it may give a
+ * little, or a light may pass from the tile across its name.
+ */
+function land(pill: HTMLElement, ok: boolean) {
+  const style = MENU_FEEL.landed
+  if (style === "tile") return
+  // A tinted layer under the pill's content, up fast, then cooling slowly: a light, not a fade.
+  const glow = h("span", { class: `pill-glow${ok ? "" : " failed"}`, "aria-hidden": "true" })
+  surface.append(glow)
+  glow
+    .animate([{ opacity: 0, easing: "ease-out" }, { opacity: 1, offset: 0.15, easing: "cubic-bezier(.2,.7,.3,1)" }, { opacity: 0 }], MENU_FEEL.flash * 1000)
+    .finished.then(() => glow.remove(), () => glow.remove())
+  if (!ok || reducedMotion()) return
+  if (style === "pop")
+    // A little give as it lands, then back out to its size, without overshoot.
+    pill.animate([{ scale: "1", easing: "cubic-bezier(.4,0,.6,1)" }, { scale: "0.965", offset: 0.22, easing: "cubic-bezier(.2,.7,.3,1)" }, { scale: "1" }], 450)
+  if (style === "sweep") {
+    // A light from the tile across the name, cooling as it goes.
+    const band = h("span", { class: "pill-sheen", "aria-hidden": "true" })
+    surface.append(band)
+    const tile = pill.querySelector<HTMLElement>(".avatar")?.getBoundingClientRect()
+    const from = tile ? tile.left + tile.width / 2 - 28 : -56
+    const to = surface.getBoundingClientRect().width
+    band.animate(
+      [
+        { transform: `translateX(${from}px)`, opacity: 1, easing: "cubic-bezier(.2,.6,.3,1)" },
+        { transform: `translateX(${to}px)`, opacity: 0 },
+      ],
+      700,
+    ).finished.then(() => band.remove(), () => band.remove())
+  }
 }
 
 /** What a pick's pill calls it: the login's username, or the item's name. */
@@ -713,8 +749,10 @@ function foldProgress(s: Record<Edge, Spring>): number {
 function stepFold(s: Record<Edge, Spring>, moving: boolean) {
   const pin = folding.pin
   if (pin) {
+    // Across, it stays put (riding the frame's left edge would slide it sideways);
+    // up, it rides the frame's top as it goes.
     const x = pin.x + pin.left - s.left.value
-    const y = pin.y + pin.top - s.top.value
+    const y = (pin.y + pin.top - s.top.value) * (1 - MENU_FEEL.foldRide)
     for (const el of folding.fading) el.style.translate = `${x}px ${y}px`
   }
   const rest = moving ? 1 - foldProgress(s) : 0
@@ -731,25 +769,29 @@ function stepFold(s: Record<Edge, Spring>, moving: boolean) {
   label.animate([{ opacity: 0, filter: "blur(3px)", transform: "scale(0.96)" }, { opacity: 1, filter: "none", transform: "none" }], timing(MENU_MOTION.pillLabel))
 }
 
+/** The pill's frame at rest (inline.ts targetRect), and the pill itself (menu.css .pill). */
+const PILL_HEIGHT = 32
+
 function placePill() {
   const pill = document.querySelector<HTMLElement>(".pill")
   const s = host.springs
   if (!pill) return
   // The frame is the pill's place plus these offsets: undo them, anchored at the right
   // (pills grow leftward from the end of the field, and from the top right of the page).
-  const ox = s ? s.left.value : 0
-  const oy = s ? s.top.value : 0
-  const ow = s ? s.width.value : 0
-  const oh = s ? s.height.value : 0
+  // On the pixel grid, as the host's box is (inline.ts position), so the two cancel exactly.
+  // The middle is the pill's own (32 px tall at rest), not innerHeight's, which the browser rounds.
+  const ox = s ? devicePx(s.left.value) : 0
+  const oy = s ? devicePx(s.top.value) : 0
+  const ow = s ? devicePx(s.width.value) : 0
   pill.style.right = `${ox + ow}px`
-  pill.style.top = `${-oy + (innerHeight - oh) / 2}px`
+  pill.style.top = `${PILL_HEIGHT / 2 - oy}px`
   const moving = !!s && !(s.left.done && s.top.done && s.width.done && s.height.done)
   if (s) stepFold(s, moving)
   // One loop, however often this is called directly.
   if (moving && !host.raf)
-    host.raf = requestAnimationFrame(() => {
+    host.raf = requestAnimationFrame((time) => {
       host.raf = 0
-      placePill()
+      inFrame(time, placePill)
     })
 }
 
