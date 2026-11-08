@@ -33,6 +33,7 @@ import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, t
 import { epochNow, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import { asksNewPassword, findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
+import { fieldRect } from "./field-box"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
@@ -386,7 +387,8 @@ function targetRect(): Rect | null {
   // on where the field shows (anchorBox), out of sight while the frame's
   // fields are checked (see hold).
   if (mode === "pill" && !anchor && !anchorBox) return corner(Math.min(wanted.width || 180, 320), 32)
-  const r = anchor ? anchor.getBoundingClientRect() : boxNow()
+  // The field as drawn: a floating-label field's frame, not just its bare input.
+  const r = anchor ? fieldRect(anchor) : boxNow()
   if (!r) return null
   if (mode === "pill") {
     // On the field, at its end: beside the text the user sees being filled, not over the next field.
