@@ -923,6 +923,10 @@ try {
       return null
     })
     await p.waitForTimeout(1400)
+    // Under the field's bordered box, the floating label's too, not just its bare input.
+    const [placed, drawn] = await Promise.all([(await menu.frameElement()).boundingBox(), p.locator(".field").boundingBox()])
+    check(placed && drawn && Math.abs(placed.x - drawn.x) <= 1 && Math.abs(placed.width - drawn.width) <= 1 && placed.y >= drawn.y + drawn.height,
+      `the menu lines up under the floating-label field's drawn box (${JSON.stringify({ placed, drawn })})`)
     const target = menu.locator("button.row", { hasText: row }).first()
     const box = await target.boundingBox()
     const recording = recordings.find((r) => r.page === p)
