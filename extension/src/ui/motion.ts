@@ -32,6 +32,39 @@ export function spring(duration: number, bounce = 0): { easing: string; duration
   return { easing: `linear(${points.join(", ")})`, duration: Math.round(total * 1000) }
 }
 
+/**
+ * The inline menu's springs, in seconds (bounce 0), by what moves: the list
+ * (menu.ts) and the frame around it (content/inline.ts). Labels roll as
+ * everywhere else (rollLabel). What the user moves, the highlight under a key
+ * or the pointer, moves at once and isn't here.
+ */
+export const MENU_MOTION = {
+  /** The list growing in under its field. */
+  open: 0.25,
+  /** The save offer and the corner offer sliding in from the corner. */
+  openCorner: 0.4,
+  /** Rows sliding into the gap a row left as the list narrows, and the highlight riding on its row. */
+  reflow: 0.4,
+  /** A row that stops matching fading where it is. */
+  rowOut: 0.25,
+  /** A row that matches again coming back. */
+  rowIn: 0.3,
+  /** What doesn't go into the pill fading where it is, as the list folds. */
+  foldOut: 0.25,
+  /** The picked row's avatar (or the Save label) travelling into the pill. */
+  foldIn: 0.38,
+  /** The pill's label fading in. */
+  pillLabel: 0.3,
+  /** The frame springing to a new mode's place, size and corners. */
+  frameMode: 0.38,
+  /** The frame springing to a new size in the same mode, and the offer's corners. */
+  frameSize: 0.37,
+  /** The surface going, in place. */
+  leave: 0.25,
+  /** A saved login's surface going toward the toolbar button. */
+  leaveTravel: 0.5,
+}
+
 /** The fade that stands in for travel, scale and blur when motion is reduced. */
 export const REDUCED_FADE = { easing: "ease-out", duration: 180 }
 

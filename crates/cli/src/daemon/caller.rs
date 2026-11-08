@@ -1,21 +1,20 @@
 //! Who is asking (`docs/agent-control.md`): each connection's peer as the
 //! kernel names it, its code signature (macOS) or executable (Linux), and the
-//! class that rests on them. What the client claims is attached, never used.
+//! class that rests on them. A client's claim can never establish trust.
 
+#[cfg(any(test, target_os = "macos"))]
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 #[cfg(any(test, target_os = "macos"))]
 use std::path::PathBuf;
+#[cfg(any(test, target_os = "macos"))]
 use std::sync::Mutex;
 
 use deadbolt_client::peer::{APP_ID, AUTOFILL_ID, CodeSignature, DAEMON_ID, Peer, Process};
 use tracing::warn;
 
-use crate::protocol::{CallerClass, CallerInfo, Check, Claim, Signature};
-
-/// Peers remembered, by audit token (pid and pid version).
-const CACHE_MAX: usize = 256;
+use crate::protocol::{Ancestor, CallerClass, CallerInfo, Check, Claim, Signature};
 
 /// AI hosts whose process names make a better label than their path.
 const HOSTS: [(&str, &str); 7] = [
@@ -41,7 +40,42 @@ pub struct Callers {
     /// Their signatures, read with the first peer.
     #[cfg(target_os = "macos")]
     own: Mutex<Option<Own>>,
-    cache: Mutex<HashMap<Peer, CallerInfo>>,
+    /// Original process facts, never request claims. An exec changes the
+    /// audit token. An exit invalidates the entry even on inherited sockets.
+    #[cfg(target_os = "macos")]
+    live: Mutex<LivePeers<256>>,
+    #[cfg(test)]
+    fixtures: Mutex<HashMap<Peer, CallerInfo>>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct LivePeers<const LIMIT: usize> {
+    entries: HashMap<[u32; 8], CallerInfo>,
+    probe: usize,
+}
+
+#[cfg(target_os = "macos")]
+impl<const LIMIT: usize> LivePeers<LIMIT> {
+    fn remember(&mut self, token: [u32; 8], info: CallerInfo) -> CallerInfo {
+        if let Some(first) = self.entries.get(&token) {
+            return first.clone();
+        }
+        if self.entries.len() >= LIMIT {
+            // Bound cleanup to one liveness check per miss, not 256 while
+            // holding the cache lock. A recycled pid isn't the old token.
+            if let Some(old) = self.entries.keys().nth(self.probe).copied() {
+                self.probe = (self.probe + 1) % LIMIT;
+                if !deadbolt_client::peer::live_token(&old) {
+                    self.entries.remove(&old);
+                }
+            }
+        }
+        if self.entries.len() < LIMIT {
+            self.entries.insert(token, info.clone());
+        }
+        info
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -98,20 +132,23 @@ impl Callers {
             exe,
             #[cfg(target_os = "macos")]
             own: Mutex::default(),
-            cache: Mutex::default(),
+            #[cfg(target_os = "macos")]
+            live: Mutex::default(),
+            #[cfg(test)]
+            fixtures: Mutex::default(),
         }
     }
 
     #[cfg(test)]
     pub fn cache_for_test(&self, peer: Peer, info: CallerInfo) {
-        self.cache
+        self.fixtures
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(peer, info);
     }
 
     /// How the daemon sees `peer`, claiming `claimed`. Blocking: on macOS it
-    /// runs `deadbolt-enclave identify` the first time it sees a process.
+    /// runs `deadbolt-enclave identify` against the connecting audit token.
     pub fn identify(&self, peer: io::Result<Peer>, claimed: Option<Claim>) -> CallerInfo {
         let mut info = match peer {
             Ok(peer) => self.lookup(peer),
@@ -121,34 +158,70 @@ impl Callers {
             }
         };
         info.claimed = claimed.filter(|c| !c.is_empty());
+        if info.identified {
+            info.reason = ai_host(&info.ancestry)
+                .map(|host| format!("AI ancestor: {host}"))
+                .or_else(|| {
+                    info.claimed
+                        .as_ref()?
+                        .opencode_session
+                        .as_ref()
+                        .map(|_| "claimed OPENCODE_SESSION_ID".into())
+                });
+        }
+        // A claim can remove browser-host standing, never confer it.
+        if info.class == CallerClass::BrowserHost && is_ai(&info) {
+            info.class = CallerClass::Caller;
+        }
         info
     }
 
     fn lookup(&self, peer: Peer) -> CallerInfo {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(info) = cache.get(&peer) {
+        #[cfg(test)]
+        if let Some(info) = self
+            .fixtures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&peer)
+        {
             return info.clone();
         }
-        drop(cache);
-        let (info, keep) = self.read(peer);
-        if keep {
-            cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if cache.len() >= CACHE_MAX {
-                cache.clear();
+        #[cfg(target_os = "macos")]
+        if let Some(token) = peer.token {
+            let cached = self
+                .live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entries
+                .get(&token)
+                .cloned();
+            if let Some(info) = cached {
+                return if deadbolt_client::peer::live_token(&token) {
+                    info
+                } else {
+                    unverified(Some(peer), "process is no longer identifiable")
+                };
             }
-            cache.insert(peer, info.clone());
+            let info = self.read(peer);
+            if !info.identified {
+                return info;
+            }
+            return self
+                .live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remember(token, info);
         }
-        info
+        self.read(peer)
     }
 
-    /// The peer's info, and whether it may be remembered.
     #[cfg(target_os = "macos")]
-    fn read(&self, peer: Peer) -> (CallerInfo, bool) {
+    fn read(&self, peer: Peer) -> CallerInfo {
         let helper = match super::biometric::helper() {
             Ok(helper) => helper,
             Err(error) => {
                 warn!("can't identify callers: {error:#}");
-                return (unverified(Some(peer), "unverified process"), false);
+                return unverified(Some(peer), "identification helper unavailable");
             }
         };
         let own = self.own.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -164,10 +237,10 @@ impl Callers {
         };
         let found = match deadbolt_client::peer::identify(&helper, peer.token, &files) {
             Ok(Some(found)) => found,
-            Ok(None) => return (unverified(Some(peer), "exited process"), false),
+            Ok(None) => return unverified(Some(peer), "exited process"),
             Err(error) => {
                 warn!("identifying a caller: {error}");
-                return (unverified(Some(peer), "unverified process"), false);
+                return unverified(Some(peer), "identification helper failed");
             }
         };
         let own = own.unwrap_or_else(|| {
@@ -200,20 +273,20 @@ impl Callers {
             },
             None => Evidence::None,
         };
-        (info(peer, &evidence, process), true)
+        info(peer, &evidence, process)
     }
 
     /// Labels only, from `/proc`: never the app or the browser host, so
     /// nothing a Linux peer does is taken on its word.
     #[cfg(target_os = "linux")]
-    fn read(&self, peer: Peer) -> (CallerInfo, bool) {
-        let process = deadbolt_client::peer::linux::process(peer.pid);
-        (from_proc(peer, process), true)
+    fn read(&self, peer: Peer) -> CallerInfo {
+        let process = deadbolt_client::peer::linux::process(peer, |name| host_name(name).is_some());
+        from_proc(peer, process)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    fn read(&self, peer: Peer) -> (CallerInfo, bool) {
-        (unverified(Some(peer), "unverified process"), false)
+    fn read(&self, peer: Peer) -> CallerInfo {
+        unverified(Some(peer), "unverified process")
     }
 }
 
@@ -255,6 +328,26 @@ fn browser_host_args(args: &[String]) -> bool {
     }
 }
 
+/// Native hosts on macOS run under one of the browsers `browser install`
+/// supports (or Chrome for Testing). Match the kernel's executable path,
+/// not an ancestor's display name. This is a hint, not browser pairing.
+fn browser_ancestor(parent: &Ancestor) -> bool {
+    let Some(path) = parent.path.as_deref().map(Path::new) else {
+        return false;
+    };
+    [
+        "Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "Brave Browser.app/Contents/MacOS/Brave Browser",
+        "Arc.app/Contents/MacOS/Arc",
+        "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "Chromium.app/Contents/MacOS/Chromium",
+        "Helium.app/Contents/MacOS/Helium",
+    ]
+    .iter()
+    .any(|bundle| path.ends_with(bundle))
+}
+
 /// The class `evidence` supports. Nothing a client says enters here.
 ///
 /// A Developer ID build knows its own code by team and identifier. An
@@ -263,7 +356,7 @@ fn browser_host_args(args: &[String]) -> bool {
 /// The app must run from the daemon's bundle either way: its executable is
 /// the whole `deadbolt` binary signed as the app, which runs only the app
 /// there, but a copy elsewhere would run CLI commands under its signature.
-pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
+fn classify(evidence: &Evidence, args: &[String], ancestry: &[Ancestor]) -> (CallerClass, Check) {
     match evidence {
         Evidence::Signature {
             code,
@@ -283,7 +376,11 @@ pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
                 CallerClass::App
             } else if is(autofill, AUTOFILL_ID) {
                 CallerClass::AutoFill
-            } else if is(exe, DAEMON_ID) && browser_host_args(args) {
+            } else if is(exe, DAEMON_ID)
+                && browser_host_args(args)
+                && ancestry.iter().any(browser_ancestor)
+                && ai_host(ancestry).is_none()
+            {
                 CallerClass::BrowserHost
             } else {
                 CallerClass::Caller
@@ -296,13 +393,31 @@ pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
 
 /// A peer's info from what was read about it, without a claim.
 pub fn info(peer: Peer, evidence: &Evidence, process: Process) -> CallerInfo {
-    let (class, check) = classify(evidence, &process.args);
+    let identified = process.ancestry_complete
+        && (matches!(evidence, Evidence::Signature { .. }) || process.exe.is_some());
+    let (class, check) = if identified {
+        classify(evidence, &process.args, &process.ancestry)
+    } else {
+        (CallerClass::Caller, Check::None)
+    };
     let (program, signature): (Option<String>, Option<Signature>) = match evidence {
         Evidence::Signature { code, .. } => (code.path.clone(), Some(code.signature())),
         Evidence::None => (process.exe.clone(), None),
     };
     let label = label(class, program.as_deref(), &process);
     CallerInfo {
+        identified,
+        browser_host_mode: browser_host_args(&process.args),
+        reason: (!identified).then(|| {
+            if process.ppid.is_none() {
+                "missing live process facts"
+            } else if !process.ancestry_complete {
+                process.ancestry_error.unwrap_or("incomplete parent chain")
+            } else {
+                "missing executable identity"
+            }
+            .into()
+        }),
         class,
         check,
         pid: peer.pid,
@@ -329,44 +444,44 @@ fn from_proc(peer: Peer, process: Process) -> CallerInfo {
     info
 }
 
-/// Whether the caller looks like an AI: an AI host (OpenCode, Claude Code…)
+/// Whether the caller needs the AI gate: missing peer facts, an AI host
 /// among its parents, or a claim to be an OpenCode session. A hint, never
 /// proof: an AI can start a terminal outside its own tree. So it only ever
 /// refuses (pairing agent clients, granting sign-ins), never allows.
 pub fn is_ai(info: &CallerInfo) -> bool {
-    let host = |name: &str| {
-        let name = name.trim_start_matches('-');
-        HOSTS
-            .iter()
-            .any(|(host, _)| host.eq_ignore_ascii_case(name))
-    };
-    info.ancestry.iter().any(|a| {
-        host(&a.name)
-            || a.path
-                .as_deref()
-                .and_then(|p| Path::new(p).file_name())
-                .is_some_and(|n| host(&n.to_string_lossy()))
-    }) || info
-        .claimed
-        .as_ref()
-        .is_some_and(|c| c.opencode_session.is_some())
+    !info.identified
+        || ai_host(&info.ancestry).is_some()
+        || info
+            .claimed
+            .as_ref()
+            .is_some_and(|c| c.opencode_session.is_some())
 }
 
-/// The AI host among `info`'s parents ("OpenCode"), if any.
-pub(super) fn ai_host(info: &CallerInfo) -> Option<&'static str> {
-    let host = |name: &str| {
-        let name = name.trim_start_matches('-');
-        HOSTS
-            .iter()
-            .find(|(host, _)| host.eq_ignore_ascii_case(name))
-            .map(|(_, label)| *label)
-    };
-    info.ancestry.iter().find_map(|a| {
-        host(&a.name).or_else(|| {
+/// For messages only: inability to identify a caller is not evidence of AI.
+pub fn gate_subject(info: &CallerInfo) -> &'static str {
+    if info.identified {
+        "an AI agent"
+    } else {
+        "an unidentified caller"
+    }
+}
+
+fn host_name(name: &str) -> Option<&'static str> {
+    let name = name.trim_start_matches('-');
+    HOSTS
+        .iter()
+        .find(|(host, _)| host.eq_ignore_ascii_case(name))
+        .map(|(_, label)| *label)
+}
+
+/// The AI host among the parents ("OpenCode"), if any.
+pub(super) fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
+    ancestry.iter().find_map(|a| {
+        host_name(&a.name).or_else(|| {
             a.path
                 .as_deref()
                 .and_then(|p| Path::new(p).file_name())
-                .and_then(|n| host(&n.to_string_lossy()))
+                .and_then(|n| host_name(&n.to_string_lossy()))
         })
     })
 }
@@ -374,7 +489,13 @@ pub(super) fn ai_host(info: &CallerInfo) -> Option<&'static str> {
 /// Why the daemon takes `info` for an AI, and where to go instead: for a
 /// refusal, so a person in a terminal inside an AI host knows what to do.
 pub fn not_from_here(info: &CallerInfo) -> String {
-    let why = match ai_host(info) {
+    if !info.identified {
+        return format!(
+            "Deadbolt couldn't identify this caller ({}); see `deadbolt debug whoami`",
+            info.reason.as_deref().unwrap_or("missing process facts")
+        );
+    }
+    let why = match ai_host(&info.ancestry) {
         Some(host) => format!("This shell runs under {host} ({})", info.label),
         None => format!("This shell has OPENCODE_SESSION_ID set ({})", info.label),
     };
@@ -456,9 +577,8 @@ fn label(class: CallerClass, program: Option<&str>, process: &Process) -> String
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::protocol::Ancestor;
 
     fn peer(pid: u32, version: u32) -> Peer {
         Peer::from_token([501, 501, 20, 501, 20, pid, 100_000, version])
@@ -472,27 +592,106 @@ mod tests {
         }
     }
 
-    /// A pid the kernel hands to a new process is a new caller: the cache is
-    /// keyed by the whole audit token, pid version included.
-    #[test]
-    fn a_reused_pid_is_not_the_same_caller() {
-        let callers = Callers::new();
-        let first = peer(4242, 7);
-        let mut known = unverified(Some(first), "Deadbolt");
-        known.class = CallerClass::App;
-        callers.cache.lock().unwrap().insert(first, known);
-        assert_eq!(callers.lookup(first).class, CallerClass::App);
+    pub(in crate::daemon) fn chrome() -> Ancestor {
+        ancestor(
+            3,
+            "Google Chrome",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )
+    }
 
-        let reused = peer(4242, 8);
-        let seen = callers.lookup(reused);
-        assert_eq!(seen.class, CallerClass::Caller);
-        assert_eq!(seen.pid_version, Some(8));
+    /// macOS peer facts for the daemon's signed binary in native-host mode.
+    pub(in crate::daemon) fn signed_host(ancestry: Vec<Ancestor>) -> (Peer, CallerInfo) {
+        signed(
+            DAEMON_ID,
+            Process {
+                args: vec![
+                    "deadbolt".into(),
+                    "browser-host".into(),
+                    crate::browser::extension_origin(),
+                ],
+                ancestry,
+                ancestry_complete: true,
+                ..Process::default()
+            },
+        )
+    }
+
+    pub(in crate::daemon) fn signed(id: &str, process: Process) -> (Peer, CallerInfo) {
+        let peer = peer(42, 1);
+        let team = Some("TEAM123456");
+        let path = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let code = at(&path, "e1", team, id);
+        let evidence = Evidence::Signature {
+            code: &code,
+            exe: None,
+            app: Some(Known {
+                path: &path,
+                file: None,
+            }),
+            autofill: None,
+            team,
+        };
+        (peer, info(peer, &evidence, process))
+    }
+
+    #[test]
+    fn browser_host_standing_needs_a_browser_and_yields_to_ai() {
+        let (_, incomplete) = signed(
+            DAEMON_ID,
+            Process {
+                ancestry: vec![chrome()],
+                args: vec!["deadbolt".into(), "browser-host".into()],
+                ..Process::default()
+            },
+        );
+        assert!(!incomplete.identified);
+        assert_eq!(incomplete.class, CallerClass::Caller);
+        assert!(is_ai(&incomplete));
+        for name in [
+            "Google Chrome",
+            "Google Chrome for Testing",
+            "Brave Browser",
+            "Arc",
+            "Microsoft Edge",
+            "Chromium",
+            "Helium",
+        ] {
+            let path = format!("/Applications/{name}.app/Contents/MacOS/{name}");
+            let (_, info) =
+                signed_host(vec![ancestor(4, "sh", "/bin/sh"), ancestor(3, name, &path)]);
+            assert_eq!(info.class, CallerClass::BrowserHost, "{name}");
+        }
+        for parents in [
+            vec![],
+            vec![ancestor(3, "Google Chrome", "/bin/sh")],
+            vec![chrome(), ancestor(2, "node", "/bin/opencode-cli")],
+        ] {
+            assert_eq!(signed_host(parents).1.class, CallerClass::Caller);
+        }
+        let callers = Callers::new();
+        let (peer, host) = signed_host(vec![chrome()]);
+        callers.cache_for_test(peer, host);
+        let claim = Claim {
+            opencode_session: Some("ses_1".into()),
+            caller: None,
+        };
+        assert_eq!(
+            callers.identify(Ok(peer), Some(claim)).class,
+            CallerClass::Caller
+        );
+        assert_eq!(
+            callers.identify(Ok(peer), None).class,
+            CallerClass::BrowserHost
+        );
     }
 
     /// Whatever a client claims, its class comes from its code alone.
     #[test]
     fn an_ai_host_among_the_parents_or_an_opencode_claim_is_an_ai() {
         let mut info = CallerInfo::unverified("zsh › deadbolt");
+        assert!(is_ai(&info));
+        info.identified = true;
         info.ancestry = vec![ancestor(10, "zsh", "/bin/zsh")];
         assert!(!is_ai(&info));
         info.ancestry.push(ancestor(
@@ -521,7 +720,7 @@ mod tests {
         let callers = Callers::new();
         let someone = peer(4343, 1);
         callers
-            .cache
+            .fixtures
             .lock()
             .unwrap()
             .insert(someone, unverified(Some(someone), "zsh › deadbolt"));
@@ -583,7 +782,7 @@ mod tests {
                 }),
                 team: None,
             };
-            classify(&evidence, args).0
+            classify(&evidence, args, &[chrome()]).0
         };
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -633,7 +832,7 @@ mod tests {
             CallerClass::Caller
         );
         assert_eq!(
-            classify(&Evidence::None, &host),
+            classify(&Evidence::None, &host, &[chrome()]),
             (CallerClass::Caller, Check::None)
         );
     }
@@ -664,7 +863,7 @@ mod tests {
                 autofill: None,
                 team,
             };
-            classify(&evidence, args).0
+            classify(&evidence, args, &[chrome()]).0
         };
         assert_eq!(
             class_of(at(&path, "a1", team, APP_ID), &[]),
@@ -708,7 +907,7 @@ mod tests {
             autofill: None,
             team,
         };
-        assert_eq!(classify(&evidence, &[]).0, CallerClass::Caller);
+        assert_eq!(classify(&evidence, &[], &[]).0, CallerClass::Caller);
     }
 
     /// Linux names a peer's program from `/proc`, which a process can race:
@@ -845,6 +1044,8 @@ mod tests {
             .unwrap()
             .expect("our own token names us");
         let process = found.process.unwrap();
+        assert!(process.ancestry_complete);
+        assert_eq!(process.ancestry.last().unwrap().pid, 1);
         assert!(found.code.unwrap().cdhash.is_some());
         assert!(!process.args.is_empty());
 
@@ -855,5 +1056,55 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_live_cached_peer_keeps_its_first_ancestry_after_reparenting() {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use tokio::{net::UnixListener, process::Command, time::timeout};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut parent = Command::new("/bin/sh")
+            .args(["-c", "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.recv(1)' \"$1\" & read -r keepalive", "fixture"])
+            .arg(path).stdin(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let limit = Duration::from_secs(10);
+        let (stream, _) = timeout(limit, listener.accept()).await.unwrap().unwrap();
+        let peer = Peer::of(&stream).unwrap();
+        let callers = Callers::new();
+        let first = callers.identify(Ok(peer), None);
+        assert!(first.identified);
+        assert!(first.ancestry.iter().any(|a| Some(a.pid) == parent.id()));
+        drop(parent.stdin.take());
+        timeout(limit, parent.wait()).await.unwrap().unwrap();
+        assert_eq!(callers.identify(Ok(peer), None), first);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cache_capacity_is_not_a_gate_and_stale_versions_do_not_pin_slots() {
+        let (stream, _other) = std::os::unix::net::UnixStream::pair().unwrap();
+        let token = Peer::of(&stream).unwrap().token.unwrap();
+        let mut stale = token;
+        stale[7] = stale[7].wrapping_add(1);
+        let person = CallerInfo {
+            identified: true,
+            reason: None,
+            ..CallerInfo::unverified("terminal")
+        };
+        let mut cache = LivePeers::<1>::default();
+        cache.entries.insert(token, person.clone());
+        let other = peer(100, 1).token.unwrap();
+        let result = cache.remember(other, person.clone());
+        assert_eq!(result, person);
+        assert!(!is_ai(&result));
+        assert!(cache.entries.contains_key(&token) && !cache.entries.contains_key(&other));
+
+        cache.entries.clear();
+        cache.entries.insert(stale, person.clone());
+        cache.remember(token, person);
+        assert!(cache.entries.contains_key(&token) && !cache.entries.contains_key(&stale));
     }
 }

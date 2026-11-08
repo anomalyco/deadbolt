@@ -301,7 +301,7 @@ fn uncovered<'a>(
 /// "Tiers"), and the browser's fills and saves, which are the browser
 /// host's alone (any same-user process can send them, so an AI is refused
 /// them here until browser pairing). `None` for anything else.
-fn refused(command: &Command) -> Option<&'static str> {
+fn refused_browser(command: &Command) -> Option<&'static str> {
     Some(match command {
         Command::SiteFill { .. } => "fill a site's login",
         Command::SiteSave { login: Some(_), .. } => "change a saved login",
@@ -309,6 +309,12 @@ fn refused(command: &Command) -> Option<&'static str> {
         Command::FormFill { .. } => "fill a form",
         Command::PasskeyGet { .. } => "sign in with a passkey",
         Command::PasskeyCreate { .. } => "save a passkey",
+        _ => return None,
+    })
+}
+
+fn refused(command: &Command) -> Option<&'static str> {
+    Some(match command {
         Command::Setup { .. } => "set Deadbolt up",
         Command::Unlock { .. } | Command::UnlockBiometric { .. } => "unlock Deadbolt",
         Command::TouchIdSet { .. } => "turn Touch ID unlock on or off",
@@ -392,18 +398,18 @@ impl Daemon {
         if !all {
             return Err(fail(
                 ErrorCode::RateLimited,
-                "too many references resolved by AI agents; try again shortly",
+                "too many secret requests; try again shortly",
             ));
         }
         Ok(())
     }
 
-    /// The stop-gap for a caller that looks like an AI (#111), until
+    /// The stop-gap for an AI-marked or unidentified caller (#111), until
     /// `policy::decide` (docs/agent-control.md, build order 3): a value it
     /// would be shown (`item-get`, `item-code`) asks for Touch ID every
     /// time, as `resolve … read` does, and the Never tier and the browser's
-    /// fills and saves are refused. Other callers, the app, the browser host
-    /// and AutoFill pass unchanged, and so do agent clients' sign-ins
+    /// fills and saves are refused. The identified app and AutoFill are
+    /// exempt; browser-host mode is not. Agent clients' sign-ins pass here
     /// (`agent-fill` and the rest), which their token authenticates.
     pub(super) async fn ai_gate(
         &self,
@@ -411,7 +417,9 @@ impl Daemon {
         command: &Command,
         conv: &Conversation,
     ) -> Result<()> {
-        if caller.class != CallerClass::Caller || !caller::is_ai(caller) {
+        if (caller.identified && matches!(caller.class, CallerClass::App | CallerClass::AutoFill))
+            || !caller::is_ai(caller)
+        {
             return Ok(());
         }
         let (vault, query, deleted, what) = match command {
@@ -423,11 +431,35 @@ impl Daemon {
             } => (vault, query, *deleted, ""),
             Command::ItemCode { vault, query } => (vault, query, false, "the one-time code of "),
             command => {
+                if let Some(what) = refused_browser(command) {
+                    let message = if !caller.identified {
+                        format!(
+                            "Can't {what}: {}",
+                            caller.reason.as_deref().unwrap_or("missing process facts")
+                        )
+                    } else if caller.browser_host_mode {
+                        let launcher = if cfg!(target_os = "macos") {
+                            "the Dock"
+                        } else {
+                            "your app launcher"
+                        };
+                        format!(
+                            "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from {launcher}."
+                        )
+                    } else {
+                        format!(
+                            "an AI agent can't {what}. {}.",
+                            caller::not_from_here(caller)
+                        )
+                    };
+                    return Err(fail(ErrorCode::Forbidden, message));
+                }
                 return match refused(command) {
                     Some(what) => Err(fail(
                         ErrorCode::Forbidden,
                         format!(
-                            "an AI agent can't {what}. {}.",
+                            "{} can't {what}. {}.",
+                            caller::gate_subject(caller),
                             caller::not_from_here(caller)
                         ),
                     )),
@@ -439,7 +471,7 @@ impl Daemon {
         // Locked, or a query that finds nothing, fails before anyone is
         // asked anything.
         let item = self.with(|s| items::named(s, vault.as_deref(), query, deleted))?;
-        let reason = format!("show {what}{item} to an AI agent");
+        let reason = format!("show {what}{item} to {}", caller::gate_subject(caller));
         self.ai_touch_id(caller, conv, &reason).await
     }
 
@@ -456,7 +488,8 @@ impl Daemon {
             return Err(fail(
                 ErrorCode::Forbidden,
                 format!(
-                    "an AI agent can see a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` with a grant instead. {}.",
+                    "{} can see a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` with a grant instead. {}.",
+                    caller::gate_subject(caller),
                     caller::not_from_here(caller)
                 ),
             ));
@@ -469,7 +502,7 @@ impl Daemon {
             Err(error) if error.downcast_ref::<DaemonError>().is_some() => Err(error),
             Err(error) => Err(fail(
                 ErrorCode::Forbidden,
-                format!("{error:#}: the value wasn't shown to the AI agent"),
+                format!("{error:#}: the value wasn't shown to the caller"),
             )),
         }
     }
@@ -536,7 +569,11 @@ impl Daemon {
             match purpose {
                 Purpose::Read => {
                     let names: Vec<String> = found.iter().map(named).collect();
-                    let reason = format!("show {} to an AI agent", names.join(", "));
+                    let reason = format!(
+                        "show {} to {}",
+                        names.join(", "),
+                        caller::gate_subject(caller)
+                    );
                     self.ai_touch_id(caller, conv, &reason).await?;
                     // A one-time code may have moved on during the prompt.
                     found = self.with(|s| lookup(s))?;
@@ -547,8 +584,10 @@ impl Daemon {
                         let missing = uncovered(s, &found, purpose, now)?;
                         if missing.is_empty() {
                             Ok(())
-                        } else {
+                        } else if caller.identified {
                             Err(not_granted(&missing, purpose))
+                        } else {
+                            Err(fail(ErrorCode::NotGranted, format!("Deadbolt couldn't identify this caller ({}) and no grant covers the requested secrets", caller.reason.as_deref().unwrap_or("missing process facts"))))
                         }
                     })?;
                 }
@@ -795,7 +834,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(code(&error), Some(ErrorCode::RateLimited));
-        let person = CallerInfo::unverified("zsh › deadbolt");
+        let person = CallerInfo {
+            identified: true,
+            ..CallerInfo::unverified("zsh › deadbolt")
+        };
         for _ in 0..30 {
             assert!(
                 daemon
@@ -809,6 +851,7 @@ mod tests {
     /// A caller under OpenCode, by its parents.
     fn under_opencode(class: CallerClass) -> CallerInfo {
         let mut info = CallerInfo::unverified("OpenCode › zsh › deadbolt");
+        info.identified = true;
         info.class = class;
         info.ancestry = vec![crate::protocol::Ancestor {
             pid: 7,
@@ -870,13 +913,25 @@ mod tests {
             },
         ];
         let ai = under_opencode(CallerClass::Caller);
+        let mut browser = ai.clone();
+        browser.browser_host_mode = true;
         for command in &refused {
             let error = f.daemon.ai_gate(&ai, command, &conv).await.unwrap_err();
             assert_eq!(code(&error), Some(ErrorCode::Forbidden), "{command:?}");
+            assert!(error.to_string().contains("This shell runs under OpenCode"));
+            let error = f
+                .daemon
+                .ai_gate(&browser, command, &conv)
+                .await
+                .unwrap_err();
             let message = error.to_string();
             assert!(
-                message.contains("This shell runs under OpenCode (OpenCode › zsh › deadbolt)")
-                    && message.contains("see `deadbolt debug whoami`"),
+                message
+                    == if cfg!(target_os = "macos") {
+                        "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from the Dock."
+                    } else {
+                        "This browser was started by an AI agent, so Deadbolt won't fill here. Quit it and open it from your app launcher."
+                    },
                 "{message}"
             );
         }
@@ -899,11 +954,306 @@ mod tests {
                 "{command:?}"
             );
         }
-        let host = under_opencode(CallerClass::BrowserHost);
-        let person = CallerInfo::unverified("zsh › deadbolt");
+        let mut host = CallerInfo::unverified("browser host (Chrome)");
+        host.identified = true;
+        host.class = CallerClass::BrowserHost;
+        let conflict = under_opencode(CallerClass::BrowserHost);
+        let person = CallerInfo {
+            identified: true,
+            ..CallerInfo::unverified("zsh › deadbolt")
+        };
         for command in &refused {
             assert!(f.daemon.ai_gate(&host, command, &conv).await.is_ok());
             assert!(f.daemon.ai_gate(&person, command, &conv).await.is_ok());
+            let error = f
+                .daemon
+                .ai_gate(&conflict, command, &conv)
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::Forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_host_mode_does_not_authorize_an_ai() {
+        use crate::protocol::{Ancestor, Fill, LoginRef, PROTOCOL_VERSION, PagePassword, Request};
+        let f = super::super::passkeys::tests::daemon::unlocked().await;
+        let (conv, _closed) = super::super::passkeys::tests::daemon::conversation();
+        let origin = "https://example.com";
+        let (login, identity) = f
+            .daemon
+            .with(|s| {
+                let vault = s.resolve(None)?.to_string();
+                Ok((
+                    LoginRef {
+                        vault: vault.clone(),
+                        item: new(
+                            s,
+                            "login",
+                            "Example",
+                            &[("url", origin), ("password", "fixture-pw")],
+                        ),
+                    },
+                    LoginRef {
+                        vault,
+                        item: new(s, "identity", "Home", &[("city", "Example City")]),
+                    },
+                ))
+            })
+            .unwrap();
+        let cmds = [
+            Command::SiteFill {
+                origin: origin.into(),
+                login: login.clone(),
+                want: vec![Fill::Password],
+            },
+            Command::FormFill {
+                origin: origin.into(),
+                item: identity,
+                fields: vec!["city".into()],
+            },
+            Command::SiteSave {
+                origin: origin.into(),
+                login: Some(login),
+                title: "Example".into(),
+                url: origin.into(),
+                username: String::new(),
+                password: PagePassword::Typed(Secret::new("replacement")),
+            },
+        ];
+        let unknown = CallerInfo::unverified("incomplete parent chain");
+        let error = f
+            .daemon
+            .ai_gate(&unknown, &cmds[0], &conv)
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), Some(ErrorCode::Forbidden));
+        assert!(error.to_string().contains("incomplete parent chain"));
+        let error = f
+            .daemon
+            .resolve(
+                &unknown,
+                &["deadbolt://personal/Example/password".into()],
+                Purpose::Run,
+                &conv,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), Some(ErrorCode::NotGranted));
+        assert!(error.to_string().contains("incomplete parent chain"));
+
+        // The direct reproduction, and one with the AI parent just past
+        // Activity's 16-parent display limit. Neither needs a session claim.
+        for depth in [0, 16, 33] {
+            let mut parents = (0..depth)
+                .map(|n| Ancestor {
+                    pid: n + 10,
+                    name: "sh".into(),
+                    path: Some("/bin/sh".into()),
+                })
+                .collect::<Vec<_>>();
+            parents.extend(under_opencode(CallerClass::Caller).ancestry);
+            let (peer, host) = caller::tests::signed_host(parents);
+            f.daemon.callers.cache_for_test(peer, host);
+            for command in cmds.clone() {
+                let (result, _) = f
+                    .daemon
+                    .clone()
+                    .answer(
+                        super::super::macos_autofill::SocketKind::Control,
+                        Ok(peer),
+                        Request {
+                            v: PROTOCOL_VERSION,
+                            claimed: None,
+                            command,
+                        },
+                        &conv,
+                    )
+                    .await;
+                assert_eq!(code(&result.unwrap_err()), Some(ErrorCode::Forbidden));
+            }
+        }
+    }
+
+    /// The socket identifies the process that connected, not whoever later
+    /// writes the request. Even a previously identified peer can have exited.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn answer_requires_live_identification_for_fills_and_unapproved_reads() {
+        use super::super::macos_autofill::SocketKind;
+        use crate::protocol::{Fill, LoginRef, PROTOCOL_VERSION, Request};
+        use deadbolt_client::peer::{APP_ID, AUTOFILL_ID, DAEMON_ID, Peer, Process};
+        use tokio::{net::UnixListener, process::Command as Child, time::timeout};
+
+        let f = super::super::passkeys::tests::daemon::unlocked().await;
+        *f.daemon.biometric_hook.lock().unwrap() =
+            Some(Arc::new(|_| Err(biometric::UnlockError::Cancelled)));
+        let (conv, _closed) = super::super::passkeys::tests::daemon::conversation();
+        let origin = "https://example.com";
+        let login = f
+            .daemon
+            .with(|s| {
+                Ok(LoginRef {
+                    vault: s.resolve(None)?.to_string(),
+                    item: new(
+                        s,
+                        "login",
+                        "GitHub",
+                        &[("url", origin), ("password", "fixture-pw")],
+                    ),
+                })
+            })
+            .unwrap();
+        let fill = Command::SiteFill {
+            origin: origin.into(),
+            login,
+            want: vec![Fill::Password],
+        };
+        let get = Command::ItemGet {
+            vault: None,
+            query: vec!["GitHub".into()],
+            otp: false,
+            ssh_private: false,
+            files: vec![],
+            deleted: false,
+        };
+        let answer = async |peer, command, socket| {
+            f.daemon
+                .clone()
+                .answer(
+                    socket,
+                    Ok(peer),
+                    Request {
+                        v: PROTOCOL_VERSION,
+                        claimed: None,
+                        command,
+                    },
+                    &conv,
+                )
+                .await
+                .0
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut child = Child::new("python3").args(["-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.recv(1)"]).arg(path).kill_on_drop(true).spawn().unwrap();
+        let wait = Duration::from_secs(10);
+        let (stream, _) = timeout(wait, listener.accept()).await.unwrap().unwrap();
+        let exited = Peer::of(&stream).unwrap();
+        assert!(f.daemon.callers.identify(Ok(exited), None).identified);
+        drop(stream);
+        // The connecting process is dead but its pid has not been reaped.
+        use rustix::process::{Pid, WaitIdOptions, waitid};
+        waitid(
+            rustix::process::WaitId::Pid(Pid::from_raw(exited.pid as i32).unwrap()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+        )
+        .unwrap();
+        assert!(
+            !f.daemon.callers.identify(Ok(exited), None).identified,
+            "a zombie is not a live peer"
+        );
+        assert!(
+            timeout(wait, child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+        for cmd in [get.clone(), fill.clone()] {
+            let err = answer(exited, cmd, SocketKind::Control).await.unwrap_err();
+            assert_eq!(code(&err), Some(ErrorCode::Forbidden));
+        }
+
+        #[cfg(target_os = "linux")]
+        for reason in [Some(deadbolt_client::peer::linux::HIDEPID_AI), None] {
+            let process = Process {
+                ppid: Some(31),
+                exe: Some("/bin/deadbolt".into()),
+                ancestry_complete: reason.is_none(),
+                ancestry_error: reason,
+                ..Default::default()
+            };
+            let info = caller::info(exited, &caller::Evidence::None, process);
+            f.daemon.callers.cache_for_test(exited, info);
+            let result = answer(exited, fill.clone(), SocketKind::Control).await;
+            if let Some(reason) = reason {
+                let error = result.unwrap_err();
+                assert_eq!(code(&error), Some(ErrorCode::Forbidden));
+                assert!(error.to_string().contains(reason));
+            } else {
+                assert!(matches!(result.unwrap(), Reply::SiteFill { .. }));
+            }
+        }
+
+        // A signed CLI with a broken parent chain cannot send a phone request
+        // or begin proving a designation. Even a missing item/vault must yield
+        // the caller refusal, not a lookup, approval or passphrase error.
+        let (peer, incomplete) = caller::tests::signed(
+            DAEMON_ID,
+            Process {
+                ppid: Some(31),
+                ..Default::default()
+            },
+        );
+        assert!(incomplete.signature.as_ref().unwrap().valid);
+        assert!(!incomplete.identified);
+        f.daemon.callers.cache_for_test(peer, incomplete);
+        for command in [
+            Command::ExperimentalMobileRead {
+                refs: vec!["deadbolt://absent/password".into()],
+            },
+            Command::ExperimentalApproverSet {
+                vault: Some("absent".into()),
+                device: None,
+                passphrase: None,
+            },
+        ] {
+            let error = answer(peer, command, SocketKind::Control)
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::Forbidden));
+            assert!(
+                error.to_string().contains("incomplete parent chain"),
+                "{error:#}"
+            );
+        }
+
+        let terminal = Process {
+            ancestry_complete: true,
+            ..Default::default()
+        };
+        for ((peer, info), class, command, socket) in [
+            (
+                caller::tests::signed(DAEMON_ID, terminal.clone()),
+                CallerClass::Caller,
+                get.clone(),
+                SocketKind::Control,
+            ),
+            (
+                caller::tests::signed(APP_ID, terminal.clone()),
+                CallerClass::App,
+                get,
+                SocketKind::Control,
+            ),
+            (
+                caller::tests::signed_host(vec![caller::tests::chrome()]),
+                CallerClass::BrowserHost,
+                fill,
+                SocketKind::Control,
+            ),
+            (
+                caller::tests::signed(AUTOFILL_ID, terminal),
+                CallerClass::AutoFill,
+                Command::AutofillIdentities,
+                SocketKind::AutoFill,
+            ),
+        ] {
+            assert!(info.identified);
+            assert_eq!(info.class, class);
+            f.daemon.callers.cache_for_test(peer, info);
+            answer(peer, command, socket).await.unwrap();
         }
     }
 

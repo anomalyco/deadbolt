@@ -233,8 +233,3 @@ export function visibleNow(timeoutMs = 1000, target: Element = document.body, pa
     }
   })
 }
-
-/** Tells the background how tall the page's content is, whenever it changes. */
-export function reportHeight(send: (height: number) => void) {
-  new ResizeObserver(() => send(Math.ceil(document.body.getBoundingClientRect().height))).observe(document.body)
-}

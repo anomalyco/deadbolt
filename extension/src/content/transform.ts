@@ -10,6 +10,7 @@
 import type { FormRole, FormValues } from "../messages"
 import type { FormControl } from "./detect"
 import { plain } from "./forms"
+import { luhn } from "../payments"
 
 const digits = (s: string) => s.replace(/\D/g, "")
 const pad = (n: number | string) => String(n).padStart(2, "0")
@@ -94,8 +95,8 @@ export function matchOption(el: HTMLSelectElement, wanted: string[]): string | u
 
 // ---- Values per role -------------------------------------------------------------
 
-/** The cardholder's given and family names: all but the last word, and the last. */
-function splitName(full: string): [string, string] {
+/** A full name's given and family names: all but the last word, and the last. */
+export function splitName(full: string): [string, string] {
   const parts = full.trim().split(/\s+/)
   return parts.length < 2 ? [full.trim(), ""] : [parts.slice(0, -1).join(" "), parts[parts.length - 1]]
 }
@@ -371,4 +372,134 @@ export function splitNumber(number: string, boxes: FormControl[]): string[] {
     at += len
   })
   return out
+}
+
+// ---- Reading what was typed, for a save --------------------------------------------
+
+/** A card number as saved: 12 to 19 digits that pass the Luhn check, else nothing. */
+export function readCardNumber(text: string): string | undefined {
+  const d = digits(text)
+  return /^[\d\s-]+$/.test(text.trim()) && d.length >= 12 && d.length <= 19 && luhn(d) ? d : undefined
+}
+
+/** A month and year (two or four digits) as YYYY-MM, if they read as one. */
+export function readExpiryParts(month: string, year: string): string | undefined {
+  const m = Number(digits(month))
+  const y = digits(year)
+  if (!(m >= 1 && m <= 12) || (y.length !== 2 && y.length !== 4)) return undefined
+  return `${y.length === 2 ? `20${y}` : y}-${pad(m)}`
+}
+
+/** An expiry as typed (MM/YY, MM / YYYY, MM-YY, MMYY, or YYYY-MM from a month box) as YYYY-MM. */
+export function readExpiry(text: string): string | undefined {
+  const t = text.trim()
+  let m = /^(\d{4})-(\d{1,2})$/.exec(t)
+  if (m) return readExpiryParts(m[2], m[1])
+  m = /^(\d{1,2})\s*[/\-.]\s*(\d{2}|\d{4})$/.exec(t)
+  if (m) return readExpiryParts(m[1], m[2])
+  m = /^(\d{2})(\d{2})$/.exec(t)
+  return m ? readExpiryParts(m[1], m[2]) : undefined
+}
+
+/** A month in a select, as a number: its value or its text (a number or a month's name). */
+export function monthOf(el: FormControl): string {
+  if (!(el instanceof HTMLSelectElement)) return el.value
+  const option = el.selectedOptions[0]
+  if (!option || !option.value) return ""
+  if (/^\d{1,2}$/.test(option.value.trim())) return option.value.trim()
+  const t = plain(option.text).trim()
+  const i = MONTH_WORDS.findIndex((w) => t.startsWith(w))
+  return i >= 0 ? String(i + 1) : digits(t)
+}
+
+/** A select's chosen option's text, or a box's value. */
+export const shownText = (el: FormControl) => (el instanceof HTMLSelectElement ? (el.selectedOptions[0]?.value ? el.selectedOptions[0].text : "") : el.value).trim()
+
+let countries: Map<string, string> | undefined
+
+function canonicalRegion(code: string): string | undefined {
+  try {
+    return Intl.getCanonicalLocales(`und-${code}`)[0]?.split("-").pop()
+  } catch {
+    return undefined
+  }
+}
+
+/** A country's ISO 3166-1 alpha-2 code, from its code, alpha-3, name in English or the page's language, or a common alias. */
+export function countryCode(text: string): string | undefined {
+  const t = plain(text).trim()
+  if (!t) return undefined
+  if (/^[a-z]{2}$/.test(t)) return t.toUpperCase()
+  if (!countries) {
+    // Built once, on a save: every two-letter code the browser has a name for.
+    countries = new Map()
+    for (const [code, a3] of Object.entries(ALPHA3)) countries.set(a3, code)
+    for (const [code, names] of Object.entries(COUNTRY_ALIASES)) for (const n of names) countries.set(plain(n).trim(), code)
+    const langs = [...new Set(["en", pageLang()])]
+    const names = langs.map((l) => {
+      try {
+        return new Intl.DisplayNames([l], { type: "region", fallback: "none" })
+      } catch {
+        return null
+      }
+    })
+    const A = 65
+    for (let i = 0; i < 26; i++)
+      for (let j = 0; j < 26; j++) {
+        const code = String.fromCharCode(A + i, A + j)
+        // Retired codes (DD, East Germany) canonicalize to the current one, whose name they share.
+        if (canonicalRegion(code) !== code) continue
+        for (const n of names) {
+          const name = n?.of(code)
+          if (name && name !== code && !countries.has(plain(name).trim())) countries.set(plain(name).trim(), code)
+        }
+      }
+  }
+  return countries.get(t)
+}
+
+/** A country select or box as a code: an option's value that is one, else its text. */
+export function countryOf(el: FormControl): string | undefined {
+  if (el instanceof HTMLSelectElement) {
+    const option = el.selectedOptions[0]
+    if (!option?.value) return undefined
+    return countryCode(option.value) ?? countryCode(option.text)
+  }
+  return countryCode(el.value)
+}
+
+/** A birthday as YYYY-MM-DD: a date box, or a whole date in the order its placeholder (else the page's locale) shows. */
+export function readBirthday(el: FormControl): string | undefined {
+  const t = el.value.trim()
+  const date = (y: number, m: number, d: number) => {
+    const at = new Date(Date.UTC(y, m - 1, d))
+    return y >= 1900 && at.getUTCFullYear() === y && at.getUTCMonth() === m - 1 && at.getUTCDate() === d ? `${y}-${pad(m)}-${pad(d)}` : undefined
+  }
+  let m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(t)
+  if (m) return date(+m[1], +m[2], +m[3])
+  m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/.exec(t)
+  if (!m) return undefined
+  const hint = attr(el, "placeholder")
+  const dayFirst = /^d/.test(hint) || (!/^m/.test(hint) && !/^en-us/i.test(pageLang()) && !/^en$/i.test(pageLang()))
+  return dayFirst ? date(+m[3], +m[2], +m[1]) : date(+m[3], +m[1], +m[2])
+}
+
+/** A birthday from its day, month and year parts, as YYYY-MM-DD. */
+export function readBirthdayParts(day: string, month: string, year: string): string | undefined {
+  const [d, m, y] = [Number(digits(day)), Number(digits(month)), digits(year)]
+  if (y.length !== 4) return undefined
+  const at = new Date(Date.UTC(+y, m - 1, d))
+  return at.getUTCFullYear() === +y && at.getUTCMonth() === m - 1 && at.getUTCDate() === d ? `${y}-${pad(m)}-${pad(d)}` : undefined
+}
+
+/**
+ * A phone number as saved: international (`+…`) when it says so or a
+ * calling code box beside it does (its national trunk 0 dropped), else as
+ * typed.
+ */
+export function readPhone(phone: string, callingCode?: string): string {
+  const p = phone.trim()
+  if (p.startsWith("+") || !callingCode) return p
+  const code = digits(callingCode)
+  return code ? `+${code}${digits(p).replace(/^0/, "")}` : p
 }

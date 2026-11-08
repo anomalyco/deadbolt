@@ -9,7 +9,7 @@
 // shape: inputmode, maxlength, and a <select>'s options (countries, regions,
 // months, years). Text is matched in memory only; nothing here leaves the page.
 
-import { CARD_ROLES, FORM_ROLES, formKindOf, type FormRole } from "../messages"
+import { FORM_ROLES, formKindOf, type FormRole } from "../messages"
 import type { FormKind } from "../protocol"
 import { ignored, isVisible, labelText, type FormControl } from "./detect"
 import { deepQueryAll, openRoots } from "./shadow"
@@ -324,5 +324,3 @@ function sectionsOf(found: Array<Candidate & { role: FormRole; split?: number }>
 export function sectionFields(fields: FormField[], section: string | undefined, kind: FormKind): FormField[] {
   return fields.filter((f) => f.kind === kind && (kind === "card" || section === undefined || f.section === section))
 }
-
-export const isCardRole = (role: FormRole) => (CARD_ROLES as readonly string[]).includes(role)

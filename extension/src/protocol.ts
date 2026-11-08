@@ -10,7 +10,7 @@ export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
 export type CheckStatus = "new" | "update" | "same"
 export type Change = "locked" | "unlocked" | "items" | "stopped" | "started"
 /** `passphrase_needed` and `wrong_passphrase` come only from the browser-only vault (bg/standalone.ts), never the native host. */
-export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "failed" | "passphrase_needed" | "wrong_passphrase"
+export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "forbidden" | "failed" | "passphrase_needed" | "wrong_passphrase"
 export type UserVerification = "required" | "preferred" | "discouraged"
 export type FormKind = "identity" | "card"
 
@@ -54,6 +54,14 @@ export type Request =
     }
   | { id: number; type: "forms"; origin: string; kinds: FormKind[] }
   | { id: number; type: "fill-form"; origin: string; ref: string; fields: FormField[] }
+  /**
+   * Keeps an identity or card the user typed into a form and chose to save:
+   * a new one, or the changed fields of `ref`. Never a card's `cvv`; an
+   * update never changes a card's `number`. `match` (the browser-only vault,
+   * capability `save-form-match`): a card update's typed number, only
+   * compared with the card's (another is `not_found`), never kept.
+   */
+  | { id: number; type: "save-form"; origin: string; kind: FormKind; ref?: string; fields: Partial<Record<FormField, string>>; match?: { number: string } }
   | { id: number; type: "passkey-list"; origin: string; rpId?: string }
   | {
       id: number
@@ -212,6 +220,11 @@ export interface FillFormReply {
   /** Whether Touch ID verified the user for this fill. */
   verified: boolean
 }
+export interface SaveFormReply {
+  type: "save-form"
+  ref: string
+  created: boolean
+}
 export interface ErrorReply {
   type: "error"
   code: ErrorCode
@@ -228,6 +241,7 @@ export type Reply =
   | SaveReply
   | FormsReply
   | FillFormReply
+  | SaveFormReply
   | PasskeysReply
   | PasskeyCreatedReply
   | PasskeyAssertionReply
@@ -248,6 +262,7 @@ export interface ReplyFor {
   save: SaveReply
   forms: FormsReply
   "fill-form": FillFormReply
+  "save-form": SaveFormReply
   "passkey-list": PasskeysReply
   "passkey-create": PasskeyCreatedReply
   "passkey-get": PasskeyAssertionReply
@@ -268,6 +283,7 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   save: "save",
   forms: "forms",
   "fill-form": "fill-form",
+  "save-form": "save-form",
   "passkey-list": "passkeys",
   "passkey-create": "passkey-created",
   "passkey-get": "passkey-assertion",
@@ -282,7 +298,7 @@ export type HostMessage =
 const STATUSES: HostStatus[] = ["ready", "locked", "not-set-up", "unavailable"]
 const CHECKS: CheckStatus[] = ["new", "update", "same"]
 const CHANGES: Change[] = ["locked", "unlocked", "items", "stopped", "started"]
-const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "weak", "exists", "cancelled", "failed", "passphrase_needed", "wrong_passphrase"]
+const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "weak", "exists", "cancelled", "forbidden", "failed", "passphrase_needed", "wrong_passphrase"]
 const REF = /^[0-9a-f]{64}:[0-9a-f]{32}$/
 const B64URL = /^[A-Za-z0-9_-]*$/
 
@@ -448,6 +464,8 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
       }
       return { type: "fill-form", values, verified: raw.verified === true }
     }
+    case "save-form":
+      return isRef(raw.ref) ? { type: "save-form", ref: raw.ref, created: raw.created === true } : null
     case "passkeys": {
       if (!Array.isArray(raw.passkeys) || typeof raw.rpId !== "string") return null
       const passkeys = raw.passkeys.map(passkey).filter((p): p is Passkey => p !== null)

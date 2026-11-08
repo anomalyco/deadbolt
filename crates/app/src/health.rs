@@ -136,16 +136,8 @@ impl Health {
         self.report.as_ref()?.items.iter().find(|i| i.id == id)
     }
 
-    pub fn primary_risk(&self, id: &str) -> Option<&Finding> {
-        self.item(id)?.findings.iter().find(|f| f.kind().is_risk())
-    }
-
     pub fn password_changed_for(&self, id: &str) -> Option<&str> {
         self.item(id)?.password_changed.as_deref()
-    }
-
-    pub fn change_url_for(&self, id: &str) -> Option<&str> {
-        self.item(id)?.change_url.as_deref()
     }
 
     pub fn tabs(&self) -> Vec<Tab> {

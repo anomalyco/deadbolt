@@ -3,7 +3,7 @@
 
 import { HostError, type VaultBackend } from "../src/bg/backend"
 import type { PageFacts, Status } from "../src/messages"
-import type { Account, RequestBody as Request } from "../src/protocol"
+import type { Account, FormCard, FormIdentity, RequestBody as Request } from "../src/protocol"
 
 export const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 export const MENU_URL = "chrome-extension://0123456789abcdef/menu.html"
@@ -165,6 +165,16 @@ export const ACCOUNTS: Account[] = [
   { ref: `${"a".repeat(64)}:${"2".repeat(32)}`, vault: "Work", title: "Example admin", username: "admin", hasPassword: true, hasTotp: false, urls: [] },
 ]
 
+/** The vault's identity and card for forms: Home, and a Visa ending 4242 (which `forms` lists without its number). */
+export const HOME_REF = `${"c".repeat(64)}:${"1".repeat(32)}`
+export const VISA_REF = `${"c".repeat(64)}:${"3".repeat(32)}`
+export const HOME_VALUES: Record<string, string> = {
+  "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "+14155550123",
+  "address-line1": "123 Main St", city: "Brooklyn", region: "NY", "postal-code": "11201", country: "US",
+}
+export const IDENTITIES: FormIdentity[] = [{ ref: HOME_REF, vault: "Personal", title: "Home", summary: "Kit Langton · 123 Main St, Brooklyn", fields: Object.keys(HOME_VALUES) as FormIdentity["fields"] }]
+export const CARDS: FormCard[] = [{ ref: VISA_REF, vault: "Personal", title: "Visa •••• 4242", brand: "Visa", last4: "4242", expiry: "2028-08", cardholder: "Kit Langton", fields: ["number", "expiry", "cardholder", "brand"] }]
+
 export interface FakeHost {
   host: VaultBackend
   requests: Request[]
@@ -180,6 +190,7 @@ export function fakeHost(): FakeHost {
   let held: Promise<void> | null = null
   const host = {
     status: { state: "ready", version: "0.0.0" } as Status,
+    capabilities: ["list", "fill", "check", "save", "generate", "forms", "save-form", "learn"],
     onChange: (l: (s: Status) => void) => void listeners.push(l),
     connect: async () => {},
     reconnectNow: async () => {},
@@ -211,6 +222,14 @@ export function fakeHost(): FakeHost {
           return { type: req.type }
         case "save":
           return { type: "save", ref: req.ref ?? "b", created: !req.ref }
+        case "forms":
+          return { type: "forms", canVerify: true, identities: IDENTITIES, cards: CARDS }
+        case "fill-form": {
+          const values = req.ref === HOME_REF ? HOME_VALUES : {}
+          return { type: "fill-form", verified: false, values: Object.fromEntries(req.fields.filter((f) => f in values).map((f) => [f, values[f]])) }
+        }
+        case "save-form":
+          return { type: "save-form", ref: req.ref ?? `${"d".repeat(64)}:${"9".repeat(32)}`, created: !req.ref }
       }
       throw new Error("unexpected")
     },

@@ -61,6 +61,18 @@ fn whoami_lines(caller: &CallerInfo) -> Vec<(&'static str, String)> {
     let mut lines = vec![
         ("caller", caller.label.clone()),
         ("class", kebab(&caller.class)),
+        ("identified", caller.identified.to_string()),
+        (
+            "reason",
+            caller.reason.clone().unwrap_or_else(|| {
+                if caller.identified {
+                    "live peer; no AI marker"
+                } else {
+                    "no identification recorded"
+                }
+                .into()
+            }),
+        ),
         ("checked", check(caller.check).into()),
         ("pid", caller.pid.to_string()),
     ];
@@ -216,6 +228,9 @@ mod tests {
 
     fn caller() -> CallerInfo {
         CallerInfo {
+            identified: true,
+            browser_host_mode: false,
+            reason: None,
             class: CallerClass::Caller,
             check: Check::Signature,
             pid: 42,

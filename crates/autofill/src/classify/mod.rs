@@ -215,10 +215,6 @@ impl Engine {
         })
     }
 
-    pub fn with_rules(rules: Rules) -> Engine {
-        Engine { rules }
-    }
-
     pub fn rules(&self) -> &Rules {
         &self.rules
     }

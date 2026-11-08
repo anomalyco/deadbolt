@@ -14,8 +14,9 @@ import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, P
 import { provider as providerOf } from "./signin"
 import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
-import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
+import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
+import { offerTitle } from "./ui/offer"
 import { brandBySlug, siteTile } from "./ui/site-icon"
 
 /** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
@@ -252,14 +253,14 @@ function row(item: Row, i: number): HTMLElement {
   r.addEventListener("pointerdown", (e) => {
     if (!e.isTrusted || e.button !== 0 || busy || mode !== "accounts") return
     active = i
-    highlight(false)
+    highlight()
     press(r)
   })
   r.addEventListener("pointermove", () => {
-    if (active === i) return
+    if (active === i && !highlightEl.hidden) return
     active = i
     // The pointer is the user's own hand: the highlight lands under it at once.
-    highlight(false)
+    highlight()
   })
   return r
 }
@@ -416,8 +417,12 @@ function setCaption(site: string) {
   caption.hidden = !site
 }
 
-/** The one highlight, which slides between rows. Its y and height spring together, and retarget mid-flight. */
-const hl = { y: new Spring(0, 0.3), height: new Spring(0, 0.3), raf: 0, shown: false }
+/**
+ * The one highlight. A key or the pointer puts it on the active row at once,
+ * in the same frame as the row's own colour; as the list narrows it rides on
+ * its row, on the rows' spring, retargeting mid-flight.
+ */
+const hl = { y: new Spring(0), height: new Spring(0), raf: 0, shown: false }
 
 function stepHighlight() {
   highlightEl.style.transform = `translateY(${hl.y.value}px)`
@@ -425,8 +430,8 @@ function stepHighlight() {
   hl.raf = hl.y.done && hl.height.done ? 0 : requestAnimationFrame(stepHighlight)
 }
 
-/** Puts the highlight on the active row: sliding there with `slide`, at once otherwise. */
-function highlight(slide = true) {
+/** Puts the highlight on the active row: at once, or riding along as rows reflow with `slide`. */
+function highlight(slide = false) {
   const rows = Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row"))
   rows.forEach((el, i) => {
     el.classList.toggle("active", i === active)
@@ -441,14 +446,16 @@ function highlight(slide = true) {
   const y = rowsEl.offsetTop + el.offsetTop
   const height = el.offsetHeight
   if (slide && hl.shown) {
-    hl.y.to(y)
-    hl.height.to(height)
+    hl.y.to(y, MENU_MOTION.reflow)
+    hl.height.to(height, MENU_MOTION.reflow)
+    if (!hl.raf) hl.raf = requestAnimationFrame(stepHighlight)
   } else {
     hl.y.jump(y)
     hl.height.jump(height)
+    cancelAnimationFrame(hl.raf)
+    stepHighlight()
   }
   hl.shown = true
-  if (!hl.raf) hl.raf = requestAnimationFrame(stepHighlight)
   el.scrollIntoView({ block: "nearest" })
 }
 
@@ -529,7 +536,7 @@ function narrow(text: string) {
         r.hidden = true
         r.style.cssText = ""
       }
-      const anim = animateTo(r, reduced ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, 0.25, { fill: false })
+      const anim = animateTo(r, reduced ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, MENU_MOTION.rowOut, { fill: false })
       if (anim) anim.finished.then(finish, finish)
       else finish()
     } else if (!shown(r) && want) {
@@ -538,18 +545,29 @@ function narrow(text: string) {
       r.hidden = false
       r.style.cssText = ""
       if (typeof r.animate === "function")
-        r.animate(reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(3px)", transform: "scale(0.96)" }, { opacity: 1, filter: "blur(0px)", transform: "none" }], timing(0.3))
+        r.animate(reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(3px)", transform: "scale(0.96)" }, { opacity: 1, filter: "blur(0px)", transform: "none" }], timing(MENU_MOTION.rowIn))
     }
   })
+  const slid = new Map<HTMLElement, number>()
   if (!reduced)
     for (const [r, top] of before) {
       if (!shown(r)) continue
       const dy = top - r.getBoundingClientRect().top
-      if (Math.abs(dy) > 0.5) r.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], spring(0.4))
+      if (Math.abs(dy) > 0.5) r.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], spring(MENU_MOTION.reflow))
+      slid.set(r, dy)
     }
   const left = visible()
+  const was = active
   if (left.length && !left.includes(active)) active = left[0]
-  if (left.length) highlight(true)
+  // The highlight stays on its row: a row it moves to (its own went) it
+  // takes from where that row is on screen, then rides along with it.
+  const to = rows[active]
+  if (left.length && active !== was && to) {
+    const dy = slid.get(to)
+    if (dy !== undefined) hl.y.jump(rowsEl.offsetTop + to.offsetTop + dy)
+    hl.height.jump(to.offsetHeight)
+    highlight(dy !== undefined)
+  } else if (left.length) highlight(true)
   else highlightEl.hidden = true
   // The rows' own animations pause the frame's visibility readings, so the
   // dwell counts from when they're over, as if the menu had moved.
@@ -723,7 +741,7 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
   for (const el of Array.from(surface.children) as HTMLElement[]) {
     el.setAttribute("aria-hidden", "true")
     el.style.pointerEvents = "none"
-    animateTo(el, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, 0.25)
+    animateTo(el, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, MENU_MOTION.foldOut)
   }
   // The pill's size, before anything moves into it: the label's text and the slots' sizes.
   if (persistIsLabel && persist) label.append(...Array.from(persist.cloneNode(true).childNodes))
@@ -753,17 +771,18 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
         label.replaceChildren(...Array.from(el.childNodes))
         el.remove()
       } else slot.replaceWith(el)
-      if (reducedMotion()) return
+      // Reduced motion: it fades in where it lands.
+      if (reducedMotion()) return void (asLabel ? label : el).animate([{ opacity: 0 }, { opacity: 1 }], REDUCED_FADE)
       const to = (asLabel ? target : el).getBoundingClientRect()
       const dx = from.left + from.width / 2 - (to.left + to.width / 2)
       const dy = from.top + from.height / 2 - (to.top + to.height / 2)
       const scale = to.width && !asLabel ? from.width / to.width : 1
-      ;(asLabel ? label : el).animate([{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }], spring(0.38))
+      ;(asLabel ? label : el).animate([{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }], spring(MENU_MOTION.foldIn))
     }
     moveIn(lead, slots.lead)
     if (persistIsLabel) moveIn(persist, slots.persist, true)
     else moveIn(persist, slots.persist)
-    if (!persistIsLabel && !reducedMotion()) label.animate([{ opacity: 0 }, { opacity: 1 }], timing(0.3))
+    if (!persistIsLabel) label.animate([{ opacity: 0 }, { opacity: 1 }], timing(MENU_MOTION.pillLabel))
   })
   return label
 }
@@ -876,7 +895,7 @@ document.addEventListener("keydown", (e) => {
     return void pick(active)
   } else return
   e.preventDefault()
-  highlight(true)
+  highlight()
 })
 
 function show(reply: MenuLoadReply) {
@@ -924,7 +943,7 @@ function show(reply: MenuLoadReply) {
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]
-  highlight(false)
+  highlight()
   if (universal) showUniversal()
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
 }
@@ -940,7 +959,7 @@ function expandUniversal() {
   universalExpanded = true
   surface.classList.add("expanded")
   rowsEl.replaceChildren(...accounts.map(row))
-  highlight(false)
+  highlight()
   dwell.moved(performance.now())
   report()
 }
@@ -1009,7 +1028,8 @@ function showUniversal() {
     rowsEl.replaceChildren(top)
     // Quiet until the pointer is on it (the row's own pointermove lights it).
     highlightEl.hidden = true
-  }  surface.querySelector(".signin-dismiss")?.remove()
+  }
+  surface.querySelector(".signin-dismiss")?.remove()
   const dismiss = h("button", { class: "signin-dismiss", type: "button", title: "Not now for this site (30 minutes)", "aria-label": "Not now for this site" }, "×")
   dismiss.addEventListener("click", async (e) => {
     if (!e.isTrusted || (e.detail === 0 && !entry.entered) || busy || !pressedScale || !dwell.settled(pressedAt)) return
@@ -1052,7 +1072,7 @@ function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]
-  highlight(false)
+  highlight()
 }
 
 // ---- A step filled without a pick -----------------------------------------------------
@@ -1099,31 +1119,38 @@ let offerSize: () => { width: number; height: number } = () => ({ width: 0, heig
  */
 function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   mode = "save"
+  const title = offerTitle(offer)
   document.body.classList.add("save")
   document.body.dataset.offer = offerState
   const status = h("p", { class: "offer-status" })
-  const saveLabel = h("span", { class: "roll-label" }, "Save")
-  saveLabel.dataset.text = "Save"
+  // An update says so on its button.
+  const primary = offer.update ? "Update" : "Save"
+  const saveLabel = h("span", { class: "roll-label" }, primary)
+  saveLabel.dataset.text = primary
   const save = h("button", { class: "btn primary", type: "button" }, saveLabel)
   const later = h("button", { class: "btn", type: "button" }, "Not now")
   const never = h("button", { class: "link never", type: "button" }, "Never for this site")
+  // An update of a card or identity may be kept as a new one instead.
+  const asNew = offer.saveNew ? h("button", { class: "btn new", type: "button" }, "Save as new") : null
   const bar = h("span", { class: "bar", "aria-hidden": "true" })
   const mark = h("span", { class: "offer-mark", "aria-hidden": "true" }, svg(ICONS.deadbolt))
-  const row = h("div", { class: "offer-row" }, mark, h("h1", { class: "offer-title" }, offer.update ? "Update password?" : "Save login?"), save)
+  const row = h("div", { class: "offer-row" }, mark, h("h1", { class: "offer-title" }, title), save)
   const section = h(
     "section",
-    { class: "offer", "aria-label": offer.update ? "Update password" : "Save login" },
+    { class: "offer", "aria-label": title.slice(0, -1) },
     row,
     h(
       "div",
       { class: "offer-more" },
       h("p", { class: "offer-user" }, h("span", { class: "value" }, offer.username), h("span", { class: "site" }, ` · ${offer.site}`)),
+      // What an update changes, for a card: "Expires 08/28 → 09/30".
+      offer.change ? h("p", { class: "offer-change" }, offer.change) : null,
       status,
-      h("div", { class: "offer-actions" }, never, later),
+      h("div", { class: "offer-actions" }, never, asNew, later),
     ),
     bar,
   )
-  const dot = h("button", { class: "dot", type: "button", "aria-label": offer.update ? "Update password?" : "Save login?" }, svg(ICONS.deadbolt))
+  const dot = h("button", { class: "dot", type: "button", "aria-label": title }, svg(ICONS.deadbolt))
   surface.replaceChildren(section, dot)
   section.inert = offerState === "dot"
   dot.inert = offerState !== "dot"
@@ -1261,7 +1288,8 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   }
   say("")
   // It shows in the corner, away from where the user is: a screen reader hears it came.
-  announce(`${offer.update ? "Update password" : "Save login"} for ${offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
+  // An update names what it changes: "Update phone for Kit Langton?".
+  announce(`${title.slice(0, -1)} for ${offer.what && offer.update ? offer.username : offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
   const answer = async (choice: OfferChoice, e: MouseEvent) => {
     // Real presses only.
     if (!e.isTrusted || busy || offerState === "dot") return
@@ -1283,12 +1311,13 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     document.body.classList.remove("held")
     // "Saving…" rolls in the button itself, and stays long enough to read.
     const shownAt = performance.now()
-    if (choice === "save") {
+    const saving = choice === "save" || choice === "new"
+    if (saving) {
       document.body.classList.add("busy")
       rollLabel(saveLabel, "Saving…")
     }
     const reply = await send<ChooseReply>({ type: "db:surface-choose", token, choice })
-    if (choice !== "save") return leaveLikeSave()
+    if (!saving) return leaveLikeSave()
     if (reply?.ok) {
       await new Promise((r) => setTimeout(r, Math.max(0, SAVING_READS_MS - (performance.now() - shownAt))))
       const label = fold(saveLabel, "Saving…", true, mark)
@@ -1305,14 +1334,15 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     busy = false
     relax()
     document.body.classList.remove("busy")
-    rollLabel(saveLabel, "Save")
+    rollLabel(saveLabel, primary)
     shape("open")
     say(reply.message)
     rearm()
   }
   // The press shows at once; what it does waits for the checks.
-  for (const b of [save, later, never]) b.addEventListener("pointerdown", (e) => e.isTrusted && e.button === 0 && !busy && press(b))
+  for (const b of [save, later, never, ...(asNew ? [asNew] : [])]) b.addEventListener("pointerdown", (e) => e.isTrusted && e.button === 0 && !busy && press(b))
   save.addEventListener("click", (e) => void answer("save", e))
+  asNew?.addEventListener("click", (e) => void answer("new", e))
   later.addEventListener("click", (e) => void answer("later", e))
   never.addEventListener("click", (e) => void answer("never", e))
   report()
@@ -1375,7 +1405,7 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
                     { opacity: 0, transform: "scale(0.96)" },
                     { opacity: 1, transform: "none" },
                   ],
-            timing(corner ? 0.4 : 0.25),
+            timing(corner ? MENU_MOTION.openCorner : MENU_MOTION.open),
           )
           if (corner && mode === "save") {
             const clear = () => { el.style.borderRadius = "" }

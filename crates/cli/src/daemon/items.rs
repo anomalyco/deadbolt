@@ -66,6 +66,11 @@ fn matches_parsed(item: &Item, parsed: &Query, has_any_tagged: bool) -> bool {
     let id = item.id.to_string();
     parsed.words.iter().all(|word| {
         let word = word.to_lowercase();
+        // A whole item id names that item and no other, whatever text holds it
+        // (the browser host changes an identity or card by its id).
+        if word.len() == id.len() && word.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return word == id;
+        }
         texts.iter().any(|t| t.contains(&word))
             || (word.len() >= MIN_SHORT
                 && word.bytes().all(|b| b.is_ascii_hexdigit())

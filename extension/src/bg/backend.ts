@@ -23,7 +23,7 @@ export interface SendOptions {
 }
 
 export type Listener = (status: Status, change?: Change) => void
-export type ReauthBody = Extract<RequestBody, { type: "fill-form" | "passkey-create" | "passkey-get" }>
+export type ReauthBody = Extract<RequestBody, { type: "fill-form" | "save-form" | "passkey-create" | "passkey-get" }>
 export type ReauthReply = ReplyFor[ReauthBody["type"]]
 
 export interface VaultBackend {
@@ -40,7 +40,7 @@ export interface VaultBackend {
   used?(): void
   /**
    * The browser-only vault only: a fill the vault answered `passphrase_needed`
-   * (a card's number or code under Strict). Asks for the passphrase in
+   * (a card's number or code under Strict), or a card's save. Asks for the passphrase in
    * Deadbolt's own popup or device.html, never the page, and runs the fill
    * once with it. Rejects if the user cancels, Deadbolt locks, `signal`
    * aborts (the page navigated) or nobody answers in time.

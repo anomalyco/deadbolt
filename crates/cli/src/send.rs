@@ -7,6 +7,7 @@
 //! into the link.
 
 use std::io::{IsTerminal, Read};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -25,13 +26,16 @@ use crate::config;
 use crate::paths::Paths;
 use crate::prompt;
 use crate::protocol::{
-    Command, FieldInfo, ItemInfo, Reply, Secret, SendInfo, SendState, SenderInfo,
+    Answer, Command, Event, FieldInfo, ItemInfo, Reply, Secret, SendInfo, SendState, SenderInfo,
 };
 
 /// Exit code of `send --wait` when the link expired unopened.
 pub const EXIT_EXPIRED: u8 = 4;
 /// Exit code of `send --wait` when the link was revoked.
 pub const EXIT_REVOKED: u8 = 5;
+
+/// What a bundle holds, in whole MB, for the "too large" messages.
+const MAX_MB: usize = MAX_SEALED_LEN / 1024 / 1024;
 
 /// `deadbolt send`'s subcommand or flags, plus where each input sat on the
 /// command line: inputs go into the bundle in that order, and each
@@ -181,8 +185,13 @@ impl SendArgs {
             sources.push((at, source));
         }
         for (query, &at) in raw.items.iter().zip(&self.items_at) {
-            let query = query.clone();
-            sources.push((at, Source::Item { query, field: None }));
+            sources.push((
+                at,
+                Source::Item {
+                    query: query.clone(),
+                    field: None,
+                },
+            ));
         }
         sources.sort_by_key(|(at, _)| *at);
         for (name, &at) in raw.fields.iter().zip(&self.fields_at) {
@@ -367,7 +376,10 @@ pub async fn send(
         }
     }
 
-    let names: Vec<String> = parts.iter().map(|p| node_name(&p.node)).collect();
+    let names: Vec<String> = parts
+        .iter()
+        .map(|p| node_name(&p.node).to_owned())
+        .collect();
     let entries: Vec<Node> = parts.into_iter().map(|p| p.node).collect();
 
     let bundle = Bundle {
@@ -380,9 +392,8 @@ pub async fn send(
     // Sealing adds 16 bytes per 64 KiB chunk and a 15-byte prefix.
     if plaintext.len() + plaintext.len() / 4096 + 64 > MAX_SEALED_LEN {
         bail!(
-            "too large to send: {} bytes, at most about {} MB",
+            "too large to send: {} bytes, at most about {MAX_MB} MB",
             plaintext.len(),
-            MAX_SEALED_LEN / 1024 / 1024
         );
     }
     let key = random_secret()?;
@@ -520,7 +531,7 @@ async fn manage(paths: &Paths, command: SendCommand) -> Result<()> {
     Ok(())
 }
 
-fn no_events(event: crate::protocol::Event) -> Result<Option<crate::protocol::Answer>> {
+fn no_events(event: Event) -> Result<Option<Answer>> {
     Err(anyhow!("unexpected event {event:?}"))
 }
 
@@ -691,21 +702,21 @@ fn preview(
         rows.push(["note".into(), note.into(), String::new(), String::new()]);
     }
     for part in parts {
-        let (count, bytes, sensitive) = leaves(&part.node);
-        let size = match part.kind {
+        let (count, bytes, hidden) = leaves(&part.node);
+        let detail = match part.kind {
             Kind::Item => plural(count, "field"),
             Kind::Folder => format!("{}, {}", plural(count, "file"), size(bytes)),
             _ => size(bytes),
         };
-        let sensitive = match sensitive {
+        let sensitive = match hidden {
             0 => String::new(),
             n if n == count => "sensitive".into(),
             n => format!("{n} sensitive"),
         };
         rows.push([
             part.kind.as_str().into(),
-            node_name(&part.node),
-            size,
+            node_name(&part.node).into(),
+            detail,
             sensitive,
         ]);
     }
@@ -720,19 +731,14 @@ fn preview(
         "About to send ({uses}, expires in {}):\n",
         duration(ttl_secs)
     );
-    for row in &rows {
-        let mut line = format!(
-            "  {:w0$}  {:w1$}  {:w2$}  {}",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
+    for [kind, name, detail, sensitive] in &rows {
+        let line = format!(
+            "  {kind:w0$}  {name:w1$}  {detail:w2$}  {sensitive}",
             w0 = widths[0],
             w1 = widths[1],
             w2 = widths[2]
         );
-        line.truncate(line.trim_end().len());
-        out.push_str(&line);
+        out.push_str(line.trim_end());
         out.push('\n');
     }
     out
@@ -869,9 +875,8 @@ struct Walk {
 
 fn too_large(path: &Path) -> anyhow::Error {
     anyhow!(
-        "too large to send: {} goes past about {} MB",
-        path.display(),
-        MAX_SEALED_LEN / 1024 / 1024
+        "too large to send: {} goes past about {MAX_MB} MB",
+        path.display()
     )
 }
 
@@ -881,7 +886,7 @@ const GROUP_COST: u64 = 10;
 
 impl Walk {
     fn new(limit: usize) -> Self {
-        Walk {
+        Self {
             left: limit as u64,
             open: Vec::new(),
         }
@@ -894,18 +899,15 @@ impl Walk {
 
     /// A file as an entry, a folder as a group of its files and folders.
     fn node(&mut self, path: &Path, sensitive: bool) -> Result<Node> {
-        use std::os::unix::fs::MetadataExt;
-
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .or_else(|| {
+            .unwrap_or_else(|| {
                 std::fs::canonicalize(path)
-                    .ok()?
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "files".into());
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "files".into())
+            });
         let meta =
             std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
         if meta.is_dir() {
@@ -945,8 +947,6 @@ impl Walk {
     }
 
     fn children(&mut self, path: &Path, sensitive: bool) -> Result<Vec<Node>> {
-        use std::os::unix::fs::MetadataExt;
-
         let mut children: Vec<_> = std::fs::read_dir(path)
             .with_context(|| format!("reading {}", path.display()))?
             .collect::<Result<_, _>>()
@@ -982,7 +982,7 @@ impl Walk {
 
 /// The media type from the content's magic bytes, else the extension, else
 /// text for UTF-8 and octets otherwise.
-pub fn mime(name: &str, data: &[u8]) -> &'static str {
+fn mime(name: &str, data: &[u8]) -> &'static str {
     const MAGIC: &[(&[u8], &str)] = &[
         (b"\x89PNG\r\n\x1a\n", "image/png"),
         (b"\xff\xd8\xff", "image/jpeg"),
@@ -996,7 +996,7 @@ pub fn mime(name: &str, data: &[u8]) -> &'static str {
     if let Some((_, mime)) = MAGIC.iter().find(|(magic, _)| data.starts_with(magic)) {
         return mime;
     }
-    if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+    if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
         return "image/webp";
     }
     let ext = name
@@ -1024,10 +1024,10 @@ pub fn mime(name: &str, data: &[u8]) -> &'static str {
     })
 }
 
-fn node_name(node: &Node) -> String {
+fn node_name(node: &Node) -> &str {
     match node {
-        Node::Entry(e) => e.name.clone(),
-        Node::Group(g) => g.name.clone().unwrap_or_else(|| "group".into()),
+        Node::Entry(e) => &e.name,
+        Node::Group(g) => g.name.as_deref().unwrap_or("group"),
     }
 }
 
@@ -1079,10 +1079,10 @@ fn expiry(send: &SendInfo) -> String {
 }
 
 fn opened_at(send: &SendInfo) -> String {
-    match send.opened.last() {
-        Some(at) => crate::ago(*at),
-        None => String::new(),
-    }
+    send.opened
+        .last()
+        .map(|at| crate::ago(*at))
+        .unwrap_or_default()
 }
 
 fn opened_suffix(send: &SendInfo) -> String {

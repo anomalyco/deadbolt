@@ -48,6 +48,7 @@ import { join, resolve } from "node:path"
 import { VAULT_REQUEST } from "../src/bg/vault-messages"
 import { axe, describe } from "./axe"
 import { gauntlet } from "./gauntlet/site"
+import { gmailPage } from "./gmail-flow"
 import { gauntletAccounts, gauntletScenarios } from "./gauntlet/scenarios"
 
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
@@ -626,6 +627,53 @@ const FORMS: Record<string, string> = {
     ${sel("mm", "Expiry month", months)}${sel("yy", "Expiry year", years(new Date().getFullYear()))}
     <label for="cvv">Security code</label><input id="cvv" autocomplete="cc-csc">
     <button type="button">Pay</button></form>`,
+  // A card typed by hand on a checkout that posts to its thank-you page (saving what was typed).
+  pay: `<h1>Payment</h1><form method="post" action="/forms/thanks">
+    <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
+    <label for="cc">Card number</label><input id="cc" autocomplete="cc-number" inputmode="numeric" placeholder="1234 1234 1234 1234">
+    <label for="exp">Expiration</label><input id="exp" autocomplete="cc-exp" placeholder="MM / YY">
+    <label for="cvc">CVC</label><input id="cvc" autocomplete="cc-csc" inputmode="numeric">
+    <button type="submit">Pay</button></form>`,
+  // A shipping address that goes on in place: the form goes once it's sent.
+  ship: `<h1>Shipping</h1><form id="ship">
+    <label for="n">Full name</label><input id="n" autocomplete="shipping name">
+    <label for="a1">Address</label><input id="a1" autocomplete="shipping address-line1">
+    <label for="city">City</label><input id="city" autocomplete="shipping address-level2">
+    <label for="zip">ZIP</label><input id="zip" autocomplete="shipping postal-code">
+    ${sel("country", "Country", countries, ` autocomplete="shipping country"`)}
+    <button type="submit">Continue</button></form>
+    <script>document.getElementById("ship").addEventListener("submit", (e) => {
+      e.preventDefault()
+      setTimeout(() => { e.target.remove(); document.querySelector("main").insertAdjacentHTML("beforeend", "<p>Delivering there.</p>") }, 300)
+    })</script>`,
+  // The same address with no form: a real button beside the fields, and an element that only says it's one.
+  "ship-spa": `<h1>Shipping</h1><div id="ship">
+    <label for="n">Full name</label><input id="n" autocomplete="shipping name">
+    <label for="a1">Address</label><input id="a1" autocomplete="shipping address-line1">
+    <label for="city">City</label><input id="city" autocomplete="shipping address-level2">
+    <label for="zip">ZIP</label><input id="zip" autocomplete="shipping postal-code">
+    <div role="button" id="fake" tabindex="0" style="margin-top:12px;padding:8px;border:1px solid">Continue</div>
+    <button type="button" id="real">Continue</button></div>
+    <script>for (const id of ["fake", "real"]) document.getElementById(id).addEventListener("click", () => setTimeout(() => document.getElementById("ship").remove(), 300))</script>`,
+  // Contact details whose email the page swaps as the form goes, and an address with an email planted where nobody sees it.
+  contact: `<h1>Contact</h1><form id="contact">
+    <label for="n">Full name</label><input id="n" autocomplete="name">
+    <label for="em">Email</label><input id="em" type="email" autocomplete="email">
+    <label for="tel">Phone</label><input id="tel" type="tel" autocomplete="tel">
+    <button type="submit">Save</button></form>
+    <script>document.getElementById("contact").addEventListener("submit", (e) => {
+      e.preventDefault()
+      document.getElementById("em").value = "attacker@example.net"
+      setTimeout(() => e.target.remove(), 300)
+    })</script>`,
+  "ship-planted": `<h1>Shipping</h1><form id="ship">
+    <label for="n">Full name</label><input id="n" autocomplete="shipping name">
+    <label for="a1">Address</label><input id="a1" autocomplete="shipping address-line1">
+    <label for="city">City</label><input id="city" autocomplete="shipping address-level2">
+    <label for="zip">ZIP</label><input id="zip" autocomplete="shipping postal-code">
+    <input id="planted" autocomplete="shipping email" value="attacker@example.net" style="position:absolute;left:-2000px;width:3px;height:3px">
+    <button type="submit">Continue</button></form>
+    <script>document.getElementById("ship").addEventListener("submit", (e) => { e.preventDefault(); setTimeout(() => e.target.remove(), 300) })</script>`,
   // A card number in four boxes.
   "card-split": `<h1>Payment</h1><form>
     <label for="b1">Card number</label><div style="display:flex;gap:6px"><input id="b1" maxlength="4"><input id="b2" maxlength="4"><input id="b3" maxlength="4"><input id="b4" maxlength="4"></div>
@@ -643,6 +691,20 @@ const CARD_FRAME = `<!doctype html><html><head><meta charset="utf-8"><style>
 const cardFrame = (host: string, port: string) => `<h1>Payment</h1>
   <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
   <iframe id="pay" src="http://${host}:${port}/forms/card-frame" style="width:100%;height:220px;border:0;margin-top:12px"></iframe>`
+/** A checkout whose card goes into the provider's frame and whose own form posts to its thank-you page. */
+const cardFramePay = (host: string, port: string) => `<h1>Payment</h1><form method="post" action="/forms/thanks">
+  <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
+  <iframe id="pay" src="http://${host}:${port}/forms/card-frame" style="width:100%;height:220px;border:0;margin-top:12px"></iframe>
+  <button type="submit">Pay</button></form>
+  <script>document.querySelector("form").addEventListener("submit", (e) => {
+    // As a provider's checkout does: confirm the payment with the provider first, then post.
+    e.preventDefault()
+    setTimeout(() => e.target.submit(), 800)
+  })</script>`
+/** A card form that posts to another origin (into a frame of its own), then goes in place: nothing typed in it is offered. */
+const payAway = (port: string) => `${FORMS.pay.replace('action="/forms/thanks"', `action="http://pay.evilpay.test:${port}/forms/thanks" target="sink"`)}
+  <iframe name="sink" hidden></iframe>
+  <script>document.querySelector("form").addEventListener("submit", (e) => setTimeout(() => e.target.remove(), 300))</script>`
 
 /**
  * Apple's sign-in widget as appstoreconnect.apple.com embeds it
@@ -769,6 +831,13 @@ const server = Bun.serve({
           : html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
       if (url.pathname === "/flow/done") return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
       if (url.pathname === "/flow/failed") return Response.redirect(`/flow/failed?email=${encodeURIComponent(email)}`, 303)
+      // The Gmail-style sign-in's steps (see gmail-flow.ts), posted by fetch.
+      if (url.pathname.startsWith("/flow/gmail/")) {
+        const got = (k: string) => String(data?.get(k) ?? "")
+        const ok = { identifier: got("identifier") === "kit@acme.test", pwd: got("Passwd") === "correct horse", totp: isCode(got("totpPin").replace(/\s/g, "")), signup: true }[url.pathname.slice("/flow/gmail/".length)]
+        const errors: Record<string, string> = { identifier: "Couldn’t find your Google Account", pwd: "Wrong password. Try again or click Forgot password to reset it.", totp: "Wrong code. Try again." }
+        return Response.json(ok ? { ok: true } : { error: errors[url.pathname.slice("/flow/gmail/".length)] ?? "Something went wrong" })
+      }
       switch (url.pathname) {
         case "/":
           return html("Acme", `<h1>Acme</h1><div role="alert" class="notice">Incorrect password. Try again.</div><p><a href="/outcome/login?to=/">Back</a></p>`)
@@ -826,6 +895,9 @@ const server = Bun.serve({
             <button type="submit" id="go">Continue</button></form>`,
         )
       }
+      // A Gmail-style sign-in, every step in one document (see gmail-flow.ts).
+      case "/flow/gmail":
+        return new Response(gmailPage(url.searchParams), { headers: { "content-type": "text/html; charset=utf-8" } })
       // The same two steps in one document: Continue swaps the username box for a password box.
       case "/flow/spa":
         return html(
@@ -1165,6 +1237,9 @@ const server = Bun.serve({
     if (url.pathname === "/forms/card-frame") return new Response(CARD_FRAME, { headers: { "content-type": "text/html; charset=utf-8" } })
     if (url.pathname === "/forms/stripe") return html("Checkout", cardFrame("js.stripe.test", url.port))
     if (url.pathname === "/forms/unknown") return html("Checkout", cardFrame("pay.evilpay.test", url.port))
+    if (url.pathname === "/forms/stripe-pay") return html("Checkout", cardFramePay("js.stripe.test", url.port))
+    if (url.pathname === "/forms/pay-away") return html("Checkout", payAway(url.port))
+    if (url.pathname === "/forms/thanks") return html("Order placed", "<h1>Thank you</h1><p>Your order is on its way.</p>")
     if (url.pathname.startsWith("/forms/") && FORMS[url.pathname.slice(7)]) return html("Checkout", FORMS[url.pathname.slice(7)])
     if (url.pathname.startsWith("/detect/") && DETECT[url.pathname.slice(8)]) {
       const d = DETECT[url.pathname.slice(8)]
@@ -1217,6 +1292,8 @@ interface LaunchOptions {
   reducedMotion?: boolean
   /** Give the first fake account an exact origin for universal sign-in. */
   universal?: boolean
+  /** The first Acme login's only saved URL instead (a bare domain, as an import saves). */
+  saved?: string
   /**
    * "Offer to sign in", on unless turned off: a pick then submits on a
    * login whose saved URL names the page's exact origin (the browser
@@ -1272,7 +1349,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
       DEADBOLT_FAKE_LIST_DELAY: String(options.listDelay ?? 0),
-      DEADBOLT_FAKE_ORIGIN: options.universal ? site : "",
+      DEADBOLT_FAKE_ORIGIN: options.saved ?? (options.universal ? site : ""),
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
       DEADBOLT_FAKE_KEYLOGIN: options.keyLogin ? "1" : "",
@@ -1390,7 +1467,7 @@ async function seedVault(run: Run, options: LaunchOptions) {
       // Also for acme.test, where the same page must narrow nothing (googleAccount).
       for (const u of ["ryan@gmail.com", "ryan@anoma.ly", "kit@gmail.com"]) await login("Google", [...urls([`http://accounts.google.test:${port}`, `http://www.acme.test:${port}`]), { name: "username", value: u }, { name: "password", value: "google password" }])
     } else {
-      await login("Acme", [...urls(sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
+      await login("Acme", [...urls(options.saved ? [options.saved] : sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
       await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
       if (options.keyLogin) await login("Acme API key", [...urls(sites), { name: "password", value: "acme api key" }])
       if (options.signIn) {
@@ -1433,8 +1510,10 @@ async function diagnose(run: Run, page: Page, what: string) {
 }
 
 let failures = 0
+let lastStep = "none yet"
 function check(ok: boolean, what: string) {
   console.log(`${ok ? "ok  " : "FAIL"} ${what}`)
+  lastStep = what
   if (!ok) failures++
   return ok
 }
@@ -3553,11 +3632,18 @@ async function signInSessions() {
   }
 }
 
+/** Test isolation: forgets the sign-ins the outcome judge confirmed, so the next pick on the site signs in again. */
+async function forgetSignIns(run: Run) {
+  await run.worker.evaluate(async () => {
+    const all = await chrome.storage.session.get(null)
+    await chrome.storage.session.remove(Object.keys(all).filter((k) => k.startsWith("signin-memory:")))
+  })
+}
+
 /**
  * Picks that sign in: with "Offer to sign in" on (the default, never set
  * here), an inline pick on the email step of a two-step login fills and
- * submits each step from the one pick, its code only once the site's code
- * step is learned. A code the site sent by SMS is left alone, a form that
+ * submits each step from the one pick, its authenticator code included. A code the site sent by SMS is left alone, a form that
  * posts to another origin fills but isn't submitted, and nothing a page does
  * picks. Turned off, a pick only fills, as before.
  */
@@ -3584,37 +3670,19 @@ async function pickSignsIn() {
   try {
     check(await run.worker.evaluate(async () => !("offerToSignIn" in (await chrome.storage.local.get("offerToSignIn")))), "a new profile has never set \"Offer to sign in\"")
 
-    // An unlearned code step: email and password are submitted, the code only filled.
+    // Email, password and the authenticator code, each submitted once from the one pick: a code step needs no learned flow.
     let before = flowPosts.length
-    await open("/flow/nav")
-    await pick()
-    await page.waitForURL("**/flow/nav/next", { timeout: 15_000 })
-    check(!!(await until("the code fills", async () => isCode(await code()))), "one inline pick fills and submits the email step, then the password step, then fills the code")
-    await Bun.sleep(1500)
-    const first = flowPosts.slice(before)
-    check(JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password", "/flow/nav/next"]), `each step is submitted once, and an unlearned code step isn't (${JSON.stringify(since(before))})`)
-    check(first[0]?.body.email === "kit@acme.test" && first[1]?.body.password === "correct horse", "with the picked login's username and password")
-
-    // Learned: the site's sign-in has a code step. One pick lands signed in.
-    await run.worker.evaluate(async () => {
-      let salt = (await chrome.storage.local.get("signinFlowsSalt")).signinFlowsSalt as string | undefined
-      if (!salt) await chrome.storage.local.set({ signinFlowsSalt: (salt = crypto.randomUUID().replaceAll("-", "")) })
-      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}\nlocalhost`))
-      const key = Array.from(new Uint8Array(digest).slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")
-      const flows = ((await chrome.storage.local.get("signinFlows")).signinFlows ?? {}) as Record<string, unknown>
-      flows[key] = { identifierFirst: true, code: true, navigates: true, seen: 3, codeSeen: 3, at: Date.now() }
-      await chrome.storage.local.set({ signinFlows: flows })
-    })
-    before = flowPosts.length
     await open("/flow/nav", "pick-signs-in-totp")
     await pick()
     await page.waitForURL("**/flow/done", { timeout: 20_000 })
     const posted = flowPosts.slice(before)
-    check((await page.textContent("main"))?.includes("Signed in as kit@acme.test") === true, "with a learned code step, one inline pick lands signed in")
+    check((await page.textContent("main"))?.includes("Signed in as kit@acme.test") === true, "one inline pick lands signed in")
     check(JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password", "/flow/nav/next", "/flow/done"]), `email, password and code are each submitted once (${JSON.stringify(since(before))})`)
+    check(posted[0]?.body.email === "kit@acme.test" && posted[1]?.body.password === "correct horse", "with the picked login's username and password")
     check(isCode([1, 2, 3, 4, 5, 6].map((i) => posted[2]?.body[`d${i}`] ?? "").join("")), "and the code submitted is the login's current one")
     check((await probe(page)).blurs === 0, "nothing of Deadbolt's took the page's focus")
     await Bun.sleep(1500)
+    await forgetSignIns(run)
 
     // A code the site sent by text message: neither filled nor submitted.
     before = flowPosts.length
@@ -3695,6 +3763,112 @@ async function pickSignsIn() {
       for (const { name, path } of saved) if (path) await rename(path, join(video, `${name}.webm`)).catch((err) => check(false, `couldn't keep ${name}: ${err}`))
       for (const path of others) if (path && !saved.some((s) => s.path === path)) await rm(path, { force: true })
     }
+  }
+}
+
+/**
+ * Google's sign-in (gmail-flow.ts): no <form>, type=button Nexts, and every
+ * step swapped into one document. One pick fills and submits the email, the
+ * password and the authenticator code, each once, and lands signed in. A
+ * CAPTCHA, a texted code or a sign-up step stops it; with "Offer to sign in"
+ * off, a pick only fills.
+ */
+async function googleSignIn() {
+  const run = await launch({ universal: true, offerToSignIn: "default" })
+  let page = await run.context.newPage()
+  const open = async (path: string) => {
+    await page.close()
+    page = await run.context.newPage()
+    await page.goto(`${site}${path}`)
+  }
+  const pick = async () => {
+    const menu = await menuOn(page, "#identifierId")
+    if (!menu) throw new Error(`no menu on ${page.url()}`)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+  }
+  const since = (n: number) => flowPosts.slice(n).filter((p) => p.path.startsWith("/flow/gmail/"))
+  const paths = (n: number) => JSON.stringify(since(n).map((p) => p.path.slice("/flow/gmail/".length)))
+  try {
+    let before = flowPosts.length
+    await open("/flow/gmail")
+    await pick()
+    const signedIn = await until("signed in", async () => (await page.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
+    check(!!signedIn, `one pick on Google's sign-in fills and submits each step and lands signed in (at ${new URL(page.url()).pathname}, posted ${paths(before)})`)
+    if (!signedIn) {
+      console.log(`  password box: ${JSON.stringify(await page.inputValue("input[name=Passwd]").catch(() => null))}`)
+      await diagnose(run, page, "Google sign-in")
+    }
+    await Bun.sleep(1500)
+    const posted = since(before)
+    check(paths(before) === JSON.stringify(["identifier", "pwd", "totp"]), `email, password and code are each submitted once (${paths(before)})`)
+    check(posted[0]?.body.identifier === "kit@acme.test" && posted[1]?.body.Passwd === "correct horse" && isCode(posted[2]?.body.totpPin ?? ""), "with the picked login's username, password and current code")
+    check((await probe(page)).blurs === 0, "nothing of Deadbolt's took the page's focus")
+    await forgetSignIns(run)
+
+    // A CAPTCHA on the password step: the password fills, nothing more goes.
+    before = flowPosts.length
+    await open("/flow/gmail?captcha")
+    await pick()
+    await page.waitForURL("**/flow/gmail/challenge/pwd", { timeout: 15_000 })
+    await until("the password fills", async () => (await page.inputValue("input[name=Passwd]").catch(() => "")) === "correct horse", 8000)
+    await Bun.sleep(2500)
+    check(paths(before) === JSON.stringify(["identifier"]), `a CAPTCHA on the password step stops the sign-in before its submit (${paths(before)})`)
+
+    // A code Google texted: the password goes, the code box stays empty.
+    before = flowPosts.length
+    await open("/flow/gmail?sms")
+    await pick()
+    await page.waitForURL("**/flow/gmail/challenge/totp", { timeout: 20_000 })
+    await Bun.sleep(3000)
+    check((await page.inputValue("#totpPin")) === "" && paths(before) === JSON.stringify(["identifier", "pwd"]), `a texted code step is neither filled nor submitted (${paths(before)})`)
+
+    // An address with no account goes on to "Create a password": a sign-up step, left alone.
+    before = flowPosts.length
+    await open("/flow/gmail?new")
+    await pick()
+    await page.waitForURL("**/flow/gmail/signup/password", { timeout: 15_000 })
+    await Bun.sleep(3000)
+    check((await page.inputValue("#newPasswd")) === "" && paths(before) === JSON.stringify(["identifier"]), `a sign-up step after the email is neither filled nor submitted (${paths(before)})`)
+
+    // Off: a pick only fills, and the next step fills only after the person's own Next.
+    await run.worker.evaluate(() => chrome.storage.local.set({ offerToSignIn: false }))
+    before = flowPosts.length
+    await open("/flow/gmail")
+    await pick()
+    await until("the email fills", async () => (await page.inputValue("#identifierId")) === "kit@acme.test")
+    await Bun.sleep(2000)
+    check(new URL(page.url()).pathname === "/flow/gmail" && paths(before) === "[]", "with Offer to sign in off, a pick on Google's email step fills without submitting")
+    await page.click("#next")
+    await page.waitForURL("**/flow/gmail/challenge/pwd")
+    await until("the password step fills", async () => (await page.inputValue("input[name=Passwd]").catch(() => "")) === "correct horse", 8000)
+    await Bun.sleep(2000)
+    check(new URL(page.url()).pathname === "/flow/gmail/challenge/pwd" && paths(before) === JSON.stringify(["identifier"]), `and its password step fills after the person's own Next, still without submitting (${paths(before)})`)
+  } catch (err) {
+    check(false, `Google sign-in threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "Google sign-in")
+  } finally {
+    await close(run)
+  }
+
+  // A login saved under its bare domain, as imports save `google.com`, signs in on accounts.acme.test all the same,
+  // over plain http too (no secure context, so no crypto.randomUUID in the page).
+  const bare = await launch({ saved: "acme.test", offerToSignIn: "default" })
+  const tab = await bare.context.newPage()
+  try {
+    const before = flowPosts.length
+    await tab.goto(`http://accounts.acme.test:${server.port}/flow/gmail`)
+    const menu = await menuOn(tab, "#identifierId")
+    if (!menu) throw new Error(`no menu on ${tab.url()}`)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    const signedIn = await until("signed in", async () => (await tab.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
+    const posted = JSON.stringify(flowPosts.slice(before).filter((p) => p.path.startsWith("/flow/gmail/")).map((p) => p.path.slice("/flow/gmail/".length)))
+    check(!!signedIn && posted === JSON.stringify(["identifier", "pwd", "totp"]), `a login saved as "acme.test" signs in on accounts.acme.test with one pick (posted ${posted})`)
+    if (!signedIn) await diagnose(bare, tab, "Google sign-in, bare domain")
+  } catch (err) {
+    check(false, `Google sign-in with a bare saved domain threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(bare, tab, "Google sign-in, bare domain")
+  } finally {
+    await close(bare)
   }
 }
 
@@ -4765,6 +4939,40 @@ async function pickRow(menu: Frame, text: string) {
 }
 
 const formFills = async (run: Run) => (await hostLog(run)).filter((r) => r.type === "fill-form") as Array<{ ref: string; fields: string[]; origin: string }>
+const formSaves = async (run: Run) => (await hostLog(run)).filter((r) => r.type === "save-form") as Array<{ kind: string; ref?: string; fields: Record<string, string> }>
+/** Fields as one JSON, keys sorted, to compare whatever order they were written in. */
+const sorted = (o: Record<string, string> | undefined) => JSON.stringify(Object.entries(o ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+
+/** Types into each field by id, as a person would (trusted input). */
+async function typeIn(page: Page | Frame, values: Record<string, string>) {
+  for (const [id, text] of Object.entries(values)) await page.fill(`#${id}`, text)
+}
+
+/** The card or identity offer in the page: its title and what it names. */
+async function formOffer(page: Page, what: string) {
+  const offer = await saveSurface(page, what)
+  if (!offer) return null
+  return { offer, title: (await offer.locator(".offer-title").textContent()) ?? "", user: (await offer.locator(".offer-user").textContent()) ?? "" }
+}
+
+/** Opens the offer on approach (a still of it open, as `still`), presses Save, and waits for its Saved pill and for it to go. */
+async function acceptForm(page: Page, offer: Frame, still: string) {
+  await Bun.sleep(500)
+  await offer.locator(".offer-row").hover()
+  await until("the offer opens on approach", async () => (await frameBox(offer)).height > 60)
+  await settled(offer)
+  await shotAround(page, still, offer)
+  await offer.locator(".offer-row .btn.primary").click()
+  const saved = !!(await until("the offer folds into its Saved pill", async () => (await offer.locator(".pill.ok").count().catch(() => 0)) > 0))
+  await until("the pill goes", () => !extensionFrame(page, "menu.html"), 8000)
+  return saved
+}
+
+/** No offer shows in the page, nor badges the toolbar button, for a few seconds after a submit. */
+async function noOffer(run: Run, page: Page) {
+  await Bun.sleep(4000)
+  return !extensionFrame(page, "menu.html") && (await badge(run)) === ""
+}
 const values = (page: Page | Frame, ids: string[]) => Promise.all(ids.map((id) => page.inputValue(`#${id}`)))
 
 /** A shipping address with tokens and a card with its expiry in one box, in the light and dark themes, with stills of both menus. */
@@ -4801,6 +5009,111 @@ async function formsSurface(scheme: Scheme) {
       const got = await values(page, ["cc", "exp", "cvc", "holder"])
       check(JSON.stringify(got) === JSON.stringify(["4242 4242 4242 4242", "08 / 28", "123", "Kit Langton"]), `the card fills: spaced number, MM / YY, code, name (${got.join(" | ")})`)
     }
+
+    // What the user types by hand is offered once the submit went through,
+    // in the corner: a new card, then the same card with a new expiry.
+    const logs: string[] = []
+    run.context.on("console", (m) => logs.push(m.text()))
+    page.on("console", (m) => logs.push(m.text()))
+    await newTurn(run)
+    await page.goto(`${site}/forms/pay`)
+    await formsFound(run, page, "/forms/pay")
+    await typeIn(page, { holder: "Ada Lovelace", cc: "4000 0566 5566 5556", exp: "09 / 30", cvc: "737" })
+    await page.press("#cvc", "Enter")
+    await page.waitForURL("**/forms/thanks")
+    let offer = await formOffer(page, "the card offer shows on the thank-you page")
+    if (offer) {
+      check(offer.title === "Save card?", `a card typed by hand is offered (${offer.title})`)
+      check(offer.user === "Visa •••• 5556 · localhost", `as its brand and last four digits only, with the site (${offer.user})`)
+      await Bun.sleep(500)
+      await shotAround(page, `forms-save-card-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-save-card-open-${scheme}`), "Save in the page saves the card")
+      const saved = (await formSaves(run)).find((r) => r.kind === "card" && !r.ref)
+      check(sorted(saved?.fields) === sorted({ number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }), `with its number, expiry, name and brand, never its security code (${Object.keys(saved?.fields ?? {}).join(",")})`)
+      // As a value, not any "737" inside an id or a timestamp.
+      check(!/(?<![\w.+/=-])737(?![\w.+/=-])/.test(JSON.stringify(await hostLog(run))), "the security code went nowhere")
+    }
+    await newTurn(run)
+    await page.goto(`${site}/forms/pay`)
+    await formsFound(run, page, "/forms/pay")
+    await typeIn(page, { holder: "Kit Langton", cc: "4242 4242 4242 4242", exp: "01 / 31", cvc: "123" })
+    await page.press("#cvc", "Enter")
+    await page.waitForURL("**/forms/thanks")
+    offer = await formOffer(page, "the update offer shows")
+    if (offer) {
+      check(offer.title === "Update card?" && offer.user === "Visa •••• 4242 · localhost", `a saved card with a new expiry is an update (${offer.title} ${offer.user})`)
+      check((await offer.offer.locator(".offer-change").textContent()) === "Expires 08/28 → 01/31", "naming the change")
+      check((await offer.offer.locator(".offer-row .btn.primary").textContent()) === "Update" && (await offer.offer.locator(".offer-actions .btn.new").textContent()) === "Save as new", "with Update, and Save as new beside Not now")
+      await Bun.sleep(500)
+      await shotAround(page, `forms-update-card-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-update-card-open-${scheme}`), "Save updates the card")
+      const update = (await formSaves(run)).find((r) => r.kind === "card" && r.ref)
+      check(sorted(update?.fields) === sorted({ expiry: "2031-01" }), `only its expiry changes (${sorted(update?.fields)})`)
+    }
+
+    // The browser-only vault compares the typed number with the card's: a
+    // Visa with the same last four digits but another number is a new card.
+    // (The native daemon has no such comparison yet: there it's the update.)
+    if (standalone) {
+      await newTurn(run)
+      await page.goto(`${site}/forms/pay`)
+      await formsFound(run, page, "/forms/pay")
+      await typeIn(page, { holder: "Kit Langton", cc: "4000 0000 0002 4242", exp: "02 / 32", cvc: "123" })
+      await page.press("#cvc", "Enter")
+      await page.waitForURL("**/forms/thanks")
+      offer = await formOffer(page, "the same last four digits are offered as an update first")
+      if (offer) {
+        await Bun.sleep(500)
+        await offer.offer.locator(".offer-row").hover()
+        await until("the offer opens on approach", async () => (await frameBox(offer!.offer)).height > 60)
+        await settled(offer.offer)
+        await offer.offer.locator(".offer-row .btn.primary").click()
+        const instead = await until("another card is offered as new", async () => {
+          const f = extensionFrame(page, "menu.html")
+          return f && (await f.locator(".offer-title").textContent().catch(() => "")) === "Save card?" ? f : null
+        }, 15_000)
+        check(!!instead, "Update of another number with the same last four: the vault says no, and Save card? is offered instead")
+        const sent = (await formSaves(run)).find((r) => r.ref && (r as { match?: { number: string } }).match?.number === "4000000000024242")
+        check(!!sent && !("number" in sent.fields), "the typed number went only as a match, never as a field")
+        if (instead) check(await acceptForm(page, instead, `forms-save-card-instead-${scheme}`), "and saved as a new card")
+        const added = (await formSaves(run)).find((r) => !r.ref && r.fields.number === "4000000000024242")
+        check(!!added, "a new card with that number")
+      }
+    }
+
+    // A typed address: a new identity, then Home with a new street.
+    await newTurn(run)
+    await page.goto(`${site}/forms/ship`)
+    await formsFound(run, page, "/forms/ship")
+    await typeIn(page, { n: "Ada Lovelace", a1: "1 Main St", city: "Springfield", zip: "12345" })
+    await page.selectOption("#country", "US")
+    await page.click("button[type=submit]")
+    offer = await formOffer(page, "the address offer shows once the form went")
+    if (offer) {
+      check(offer.title === "Save address?" && offer.user === "1 Main St, Springfield · localhost", `a typed address is offered (${offer.title} ${offer.user})`)
+      await Bun.sleep(500)
+      await shotAround(page, `forms-save-address-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-save-address-open-${scheme}`), "Save keeps the address")
+      const identity = (await formSaves(run)).find((r) => r.kind === "identity" && !r.ref)
+      check(sorted(identity?.fields) === sorted({ "given-name": "Ada", "family-name": "Lovelace", "address-line1": "1 Main St", city: "Springfield", "postal-code": "12345", country: "US" }), `as a new identity, the name split and the country its code (${sorted(identity?.fields)})`)
+    }
+    await newTurn(run)
+    await page.goto(`${site}/forms/ship`)
+    await formsFound(run, page, "/forms/ship")
+    await typeIn(page, { n: "Kit Langton", a1: "5 Oak Ave", city: "Brooklyn", zip: "11215" })
+    await page.selectOption("#country", "US")
+    await page.click("button[type=submit]")
+    offer = await formOffer(page, "the address update shows")
+    if (offer) {
+      check(offer.title === "Update address?" && offer.user === "Home · localhost", `a saved identity at a new street is an update of it, by name (${offer.title} ${offer.user})`)
+      check((await offer.offer.locator(".offer-row .btn.primary").textContent()) === "Update", "with Update")
+      await Bun.sleep(500)
+      await shotAround(page, `forms-update-address-${scheme}`, offer.offer)
+      check(await acceptForm(page, offer.offer, `forms-update-address-open-${scheme}`), "Save updates the identity")
+      const moved = (await formSaves(run)).find((r) => r.kind === "identity" && r.ref)
+      check(sorted(moved?.fields) === sorted({ "address-line1": "5 Oak Ave", "postal-code": "11215" }), `with only what changed (${sorted(moved?.fields)})`)
+    }
+    check(!logs.some((l) => /4000056655665556|4000 0566 5566 5556|\b737\b/.test(l)), "no card number or code in the extension's or the page's logs")
   } catch (err) {
     check(false, `formsSurface threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "formsSurface")
@@ -4847,6 +5160,68 @@ async function formsShapes() {
       const got = await values(page, ["b1", "b2", "b3", "b4", "cvv"])
       check(JSON.stringify(got) === JSON.stringify(["4242", "4242", "4242", "4242", "123"]), `a card number split over four boxes fills each (${got.join(" | ")})`)
     } else check(false, "the split card number fills")
+
+    // A card Deadbolt filled and nobody changed offers nothing on submit.
+    await page.goto(`${site}/forms/pay`)
+    const filledCard = await formsMenu(run, page, "#cc", "/forms/pay")
+    if (filledCard && (await pickRow(filledCard, "Visa")) === "ok") {
+      await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+      await page.press("#cvc", "Enter")
+      await page.waitForURL("**/forms/thanks")
+      check((await noOffer(run, page)) && !(await formSaves(run)).length, "a card Deadbolt filled and nobody changed offers nothing")
+    } else check(false, "the card fills on the checkout")
+    // Nor is anything typed on a site saving is off for kept or looked up.
+    await run.worker.evaluate(() => chrome.storage.local.set({ neverSave: ["localhost"] }))
+    await page.goto(`${site}/forms/pay`)
+    await formsFound(run, page, "/forms/pay")
+    const lists = (await hostLog(run)).filter((r) => r.type === "forms").length
+    await typeIn(page, { holder: "Ada Lovelace", cc: "4000 0566 5566 5556", exp: "09 / 30", cvc: "737" })
+    await page.press("#cvc", "Enter")
+    await page.waitForURL("**/forms/thanks")
+    check((await noOffer(run, page)) && (await hostLog(run)).filter((r) => r.type === "forms").length === lists, "Never for this site: a typed card is neither offered nor looked up")
+    await run.worker.evaluate(() => chrome.storage.local.set({ neverSave: [] }))
+
+    // Only a real button submits: an element that only says it's a button doesn't.
+    const captures = () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen.filter((s) => s.startsWith("db:form-capture@")).length)
+    await page.goto(`${site}/forms/ship-spa`)
+    await formsFound(run, page, "/forms/ship-spa")
+    const before = await captures()
+    await typeIn(page, { n: "Ada Lovelace", a1: "1 Main St", city: "Springfield", zip: "12345" })
+    await page.click("#fake")
+    check((await noOffer(run, page)) && (await captures()) === before, "a role=button wrapper's click isn't a submit")
+    await page.goto(`${site}/forms/ship-spa`)
+    await formsFound(run, page, "/forms/ship-spa")
+    await typeIn(page, { n: "Ada Lovelace", a1: "1 Main St", city: "Springfield", zip: "12345" })
+    await page.click("#real")
+    const spa = await formOffer(page, "a real button beside the fields submits them")
+    check(spa?.title === "Save address?", `a real button beside fields with no form submits them (${spa?.title})`)
+    await clearBadge(run)
+    await run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+
+    // A swapped email isn't written into the saved identity: only the phone the user typed is.
+    await page.goto(`${site}/forms/contact`)
+    await formsFound(run, page, "/forms/contact")
+    await typeIn(page, { n: "Kit Langton", em: "kit@acme.test", tel: "+1 415 555 0199" })
+    await page.click("button[type=submit]")
+    const contact = await formOffer(page, "the contact update shows")
+    if (contact) {
+      check(contact.title === "Update phone?" && contact.user === "Home · localhost", `the update names only what the user changed (${contact.title} ${contact.user})`)
+      check(await acceptForm(page, contact.offer, "forms-update-phone-light"), "Update saves it")
+      const written = (await formSaves(run)).find((r) => r.kind === "identity" && r.ref)
+      check(sorted(written?.fields) === sorted({ phone: "+1 415 555 0199" }), `the page's swapped email isn't written (${sorted(written?.fields)})`)
+    }
+    await run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+
+    // An email planted where nobody sees it isn't saved with a new address.
+    await page.goto(`${site}/forms/ship-planted`)
+    await formsFound(run, page, "/forms/ship-planted")
+    await typeIn(page, { n: "Ada Planted", a1: "9 Elm St", city: "Springfield", zip: "12345" })
+    await page.click("button[type=submit]")
+    const planted = await formOffer(page, "the planted page's address shows")
+    if (planted && (await acceptForm(page, planted.offer, "forms-save-planted-light"))) {
+      const kept = (await formSaves(run)).find((r) => r.kind === "identity" && !r.ref && r.fields["given-name"] === "Ada")
+      check(!!kept && !("email" in kept.fields) && !JSON.stringify(kept.fields).includes("attacker"), `a hidden planted email isn't saved (${Object.keys(kept?.fields ?? {}).join(",")})`)
+    } else check(false, "the planted page's address is offered and saved")
   } catch (err) {
     check(false, `formsShapes threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "formsShapes")
@@ -4862,7 +5237,8 @@ async function formsShapes() {
  * box. An unknown cross-origin frame gets no menu and no card.
  */
 async function formsFrames() {
-  const run = await launch()
+  // The provider's frame keeps what's typed only in a secure context, as a real provider's https frame is.
+  const run = await launch({ secure: [`http://js.stripe.test:${server.port}`] })
 
   const page = await run.context.newPage()
   try {
@@ -4916,6 +5292,38 @@ async function formsFrames() {
       const last = (await formFills(run)).at(-1)
       check(!!last && !last.fields.includes("number") && !last.fields.includes("cvv"), `and its number and code are never asked for (${last?.fields.join(",")})`)
     }
+
+    // A card typed into the provider's frame and the name typed in the page:
+    // one offer, once the checkout went through.
+    await newTurn(run)
+    await page.goto(`${site}/forms/stripe-pay`)
+    const pay = await until("the Stripe frame loads", () => page.frames().find((f) => f.url().includes("js.stripe.test")) ?? null)
+    if (pay) {
+      await formsFound(run, page, "/forms/card-frame")
+      await page.fill("#holder", "Ada Lovelace")
+      await typeIn(pay, { cardnumber: "4000 0566 5566 5556", "exp-date": "09 / 30", cvc: "737" })
+      await page.locator("h1").click()
+      await page.click("button[type=submit]")
+      await page.waitForURL("**/forms/thanks")
+      const offer = await formOffer(page, "the card typed in the provider's frame is offered")
+      if (!offer) await diagnose(run, page, "card in a provider's frame")
+      if (offer) {
+        check(offer.title === "Save card?" && offer.user === "Visa •••• 5556 · localhost", `a card typed in the provider's frame is offered with the page's name, as one card (${offer.title} ${offer.user})`)
+        check(await acceptForm(page, offer.offer, "forms-save-card-frame-light"), "and saved")
+        const saved = (await formSaves(run)).at(-1)
+        check(sorted(saved?.fields) === sorted({ number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }), `from both: the number and expiry from the frame, the name from the page (${Object.keys(saved?.fields ?? {}).join(",")})`)
+      }
+    }
+
+    // A card form that posts to another origin: nothing typed in it is offered.
+    await newTurn(run)
+    const saves = (await formSaves(run)).length
+    await page.goto(`${site}/forms/pay-away`)
+    await formsFound(run, page, "/forms/pay-away")
+    await typeIn(page, { holder: "Ada Lovelace", cc: "5555 5555 5555 4444", exp: "09 / 30", cvc: "737" })
+    await page.press("#cvc", "Enter")
+    await until("the form goes", async () => (await page.locator("form").count()) === 0, 5000)
+    check((await noOffer(run, page)) && (await formSaves(run)).length === saves, "a card form posting to another origin offers nothing")
   } catch (err) {
     check(false, `formsFrames threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "formsFrames")
@@ -5375,6 +5783,7 @@ const once: Record<string, () => Promise<void>> = {
   corner,
   signInSessions,
   pickSignsIn,
+  googleSignIn,
   quietPages,
   signUpStep,
   frameLogins,
@@ -5418,10 +5827,10 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
+  detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, googleSignIn: 30, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
-  formsSurface: 7, formsShapes: 14, formsFrames: 16, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,
+  formsSurface: 50, formsShapes: 50, formsFrames: 28, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,
   menuReveal: 2, menuScale: 115, menuPosition: 169, menuPositionDpr: 247,
   pageZoom: 11,
   pageDismiss: 6,
@@ -5458,7 +5867,18 @@ try {
   for (const u of mine) {
     console.log(`\n# ${u.name}`)
     const start = Date.now()
-    await u.run()
+    lastStep = "none yet"
+    // A hung scenario fails fast and names where it stopped, instead of
+    // holding the job until CI's own timeout.
+    const limit = Math.max(180, 4 * (cost[u.key] ?? 10)) * 1000
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const hung = new Promise<"hung">((done) => { timer = setTimeout(() => done("hung"), limit) })
+    const outcome = await Promise.race([u.run().then(() => "done" as const), hung]).finally(() => clearTimeout(timer))
+    if (outcome === "hung") {
+      console.log(`FAIL ${u.name} hung for ${limit / 1000} s; last step: ${lastStep}`)
+      server.stop(true)
+      process.exit(1)
+    }
     console.log(`  (${u.name}: ${((Date.now() - start) / 1000).toFixed(1)} s)`)
   }
 } finally {

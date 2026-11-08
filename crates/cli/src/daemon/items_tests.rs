@@ -824,6 +824,57 @@ fn normalizes_input() {
     assert_eq!(n("identity", "country", FieldType::Text, "Wales"), "Wales");
 }
 
+/// A whole id finds that item only: never another whose text holds it,
+/// even once the item it names is gone.
+#[test]
+fn a_whole_id_names_one_item_and_never_a_text_match() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut s = loaded(temp.path());
+    let target = create(
+        &mut s,
+        None,
+        "login",
+        Some("Target".into()),
+        vec![input("password", "pw")],
+    )
+    .unwrap();
+    let decoy = create(
+        &mut s,
+        None,
+        "login",
+        Some(target.id.clone()),
+        vec![input("password", "pw")],
+    )
+    .unwrap();
+    let vid = s.resolve(None).unwrap();
+    let q = vec![target.id.clone()];
+    assert_eq!(
+        find_live(s.vault(&vid), &q).unwrap().id.to_string(),
+        target.id
+    );
+    let id = s
+        .vault(&vid)
+        .items()
+        .into_iter()
+        .find(|i| i.id.to_string() == target.id)
+        .unwrap()
+        .id;
+    write(&mut s, vid, vec![DataOp::delete(id, 1)]).unwrap();
+    assert!(
+        find_live(s.vault(&vid), &q).is_err(),
+        "the decoy {} named after it isn't it",
+        decoy.id
+    );
+    // A shorter prefix, or words of the name, still search.
+    assert_eq!(
+        find_live(s.vault(&vid), &[decoy.id[..8].to_string()])
+            .unwrap()
+            .id
+            .to_string(),
+        decoy.id
+    );
+}
+
 #[test]
 fn live_write_lookup_matches_the_listing_including_ambiguity() {
     let temp = tempfile::tempdir().unwrap();

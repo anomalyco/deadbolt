@@ -88,7 +88,14 @@ impl Daemon {
         if caller::is_ai(caller) {
             return Err(fail(
                 ErrorCode::Forbidden,
-                "AI agents may not inspect or change password health",
+                if caller.identified {
+                    "AI agents may not inspect or change password health".into()
+                } else {
+                    format!(
+                        "Can't share or change password health: {}",
+                        caller.reason.as_deref().unwrap_or("missing process facts")
+                    )
+                },
             ));
         }
         match command {

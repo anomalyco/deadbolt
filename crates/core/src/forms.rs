@@ -240,6 +240,87 @@ pub fn needs_verify(item: &Item, fields: &[String]) -> bool {
             .any(|f| CARD_VERIFIED_FIELDS.contains(&f.as_str()) && value(item, f).is_some())
 }
 
+/// Why a browser save of an identity or card was refused.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SaveError {
+    #[error("kind is identity or card")]
+    Kind,
+    #[error("a {kind} saved from a form can't have {field}")]
+    WrongField { kind: String, field: String },
+    #[error("a new card needs its number")]
+    Number,
+    #[error("nothing to save")]
+    NoFields,
+}
+
+/// The longest value a save takes for one field.
+const MAX_SAVED_VALUE: usize = 1000;
+
+/// The fields a browser save writes to an identity or a card (`kind`), from
+/// what a page's form held: only its form fields and never a card's security
+/// code, each normalized and checked as user input. A value that doesn't
+/// read as valid (a country that's no ISO code, an expiry that isn't a
+/// month) is left out rather than failing the save, but a new card needs a
+/// valid number, and an update never changes one.
+pub fn saved_fields(
+    kind: &str,
+    values: impl IntoIterator<Item = (String, String)>,
+    update: bool,
+) -> Result<Vec<(String, crate::Field)>, SaveError> {
+    if !matches!(kind, "identity" | "card") {
+        return Err(SaveError::Kind);
+    }
+    let wrong = |field: &str| SaveError::WrongField {
+        kind: kind.into(),
+        field: field.into(),
+    };
+    let mut fields = Vec::new();
+    let mut number = false;
+    for (name, value) in values {
+        if !form_fields(kind).contains(&name.as_str()) || name == "cvv" {
+            return Err(wrong(&name));
+        }
+        if name == "number" && update {
+            return Err(wrong(&name));
+        }
+        let value = value.trim();
+        if value.is_empty() || value.chars().count() > MAX_SAVED_VALUE {
+            continue;
+        }
+        let Ok(field) = crate::listing::input_field(kind, None, &name, None, value.into()) else {
+            continue;
+        };
+        if crate::schema(kind).is_some_and(|s| crate::item::check_field(s, &name, &field).is_ok()) {
+            number |= name == "number";
+            fields.push((name, field));
+        }
+    }
+    if kind == "card" && !update && !number {
+        return Err(SaveError::Number);
+    }
+    if fields.is_empty() {
+        return Err(SaveError::NoFields);
+    }
+    Ok(fields)
+}
+
+/// Whether `typed` (spaces and dashes allowed) is the card's number, compared
+/// in constant time, as `autofill::same_password` compares a password. A
+/// browser save sends the typed number only to tell one card from another
+/// with the same last four digits; it is never kept or returned.
+pub fn same_number(card: &Item, typed: &str) -> bool {
+    let typed: zeroize::Zeroizing<String> = typed
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect::<String>()
+        .into();
+    let saved = (card.kind == "card" && !card.deleted)
+        .then(|| card.fields.get("number"))
+        .flatten()
+        .map(|f| f.value.as_str());
+    saved.is_some() && crate::autofill::same_password(saved, &typed)
+}
+
 /// Only requested, allowed form values. Call `validate` first to reject the
 /// entire request if any field is disallowed; this iterator never leaks one.
 pub fn values<'a>(
@@ -428,6 +509,127 @@ mod tests {
             validate(&home.item(&login).unwrap(), &names(&["given-name"])),
             Err(Error::NotFound)
         );
+    }
+
+    #[test]
+    fn saves_take_form_fields_only_normalized_and_never_a_security_code() {
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(n, v)| ((*n).into(), (*v).into()))
+                .collect()
+        };
+        let card = saved_fields(
+            "card",
+            pairs(&[
+                ("number", "4242 4242 4242 4242"),
+                ("expiry", "08/28"),
+                ("cardholder", " Kit Langton "),
+                ("brand", "Visa"),
+            ]),
+            false,
+        )
+        .unwrap();
+        let got: Vec<(&str, &str)> = card
+            .iter()
+            .map(|(n, f)| (n.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("number", "4242424242424242"),
+                ("expiry", "2028-08"),
+                ("cardholder", "Kit Langton"),
+                ("brand", "Visa"),
+            ]
+        );
+        for (kind, field) in [
+            ("card", "cvv"),
+            ("card", "pin"),
+            ("card", "email"),
+            ("identity", "passport"),
+            ("identity", "notes"),
+        ] {
+            assert!(matches!(
+                saved_fields(kind, pairs(&[(field, "1")]), false),
+                Err(SaveError::WrongField { .. })
+            ));
+        }
+        assert_eq!(
+            saved_fields("login", pairs(&[("username", "kit")]), false),
+            Err(SaveError::Kind)
+        );
+        // A new card needs a valid number; an update never changes one.
+        assert_eq!(
+            saved_fields("card", pairs(&[("expiry", "2028-08")]), false),
+            Err(SaveError::Number)
+        );
+        assert_eq!(
+            saved_fields("card", pairs(&[("number", "12")]), false),
+            Err(SaveError::Number)
+        );
+        assert!(matches!(
+            saved_fields("card", pairs(&[("number", "4242424242424242")]), true),
+            Err(SaveError::WrongField { .. })
+        ));
+        let update = saved_fields("card", pairs(&[("expiry", "2030-09")]), true).unwrap();
+        assert_eq!(update[0].1.value, "2030-09");
+        // An identity's values are normalized; ones that don't read as valid are left out.
+        let identity = saved_fields(
+            "identity",
+            pairs(&[
+                ("given-name", "Kit"),
+                ("phone", "+1 (415) 555-0123"),
+                ("country", "us"),
+                ("birthday", "not a date"),
+                ("city", "  "),
+            ]),
+            false,
+        )
+        .unwrap();
+        let got: Vec<(&str, &str)> = identity
+            .iter()
+            .map(|(n, f)| (n.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("given-name", "Kit"),
+                ("phone", "+14155550123"),
+                ("country", "US")
+            ]
+        );
+        assert_eq!(
+            saved_fields("identity", pairs(&[("country", "United States")]), false),
+            Err(SaveError::NoFields)
+        );
+    }
+
+    #[test]
+    fn a_typed_number_matches_only_its_own_card() {
+        let secret = DeviceSecret::generate();
+        let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+        let card = add(
+            &mut vault,
+            &secret,
+            "card",
+            None,
+            &[("number", "4242424242424242")],
+        );
+        let other = add(
+            &mut vault,
+            &secret,
+            "identity",
+            None,
+            &[("given-name", "Kit")],
+        );
+        let card = vault.item(&card).unwrap();
+        assert!(same_number(&card, "4242 4242-4242 4242"));
+        assert!(!same_number(&card, "4000000000004242"));
+        assert!(!same_number(&card, ""));
+        assert!(!same_number(
+            &vault.item(&other).unwrap(),
+            "4242424242424242"
+        ));
     }
 
     #[test]

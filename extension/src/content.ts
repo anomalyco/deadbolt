@@ -4,20 +4,23 @@
 // submit tracking are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
-import { asksNewPassword, deliveredCode, isVisible, scanPage, type Field } from "./content/detect"
+import { asksNewPassword, isVisible, scanPage, type Field } from "./content/detect"
 import { SIGNIN_SETTING, signInOn } from "./auth-state"
 import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
-import { fillable, ownValue, rendered, trackUserInput } from "./content/fill"
+import { readSubmitted } from "./content/formfill"
+import { ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
-import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
+import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
-import { pageFacts } from "./content/outcome"
+import { formFailed, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { chainActive, initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
+import { SETTLE_MS, submitPlan, type SubmitPlan } from "./content/signin-submit"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
+import { paymentProvider } from "./payments"
 
 const isTop = window === window.top
 let offerSignIn = false
@@ -30,16 +33,6 @@ if (isTop) {
 const SCAN_INTERVAL_MS = 750
 /** How soon an unchanged sign-in signal is sent again when the background couldn't decide on it. */
 const RETRY_SIGNAL_MS = 5000
-/** A first automatic step's button: signing in or going on, never confirming something. */
-const FIRST_LABEL = /^(sign\s?in|log\s?in|login|continue|next)$/i
-/** Words of re-authentication or of an action to confirm, which a sign-in's first step doesn't carry. */
-const NOT_SIGN_IN = /\b(confirm (?:your )?(?:access|identity|password)|re-?enter|re-?authenticat\w*|sudo|delete|deleting|remove|close (?:your )?account|deactivate|withdraw\w*|transfer|payment|disable|turn off|unlink)\b/i
-
-/** Whether the form, or the page's title and headings, say it's for something other than signing in. */
-function notSignIn(form: HTMLFormElement | null | undefined): boolean {
-  const text = [document.title, ...Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, [role=heading]"), (el) => el.innerText), form?.innerText ?? ""]
-  return text.some((t) => t.length > 20_000 || NOT_SIGN_IN.test(t))
-}
 const QUIET_AFTER_MS = 2500
 /** A submitted form still showing this long after means the sign-in failed. */
 const FAILED_AFTER_MS = 5000
@@ -70,6 +63,17 @@ let submission = 0
 let failureTimer: number | undefined
 /** A site may submit itself when the last digit fills. Suppress only our duplicate click. */
 let submittedForm: HTMLFormElement | undefined
+/** When identity or card fields were last submitted here, and this document's count of such submits. */
+let formsSubmitAt = 0
+let formsSubmission = 0
+/**
+ * The top page: a payment provider's frame below has card fields (the
+ * background says so, see db:forms-frames), so a submit here may carry a
+ * card typed there, even with no identity or card field of the page's own.
+ */
+let cardFrames = false
+/** How long a submitted identity or card form is watched for going away or being turned down. */
+const FORM_WATCH_MS = 60_000
 
 const sameFields = (a: Field[], b: Field[]) =>
   a.length === b.length && a.every((f, i) => f.el === b[i].el && f.role === b[i].role && f.owner.form === b[i].owner.form && f.owner.parent === b[i].owner.parent)
@@ -220,42 +224,19 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     return
   }
   if (message?.type === "db:signin-submit") {
-    refresh()
-    const button = submitControl
-    const control = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button : null
-    const form = control ? control.form : fields[0]?.el.form
-    const label = button?.textContent?.trim() || (button instanceof HTMLInputElement ? button.value : "")
-    const destination = button?.getAttribute("formaction") ?? form?.getAttribute("action") ?? location.href
-    // The browsing context it goes to: the submitter's, the form's, else the document's <base target>.
-    const target = button?.getAttribute("formtarget") ?? form?.getAttribute("target") ?? document.querySelector("base[target]")?.getAttribute("target") ?? ""
-    // A sign-in posts; a GET form puts what it sends in the URL.
-    const method = control?.hasAttribute("formmethod") ? control.formMethod : form?.method
-    // An automatic session's first step must be a sign-in's own: a username
-    // box, a sign-in or continue button, and no words of re-authentication
-    // or of something else to confirm (Confirm access, delete, withdraw,
-    // turn off two-factor) on the form or the page's headings.
-    const first = message.first !== true || (FIRST_LABEL.test(label) && fields.some((f) => IDENTIFIER_ROLES.includes(f.role)) && !notSignIn(form))
-    // A remembered code step is not permission to send a TOTP into a prompt
-    // that currently describes delivery by SMS or email.
-    const delivered = deliveredCode(fields, form)
-    // The fields passed the full check, paint included, as each was written;
-    // this one is about submitting, so it leaves the costly paint check out.
-    const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
-      (kind === "login" || kind === "mfa") && button instanceof HTMLElement && isVisible(button) &&
-      !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
-      form instanceof HTMLFormElement && fields.length > 0 && method === "post" && first &&
-      !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el, null, false)) &&
-      !delivered &&
-      new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
-    respond(!!safe)
-    if (safe) {
-      // The guarded extension pick explicitly authorized this submit. Other
-      // script-generated submit events still cannot advance a session.
-      captured()
-      stepSubmitted()
-      if (submittedForm !== form) button.click()
-    }
+    void sessionSubmit(message).then(respond, () => respond(false))
+    return true
+  }
+  if (message?.type === "db:forms-frames") {
+    if (isTop) cardFrames = message.on === true
     return
+  }
+  // The background asks a frame below what it holds, right after the user's
+  // own submit in the top page (see bg/save.ts): never the top page itself.
+  if (message?.type === "db:forms-read") {
+    if (isTop || !formFields.length) return void respond(null)
+    void readSubmitted(formFields, menuHost()).then(respond, () => respond(null))
+    return true
   }
   if (message?.type === "db:probe") {
     if (!isTop) return void respond(null)
@@ -386,6 +367,98 @@ function watchForFailure(submittedKind: SurfaceKind | null, roles: Field["role"]
   }, FAILED_AFTER_MS)
 }
 
+// ---- Identity and card submits ------------------------------------------------
+
+/** Where a form sends what it holds: the submitter's formaction, the form's action, else this page. */
+function sameOriginAction(form: HTMLFormElement, submitter?: Element | null): boolean {
+  try {
+    const action = new URL(submitter?.getAttribute("formaction") ?? form.getAttribute("action") ?? location.href, document.baseURI)
+    // A javascript: action stays in the page, which sends what it likes itself.
+    return !/^https?:$/.test(action.protocol) || action.origin === location.origin
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The user themselves submitted identity or card fields (of `form`, or the
+ * page's when there's none): what they typed goes to the background, which
+ * keeps it in memory and offers to save it once the submit has gone through
+ * (bg/save.ts). Costs nothing on a page without such fields. A form posting
+ * to another origin is left alone, except in a payment provider's own frame.
+ */
+function formsSubmitted(form: HTMLFormElement | null, submitter?: Element | null) {
+  if (!formFields.length && !(isTop && cardFrames)) return
+  const now = Date.now()
+  if (now - formsSubmitAt < 800) return
+  if (form && !sameOriginAction(form, submitter) && !paymentProvider(new URL(location.href))) return
+  const fields = form ? formFields.filter((f) => f.form === form) : formFields
+  if (!fields.length && !(isTop && cardFrames)) return
+  formsSubmitAt = now
+  void readSubmitted(fields, menuHost()).then((got) => {
+    // The top page asks the provider's frames below even with nothing of its own.
+    if (!got.card && !got.identity && !(isTop && cardFrames)) return
+    const attempt = ++formsSubmission
+    send({ type: "db:form-capture", ...got, submission: attempt })
+    watchFormOutcome(attempt, fields, form)
+  })
+}
+
+/**
+ * After a submit of identity or card fields: their going away (the page
+ * moved on in place) says it went through, and still showing five seconds
+ * on with an error (a declined card, a required field) says it didn't. A
+ * newer submit takes over. A page that loads a new document is judged by
+ * the background instead.
+ */
+function watchFormOutcome(attempt: number, fields: FormField[], form: HTMLFormElement | null) {
+  const els = fields.map((f) => f.el)
+  if (!els.length) return
+  const started = Date.now()
+  const look = () => {
+    if (attempt !== formsSubmission || document.hidden) return
+    if (!els.some((el) => el.isConnected && rendered(el))) return void send({ type: "db:form-outcome", submission: attempt, ok: true })
+    if (Date.now() - started >= FAILED_AFTER_MS && formFailed(els, form)) return void send({ type: "db:form-outcome", submission: attempt, ok: false })
+    if (Date.now() - started < FORM_WATCH_MS) window.setTimeout(look, QUIET_AFTER_MS)
+  }
+  window.setTimeout(look, QUIET_AFTER_MS)
+}
+
+/** A button that says it pays, orders or goes on: a checkout's own, often outside any form. */
+const GOES_ON = /^(pay|pay now|pay \S+|place (your )?order|order now|buy|buy now|purchase|complete (order|purchase|payment|checkout)|check ?out|continue|next|save|save (address|card|details)|submit|confirm|subscribe|donate|add card|update|review order|proceed)\b/i
+/** The longest label such a button has; a longer one isn't read. */
+const GOES_ON_MAX = 40
+
+/**
+ * A click that submits identity or card fields: on a real button (a
+ * `<button>` or an `input` of type submit or button, never an element that
+ * only says it's a button), in the form that holds the fields, or for fields
+ * in no form, beside them (under the same few parents). A form's submit
+ * control counts whatever it says; any other button only if it says it pays
+ * or goes on. Returns the fields' form, or undefined when the click isn't one.
+ */
+function formsSubmitClick(target: Element | null): { form: HTMLFormElement | null; control: Element } | undefined {
+  const control = target?.closest?.('button, input[type="submit"], input[type="button"]')
+  if (!(control instanceof HTMLButtonElement || control instanceof HTMLInputElement)) return undefined
+  const form = control.form
+  const holds = form ? formFields.some((f) => f.form === form) || (isTop && cardFrames && !!form.querySelector("iframe")) : besideFields(control)
+  if (!holds) return undefined
+  if (form && control.matches(SUBMITS)) return { form, control }
+  // The label's length first, so a big control's whole text is never read.
+  const label = control instanceof HTMLInputElement ? control.value : (control.getAttribute("aria-label") ?? (control.childElementCount <= 4 && (control.textContent?.length ?? 0) <= GOES_ON_MAX * 2 ? control.textContent : "") ?? "")
+  const trimmed = label.trim()
+  return trimmed.length <= GOES_ON_MAX && GOES_ON.test(trimmed) ? { form, control } : undefined
+}
+
+/** A button outside any form, next to identity or card fields outside one (or the top page's provider frame). */
+function besideFields(control: Element): boolean {
+  let node = control.parentElement
+  for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+    if (formFields.some((f) => !f.form && node!.contains(f.el)) || (isTop && cardFrames && node.querySelector("iframe"))) return true
+  }
+  return false
+}
+
 const realTarget = (event: Event) => eventTarget(event)
 
 // Only the user's own clicks and keypresses count: pages can dispatch
@@ -416,6 +489,40 @@ function stepSubmitted() {
   void send({ type: "db:submitted" })
 }
 
+/** The step (formId) an automatic session last submitted here: each is submitted once. */
+let sessionSubmitted = -1
+
+/**
+ * An automatic session's submit of the step it just filled (see
+ * content/signin-submit.ts), checked now and again after a short settle.
+ * The guarded extension pick explicitly authorized it; other
+ * script-generated submits still can't advance a session.
+ */
+async function sessionSubmit(message: Extract<ToContent, { type: "db:signin-submit" }>): Promise<boolean> {
+  const plan = (): SubmitPlan | null => {
+    refresh()
+    if (!isTop || !offerSignIn || document.hidden || formId !== message.form || sessionSubmitted === formId) return null
+    const p = submitPlan({ kind, fields, submit: submitControl, first: message.first === true, account: message.account })
+    return typeof p === "string" ? null : p
+  }
+  const before = plan()
+  if (!before) return false
+  // The page submitted the form itself as the last value went in: that's the step's submit.
+  if (before.form && submittedForm === before.form) {
+    sessionSubmitted = formId
+    stepSubmitted()
+    return true
+  }
+  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
+  const after = plan()
+  if (!after || after.button !== before.button) return false
+  sessionSubmitted = formId
+  captured()
+  stepSubmitted()
+  if (!after.form || submittedForm !== after.form) after.button.click()
+  return true
+}
+
 /** The user's own click on a submit control or Enter in a field. */
 function gesture() {
   submitGestureAt = performance.now()
@@ -427,6 +534,10 @@ const SUBMITS = 'button:not([type]), button[type="submit"], input[type="submit"]
 function onClick(event: MouseEvent) {
   if (!event.isTrusted) return
   let node = realTarget(event) as Element | null
+  if (formFields.length || (isTop && cardFrames)) {
+    const click = formsSubmitClick(node)
+    if (click) formsSubmitted(click.form, click.control)
+  }
   const control = node?.closest("a, button")
   if (offerSignIn && isTop && control instanceof HTMLElement && isVisible(control) &&
       !control.matches(":disabled, [aria-disabled=true]") && SIGN_OUT.test((control.getAttribute("aria-label") || control.textContent || "").trim())) {
@@ -452,6 +563,7 @@ function onClick(event: MouseEvent) {
 function onSubmit(event: Event) {
   if (!event.isTrusted) return
   const form = realTarget(event)
+  if (form instanceof HTMLFormElement) formsSubmitted(form, (event as SubmitEvent).submitter)
   if (!(form instanceof HTMLFormElement) || !fields.some((f) => form.contains(f.el))) return
   submittedForm = form
   captured()
@@ -462,6 +574,8 @@ function onKeydown(event: KeyboardEvent) {
   if (event.isTrusted && event.key === "Escape" && isTop && offerSignIn) void send({ type: "db:signin-stop" })
   if (!event.isTrusted || event.key !== "Enter") return
   const target = realTarget(event)
+  const own = formFields.find((f) => f.el === target && !(f.el instanceof HTMLTextAreaElement))
+  if (own) formsSubmitted(own.el.form ?? own.form)
   if (!fields.some((f) => f.el === target)) return
   gesture()
   captured()

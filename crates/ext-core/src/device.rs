@@ -942,7 +942,7 @@ async fn answer(mut body: Value) -> Result<Value> {
                 "not-set-up"
             };
             Ok(
-                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms", "passkeys"]}),
+                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms", "save-form", "save-form-match", "passkeys"]}),
             )
         }
         "device-create" => {
@@ -1067,6 +1067,7 @@ async fn answer(mut body: Value) -> Result<Value> {
         "generate-drop" => generate::drop_candidate(&body),
         "forms" => forms::list(&body),
         "fill-form" => forms::fill(&mut body),
+        "save-form" => forms::save(&mut body),
         "passkey-list" => passkeys::list(&body),
         "passkey-create" => passkeys::create(&mut body),
         "passkey-get" => passkeys::get(&mut body),

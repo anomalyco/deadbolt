@@ -58,7 +58,7 @@ fn verified_caller(info: &CallerInfo) -> Result<String> {
     let version = info.pid_version.ok_or_else(err)?;
     // Process ancestry is an AI *hint*. A CLI caller's claimed OpenCode session,
     // even if set, is not a verified OpenCode identity. Don't display it as one.
-    let context = caller::ai_host(info).map_or_else(
+    let context = caller::ai_host(&info.ancestry).map_or_else(
         || "AI session claimed (not verified)".into(),
         |name| format!("{name} (ancestry hint)"),
     );
@@ -152,6 +152,9 @@ impl Daemon {
         };
         if !caller::is_ai(caller) {
             return Err(forbidden("experimental mobile read is only for AI callers"));
+        }
+        if !caller.identified {
+            return Err(forbidden(&caller::not_from_here(caller)));
         }
         self.ai_rate(caller)?;
         let who = verified_caller(caller)?;
