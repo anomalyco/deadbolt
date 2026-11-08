@@ -4,6 +4,7 @@
 import { authState, type AuthReport, type AuthSignals } from "../auth-state"
 import { isChooserPage, provider as providerOf, providerForPage } from "../signin"
 import { controlText, isVisible, LOGIN_URL, providerForControl } from "./detect"
+import { newId } from "./id"
 import { pageFacts } from "./outcome"
 import { deepQueryAll, openRoots } from "./shadow"
 import type { PageState } from "./inline"
@@ -124,7 +125,7 @@ export function authReport(state: PageState, fresh = false): AuthReport {
   // action, and takeSignInAction still finds nothing to do with one that has
   // neither a login form nor a sign-in entry element.
   if (signals.loginForm || entry || signals.entry) {
-    const id = crypto.randomUUID()
+    const id = newId()
     if (actions.size >= 8) actions.delete(actions.keys().next().value!)
     actions.set(id, { ...(signals.loginForm ? {} : { element: entry }), form: state.form(), url: location.href, at: Date.now() })
     result.action = id
