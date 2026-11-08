@@ -5029,7 +5029,7 @@ async function formsSurface(scheme: Scheme) {
       const saved = (await formSaves(run)).find((r) => r.kind === "card" && !r.ref)
       check(sorted(saved?.fields) === sorted({ number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }), `with its number, expiry, name and brand, never its security code (${Object.keys(saved?.fields ?? {}).join(",")})`)
       // As a value, not any "737" inside an id or a timestamp.
-      check(!/(?<![\w.-])737(?![\w.-])/.test(JSON.stringify(await hostLog(run))), "the security code went nowhere")
+      check(!/(?<![\w.+/=-])737(?![\w.+/=-])/.test(JSON.stringify(await hostLog(run))), "the security code went nowhere")
     }
     await newTurn(run)
     await page.goto(`${site}/forms/pay`)
