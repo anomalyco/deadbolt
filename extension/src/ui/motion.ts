@@ -51,7 +51,7 @@ export const MENU_MOTION = {
   rowIn: 0.3,
   /** What doesn't go into the pill fading where it is, as the list folds. */
   foldOut: 0.25,
-  /** The picked row's avatar (or the Save label) travelling into the pill. */
+  /** The picked row's avatar (or the Save label) travelling into the pill, when the frame's springs never came (it goes with them otherwise). */
   foldIn: 0.38,
   /** The pill's label fading in. */
   pillLabel: 0.3,

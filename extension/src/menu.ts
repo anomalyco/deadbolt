@@ -670,12 +670,58 @@ async function signInWith(i: number, account: Account) {
  * The pill is laid out at that place from the first frame and stays there
  * while the frame contracts onto it, so it never rides along with the frame.
  */
-const host = { springs: null as Record<"left" | "top" | "width" | "height", Spring> | null, width: 0, raf: 0, waiters: [] as Array<{ width: number | null; go: () => void }> }
+type Edge = "left" | "top" | "width" | "height"
+const host = { springs: null as Record<Edge, Spring> | null, width: 0, raf: 0, waiters: [] as Array<{ width: number | null; go: () => void }> }
+
+/**
+ * What the fold moves on the host's springs, so it keeps one clock with the
+ * frame. What fades stays where it was on the page while the frame closes
+ * over it, instead of riding the frame's corner; what travels into the pill
+ * goes the same share of its way as the frame has, so the frame's edge never
+ * passes it; and the label fades in once the frame's edges are clear of it.
+ */
+const folding = {
+  fading: [] as HTMLElement[],
+  travellers: [] as Array<{ el: HTMLElement; dx: number; dy: number; scale: number }>,
+  label: null as HTMLElement | null,
+  /** The frame's offsets when what fades was last pinned, and how far it had been moved back by then. */
+  pin: null as { left: number; top: number; x: number; y: number } | null,
+  /** The frame's longest way still to go when the travel last began. */
+  edge: "left" as Edge,
+  from: 0,
+}
+
+/** How much of the way the frame has come since the travel last began, 0 to 1. */
+function foldProgress(s: Record<Edge, Spring>): number {
+  if (Math.abs(folding.from) < 1) return 1
+  return Math.min(1, Math.max(0, 1 - s[folding.edge].value / folding.from))
+}
+
+function stepFold(s: Record<Edge, Spring>, moving: boolean) {
+  const pin = folding.pin
+  if (pin) {
+    const x = pin.x + pin.left - s.left.value
+    const y = pin.y + pin.top - s.top.value
+    for (const el of folding.fading) el.style.translate = `${x}px ${y}px`
+  }
+  const rest = moving ? 1 - foldProgress(s) : 0
+  for (const t of folding.travellers) t.el.style.transform = rest > 0 ? `translate(${t.dx * rest}px, ${t.dy * rest}px) scale(${1 + (t.scale - 1) * rest})` : ""
+  if (!moving) folding.travellers = []
+  // Fit before fading: the label comes in once the frame's edges are clear of it.
+  const label = folding.label
+  if (!label) return
+  const r = label.getBoundingClientRect()
+  const fits = r.left >= -1 && r.top >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1
+  if (moving && !fits) return void (label.style.opacity = "0")
+  folding.label = null
+  label.style.opacity = ""
+  label.animate([{ opacity: 0, filter: "blur(3px)", transform: "scale(0.96)" }, { opacity: 1, filter: "none", transform: "none" }], timing(MENU_MOTION.pillLabel))
+}
 
 function placePill() {
   const pill = document.querySelector<HTMLElement>(".pill")
   const s = host.springs
-  if (!pill) return void (host.raf = 0)
+  if (!pill) return
   // The frame is the pill's place plus these offsets: undo them, anchored at the right
   // (pills grow leftward from the end of the field, and from the top right of the page).
   const ox = s ? s.left.value : 0
@@ -684,18 +730,40 @@ function placePill() {
   const oh = s ? s.height.value : 0
   pill.style.right = `${ox + ow}px`
   pill.style.top = `${-oy + (innerHeight - oh) / 2}px`
-  const moving = s && !(s.left.done && s.top.done && s.width.done && s.height.done)
-  host.raf = moving ? requestAnimationFrame(placePill) : 0
+  const moving = !!s && !(s.left.done && s.top.done && s.width.done && s.height.done)
+  if (s) stepFold(s, moving)
+  // One loop, however often this is called directly.
+  if (moving && !host.raf)
+    host.raf = requestAnimationFrame(() => {
+      host.raf = 0
+      placePill()
+    })
 }
 
 /** The content script's springs for the frame, as it starts or changes the fold. */
 function onFold(data: { width?: unknown; at?: unknown; springs?: Record<string, SpringState> }) {
   if (mode !== "pill" || typeof data.at !== "number" || !data.springs) return
-  const resume = (k: "left" | "top" | "width" | "height") => Spring.resume(data.springs![k], data.at as number)
-  host.springs = { left: resume("left"), top: resume("top"), width: resume("width"), height: resume("height") }
+  const resume = (k: Edge) => Spring.resume(data.springs![k], data.at as number)
+  const old = host.springs
+  const next = { left: resume("left"), top: resume("top"), width: resume("width"), height: resume("height") }
+  // Carry on from where everything is now: what travels keeps what it has
+  // left of its way, and what fades keeps its place on the page.
+  if (old) {
+    const rest = 1 - foldProgress(old)
+    for (const t of folding.travellers) Object.assign(t, { dx: t.dx * rest, dy: t.dy * rest, scale: 1 + (t.scale - 1) * rest })
+  }
+  const pin = folding.pin
+  folding.pin = {
+    left: next.left.value,
+    top: next.top.value,
+    x: pin && old ? pin.x + pin.left - old.left.value : 0,
+    y: pin && old ? pin.y + pin.top - old.top.value : 0,
+  }
+  folding.edge = (["left", "top", "width", "height"] as const).reduce((a, k) => (Math.abs(next[k].value) > Math.abs(next[a].value) ? k : a))
+  folding.from = next[folding.edge].value
+  host.springs = next
   host.width = typeof data.width === "number" ? data.width : host.width
   placePill()
-  if (!host.raf) host.raf = requestAnimationFrame(placePill)
   // Whatever waited for the frame to take this width goes now (see whenWide).
   const ready = host.waiters.filter((w) => w.width === null || Math.abs(w.width - host.width) < 2)
   host.waiters = host.waiters.filter((w) => !ready.includes(w))
@@ -735,10 +803,14 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
   if (lead) pill.append(slots.lead)
   if (persist && !persistIsLabel) pill.append(slots.persist)
   pill.append(label, mark)
+  // Whatever goes fades where it is; the pill is the main change. It keeps
+  // its size too, so the narrowing frame closes over it instead of reflowing it.
+  const fading = Array.from(surface.children) as HTMLElement[]
+  for (const el of fading) el.style.width = `${el.getBoundingClientRect().width}px`
+  Object.assign(folding, { fading, travellers: [], label: null, pin: null })
   surface.classList.add("folded")
   document.body.append(pill)
-  // Whatever goes fades where it is; the pill is the main change.
-  for (const el of Array.from(surface.children) as HTMLElement[]) {
+  for (const el of fading) {
     el.setAttribute("aria-hidden", "true")
     el.style.pointerEvents = "none"
     animateTo(el, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, MENU_MOTION.foldOut)
@@ -777,12 +849,18 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
       const dx = from.left + from.width / 2 - (to.left + to.width / 2)
       const dy = from.top + from.height / 2 - (to.top + to.height / 2)
       const scale = to.width && !asLabel ? from.width / to.width : 1
-      ;(asLabel ? label : el).animate([{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }], spring(MENU_MOTION.foldIn))
+      // On the frame's springs it goes as far as the frame has (see stepFold); without them, on its own.
+      if (host.springs) folding.travellers.push({ el: asLabel ? label : el, dx, dy, scale })
+      else (asLabel ? label : el).animate([{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }], spring(MENU_MOTION.foldIn))
     }
     moveIn(lead, slots.lead)
     if (persistIsLabel) moveIn(persist, slots.persist, true)
     else moveIn(persist, slots.persist)
-    if (!persistIsLabel) label.animate([{ opacity: 0 }, { opacity: 1 }], timing(MENU_MOTION.pillLabel))
+    if (!persistIsLabel) {
+      if (host.springs && !reducedMotion()) folding.label = label
+      else label.animate([{ opacity: 0 }, { opacity: 1 }], timing(MENU_MOTION.pillLabel))
+    }
+    placePill()
   })
   return label
 }
