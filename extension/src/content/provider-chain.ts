@@ -27,6 +27,7 @@ import { signedInHint } from "./auth-state"
 import { hasPhrase, words } from "./clues"
 import { BUSY, CAPTCHA, controlText, deliveredCode, findAccountTile, findProviderButton, inPlace, isVisible, sole, type Field } from "./detect"
 import { clippedBox, fillable, fillFields, fits, hiddenByStyle } from "./fill"
+import { newId } from "./id"
 import { send, type PageState } from "./inline"
 import { deepActiveElement, deepQueryAll, markOwnHost, openRoots } from "./shadow"
 import { SUBMIT_LABEL } from "./signin-submit"
@@ -120,7 +121,7 @@ const live = (id: string) => active && id === session && !cancelled.has(id) && h
 export const chainActive = () => active
 
 function mint(h: Handle): string {
-  const id = crypto.randomUUID()
+  const id = newId()
   handles.set(id, h)
   for (const old of handles.keys()) if (handles.size > 4) handles.delete(old)
   return id

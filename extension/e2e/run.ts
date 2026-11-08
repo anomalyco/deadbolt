@@ -1510,8 +1510,10 @@ async function diagnose(run: Run, page: Page, what: string) {
 }
 
 let failures = 0
+let lastStep = "none yet"
 function check(ok: boolean, what: string) {
   console.log(`${ok ? "ok  " : "FAIL"} ${what}`)
+  lastStep = what
   if (!ok) failures++
   return ok
 }
@@ -3848,9 +3850,9 @@ async function googleSignIn() {
     await close(run)
   }
 
-  // A login saved under its bare domain, as imports save `google.com`, signs in on accounts.acme.test all the same.
-  // (A secure context, as Google's https is: the page's sign-in probe uses crypto.randomUUID.)
-  const bare = await launch({ saved: "acme.test", offerToSignIn: "default", secure: [`http://accounts.acme.test:${server.port}`] })
+  // A login saved under its bare domain, as imports save `google.com`, signs in on accounts.acme.test all the same,
+  // over plain http too (no secure context, so no crypto.randomUUID in the page).
+  const bare = await launch({ saved: "acme.test", offerToSignIn: "default" })
   const tab = await bare.context.newPage()
   try {
     const before = flowPosts.length
@@ -5865,7 +5867,18 @@ try {
   for (const u of mine) {
     console.log(`\n# ${u.name}`)
     const start = Date.now()
-    await u.run()
+    lastStep = "none yet"
+    // A hung scenario fails fast and names where it stopped, instead of
+    // holding the job until CI's own timeout.
+    const limit = Math.max(180, 4 * (cost[u.key] ?? 10)) * 1000
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const hung = new Promise<"hung">((done) => { timer = setTimeout(() => done("hung"), limit) })
+    const outcome = await Promise.race([u.run().then(() => "done" as const), hung]).finally(() => clearTimeout(timer))
+    if (outcome === "hung") {
+      console.log(`FAIL ${u.name} hung for ${limit / 1000} s; last step: ${lastStep}`)
+      server.stop(true)
+      process.exit(1)
+    }
     console.log(`  (${u.name}: ${((Date.now() - start) / 1000).toFixed(1)} s)`)
   }
 } finally {
