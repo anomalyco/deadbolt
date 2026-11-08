@@ -291,7 +291,9 @@ function acmeFixture(req: Request, url: URL): Response {
 
 /**
  * Ramp's email-first single sign-on (app.ramp.com): an email-only step,
- * then, in place, the email locked beside one "Sign in with Google" button, which
+ * as Ramp's: a form with no method or action (so GET) whose script sends the
+ * email, and a floating-label field (the label and a bare input inside one
+ * bordered box), then, in place, the email locked beside one "Sign in with Google" button, which
  * opens a popup on the site's own auth host (sso.ramp.test, Firebase Auth's
  * /__/auth/handler) that goes on to Google with its return URL back to
  * itself; Google's existing-consent chooser (`notice=0`, `nopwd=1`), and the
@@ -301,7 +303,8 @@ function acmeFixture(req: Request, url: URL): Response {
 async function rampFixture(req: Request, url: URL): Promise<Response> {
   const q = url.searchParams
   const flow = clean(q.get("flow"))
-  const style = "<style>body{font:16px system-ui;margin:0;background:#fafafa}main{max-width:420px;margin:90px auto}input,button{display:block;box-sizing:border-box;width:320px;padding:12px;margin:12px 0;font:inherit}</style>"
+  const style = "<style>body{font:16px system-ui;margin:0;background:#fafafa}main{max-width:420px;margin:90px auto}input,button{display:block;box-sizing:border-box;width:320px;padding:12px;margin:12px 0;font:inherit}" +
+    ".field{box-sizing:border-box;width:320px;margin:12px 0;padding:6px 12px;border:1px solid #6e6a68;background:#fff}.field label{display:block;font-size:11px}.field input{width:100%;margin:0;padding:0;border:0;outline:0;background:transparent}</style>"
   if (url.hostname === "app.ramp.test") {
     const handler = `http://${q.get("hop") === "other" ? "ramp-auth.test" : "sso.ramp.test"}:${url.port}/__/auth/handler`
     const keep = new URLSearchParams({ flow, ...(q.get("hop") ? { hop: clean(q.get("hop")) } : {}) })
@@ -313,11 +316,11 @@ async function rampFixture(req: Request, url: URL): Promise<Response> {
       return page("Sign in with Google Button", `<style>body{margin:0}button{width:240px;height:40px;font:14px system-ui;border:1px solid #dadce0;border-radius:4px;background:#fff}</style></head><body><button type="button">Sign in with Google</button></body>`)
     if (url.pathname === "/login") {
       const auth = `${handler}?${new URLSearchParams({ apiKey: "synthetic", providerId: "google.com", flow })}`
-      return page("Sign in to Ramp", `${style}</head><body><main id="step"><h1>Sign in to Ramp</h1><form method="post" action="/login?${keep}"><label>Email<input name="email" type="email" autocomplete="username"></label><button type="submit">Continue</button></form>${q.get("google") === "1" ? '<p>or</p><button type="button" id="google-first">Sign in with Google</button>' : ""}${q.get("gis") === "1" ? '<p>or</p><iframe src="/accounts.google.com/gsi/button" title="Sign in with Google Button" style="width:240px;height:40px;border:0"></iframe>' : ""}</main>
+      return page("Sign in to Ramp", `${style}</head><body><main id="step"><h1>Sign in to Ramp</h1><form id="sign-in"><div class="field"><label for="email">Email address *</label><input id="email" name="email" type="email" autocomplete="username"></div><button type="submit">Continue</button></form>${q.get("google") === "1" ? '<p>or</p><button type="button" id="google-first">Sign in with Google</button>' : ""}${q.get("gis") === "1" ? '<p>or</p><iframe src="/accounts.google.com/gsi/button" title="Sign in with Google Button" style="width:240px;height:40px;border:0"></iframe>' : ""}</main>
         <script>
           document.querySelector("form").addEventListener("submit", async (e) => {
             e.preventDefault()
-            const reply = await (await fetch(e.target.action, { method: "POST", body: new FormData(e.target) })).json()
+            const reply = await (await fetch(${JSON.stringify(`/login?${keep}`)}, { method: "POST", body: new FormData(e.target) })).json()
             const step = document.querySelector("#step")
             step.innerHTML = '<h1>Sign in to Ramp</h1><label>Email<input type="email" disabled></label><button id="google" type="button">Sign in with Google</button>'
             step.querySelector("input").value = reply.email

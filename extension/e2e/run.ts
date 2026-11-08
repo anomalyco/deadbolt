@@ -916,6 +916,26 @@ const server = Bun.serve({
             })
           </script>`,
         )
+      // Ramp's shape: a form with no method or action (so GET) whose script
+      // posts the email itself, its field a floating label and a bare input
+      // in one bordered box. The step after it, a password box in the same
+      // form, is the person's to send: a GET form's password never goes by itself.
+      case "/flow/spa-email":
+        return html(
+          "Sign in to Acme",
+          `<style>.field{box-sizing:border-box;width:360px;padding:6px 12px;border:1px solid #6e6a68;background:#fff}.field label{display:block;font-size:11px}.field input{width:100%;margin:0;padding:0;border:0;outline:0;background:transparent;font:inherit}</style>
+          <h1>Welcome to Acme</h1><form id="sign-in">
+            <div id="step" class="field"><label for="email">Email address *</label><input id="email" name="email" type="email" autocomplete="username"></div>
+            <button type="submit" id="go">Continue</button></form><script>
+            document.getElementById("sign-in").addEventListener("submit", async (e) => {
+              e.preventDefault()
+              if (document.getElementById("password")) return
+              await fetch("/flow/spa-email", { method: "POST", body: new FormData(e.target) })
+              document.getElementById("step").innerHTML = '<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">'
+              document.getElementById("go").textContent = "Sign in"
+            })
+          </script>`,
+        )
       // A login form that posts to another origin (here, the same server as 127.0.0.1).
       case "/flow/cross":
         return html("Sign in to Acme", loginForm(`http://127.0.0.1:${url.port}/flow/done`))
@@ -3691,6 +3711,28 @@ async function pickSignsIn() {
     await page.waitForURL("**/flow/nav/next?sms", { timeout: 15_000 })
     await Bun.sleep(3000)
     check((await code()) === "" && !since(before).includes("/flow/done"), "an SMS code step stops the sign-in: nothing filled or submitted")
+
+    // Ramp's shape (see /flow/spa-email): the menu lines up under the field's
+    // bordered box, not its bare input; the pick submits the email step though
+    // the form has no method, and the page's script sends it, not the URL; the
+    // password step after it, in that GET form, fills and waits for the person.
+    before = flowPosts.length
+    await open("/flow/spa-email")
+    {
+      const menu = await menuOn(page)
+      if (!menu) throw new Error("no menu on /flow/spa-email")
+      const [placed, drawn] = await Promise.all([(await menu.frameElement()).boundingBox(), page.locator(".field").boundingBox()])
+      check(!!placed && !!drawn && Math.abs(placed.x - drawn.x) <= 1 && Math.abs(placed.width - drawn.width) <= 1 && placed.y >= drawn.y + drawn.height,
+        `the menu lines up under a floating-label field's drawn box (${JSON.stringify({ placed, drawn })})`)
+      await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    }
+    await until("the email step goes", async () => since(before).includes("/flow/spa-email"), 10_000)
+    check(flowPosts[before]?.body.email === "kit@acme.test" && !new URL(page.url()).search, "a pick submits an email-only step in a form with no method, through the page's own script")
+    await until("the password step fills", async () => (await page.inputValue("#password").catch(() => "")) === "correct horse", 10_000)
+    await Bun.sleep(2000)
+    check(JSON.stringify(since(before)) === JSON.stringify(["/flow/spa-email"]) && new URL(page.url()).pathname === "/flow/spa-email", "and the password step in that GET form fills but isn't submitted")
+    await Bun.sleep(1500)
+    await forgetSignIns(run)
 
     // A form posting to another origin: filled, never submitted.
     before = flowPosts.length

@@ -1,7 +1,8 @@
 // An automatic sign-in session's submit (db:signin-submit): after the
 // background filled a step, it asks this script to submit it, and the checks
-// here decide. A step is either a form that posts to this origin, in this tab,
-// or a form-less step (Google's: no <form>, a <button type="button"> Next
+// here decide. A step is either a form that posts to this origin, in this tab
+// (an email-only step may go there by GET: see identifierOnly), or a
+// form-less step (Google's: no <form>, a <button type="button"> Next
 // whose click the page's own script handles) whose fields and one Next share
 // a dialog or main region. Either way the button reads sign in, next,
 // continue, verify or the like, every field still holds its value and shows,
@@ -60,17 +61,28 @@ export interface SubmitPlan {
 }
 export type Refusal = "kind" | "button" | "scope" | "destination" | "captcha" | "values" | "first" | "error" | "delivered"
 
-/** The form a step's fields and button post with, checked: a POST to this origin, in this tab. */
+/**
+ * Whether a step may go by GET: only a username, email or phone box, in a
+ * form with no password box. A single-page app's sign-in form often has no
+ * method at all (so GET), and its script sends the email itself (Ramp's);
+ * were the script not to, the URL would carry the same email the person's
+ * own click on Continue would put there, and nothing secret.
+ */
+function identifierOnly(form: HTMLFormElement, fields: Field[]): boolean {
+  return fields.every((f) => IDENTIFIER_ROLES.includes(f.role)) && !Array.from(form.elements).some((el) => el instanceof HTMLInputElement && el.type === "password")
+}
+
+/** The form a step's fields and button post with, checked: a POST (or an identifier step's GET) to this origin, in this tab. */
 function formScope(form: HTMLFormElement, fields: Field[], button: HTMLElement): Refusal | null {
   if (!fields.every((f) => f.el.form === form && form.contains(f.el))) return "scope"
   const control = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button : null
-  // A sign-in posts; a GET form puts what it sends in the URL.
+  // A sign-in posts; a GET form puts what it sends in the URL, which only an identifier step may.
   const method = control?.hasAttribute("formmethod") ? control.formMethod : form.method
   const destination = button.getAttribute("formaction") ?? form.getAttribute("action") ?? location.href
   // The browsing context it goes to: the submitter's, the form's, else the document's <base target>.
   const target = button.getAttribute("formtarget") ?? form.getAttribute("target") ?? document.querySelector("base[target]")?.getAttribute("target") ?? ""
   try {
-    if (method !== "post" || new URL(destination, document.baseURI).origin !== location.origin || (target && target !== "_self")) return "destination"
+    if ((method !== "post" && !(method === "get" && identifierOnly(form, fields))) || new URL(destination, document.baseURI).origin !== location.origin || (target && target !== "_self")) return "destination"
   } catch {
     return "destination"
   }

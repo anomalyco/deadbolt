@@ -499,14 +499,20 @@ let sessionSubmitted = -1
  * script-generated submits still can't advance a session.
  */
 async function sessionSubmit(message: Extract<ToContent, { type: "db:signin-submit" }>): Promise<boolean> {
-  const plan = (): SubmitPlan | null => {
+  const plan = (): SubmitPlan | string => {
     refresh()
-    if (!isTop || !offerSignIn || document.hidden || formId !== message.form || sessionSubmitted === formId) return null
-    const p = submitPlan({ kind, fields, submit: submitControl, first: message.first === true, account: message.account })
-    return typeof p === "string" ? null : p
+    if (!isTop || !offerSignIn || document.hidden) return "page"
+    if (formId !== message.form) return "form changed"
+    if (sessionSubmitted === formId) return "already submitted"
+    return submitPlan({ kind, fields, submit: submitControl, first: message.first === true, account: message.account })
+  }
+  // Why a step wasn't submitted, in the page's console (Verbose): the next "it didn't press Continue" is one look away.
+  const refused = (when: string, reason: string) => {
+    console.debug(`Deadbolt: automatic submit refused ${when}: ${reason}`)
+    return false
   }
   const before = plan()
-  if (!before) return false
+  if (typeof before === "string") return refused("before the settle", before)
   // The page submitted the form itself as the last value went in: that's the step's submit.
   if (before.form && submittedForm === before.form) {
     sessionSubmitted = formId
@@ -515,7 +521,8 @@ async function sessionSubmit(message: Extract<ToContent, { type: "db:signin-subm
   }
   await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
   const after = plan()
-  if (!after || after.button !== before.button) return false
+  if (typeof after === "string") return refused("after the settle", after)
+  if (after.button !== before.button) return refused("after the settle", "button changed")
   sessionSubmitted = formId
   captured()
   stepSubmitted()

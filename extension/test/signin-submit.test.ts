@@ -148,6 +148,28 @@ describe("a form", () => {
     }
   })
 
+  // Ramp's: a single-page app's form with no method (so GET) and no action, its script sending the email.
+  const email = (attrs: string, extra = "") => `<form id="sign-in" ${attrs}><h1>Welcome</h1>
+    <div><label for="email">Email address *</label><input id="email" type="email" name="email" autocomplete="username"></div>${extra}
+    <button type="submit">Continue</button></form>`
+
+  test("an email-only step goes by GET to this origin, in this tab", () => {
+    for (const attrs of ["", `method="get"`, `action="/sign-in"`]) {
+      page(email(attrs))
+      fill("#email", "kit@acme.test")
+      const p = plan(true)
+      expect(typeof p === "object" && p.form).toBeInstanceOf(HTMLFormElement)
+    }
+  })
+
+  test("but not to another origin or tab, nor with a password box in the form", () => {
+    for (const [attrs, extra] of [[`action="https://evil.test/sign-in"`, ""], [`target="_blank"`, ""], ["", `<input type="password" name="password" hidden>`], [`method="dialog"`, ""]]) {
+      page(email(attrs, extra))
+      fill("#email", "kit@acme.test")
+      expect(plan(true)).toBe("destination")
+    }
+  })
+
   test("a sign-up form isn't a sign-in step", () => {
     page(`<form method="post"><h1>Create your account</h1><input name="email" autocomplete="email">
       <input type="password" name="new" autocomplete="new-password"><input type="password" name="confirm" autocomplete="new-password">
