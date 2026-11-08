@@ -48,6 +48,7 @@ import { join, resolve } from "node:path"
 import { VAULT_REQUEST } from "../src/bg/vault-messages"
 import { axe, describe } from "./axe"
 import { gauntlet } from "./gauntlet/site"
+import { gmailPage } from "./gmail-flow"
 import { gauntletAccounts, gauntletScenarios } from "./gauntlet/scenarios"
 
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
@@ -830,6 +831,13 @@ const server = Bun.serve({
           : html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
       if (url.pathname === "/flow/done") return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
       if (url.pathname === "/flow/failed") return Response.redirect(`/flow/failed?email=${encodeURIComponent(email)}`, 303)
+      // The Gmail-style sign-in's steps (see gmail-flow.ts), posted by fetch.
+      if (url.pathname.startsWith("/flow/gmail/")) {
+        const got = (k: string) => String(data?.get(k) ?? "")
+        const ok = { identifier: got("identifier") === "kit@acme.test", pwd: got("Passwd") === "correct horse", totp: isCode(got("totpPin").replace(/\s/g, "")), signup: true }[url.pathname.slice("/flow/gmail/".length)]
+        const errors: Record<string, string> = { identifier: "Couldn’t find your Google Account", pwd: "Wrong password. Try again or click Forgot password to reset it.", totp: "Wrong code. Try again." }
+        return Response.json(ok ? { ok: true } : { error: errors[url.pathname.slice("/flow/gmail/".length)] ?? "Something went wrong" })
+      }
       switch (url.pathname) {
         case "/":
           return html("Acme", `<h1>Acme</h1><div role="alert" class="notice">Incorrect password. Try again.</div><p><a href="/outcome/login?to=/">Back</a></p>`)
@@ -887,6 +895,9 @@ const server = Bun.serve({
             <button type="submit" id="go">Continue</button></form>`,
         )
       }
+      // A Gmail-style sign-in, every step in one document (see gmail-flow.ts).
+      case "/flow/gmail":
+        return new Response(gmailPage(url.searchParams), { headers: { "content-type": "text/html; charset=utf-8" } })
       // The same two steps in one document: Continue swaps the username box for a password box.
       case "/flow/spa":
         return html(
@@ -1281,6 +1292,8 @@ interface LaunchOptions {
   reducedMotion?: boolean
   /** Give the first fake account an exact origin for universal sign-in. */
   universal?: boolean
+  /** The first Acme login's only saved URL instead (a bare domain, as an import saves). */
+  saved?: string
   /**
    * "Offer to sign in", on unless turned off: a pick then submits on a
    * login whose saved URL names the page's exact origin (the browser
@@ -1336,7 +1349,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
       DEADBOLT_FAKE_LIST_DELAY: String(options.listDelay ?? 0),
-      DEADBOLT_FAKE_ORIGIN: options.universal ? site : "",
+      DEADBOLT_FAKE_ORIGIN: options.saved ?? (options.universal ? site : ""),
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
       DEADBOLT_FAKE_KEYLOGIN: options.keyLogin ? "1" : "",
@@ -1454,7 +1467,7 @@ async function seedVault(run: Run, options: LaunchOptions) {
       // Also for acme.test, where the same page must narrow nothing (googleAccount).
       for (const u of ["ryan@gmail.com", "ryan@anoma.ly", "kit@gmail.com"]) await login("Google", [...urls([`http://accounts.google.test:${port}`, `http://www.acme.test:${port}`]), { name: "username", value: u }, { name: "password", value: "google password" }])
     } else {
-      await login("Acme", [...urls(sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
+      await login("Acme", [...urls(options.saved ? [options.saved] : sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
       await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
       if (options.keyLogin) await login("Acme API key", [...urls(sites), { name: "password", value: "acme api key" }])
       if (options.signIn) {
@@ -3617,11 +3630,18 @@ async function signInSessions() {
   }
 }
 
+/** Test isolation: forgets the sign-ins the outcome judge confirmed, so the next pick on the site signs in again. */
+async function forgetSignIns(run: Run) {
+  await run.worker.evaluate(async () => {
+    const all = await chrome.storage.session.get(null)
+    await chrome.storage.session.remove(Object.keys(all).filter((k) => k.startsWith("signin-memory:")))
+  })
+}
+
 /**
  * Picks that sign in: with "Offer to sign in" on (the default, never set
  * here), an inline pick on the email step of a two-step login fills and
- * submits each step from the one pick, its code only once the site's code
- * step is learned. A code the site sent by SMS is left alone, a form that
+ * submits each step from the one pick, its authenticator code included. A code the site sent by SMS is left alone, a form that
  * posts to another origin fills but isn't submitted, and nothing a page does
  * picks. Turned off, a pick only fills, as before.
  */
@@ -3648,37 +3668,19 @@ async function pickSignsIn() {
   try {
     check(await run.worker.evaluate(async () => !("offerToSignIn" in (await chrome.storage.local.get("offerToSignIn")))), "a new profile has never set \"Offer to sign in\"")
 
-    // An unlearned code step: email and password are submitted, the code only filled.
+    // Email, password and the authenticator code, each submitted once from the one pick: a code step needs no learned flow.
     let before = flowPosts.length
-    await open("/flow/nav")
-    await pick()
-    await page.waitForURL("**/flow/nav/next", { timeout: 15_000 })
-    check(!!(await until("the code fills", async () => isCode(await code()))), "one inline pick fills and submits the email step, then the password step, then fills the code")
-    await Bun.sleep(1500)
-    const first = flowPosts.slice(before)
-    check(JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password", "/flow/nav/next"]), `each step is submitted once, and an unlearned code step isn't (${JSON.stringify(since(before))})`)
-    check(first[0]?.body.email === "kit@acme.test" && first[1]?.body.password === "correct horse", "with the picked login's username and password")
-
-    // Learned: the site's sign-in has a code step. One pick lands signed in.
-    await run.worker.evaluate(async () => {
-      let salt = (await chrome.storage.local.get("signinFlowsSalt")).signinFlowsSalt as string | undefined
-      if (!salt) await chrome.storage.local.set({ signinFlowsSalt: (salt = crypto.randomUUID().replaceAll("-", "")) })
-      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}\nlocalhost`))
-      const key = Array.from(new Uint8Array(digest).slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")
-      const flows = ((await chrome.storage.local.get("signinFlows")).signinFlows ?? {}) as Record<string, unknown>
-      flows[key] = { identifierFirst: true, code: true, navigates: true, seen: 3, codeSeen: 3, at: Date.now() }
-      await chrome.storage.local.set({ signinFlows: flows })
-    })
-    before = flowPosts.length
     await open("/flow/nav", "pick-signs-in-totp")
     await pick()
     await page.waitForURL("**/flow/done", { timeout: 20_000 })
     const posted = flowPosts.slice(before)
-    check((await page.textContent("main"))?.includes("Signed in as kit@acme.test") === true, "with a learned code step, one inline pick lands signed in")
+    check((await page.textContent("main"))?.includes("Signed in as kit@acme.test") === true, "one inline pick lands signed in")
     check(JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password", "/flow/nav/next", "/flow/done"]), `email, password and code are each submitted once (${JSON.stringify(since(before))})`)
+    check(posted[0]?.body.email === "kit@acme.test" && posted[1]?.body.password === "correct horse", "with the picked login's username and password")
     check(isCode([1, 2, 3, 4, 5, 6].map((i) => posted[2]?.body[`d${i}`] ?? "").join("")), "and the code submitted is the login's current one")
     check((await probe(page)).blurs === 0, "nothing of Deadbolt's took the page's focus")
     await Bun.sleep(1500)
+    await forgetSignIns(run)
 
     // A code the site sent by text message: neither filled nor submitted.
     before = flowPosts.length
@@ -3759,6 +3761,112 @@ async function pickSignsIn() {
       for (const { name, path } of saved) if (path) await rename(path, join(video, `${name}.webm`)).catch((err) => check(false, `couldn't keep ${name}: ${err}`))
       for (const path of others) if (path && !saved.some((s) => s.path === path)) await rm(path, { force: true })
     }
+  }
+}
+
+/**
+ * Google's sign-in (gmail-flow.ts): no <form>, type=button Nexts, and every
+ * step swapped into one document. One pick fills and submits the email, the
+ * password and the authenticator code, each once, and lands signed in. A
+ * CAPTCHA, a texted code or a sign-up step stops it; with "Offer to sign in"
+ * off, a pick only fills.
+ */
+async function googleSignIn() {
+  const run = await launch({ universal: true, offerToSignIn: "default" })
+  let page = await run.context.newPage()
+  const open = async (path: string) => {
+    await page.close()
+    page = await run.context.newPage()
+    await page.goto(`${site}${path}`)
+  }
+  const pick = async () => {
+    const menu = await menuOn(page, "#identifierId")
+    if (!menu) throw new Error(`no menu on ${page.url()}`)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+  }
+  const since = (n: number) => flowPosts.slice(n).filter((p) => p.path.startsWith("/flow/gmail/"))
+  const paths = (n: number) => JSON.stringify(since(n).map((p) => p.path.slice("/flow/gmail/".length)))
+  try {
+    let before = flowPosts.length
+    await open("/flow/gmail")
+    await pick()
+    const signedIn = await until("signed in", async () => (await page.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
+    check(!!signedIn, `one pick on Google's sign-in fills and submits each step and lands signed in (at ${new URL(page.url()).pathname}, posted ${paths(before)})`)
+    if (!signedIn) {
+      console.log(`  password box: ${JSON.stringify(await page.inputValue("input[name=Passwd]").catch(() => null))}`)
+      await diagnose(run, page, "Google sign-in")
+    }
+    await Bun.sleep(1500)
+    const posted = since(before)
+    check(paths(before) === JSON.stringify(["identifier", "pwd", "totp"]), `email, password and code are each submitted once (${paths(before)})`)
+    check(posted[0]?.body.identifier === "kit@acme.test" && posted[1]?.body.Passwd === "correct horse" && isCode(posted[2]?.body.totpPin ?? ""), "with the picked login's username, password and current code")
+    check((await probe(page)).blurs === 0, "nothing of Deadbolt's took the page's focus")
+    await forgetSignIns(run)
+
+    // A CAPTCHA on the password step: the password fills, nothing more goes.
+    before = flowPosts.length
+    await open("/flow/gmail?captcha")
+    await pick()
+    await page.waitForURL("**/flow/gmail/challenge/pwd", { timeout: 15_000 })
+    await until("the password fills", async () => (await page.inputValue("input[name=Passwd]").catch(() => "")) === "correct horse", 8000)
+    await Bun.sleep(2500)
+    check(paths(before) === JSON.stringify(["identifier"]), `a CAPTCHA on the password step stops the sign-in before its submit (${paths(before)})`)
+
+    // A code Google texted: the password goes, the code box stays empty.
+    before = flowPosts.length
+    await open("/flow/gmail?sms")
+    await pick()
+    await page.waitForURL("**/flow/gmail/challenge/totp", { timeout: 20_000 })
+    await Bun.sleep(3000)
+    check((await page.inputValue("#totpPin")) === "" && paths(before) === JSON.stringify(["identifier", "pwd"]), `a texted code step is neither filled nor submitted (${paths(before)})`)
+
+    // An address with no account goes on to "Create a password": a sign-up step, left alone.
+    before = flowPosts.length
+    await open("/flow/gmail?new")
+    await pick()
+    await page.waitForURL("**/flow/gmail/signup/password", { timeout: 15_000 })
+    await Bun.sleep(3000)
+    check((await page.inputValue("#newPasswd")) === "" && paths(before) === JSON.stringify(["identifier"]), `a sign-up step after the email is neither filled nor submitted (${paths(before)})`)
+
+    // Off: a pick only fills, and the next step fills only after the person's own Next.
+    await run.worker.evaluate(() => chrome.storage.local.set({ offerToSignIn: false }))
+    before = flowPosts.length
+    await open("/flow/gmail")
+    await pick()
+    await until("the email fills", async () => (await page.inputValue("#identifierId")) === "kit@acme.test")
+    await Bun.sleep(2000)
+    check(new URL(page.url()).pathname === "/flow/gmail" && paths(before) === "[]", "with Offer to sign in off, a pick on Google's email step fills without submitting")
+    await page.click("#next")
+    await page.waitForURL("**/flow/gmail/challenge/pwd")
+    await until("the password step fills", async () => (await page.inputValue("input[name=Passwd]").catch(() => "")) === "correct horse", 8000)
+    await Bun.sleep(2000)
+    check(new URL(page.url()).pathname === "/flow/gmail/challenge/pwd" && paths(before) === JSON.stringify(["identifier"]), `and its password step fills after the person's own Next, still without submitting (${paths(before)})`)
+  } catch (err) {
+    check(false, `Google sign-in threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "Google sign-in")
+  } finally {
+    await close(run)
+  }
+
+  // A login saved under its bare domain, as imports save `google.com`, signs in on accounts.acme.test all the same.
+  // (A secure context, as Google's https is: the page's sign-in probe uses crypto.randomUUID.)
+  const bare = await launch({ saved: "acme.test", offerToSignIn: "default", secure: [`http://accounts.acme.test:${server.port}`] })
+  const tab = await bare.context.newPage()
+  try {
+    const before = flowPosts.length
+    await tab.goto(`http://accounts.acme.test:${server.port}/flow/gmail`)
+    const menu = await menuOn(tab, "#identifierId")
+    if (!menu) throw new Error(`no menu on ${tab.url()}`)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    const signedIn = await until("signed in", async () => (await tab.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
+    const posted = JSON.stringify(flowPosts.slice(before).filter((p) => p.path.startsWith("/flow/gmail/")).map((p) => p.path.slice("/flow/gmail/".length)))
+    check(!!signedIn && posted === JSON.stringify(["identifier", "pwd", "totp"]), `a login saved as "acme.test" signs in on accounts.acme.test with one pick (posted ${posted})`)
+    if (!signedIn) await diagnose(bare, tab, "Google sign-in, bare domain")
+  } catch (err) {
+    check(false, `Google sign-in with a bare saved domain threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(bare, tab, "Google sign-in, bare domain")
+  } finally {
+    await close(bare)
   }
 }
 
@@ -4920,7 +5028,8 @@ async function formsSurface(scheme: Scheme) {
       check(await acceptForm(page, offer.offer, `forms-save-card-open-${scheme}`), "Save in the page saves the card")
       const saved = (await formSaves(run)).find((r) => r.kind === "card" && !r.ref)
       check(sorted(saved?.fields) === sorted({ number: "4000056655665556", expiry: "2030-09", cardholder: "Ada Lovelace", brand: "Visa" }), `with its number, expiry, name and brand, never its security code (${Object.keys(saved?.fields ?? {}).join(",")})`)
-      check(!JSON.stringify(await hostLog(run)).includes("737"), "the security code went nowhere")
+      // As a value, not any "737" inside an id or a timestamp.
+      check(!/(?<![\w.+/=-])737(?![\w.+/=-])/.test(JSON.stringify(await hostLog(run))), "the security code went nowhere")
     }
     await newTurn(run)
     await page.goto(`${site}/forms/pay`)
@@ -5672,6 +5781,7 @@ const once: Record<string, () => Promise<void>> = {
   corner,
   signInSessions,
   pickSignsIn,
+  googleSignIn,
   quietPages,
   signUpStep,
   frameLogins,
@@ -5715,7 +5825,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
+  detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, googleSignIn: 30, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
   formsSurface: 50, formsShapes: 50, formsFrames: 28, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,

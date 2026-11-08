@@ -123,8 +123,13 @@ off stays off. Off, inline and popup picks only fill, as in Sign-in sessions.
 Page arrival and detector confidence never authorize a fill. The existing
 500 ms visible dwell and fresh 400 ms post-pick visibility check remain
 mandatory for menu picks (the popup is the browser's own surface). A sign-up
-or change-password form, a frame's field and a login with no saved URL naming
-the page's exact origin only fill (see the first-step rules below);
+or change-password form and a frame's field only fill (see the first-step
+rules below). A pick signs in on the origin it was made on, whatever URL the
+login was saved with (an import's `google.com` picked on accounts.google.com):
+the daemon listed it there and the pick fills it there, and once the values are
+in the page's fields its script can post them anyway, so submitting adds
+nothing. The corner offer, which may click the site's own sign-in link, and a
+provider's button keep requiring a saved URL naming the exact origin;
 Browse-agent fills keep manual submit. A top page asks the service worker
 about an offer or a provider chain only when it shows something of a
 sign-in (a login form, a sign-in path, a provider, “Sign in” or “Sign out”
@@ -136,7 +141,7 @@ URL and what of a sign-in it shows) that got no offer isn't probed again
 until the vault changes, and the provider accounts are listed once until it
 does.
 
-The automatic session is bound to the selected account, exact saved origin
+The automatic session is bound to the selected account, the pick's origin
 (scheme, host and port), top frame and current document/form snapshots. Its
 entry window is 20 seconds, followed by the existing bounded sign-in session.
 It permits at most four automatic submit requests. Once a password has filled,
@@ -151,19 +156,38 @@ Log in, Continue or Next, and neither the form nor the page's title and
 headings may speak of re-authentication or another action (Confirm access,
 delete, withdraw, transfer, turn off, and the like). A password or code box
 on its own, a Confirm access page, a withdrawal or a two-factor setting
-only fills. Every submit also needs a POST that stays in the tab (no
-`target`, `formtarget` or `<base target>` other than `_self`).
+only fills.
+
+Every automatic submit goes through the content script's checks
+(`content/signin-submit.ts`, `submitPlan`). The step is one of two shapes:
+
+- a form whose fields and button it owns, posting in the tab (no `target`,
+  `formtarget` or `<base target>` other than `_self`) to this origin;
+- a form-less step, as Google's sign-in is: no `<form>` at all, a
+  `<button type="button">` Next whose click the page's own script handles.
+  Every field sits in one `dialog` or `main` region (else the body), no form
+  owns the button, and the button is the only visible control there that
+  reads like a submit (Sign in, Next, Continue, Verify…).
+
+Either way the button is visible and enabled, every field still holds its
+value and shows, no CAPTCHA shows anywhere on the page, no error shows in the
+step (a `role=alert` or `aria-live=assertive` with text, a field with
+`aria-invalid=true`), and a code step's prompt doesn't say the code was sent
+(SMS, email, a masked number…). The account chip a provider shows (Google's
+`[data-profile-identifier]`) is read past only when every visible chip is
+exactly the session's username. A step (the content script's form snapshot)
+is submitted at most once; the checks run again after a 150 ms settle, with
+the same button, before the click. Site scripts can submit on fill; Deadbolt
+does not duplicate an observed trusted submit event or mint a user-gesture
+timestamp.
 
 Each later automatic step must show within 20 seconds of the last automatic
-submit, and the outcome judge confirming a sign-in ends the session. A TOTP
-can fill without another pick, but Deadbolt submits a code step only when
-the site's learned `Flow.code` is true, and only within those 20 seconds of
-the session's password step being submitted (by Deadbolt or the person). A current SMS/email-looking prompt
-vetoes that submission even with a learned flow. Site scripts can submit on fill;
-Deadbolt does not duplicate an observed trusted submit event or mint a user-gesture timestamp.
-Every explicit submit rechecks visible fields, the button's form ownership and
-containment, and the effective form/submitter action and target: same origin,
-same browsing context only. A provider chain has the additional rules below.
+submit, in the same top frame and origin, and the outcome judge confirming a
+sign-in ends the session. A code step fills with the login's TOTP and is
+submitted only within those 20 seconds of the session's password step being
+submitted (by Deadbolt or the person); no learned flow is needed. A refused
+or failed fill, a fill that left a field empty, or a refused submit ends the
+session. A provider chain has the additional rules below.
 
 Auth-state evidence is local and value-free. The probe does not receive vault
 usernames or compare arbitrary text, aria-labels, titles or alt text with them.

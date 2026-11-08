@@ -866,7 +866,8 @@ async function formSaveFlows(device: Page, worker: Worker) {
     })
     const activity = JSON.stringify(entries)
     for (const [where, text] of [["Activity", activity], ["extension storage", stored], ["IndexedDB", indexed], ["logs", logs.join("\n")]] as const)
-      check(!secrets.some((value) => (where === "logs" && value === "737" ? /\b737\b/.test(text) : text.includes(value))) && !text.includes(passphrase), `no card number, code or passphrase in ${where}`)
+      // The code as a value, not any "737" inside an id, a salt or a timestamp.
+      check(!secrets.some((value) => (value === "737" ? /(?<![\w.+/=-])737(?![\w.+/=-])/.test(text) : text.includes(value))) && !text.includes(passphrase), `no card number, code or passphrase in ${where}`)
   } finally {
     context!.off("console", listen)
     await request(device, { type: "device-preset", preset: "comfortable" }).catch(() => {})

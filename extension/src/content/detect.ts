@@ -542,9 +542,10 @@ export function findAccountTile(account: string, unique = false): Element | null
  * Each specific hint is checked before the surrounding copy; oversized
  * context is unknown, not permission to truncate away a delivery warning.
  */
-export function deliveredCode(fields: Field[], form: HTMLFormElement | null | undefined, chipAccount?: string): boolean {
+export function deliveredCode(fields: Field[], within: Element | null | undefined, chipAccount?: string): boolean {
   if (!fields.some((f) => f.role === "otp")) return false
-  const context = form?.closest<HTMLElement>("dialog, [role=dialog], main, [role=main]") ?? document.body
+  // The step's form or region, read out to the dialog or main region around it.
+  const context = within?.closest<HTMLElement>("dialog, [role=dialog], main, [role=main]") ?? document.body
   // `chipAccount`: on a provider's own account page whose account chip shows
   // exactly the linked account (see provider-chain.ts chipAccount), a line of
   // the surrounding copy that is that account and nothing else is its chip,
