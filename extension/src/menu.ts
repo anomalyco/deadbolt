@@ -14,7 +14,7 @@ import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, P
 import { provider as providerOf } from "./signin"
 import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
-import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
+import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
 import { offerTitle } from "./ui/offer"
 import { brandBySlug, siteTile } from "./ui/site-icon"
@@ -253,14 +253,14 @@ function row(item: Row, i: number): HTMLElement {
   r.addEventListener("pointerdown", (e) => {
     if (!e.isTrusted || e.button !== 0 || busy || mode !== "accounts") return
     active = i
-    highlight(false)
+    highlight()
     press(r)
   })
   r.addEventListener("pointermove", () => {
-    if (active === i) return
+    if (active === i && !highlightEl.hidden) return
     active = i
     // The pointer is the user's own hand: the highlight lands under it at once.
-    highlight(false)
+    highlight()
   })
   return r
 }
@@ -417,8 +417,12 @@ function setCaption(site: string) {
   caption.hidden = !site
 }
 
-/** The one highlight, which slides between rows. Its y and height spring together, and retarget mid-flight. */
-const hl = { y: new Spring(0, 0.3), height: new Spring(0, 0.3), raf: 0, shown: false }
+/**
+ * The one highlight. A key or the pointer puts it on the active row at once,
+ * in the same frame as the row's own colour; as the list narrows it rides on
+ * its row, on the rows' spring, retargeting mid-flight.
+ */
+const hl = { y: new Spring(0), height: new Spring(0), raf: 0, shown: false }
 
 function stepHighlight() {
   highlightEl.style.transform = `translateY(${hl.y.value}px)`
@@ -426,8 +430,8 @@ function stepHighlight() {
   hl.raf = hl.y.done && hl.height.done ? 0 : requestAnimationFrame(stepHighlight)
 }
 
-/** Puts the highlight on the active row: sliding there with `slide`, at once otherwise. */
-function highlight(slide = true) {
+/** Puts the highlight on the active row: at once, or riding along as rows reflow with `slide`. */
+function highlight(slide = false) {
   const rows = Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row"))
   rows.forEach((el, i) => {
     el.classList.toggle("active", i === active)
@@ -442,14 +446,16 @@ function highlight(slide = true) {
   const y = rowsEl.offsetTop + el.offsetTop
   const height = el.offsetHeight
   if (slide && hl.shown) {
-    hl.y.to(y)
-    hl.height.to(height)
+    hl.y.to(y, MENU_MOTION.reflow)
+    hl.height.to(height, MENU_MOTION.reflow)
+    if (!hl.raf) hl.raf = requestAnimationFrame(stepHighlight)
   } else {
     hl.y.jump(y)
     hl.height.jump(height)
+    cancelAnimationFrame(hl.raf)
+    stepHighlight()
   }
   hl.shown = true
-  if (!hl.raf) hl.raf = requestAnimationFrame(stepHighlight)
   el.scrollIntoView({ block: "nearest" })
 }
 
@@ -530,7 +536,7 @@ function narrow(text: string) {
         r.hidden = true
         r.style.cssText = ""
       }
-      const anim = animateTo(r, reduced ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, 0.25, { fill: false })
+      const anim = animateTo(r, reduced ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, MENU_MOTION.rowOut, { fill: false })
       if (anim) anim.finished.then(finish, finish)
       else finish()
     } else if (!shown(r) && want) {
@@ -539,18 +545,29 @@ function narrow(text: string) {
       r.hidden = false
       r.style.cssText = ""
       if (typeof r.animate === "function")
-        r.animate(reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(3px)", transform: "scale(0.96)" }, { opacity: 1, filter: "blur(0px)", transform: "none" }], timing(0.3))
+        r.animate(reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(3px)", transform: "scale(0.96)" }, { opacity: 1, filter: "blur(0px)", transform: "none" }], timing(MENU_MOTION.rowIn))
     }
   })
+  const slid = new Map<HTMLElement, number>()
   if (!reduced)
     for (const [r, top] of before) {
       if (!shown(r)) continue
       const dy = top - r.getBoundingClientRect().top
-      if (Math.abs(dy) > 0.5) r.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], spring(0.4))
+      if (Math.abs(dy) > 0.5) r.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], spring(MENU_MOTION.reflow))
+      slid.set(r, dy)
     }
   const left = visible()
+  const was = active
   if (left.length && !left.includes(active)) active = left[0]
-  if (left.length) highlight(true)
+  // The highlight stays on its row: a row it moves to (its own went) it
+  // takes from where that row is on screen, then rides along with it.
+  const to = rows[active]
+  if (left.length && active !== was && to) {
+    const dy = slid.get(to)
+    if (dy !== undefined) hl.y.jump(rowsEl.offsetTop + to.offsetTop + dy)
+    hl.height.jump(to.offsetHeight)
+    highlight(dy !== undefined)
+  } else if (left.length) highlight(true)
   else highlightEl.hidden = true
   // The rows' own animations pause the frame's visibility readings, so the
   // dwell counts from when they're over, as if the menu had moved.
@@ -724,7 +741,7 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
   for (const el of Array.from(surface.children) as HTMLElement[]) {
     el.setAttribute("aria-hidden", "true")
     el.style.pointerEvents = "none"
-    animateTo(el, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, 0.25)
+    animateTo(el, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, MENU_MOTION.foldOut)
   }
   // The pill's size, before anything moves into it: the label's text and the slots' sizes.
   if (persistIsLabel && persist) label.append(...Array.from(persist.cloneNode(true).childNodes))
@@ -754,17 +771,18 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
         label.replaceChildren(...Array.from(el.childNodes))
         el.remove()
       } else slot.replaceWith(el)
-      if (reducedMotion()) return
+      // Reduced motion: it fades in where it lands.
+      if (reducedMotion()) return void (asLabel ? label : el).animate([{ opacity: 0 }, { opacity: 1 }], REDUCED_FADE)
       const to = (asLabel ? target : el).getBoundingClientRect()
       const dx = from.left + from.width / 2 - (to.left + to.width / 2)
       const dy = from.top + from.height / 2 - (to.top + to.height / 2)
       const scale = to.width && !asLabel ? from.width / to.width : 1
-      ;(asLabel ? label : el).animate([{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }], spring(0.38))
+      ;(asLabel ? label : el).animate([{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }], spring(MENU_MOTION.foldIn))
     }
     moveIn(lead, slots.lead)
     if (persistIsLabel) moveIn(persist, slots.persist, true)
     else moveIn(persist, slots.persist)
-    if (!persistIsLabel && !reducedMotion()) label.animate([{ opacity: 0 }, { opacity: 1 }], timing(0.3))
+    if (!persistIsLabel) label.animate([{ opacity: 0 }, { opacity: 1 }], timing(MENU_MOTION.pillLabel))
   })
   return label
 }
@@ -877,7 +895,7 @@ document.addEventListener("keydown", (e) => {
     return void pick(active)
   } else return
   e.preventDefault()
-  highlight(true)
+  highlight()
 })
 
 function show(reply: MenuLoadReply) {
@@ -925,7 +943,7 @@ function show(reply: MenuLoadReply) {
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]
-  highlight(false)
+  highlight()
   if (universal) showUniversal()
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
 }
@@ -941,7 +959,7 @@ function expandUniversal() {
   universalExpanded = true
   surface.classList.add("expanded")
   rowsEl.replaceChildren(...accounts.map(row))
-  highlight(false)
+  highlight()
   dwell.moved(performance.now())
   report()
 }
@@ -1010,7 +1028,8 @@ function showUniversal() {
     rowsEl.replaceChildren(top)
     // Quiet until the pointer is on it (the row's own pointermove lights it).
     highlightEl.hidden = true
-  }  surface.querySelector(".signin-dismiss")?.remove()
+  }
+  surface.querySelector(".signin-dismiss")?.remove()
   const dismiss = h("button", { class: "signin-dismiss", type: "button", title: "Not now for this site (30 minutes)", "aria-label": "Not now for this site" }, "×")
   dismiss.addEventListener("click", async (e) => {
     if (!e.isTrusted || (e.detail === 0 && !entry.entered) || busy || !pressedScale || !dwell.settled(pressedAt)) return
@@ -1053,7 +1072,7 @@ function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]
-  highlight(false)
+  highlight()
 }
 
 // ---- A step filled without a pick -----------------------------------------------------
@@ -1386,7 +1405,7 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
                     { opacity: 0, transform: "scale(0.96)" },
                     { opacity: 1, transform: "none" },
                   ],
-            timing(corner ? 0.4 : 0.25),
+            timing(corner ? MENU_MOTION.openCorner : MENU_MOTION.open),
           )
           if (corner && mode === "save") {
             const clear = () => { el.style.borderRadius = "" }
