@@ -9,7 +9,7 @@ import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, phoneLike, t
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { boxesInTop, cleanApproved, cleanBox, LOGIN_FRAME_PLACE, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type VaultBackend } from "./backend"
-import { isAccountPage, isProviderPage, pageAccountOf, provider as providerOf, providerOrigins, savedAtProvider } from "../signin"
+import { isAccountPage, isProviderPage, pageAccountOf, provider as providerOf, providerForPage, providerOrigins, savedAtProvider } from "../signin"
 import type { ProviderChain } from "./provider-chain"
 import type { SignInWith } from "./signinwith"
 import { siteOf } from "./site"
@@ -842,16 +842,16 @@ export class Autofill {
 
   /**
    * Whether a pick of `account` in `target` may start an automatic sign-in:
-   * Deadbolt ready, "Offer to sign in" on, and the top page. The pick's own
-   * origin is the session's, whatever URL the login was saved with
-   * (`google.com` picked on accounts.google.com): the daemon listed the
-   * login here, the pick fills it here, and once the values are in the
-   * page's fields its script can post them anyway, so submitting them adds
-   * nothing. A `provider` sign-in, which presses a provider's button on the
-   * site, still needs a saved URL naming the exact origin.
+   * Deadbolt ready, "Offer to sign in" on, the top page, and a saved URL
+   * on this page's own host (see signInHost). The daemon lists a login on
+   * every host of its site, so on any other host (a forgotten subdomain
+   * someone else now serves) a pick only fills, and each later step waits
+   * for the person's own submit. A `provider` sign-in, which presses a
+   * provider's button on the site, still needs a saved URL naming the exact
+   * origin.
    */
   private async signInAllowed(target: FrameTarget, account: Account, provider = false): Promise<boolean> {
-    return this.host.status.state === "ready" && target.frameId === 0 && (!provider || account.urls.some((u) => exactSignInOrigin(u, target.origin))) && (await signInEnabled())
+    return this.host.status.state === "ready" && target.frameId === 0 && account.urls.some((u) => (provider ? exactSignInOrigin(u, target.origin) : signInHost(u, target.origin))) && (await signInEnabled())
   }
 
   /**
@@ -1303,6 +1303,25 @@ export function resizeMessage(token: string, height: number, width?: unknown, mo
   const h = Number.isFinite(height) ? Math.min(Math.max(height, 28), 400) : 40
   const w = typeof width === "number" && Number.isFinite(width) ? Math.min(Math.max(width, 28), 420) : undefined
   return { type: "db:resize-menu", token, height: h, ...(w !== undefined ? { width: w } : {}), ...(mode === "pill" ? { mode: "pill" as const } : {}) }
+}
+
+/**
+ * Whether a login saved at `saved` may sign in on `origin`: the same host
+ * over the same scheme and port, whatever the path; its `www.` twin; or a
+ * known provider's own sign-in host on the saved site (`google.com` on
+ * accounts.google.com). Never another host of the site.
+ */
+export function signInHost(saved: string, origin: string): boolean {
+  try {
+    const s = new URL(saved.includes("://") ? saved : `https://${saved}`)
+    const o = new URL(origin)
+    const bare = (host: string) => host.toLowerCase().replace(/^www\./, "")
+    if (s.protocol === o.protocol && s.port === o.port && bare(s.hostname) === bare(o.hostname)) return true
+    const site = siteOf(o.hostname)
+    return !!site && site === siteOf(s.hostname) && !!providerForPage(o.href)
+  } catch {
+    return false
+  }
 }
 
 function siteOfUrl(url: string | undefined): string | null {
