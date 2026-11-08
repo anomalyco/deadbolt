@@ -14,7 +14,7 @@ import type { DeviceCommand, DeviceReply, ItemInput, LockPreset, Reauth, ReauthC
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type ReauthAsk, type ReauthBody, type ReauthReply, type SendOptions, type VaultBackend } from "./backend"
 import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, digest, isCopied, type Copied } from "./clipboard"
-import { appendLearnLine } from "./learn-log"
+import { appendLearnLine, deleteLearnLog, learnLog, learnSession } from "./learn-log"
 import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultClipboard, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
 
 export const OFFSCREEN_PAGE = "offscreen.html"
@@ -71,7 +71,7 @@ const tooMany = (wait: number) => `Too many wrong passphrases. Try again in ${Ma
  * learning log is kept here (bg/learn-log.ts), locked or not, as the host
  * keeps it outside the daemon.
  */
-const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "save-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel", "learn"])
+const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "save-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel", "learn", "learn-read", "learn-delete"])
 /** Requests that count as use for the idle lock. Listing a page's logins or forms doesn't (docs/autofill.md). */
 const USES = new Set<string>(["fill", "save", "fill-form", "save-form", "generate", "passkey-create", "passkey-get"])
 
@@ -88,6 +88,7 @@ const LEARNS_RATE = { capacity: 100, everyMs: 100 }
 const MAX_REQUEST = 64 * 1024
 const RATED: Partial<Record<string, "checks" | "fills" | "passkeys" | "learns">> = {
   learn: "learns",
+  "learn-read": "learns",
   check: "checks",
   "generate-check": "checks",
   fill: "fills",
@@ -300,7 +301,7 @@ export class StandaloneBackend implements VaultBackend {
       if (reply.type !== "hello") throw new HostError("failed", UNREADABLE)
       // Only what this build sends on: a capability it would refuse is never offered.
       // The learning log is this side's own, whatever the vault says.
-      this.capabilities = [...reply.capabilities.filter((c) => c !== "learn" && (c === "passkeys" || c === "save-form-match" || SUPPORTED.has(c))), "learn"]
+      this.capabilities = [...reply.capabilities.filter((c) => c !== "learn" && c !== "learn-files" && (c === "passkeys" || c === "save-form-match" || SUPPORTED.has(c))), "learn", "learn-files"]
       if (reply.protocol !== PROTOCOL) {
         this.setStatus({ state: "unavailable", detail: "This extension and its vault are different versions. Reload the extension." }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
@@ -330,6 +331,7 @@ export class StandaloneBackend implements VaultBackend {
       if (signal?.aborted) throw cancelled()
       if (USES.has(body.type)) this.used()
       if (body.type === "learn") return (await this.learn(body as Extract<RequestBody, { type: "learn" }>)) as ReplyFor[T]
+      if (body.type === "learn-read" || body.type === "learn-delete") return (await this.learnFile(body as Extract<RequestBody, { type: "learn-read" | "learn-delete" }>)) as ReplyFor[T]
       reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
     } finally {
       if (ceremony) this.ceremonies--
@@ -351,6 +353,15 @@ export class StandaloneBackend implements VaultBackend {
     const refused = await appendLearnLine(body.session, body.line).catch(() => "couldn't write the learning log")
     if (refused) throw new HostError(refused.startsWith("couldn't") ? "failed" : "bad_request", refused)
     return { type: "learned" }
+  }
+
+  /** A recording's log for the popup's Download (all of it at once: nothing limits a reply here), or Delete. */
+  private async learnFile(body: Extract<RequestBody, { type: "learn-read" | "learn-delete" }>): Promise<ReplyFor["learn-read"] | ReplyFor["learn-delete"]> {
+    if (!learnSession(body.session)) throw new HostError("bad_request", "session is a lowercase UUID")
+    if (body.type === "learn-delete") return { type: "learn-deleted", found: await deleteLearnLog(body.session).catch(() => false) }
+    const log = await learnLog(body.session).catch(() => undefined)
+    if (!log) throw new HostError("not_found", "no such learning log")
+    return { type: "learn-text", text: log.lines.map((l) => `${l}\n`).join(""), next: null }
   }
 
   /** device.html's commands (see DeviceCommand); the background checks the sender (fromVaultPage). */

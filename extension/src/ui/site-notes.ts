@@ -1,66 +1,134 @@
-// What the popup says about the tab's site besides its logins: "Learn this
-// site" and the learning session it starts (src/learn.ts), and "Saving is
-// off for acme.com", which undoes Never for this site. The native popup and
-// the browser-only vault's popup show the same ones.
+// What the popup says about the tab besides its logins: Record (src/learn.ts),
+// its button in the header and the bar under it, and "Saving is off for
+// acme.com", which undoes Never for this site. The native popup and the
+// browser-only vault's popup show the same ones.
 
-import type { LearnReply, Learning } from "../messages"
+import type { LearnReply, RecordedReply, Recording } from "../messages"
 import { h } from "./dom"
 
 const send = <T>(message: unknown): Promise<T | null> => chrome.runtime.sendMessage(message).catch(() => null) as Promise<T | null>
 
-const para = (...parts: Array<Node | string>) => {
-  const p = h("p", { class: "muted" })
-  p.append(...parts)
-  return p
+/** 0:42, 10:00. */
+const clock = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
 }
 
-/** Starts or stops learning the tab's site; `changed` repaints. Starting closes the popup: the user signs in by hand next. */
-async function learn(tabId: number | undefined, on: boolean, button: HTMLElement, status: HTMLElement, changed: () => void) {
-  if (tabId === undefined) return
-  button.setAttribute("disabled", "")
-  const reply = await send<LearnReply>({ type: "db:popup-learn", tabId, on })
-  button.removeAttribute("disabled")
-  if (reply && !reply.ok) {
-    status.textContent = reply.message || "Couldn't start learning."
-    status.hidden = false
-    return
+export interface RecordControl {
+  /** The header's Record button: always there on a web page, disabled where Chrome lets no extension in. */
+  button: HTMLButtonElement
+  /** Under the header: "Recording · 0:42" and Stop, "Recorded 38 steps on …" with Download and Delete, or why it can't. */
+  bar: HTMLElement
+  refresh(): Promise<void>
+}
+
+/**
+ * Record for the popup's tab (`tab()`), whatever the vault's state: it
+ * follows the background once a second, so the shortcut, the time cap and a
+ * closed tab show here too. Starting closes the popup: the user does what
+ * they want recorded next.
+ */
+export function recordControl(tab: () => number | undefined, announce: (text: string) => void): RecordControl {
+  const button = h("button", { class: "icon-button record", type: "button", "data-focus": "record" }, h("span", { class: "rec-dot", "aria-hidden": "true" }))
+  const bar = h("div", { class: "record-bar", role: "group", "aria-label": "Recording" })
+  bar.hidden = true
+  const error = h("p", { class: "error", role: "alert" })
+  let rec: Recording = { state: "off" }
+  let shown = ""
+  let shortcut = ""
+  let time: HTMLElement | null = null
+
+  const fail = (message: string) => {
+    error.textContent = message
+    if (!bar.contains(error)) bar.append(error)
+    bar.hidden = false
+    announce(message)
   }
-  // Learning starts with the user signing in by hand: out of the way.
-  if (on) return window.close()
-  changed()
+
+  const act = async (b: HTMLButtonElement, message: unknown, then?: (reply: Extract<RecordedReply, { ok: true }>) => void) => {
+    const tabId = tab()
+    if (tabId === undefined) return
+    b.disabled = true
+    const reply = await send<LearnReply | RecordedReply>({ ...(message as object), tabId })
+    b.disabled = false
+    if (!reply?.ok) return fail(reply && "message" in reply && reply.message ? reply.message : "Deadbolt didn't answer. Try again.")
+    then?.(reply as Extract<RecordedReply, { ok: true }>)
+    await refresh()
+  }
+
+  const start = (b: HTMLButtonElement) => act(b, { type: "db:popup-learn", on: true }, () => window.close())
+  const stop = (b: HTMLButtonElement) => act(b, { type: "db:popup-learn", on: false }, () => announce("Stopped recording."))
+  button.addEventListener("click", () => void (rec.state === "on" ? stop(button) : start(button)))
+
+  function paint() {
+    const on = rec.state === "on"
+    button.classList.toggle("recording", on)
+    button.disabled = rec.state === "blocked"
+    button.setAttribute("aria-pressed", String(on))
+    const label = on ? "Stop recording" : "Record what you do on this page"
+    button.setAttribute("aria-label", label)
+    button.title = rec.state === "blocked" ? rec.message : `${label}${shortcut ? ` (${shortcut})` : ""}`
+    time = null
+    bar.dataset.state = rec.state
+    bar.hidden = rec.state === "off"
+    if (rec.state === "blocked") return bar.replaceChildren(h("span", {}, rec.message))
+    if (rec.state === "on") {
+      time = h("span", { class: "record-time" }, clock(Date.now() - rec.startedAt))
+      const stopButton = h("button", { class: "btn", type: "button" }, "Stop")
+      stopButton.addEventListener("click", () => void stop(stopButton))
+      return bar.replaceChildren(h("div", { class: "record-row" }, h("span", { class: "rec-dot", "aria-hidden": "true" }), h("span", { class: "record-text" }, "Recording · ", time), stopButton))
+    }
+    if (rec.state === "done") {
+      const done = rec
+      const download = h("button", { class: "btn", type: "button" }, "Download")
+      download.addEventListener("click", () =>
+        void act(download, { type: "db:popup-recorded", action: "download" }, (reply) => {
+          save(reply.text ?? "", `deadbolt-recording-${done.host}-${new Date().toISOString().slice(0, 10)}.jsonl`)
+          void send({ type: "db:popup-recorded", tabId: tab(), action: "dismiss" })
+          announce("Downloaded the recording.")
+        }),
+      )
+      const remove = h("button", { class: "btn", type: "button" }, "Delete")
+      remove.addEventListener("click", () => void act(remove, { type: "db:popup-recorded", action: "delete" }, () => announce("Deleted the recording.")))
+      return bar.replaceChildren(
+        h("span", { class: "record-text" }, `Recorded ${done.steps} ${done.steps === 1 ? "step" : "steps"} on `, h("span", { class: "mono" }, done.host)),
+        h("span", { class: "record-actions" }, download, remove),
+      )
+    }
+    bar.replaceChildren()
+  }
+
+  async function refresh() {
+    const tabId = tab()
+    const next = tabId === undefined ? null : await send<Recording>({ type: "db:popup-record", tabId })
+    if (!next || typeof next.state !== "string") return
+    rec = next
+    if (time && rec.state === "on") time.textContent = clock(Date.now() - rec.startedAt)
+    const key = JSON.stringify(rec.state === "on" ? [rec.state, rec.startedAt] : rec)
+    if (key === shown) return
+    shown = key
+    paint()
+  }
+
+  void chrome.commands
+    ?.getAll?.()
+    .then((all) => {
+      shortcut = all.find((c) => c.name === "record")?.shortcut ?? ""
+      paint()
+    })
+    .catch(() => {})
+  setInterval(() => void refresh(), 1000)
+  paint()
+  return { button, bar, refresh }
 }
 
-/** "Learning acme.com": sign in by hand, Deadbolt records the form's shape. */
-export function learningCard(l: Learning, tabId: number | undefined, changed: () => void): HTMLElement {
-  const status = h("p", { class: "error", role: "status" })
-  status.hidden = true
-  const stop = h("button", { class: "btn primary", type: "button" }, "Stop")
-  stop.addEventListener("click", () => void learn(tabId, false, stop, status, changed))
-  const minutes = Math.max(1, Math.ceil((l.until - Date.now()) / 60_000))
-  return h(
-    "section",
-    { class: "offer", "aria-label": "Learning this site" },
-    h("h2", {}, `Learning ${l.site}`),
-    para("Sign in by hand. Deadbolt records how the form is built and which fields you type into, never what you type."),
-    para("Frames from other sites on the page, like chat widgets and ads, are logged too, by shape only."),
-    h(
-      "div",
-      { class: "box" },
-      h("div", { class: "line" }, h("span", { class: "muted" }, "Steps logged"), h("span", { class: "value" }, String(l.steps))),
-      h("div", { class: "line" }, h("span", { class: "muted" }, "Stops"), h("span", { class: "value" }, `after you sign in, or in ${minutes} min`)),
-    ),
-    status,
-    h("div", { class: "buttons" }, stop),
-  )
-}
-
-/** "Form not filling here? Learn this site". */
-export function learnLine(tabId: number | undefined, changed: () => void): HTMLElement {
-  const status = h("p", { class: "error", role: "status" })
-  status.hidden = true
-  const start = h("button", { class: "link", type: "button" }, "Learn this site")
-  start.addEventListener("click", () => void learn(tabId, true, start, status, changed))
-  return h("div", {}, h("p", { class: "note saving-off" }, h("span", {}, "Deadbolt missing the form here?"), start), status)
+function save(text: string, name: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/x-ndjson" }))
+  const a = h("a", { href: url, download: name })
+  document.body.append(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
 /** "Saving is off for acme.com. Turn on": undoes Never for this site. */

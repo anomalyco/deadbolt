@@ -428,3 +428,102 @@ main {
   overflow: hidden;
   white-space: nowrap;
 }
+
+/* Record: a dot in the header, red while the tab records, and the bar under
+   the header that says what it's doing. The red is the app icon's. */
+.icon-button.record .rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.6px currentColor;
+}
+
+.icon-button.record.recording {
+  color: #f02e29;
+}
+
+.rec-dot {
+  flex-shrink: 0;
+}
+
+.icon-button.record.recording .rec-dot,
+.record-bar .rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f02e29;
+  box-shadow: none;
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+
+.icon-button.record.recording .rec-dot {
+  width: 10px;
+  height: 10px;
+}
+
+@keyframes rec-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rec-dot {
+    animation: none !important;
+  }
+}
+
+.record-bar {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: 6px;
+  min-height: 44px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-weak);
+  font-size: 12.5px;
+  font-weight: var(--weight-medium);
+  animation: settle-in 200ms var(--settle);
+}
+
+.record-bar[hidden] {
+  display: none;
+}
+
+.record-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.record-row .record-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.record-bar .record-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.record-bar .record-text .mono {
+  font-size: 12px;
+}
+
+/* Done: what was recorded, its choices under it. */
+.record-bar .record-actions {
+  display: flex;
+  align-self: flex-end;
+  gap: 6px;
+}
+
+.record-bar[data-state="blocked"] {
+  min-height: 0;
+  font-size: 11.5px;
+  font-weight: var(--weight);
+  color: var(--text-faint);
+}
+
+.record-bar .error {
+  margin: 0;
+}

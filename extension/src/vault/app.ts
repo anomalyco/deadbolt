@@ -14,6 +14,7 @@ import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
 import { iconSettings, onIconSettings, type IconSettings } from "../ui/icon-store"
 import { passkeyCard } from "../ui/passkey"
+import { recordControl, type RecordControl } from "../ui/site-notes"
 import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from "./kit"
 import { itemDetailView, itemEditView, kindsView } from "./items"
 import { detailView, editView, listView } from "./logins"
@@ -37,7 +38,7 @@ export interface View {
   leave?: () => void
 }
 
-/** This tab's site in the popup: logins, offers, passkeys, saving and learning state. */
+/** This tab's site in the popup: logins, offers, passkeys and saving state. */
 export interface Site {
   tabId: number
   host: string
@@ -45,7 +46,6 @@ export interface Site {
   offer?: PopupReply["offer"]
   passkey?: PasskeyPrompt
   savingOff?: string
-  learning?: PopupReply["learning"]
 }
 
 /** How long the popup stays open after a passkey choice for the passphrase prompt it leads to. */
@@ -86,6 +86,10 @@ export class App {
   private live = h("div", { class: "sr-only", role: "status", "aria-live": "polite" })
   private footer = h("footer", { class: "bottom sync" })
   private header = h("header", { class: "top" })
+  /** Record, in the popup only, in every state: it needs no vault (see ui/site-notes.ts). */
+  private record: RecordControl | null = null
+  /** The popup's tab: Record follows it before the vault answers. */
+  private tabId: number | undefined
   private setup: Setup
 
   constructor(
@@ -94,6 +98,7 @@ export class App {
   ) {
     root.classList.add("vault", surface)
     this.setup = new Setup(this)
+    if (surface === "popup") this.record = recordControl(() => this.tabId, (text) => this.announce(text))
   }
 
   run(command: DeviceCommand): Promise<DeviceReply> {
@@ -189,6 +194,7 @@ export class App {
     this.header.replaceChildren(
       h("span", { class: "logo" }, svg(ICONS.deadbolt)),
       h("h1", { class: "brand" }, "Deadbolt", ready && this.vaultName ? h("span", { class: "vault-name" }, this.vaultName) : null),
+      this.record?.button ?? "",
       ...right,
     )
     this.footer.hidden = !ready
@@ -338,7 +344,7 @@ export class App {
       this.site = null
       this.reauth = null
     }
-    if (!this.root.contains(this.stage)) this.root.replaceChildren(this.header, this.stage, this.footer, this.live)
+    if (!this.root.contains(this.stage)) this.root.replaceChildren(this.header, ...(this.record ? [this.record.bar] : []), this.stage, this.footer, this.live)
     const first = this.shell === ""
     this.shell = this.status.state
     this.show(0, !first)
@@ -383,15 +389,6 @@ export class App {
     this.paintChrome()
   }
 
-  /** This tab's site again (a learning session's steps), and the view follows. */
-  async refreshSite() {
-    if (this.status.state !== "ready" || this.surface !== "popup") return
-    const prompt = this.site?.passkey?.id
-    this.site = await this.loadSite()
-    if (this.site?.passkey?.id !== prompt && !this.reauth) return this.show(0)
-    this.view?.update?.()
-  }
-
   async loadPreset() {
     const s = await this.run({ type: "device-settings" })
     if (s.ok && typeof s.reply.preset === "string") this.preset = s.reply.preset as LockPreset
@@ -404,7 +401,7 @@ export class App {
     if (tab?.id === undefined) return null
     const reply = (await chrome.runtime.sendMessage({ type: "db:popup-load", tabId: tab.id }).catch(() => null)) as PopupReply | null
     if (!reply || reply.unfillable || !(reply.site || reply.host)) return null
-    return { tabId: tab.id, host: reply.site || reply.host || "", accounts: reply.accounts, offer: reply.offer, passkey: reply.passkey, savingOff: reply.savingOff, learning: reply.learning }
+    return { tabId: tab.id, host: reply.site || reply.host || "", accounts: reply.accounts, offer: reply.offer, passkey: reply.passkey, savingOff: reply.savingOff }
   }
 
   /** Follows the background's status pushes, and starts. */
@@ -437,8 +434,14 @@ export class App {
       this.icons = icons
       if (this.shell === "ready" && (this.route.name === "list" || this.route.name === "item")) this.show(0, false)
     })
-    // While the tab is learning, its step count follows along, as in the native popup.
-    if (this.surface === "popup") setInterval(() => this.site?.learning && void this.refreshSite(), 1000)
+    if (this.record)
+      void chrome.tabs
+        .query({ active: true, currentWindow: true })
+        .then(([tab]) => {
+          this.tabId = tab?.id
+          return this.record?.refresh()
+        })
+        .catch(() => {})
     // A vault slow to answer shows that it's starting, never an empty frame.
     const slow = setTimeout(() => this.shell === "" && this.render(), 250)
     void Promise.all([this.run({ type: "device-status" }), iconSettings().then((icons) => (this.icons = icons))]).then(async () => {

@@ -1,19 +1,26 @@
-// "Learn this site": while the user signs in by hand, every frame of the tab
-// records the shape of each step (the inputs, what the detector made of
-// them, which fields the user typed into and how the step was submitted) and
-// the native host appends it to a log, one JSON line per step, for building
-// the detector. Values are never recorded: a typed field gets only the shape
-// of its value (email, digits, …), its length band (not for a secret), and
-// whether it was the username of a saved login for the site, which the
-// background decides from a salted digest. See docs/autofill.md, "Learning a site".
+// Record (once "Learn this site"): while the user uses a page by hand, every
+// frame of the tab records the shape of each step (the inputs, what the
+// detector made of them, which fields the user typed into and how the step
+// was submitted) and a timeline of what the user did (clicks, named keys,
+// focus, typing by shape, submits, scrolls, navigations), and the native host
+// appends it to a log, one JSON line per step or batch of the timeline, for
+// fixing the detector. Values are never recorded: a typed field gets only the
+// shape of its value (email, digits, …), its length band (not for a secret),
+// and whether it was the username of a saved login for the site, which the
+// background decides from a salted digest. See docs/autofill.md, "Recording a site".
 
-/** How long a learning session lasts unless it's stopped or the sign-in works first. */
-export const LEARN_TTL_MS = 5 * 60_000
+/** How long a recording lasts unless it's stopped first. */
+export const LEARN_TTL_MS = 10 * 60_000
 /** Caps that keep one step well under the host's 64 KiB request limit. */
 export const MAX_INPUTS = 80
 export const MAX_FRAMES = 20
 export const MAX_TEXT = 80
 export const MAX_STEPS = 200
+/** A recording's timeline holds at most this many events; later ones are counted, not kept. */
+export const MAX_EVENTS = 4000
+/** What a frame sends of its timeline at once, and how often. */
+export const EVENTS_PER_BATCH = 50
+export const BATCH_MS = 500
 
 /** What a typed value looked like. "secret": typed into a password box. */
 export type ValueShape = "secret" | "email" | "phone" | "digits" | "text"
@@ -23,7 +30,7 @@ export type LengthBand = "1-3" | "4-8" | "9-16" | "17-32" | "33+"
 export type Truth = "username" | "email" | "phone" | "password" | "otp" | "other"
 export type LearnTrigger = "start" | "change" | "submit"
 export type SubmitBy = "click" | "enter" | "submit"
-export type LearnEnd = "stopped" | "signed-in" | "timeout" | "closed" | "replaced"
+export type LearnEnd = "stopped" | "timeout" | "closed" | "replaced"
 
 export interface LearnRect {
   x: number
@@ -32,12 +39,93 @@ export interface LearnRect {
   h: number
 }
 
-/** What a learning session's frames are told: its id, the salt for username digests and when it ends. */
+/** What a recording's frames are told: its id, the salt for username digests, when it started (timeline times count from it) and when it ends. */
 export interface LearnSession {
   id: string
   salt: string
+  startedAt: number
   until: number
 }
+
+/**
+ * An element the user acted on, in the probe's terms: never its value, and
+ * text only for a button or link (40 characters), scrubbed like page text.
+ */
+export interface Target {
+  tag: string
+  type?: string
+  name?: string
+  id?: string
+  role?: string
+  label?: string
+  autocomplete?: string
+  text?: string
+  /** A short selector path, up to four elements: `form#login > div.row > input[name=email]`. */
+  path: string
+  inShadow?: boolean
+  /** The detector's role for a field, as of the frame's last step. */
+  detected?: string
+}
+
+export type TimelineType =
+  | "pointerdown"
+  | "pointerup"
+  | "click"
+  | "dblclick"
+  | "key"
+  | "focus"
+  | "blur"
+  | "input"
+  | "change"
+  | "submit"
+  | "scroll"
+  | "unload"
+  // From the background: what Chrome saw of the tab.
+  | "navigate"
+  | "popup"
+  | "signed-in"
+
+/** One thing the user did, or that happened to the tab, `t` ms after the recording started. */
+export interface TimelineEvent {
+  t: number
+  type: TimelineType
+  target?: Target
+  /** Viewport coordinates of a pointer event. */
+  x?: number
+  y?: number
+  /** A named key (`Enter`, `Tab`, `ArrowDown`, …), or `char` for any printable one. */
+  key?: string
+  /** Modifiers held, as `alt+ctrl+meta+shift` in that order. */
+  mods?: string
+  /** What the field holds after typing, by shape: never the value. */
+  shape?: ValueShape
+  length?: LengthBand
+  /** The kind of input (`insertText`, `insertFromPaste`, `deleteContentBackward`, …), the last of those merged: typing in one field close together is one event, and how many keystrokes it was isn't kept (that would be the value's length). */
+  inputType?: string
+  /** A submit's control. */
+  submitter?: Target
+  /** Where a page or frame went: origin, path and the query's parameter names. */
+  frame?: LearnFrame
+  /** Set by the background: which frame it came from and whether that's on the page's site. */
+  frameId?: number
+  sameSite?: boolean
+  transition?: string
+  /** Events a frame couldn't send (too many, too fast). */
+  dropped?: number
+}
+
+/** Keys recorded by name; any other key with a printable character is `char`. */
+const NAMED_KEYS = new Set([
+  "Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown",
+  "Shift", "Control", "Alt", "Meta", "CapsLock", "Insert", "ContextMenu",
+  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+])
+
+/** The name a keydown is recorded by: never which character it typed. */
+export const keyName = (key: string) => (NAMED_KEYS.has(key) ? key : "char")
+
+export const modsOf = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) =>
+  [e.altKey && "alt", e.ctrlKey && "ctrl", e.metaKey && "meta", e.shiftKey && "shift"].filter(Boolean).join("+")
 
 export interface Typed {
   /** 1 for the first field the user typed into in this document, then 2, … */
@@ -150,13 +238,13 @@ export const clip = (s: string | null | undefined, n = MAX_TEXT) => (s ?? "").re
  * addresses, runs of four or more digits, and the values typed in this
  * document (a step 2 that says "Signed in as kit" names the username).
  */
-export function scrub(text: string, typed: Iterable<string> = []): string {
-  let out = text
-  for (const value of typed) {
-    const v = value.trim()
-    if (v.length >= 3) out = out.replace(new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "<typed>")
-  }
-  return out.replace(/[\w.+%'-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>").replace(/\d{4,}/g, "<n>")
+export const scrub = (text: string, typed: Iterable<string> = []): string => scrubber(typed)(text)
+
+/** `scrub` for many texts and the same typed values: their pattern is built once, longest first. */
+export function scrubber(typed: Iterable<string> = []): (text: string) => string {
+  const values = [...new Set([...typed].map((v) => v.trim()).filter((v) => v.length >= 3))].sort((a, b) => b.length - a.length)
+  const own = values.length ? new RegExp(values.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi") : null
+  return (text) => (own ? text.replace(own, "<typed>") : text).replace(/[\w.+%'-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>").replace(/\d{4,}/g, "<n>")
 }
 
 /** Where a frame is, without the query's values or the fragment, its path and parameter names scrubbed like page text. */

@@ -527,7 +527,7 @@ scenario named.
 | `forms`, `fill-form` | Shared form rules | Strict asks for the passphrase or an enrolled platform PRF assertion |
 | `save-form` | Shared `forms::saved_fields` rules | Strict asks for the passphrase or an enrolled platform PRF before a card is saved; an identity saves without |
 | `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Shared ceremony rules, without biometric UV | Strict uses passphrase reauthentication; required UV uses the browser |
-| `learn` | Same, kept in the browser | See "Learning logs" below |
+| `learn`, `learn-read`, `learn-delete` | Same, kept in the browser | See "Recordings" below |
 | Rate limits | Same | The host's token buckets, in the service worker |
 
 ### Background and page features
@@ -548,7 +548,7 @@ scenario named.
 | Toolbar popup: this site's logins and Fill, fill errors, the offer | Same (the vault's own popup) | `fillAndTotp`, `rateLimited`, `securityPage`, `savePrompt` |
 | Locked and not set up | The menu and popup offer to unlock or set up here | `locked`, `notInstalled` |
 | Passkeys | Registration, assertions, account selection, conditional UI, sync and deletion | `e2e/standalone.ts`; native adapter covered by `passkeys` |
-| "Learn this site" (#65), in the popup | Same | `learnAndNever` |
+| Record (#65, once "Learn this site"), in the popup's header and by shortcut | Same | `learnAndNever` |
 | "Never for this site", and "Saving is off… Turn on" in the popup | Same; Settings also lists every such site | `learnAndNever` |
 | Touch ID for card numbers | Strict passphrase or enrolled PRF | `formsTouchId` is native only; e2e/standalone.ts covers Strict and PRF |
 
@@ -564,18 +564,21 @@ scenario named.
 | Export | Neither build has one |
 | Activity | Same entries and limits, in Settings › Activity; see "Activity" below |
 
-### Learning logs
+### Recordings
 
-"Learn this site" works as in the native build: the background's `Learner`
-(bg/learn.ts) turns each step into a line with no values, and `learn` writes
-it. The native host appends to `~/.local/state/deadbolt/learn/<session>.jsonl`.
+Record works as in the native build: the background's `Learner`
+(bg/learn.ts) turns each step and batch of the timeline into a line with no
+values, and `learn` writes it. The native host appends to
+`~/.local/state/deadbolt/learn/<session>.jsonl`.
 The standalone build keeps the same lines in this extension's IndexedDB
 (bg/learn-log.ts), with the host's session-id rule and limits: at most 4 MiB
 a log, the newest 50 logs, none past 30 days, and 100 lines at once, then
 10 a second. Like the host's log, it lives outside the vault, works while it's
-locked, and never reaches the wasm worker. Settings › Learning logs downloads
-every session as one JSONL file, each line with its `session`, for
-`bun corpus/learned.ts --file <download>`, or deletes them. Settings › Saving
+locked, and never reaches the wasm worker. `learn-read` and `learn-delete`
+read and delete one log there, for the popup's Download and Delete after a
+recording. Settings › Recordings downloads every recording as one JSONL file,
+each line with its `session`, for `bun corpus/learned.ts --file <download>`,
+or deletes them. Settings › Saving
 lists the sites "Never for this site" turned off (the same
 `chrome.storage.local` preference as the native build), each with Turn on.
 

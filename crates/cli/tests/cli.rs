@@ -2788,6 +2788,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
             "generate",
             "passkeys",
             "learn",
+            "learn-files",
             "forms",
             "save-form"
         ])

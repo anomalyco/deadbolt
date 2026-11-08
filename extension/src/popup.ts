@@ -9,7 +9,7 @@ import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
 import { offerCard } from "./ui/offer"
 import { passkeyCard } from "./ui/passkey"
-import { learnLine, learningCard, savingOffLine } from "./ui/site-notes"
+import { recordControl, savingOffLine } from "./ui/site-notes"
 import { mountVault } from "./vault/app"
 import { animateTo, reducedMotion, ROLL_CSS, timing } from "./ui/motion"
 import { appearanceRows } from "./ui/appearance"
@@ -26,7 +26,6 @@ const root = document.getElementById("app")!
 if (native) document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
 let rendered = ""
-let learningShown = false
 /** Where rows show site icons; the popup's settings change them. */
 let icons: IconSettings = { menu: false, vault: true }
 /** The settings show in place of the site's logins. */
@@ -40,6 +39,8 @@ function announce(text: string) {
   live.textContent = ""
   setTimeout(() => (live.textContent = text), 50)
 }
+/** Record: in the header and under it on every web page, whatever Deadbolt's state (see ui/site-notes.ts). */
+const record = native ? recordControl(() => tabId, announce) : null
 /** A login's tile: its site's icon, dithered in the first time this popup shows it, or its letter (see ui/site-icon.ts). */
 function tileFor(a: Account, index: number): HTMLElement {
   const url = a.urls.find(Boolean) ?? ""
@@ -288,6 +289,7 @@ function lockButton(): HTMLElement {
 async function render(changed = false) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   tabId = tab?.id
+  void record?.refresh()
   const reply = tabId === undefined ? null : await send<PopupReply>({ type: "db:popup-load", tabId })
   paint(reply, changed)
 }
@@ -297,8 +299,7 @@ function paint(reply: PopupReply | null, changed: boolean) {
   const body = settingsOpen ? settingsBody() : (statusBody(status) ?? (reply ? siteBody(reply) : null))
 
   // Status pushes re-render; skip it when nothing visible changed.
-  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff, reply?.learning, settingsOpen, icons.vault])
-  learningShown = !!reply?.learning
+  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff, settingsOpen, icons.vault])
   if (key === rendered && !changed) return
   const first = rendered === ""
   rendered = key
@@ -320,16 +321,14 @@ function paint(reply: PopupReply | null, changed: boolean) {
             passkeyCard(reply.passkey, tabId, { chosen: () => window.close(), ended: () => void render(true) }),
           ]
         : [
-            reply?.learning ? learningCard(reply.learning, tabId, () => void render(true)) : null,
             reply?.offer ? offerCard(reply.offer, tabId, () => void render(true)) : null,
             body,
             reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff, tabId, () => void render(true)) : null,
-            // Learning keeps no logins, so it works locked too; it needs a page to learn.
-            reply && !reply.learning && !reply.unfillable && reply.host && (status.state === "ready" || status.state === "locked") ? learnLine(tabId, () => void render(true)) : null,
           ]),
   )
   root.replaceChildren(
-    h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("h1", { class: "brand" }, "Deadbolt"), pill(status)),
+    h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("h1", { class: "brand" }, "Deadbolt"), record?.button ?? null, pill(status)),
+    ...(record ? [record.bar] : []),
     body2,
     h("footer", { class: "bottom" }, open ?? h("span"), h("span", { class: "bottom-end" }, status.state === "ready" ? (native ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : lockButton()) : null, native ? settingsButton() : null)),
   )
@@ -361,11 +360,6 @@ if (native) {
   chrome.runtime.onMessage.addListener((message: StatusChanged) => {
     if (message?.type === "db:status") void render()
   })
-
-  // While learning, the step count follows along.
-  setInterval(() => {
-    if (learningShown) void render()
-  }, 1000)
 
   // A vault that's slow to answer shows that it's connecting, never an empty popup.
   const slow = setTimeout(() => rendered === "" && paint({ status: { state: "connecting" }, accounts: [] }, false), 300)

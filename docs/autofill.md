@@ -1221,64 +1221,116 @@ globe, 64 px from `_favicon/`). At 17–26 px the traced icon is no sharper,
 its edges come out lumpier, and it's 90–175 KB of path per icon, so rasters
 stay rasters: the dither works on pixels anyway.
 
-## Learning a site
+## Recording a site
 
-When Deadbolt misses a site's form, the popup's **Learn this site** records
-the user signing in by hand, to build the detector from. It isn't a fill:
-while the tab learns, Deadbolt's surface (the menu, a generated password)
-stays away and a sign-in session's later steps fill nothing.
+When Deadbolt gets a site wrong, **Record** keeps what the user does there by
+hand, so the detector can be fixed from it. It was "Learn this site", a link
+at the bottom of the popup shown only on pages that get logins, with
+Deadbolt connected (ready or locked), outside the native popup's settings and
+a passkey prompt, and in the browser-only vault only unlocked and not while
+searching: on a plain-http page, a locked browser-only vault, a disconnected
+native one, or a page whose logins filled the popup, it was missing or out
+of sight. Record is a dot in the popup's header in both builds, whatever
+Deadbolt's state and whatever the page reply says; only where Chrome lets no
+extension in (its own pages, the Web Store) is it disabled, with a line
+saying why. It isn't a fill: while a tab records, Deadbolt's surface (the
+menu, a generated password) stays away and a sign-in session's later steps
+fill nothing, and nothing is added to the page or takes its focus.
 
-- **A session** belongs to one tab. It ends when the user clicks Stop, 2.5 s
-  after the save judge sees the sign-in work (so the page it lands on is
-  recorded), after 5 minutes, or with the tab. It needs no unlocked vault;
-  unlocked, it can also tell a saved username (below). The background keeps
-  its sessions in `chrome.storage.session` too, so a service worker that
-  restarts picks them up (one whose time ran out meanwhile ends then). A
-  frame whose step the background refuses ends the session on its side, so
-  the inline menu doesn't stay away for a session nobody logs.
+- **Starting and stopping.** The header's dot starts a recording of the tab
+  and closes the popup; the `record` command does too, and stops it
+  (⌥⇧R on a Mac, Alt+Shift+D elsewhere, where Chrome keeps Alt+Shift+R;
+  either can be changed in chrome://extensions/shortcuts). While it runs
+  the toolbar button says `REC` in red (over an offer's `1`, which shows
+  again after) and the popup "Recording · 0:42" with Stop. It ends on Stop,
+  on the shortcut, after 10 minutes, or with the tab. A sign-in the save
+  judge sees work is a `signed-in` mark on the timeline, not an end. It
+  needs no unlocked vault; unlocked, it can also tell a saved username
+  (below). The background keeps its recordings in `chrome.storage.session`
+  too, so a service worker that restarts picks them up (one whose time ran
+  out meanwhile ends then). A frame whose step or events the background
+  refuses ends the recording on its side, so the inline menu doesn't stay
+  away for one nobody logs.
+- **After.** The popup says "Recorded 38 steps on accounts.example.com" (the
+  timeline's events) with **Download**, the recording's log as one JSONL
+  file in Settings' format (each line with its `session`, timeline
+  included), and **Delete**, which removes the log (`learn-read` and
+  `learn-delete` under Host messages). Either puts the note away; so does
+  the next recording, or closing the tab.
 - **Every frame** of the tab joins, from any site, including frames that load
-  later (they ask the background on load). Steps from frames on another site
-  than the top page are marked `sameSite: false`, judged from the frame's
-  origin as Chrome reports it, not from the step. The popup says so: chat
-  widgets and ads are logged too, by shape only.
-- **A step** is recorded when the session starts, when the inputs a frame
+  later (they ask the background on load, the one thing a frame does while
+  nothing records). Steps and events from frames on another site than the
+  top page are marked `sameSite: false`, judged from the frame's origin as
+  Chrome reports it, not from what the frame says.
+- **A step** is recorded when the recording starts, when the inputs a frame
   shows or the detector's verdict change, and when the user submits: a
   trusted click on a button, Enter in an input or a trusted submit event,
-  found without the detector, since a page it gets wrong is what learning
+  found without the detector, since a page it gets wrong is what recording
   is for. A step holds each input in the corpus probe's terms
   (`extension/corpus/probe.ts`: type, name, id, autocomplete, label,
   placeholder, size and place, shadow root, form), the detector's role for
   it and the page's kind, the submit control it picked, what the user
   clicked and whether that was the same control, the frame's place (origin,
   path, the query's parameter names, never values) and its iframes.
+- **The timeline** is what the user did, `t` milliseconds after the start:
+  pointer down and up, clicks and double-clicks with viewport `x` and `y`;
+  keys by name only (Enter, Tab, Escape, arrows, Backspace, Delete, Home,
+  End, page keys, F-keys, modifiers), any printable key as `char` with its
+  modifiers; focus and blur; typing (`input`, with its `inputType`, such as
+  `insertFromPaste`) and `change`, by the value's shape and length band
+  only; submits with their control; scrolls (at most two a second per
+  frame); `unload` when a page or frame goes. The background adds what
+  Chrome sees: navigations of every frame (origin, path, parameter names,
+  the transition), windows the tab opens, and `signed-in`. Each element is
+  a target in the probe's terms: tag, type, name, id, role, label,
+  autocomplete, the text of a button or link (40 characters), a selector
+  path of up to four elements, whether it's in a shadow root, the
+  detector's role for a field as of the frame's last step, and the frame
+  (`frameId`). Typing into a field isn't a key per character: printable
+  keys there are left out, and typing in one field less than a second apart
+  is one event with no count (that would be the value's length); in a
+  password box the typing is one event until the user moves on, and only
+  Enter, Tab and Escape are kept, so neither its length nor its capitals
+  show. A frame sends its events every half second, at most 50 at once,
+  and at most a burst of 60, then 20 a second (more are counted as
+  `dropped`); the background takes at most 4,000 a recording, rebuilds
+  each from the fields above only, and writes them a second apart as
+  `timeline` lines under the host's request limit. The frame's listeners
+  are on only while the tab records, capture and passive; measured in
+  Chromium on a page of three fields and a button, each event costs about
+  40 µs of the content script, the submit steps a button click records
+  included.
 - **Typed fields** get what the typing shows instead of the value: the order
   they were typed in, the value's shape (`secret` in a password box, then
   `email`, `phone`, `digits` or `text`), a length band (not for a secret),
   whether it repeats an earlier field (`sameAs`), whether it's the username
   of a saved login for the site (`savedUsername`), and from those the field's
   `truth`: the role the detector is judged against. For `sameAs` and `savedUsername` the content
-  script keeps SHA-256 digests of the session's random salt and the value,
+  script keeps SHA-256 digests of the recording's random salt and the value,
   from the last trusted keystroke; only the username digest of a field that
   isn't a password box leaves the frame, and the background compares it with
   the saved usernames' digests, then drops it before logging. A field that
-  was a password box at any point of the session, or that the detector takes
+  was a password box at any point of the recording, or that the detector takes
   for one, counts as a password box, so a show-password toggle doesn't make
-  a password a username.
-- **Page text** in a step (labels, placeholders, the title, button text, and
-  what the page controls: input names, ids, autocomplete and inputmode, the
-  form's action host, iframe hosts and paths, the frame's path and query
-  parameter names) has email addresses, runs of four or more digits and the
-  values typed into the frame's non-password fields replaced (`<email>`,
-  `<n>`, `<typed>`), since a step 2 often names the account.
+  a password a username. Nothing reads the clipboard: a paste is an `input`
+  whose `inputType` says so, by shape like any other.
+- **Page text** in a step or a target (labels, placeholders, the title,
+  button text, and what the page controls: input names, ids, autocomplete
+  and inputmode, selector paths, the form's action host, iframe hosts and
+  paths, the frame's path and query parameter names) has email addresses,
+  runs of four or more digits and the values typed into the frame's
+  non-password fields replaced (`<email>`, `<n>`, `<typed>`), since a step
+  2 often names the account.
 - **The log** is `~/.local/state/deadbolt/learn/<session>.jsonl` (beside the
-  daemon's log), one `start` line, then `step` lines, then an `end` line with
-  its reason. The native host writes it (see `learn` under Host messages);
-  the daemon and the vault are never involved, and nothing syncs. Starting a
-  session's log removes logs older than 30 days, then the oldest beyond the
-  newest 50. `bun corpus/learned.ts` reports on the logs. The browser-only
-  build keeps the same lines in the extension's IndexedDB under the same
-  limits, and downloads them from Settings for `bun corpus/learned.ts --file`
-  (docs/extension-device.md, Learning logs).
+  daemon's log), one `start` line, then `step` and `timeline` lines, then an
+  `end` line with its reason and how many steps and events it kept. The
+  native host writes it (see `learn` under Host messages); the daemon and
+  the vault are never involved, and nothing syncs. Starting a recording's
+  log removes logs older than 30 days, then the oldest beyond the newest 50.
+  `bun corpus/learned.ts` reports on the logs (it reads the steps). The
+  browser-only build keeps the same lines in the extension's IndexedDB
+  under the same limits, and Settings › Recordings downloads them for
+  `bun corpus/learned.ts --file` (docs/extension-device.md, Recordings).
 
 ## Which logins a page gets
 
@@ -2142,7 +2194,7 @@ The host exits when the port closes.
 ```json
 { "id": "1", "type": "hello" }
 { "id": "1", "type": "hello", "protocol": 3, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "forms", "save-form"] }
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "learn-files", "forms", "save-form"] }
 ```
 
 `status` is one of:
@@ -2418,7 +2470,7 @@ error. `found` is false when it had already finished.
 ```
 
 Appends `line`, a JSON object, as one line of
-`~/.local/state/deadbolt/learn/<session>.jsonl` (see Learning a site).
+`~/.local/state/deadbolt/learn/<session>.jsonl` (see Recording a site).
 `session` is a lowercase UUID, since it names the file; the directory is
 `0700` (set again on every line) and the file `0600`. A session's first line
 prunes the directory: logs older than 30 days go, then the oldest until 50
@@ -2426,6 +2478,22 @@ are left with the new one. The host doesn't read the line: the extension
 puts no values in it. Lines come at most 100 at once, then one per 100 ms
 (`rate_limited`), and a session's log stops at 4 MiB (`bad_request`). It
 works without a daemon and while locked.
+
+### learn-read, learn-delete: a recording's log back, or gone
+
+```json
+{ "id": 11, "type": "learn-read", "session": "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", "offset": 0 }
+{ "id": 11, "type": "learn-text", "text": "{\"event\":\"start\",…}\n…", "next": 262101 }
+{ "id": 12, "type": "learn-delete", "session": "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b" }
+{ "id": 12, "type": "learn-deleted", "found": true }
+```
+
+For the popup's Download and Delete after a recording (capability
+`learn-files`). `learn-read` answers up to 256 KiB of the log from byte
+`offset` (0 when left out), whole lines only, and `next`, where the rest
+starts, or null at the end; a log that isn't there is `not_found`.
+`learn-delete` removes it; `found` says whether it was there. `session` is a
+lowercase UUID as for `learn`, and `learn-read` shares its rate.
 
 ### changed (pushed)
 

@@ -62,6 +62,8 @@ const MAX_LEARN_LOG: u64 = 4 * 1024 * 1024;
 /// How many session logs are kept, and for how long; a new session prunes the rest, oldest first.
 const MAX_LEARN_LOGS: usize = 50;
 const LEARN_LOG_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// The most of a log one `learn-read` answers: escaped, well under `MAX_REPLY`.
+const LEARN_READ: u64 = 256 * 1024;
 
 /// A token bucket: `capacity` at once, refilled one per `every`.
 pub(crate) struct Bucket {
@@ -175,11 +177,21 @@ enum Request {
     PasskeyCreate(passkeys::Create),
     PasskeyGet(passkeys::Get),
     PasskeyCancel(passkeys::Cancel),
-    /// One line for the log of a "Learn this site" session. The extension
+    /// One line for the log of a recording (Record). The extension
     /// sends form shapes only, never values; the host just appends it.
     Learn {
         session: String,
         line: serde_json::Map<String, Value>,
+    },
+    /// Part of a session's log, from byte `offset`, for the popup's Download.
+    LearnRead {
+        session: String,
+        #[serde(default)]
+        offset: u64,
+    },
+    /// Deletes a session's log, for the popup's Delete.
+    LearnDelete {
+        session: String,
     },
 }
 
@@ -257,7 +269,7 @@ pub(super) enum Body {
         status: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        capabilities: [&'static str; 9],
+        capabilities: [&'static str; 10],
     },
     List {
         site: String,
@@ -313,6 +325,13 @@ pub(super) enum Body {
         found: bool,
     },
     Learned,
+    LearnText {
+        text: String,
+        next: Option<u64>,
+    },
+    LearnDeleted {
+        found: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -1179,6 +1198,21 @@ impl Serial {
                 learn(&self.paths, &session, &line)?;
                 Ok(Body::Learned)
             }
+            Request::LearnRead { session, offset } => {
+                if !self.learns.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                learn_read(&self.paths, &session, offset)
+            }
+            Request::LearnDelete { session } => {
+                if !learn_session(&session) {
+                    return Err(Refusal::bad("session is a lowercase UUID"));
+                }
+                let path = self.paths.learn_dir().join(format!("{session}.jsonl"));
+                Ok(Body::LearnDeleted {
+                    found: std::fs::remove_file(path).is_ok(),
+                })
+            }
         }
     }
 }
@@ -1265,6 +1299,38 @@ fn learn(
         .map_err(|e| failed("write", e))
 }
 
+/// Up to `LEARN_READ` bytes of a session's log from `offset`, whole lines
+/// only (a line is far smaller), and where the next part starts, if any.
+fn learn_read(paths: &Paths, session: &str, offset: u64) -> Result<Body, Refusal> {
+    use std::io::{Read, Seek};
+
+    if !learn_session(session) {
+        return Err(Refusal::bad("session is a lowercase UUID"));
+    }
+    let path = paths.learn_dir().join(format!("{session}.jsonl"));
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Err(Refusal {
+            code: Code::NotFound,
+            message: "no such learning log".into(),
+        });
+    };
+    let mut bytes = Vec::new();
+    file.seek(std::io::SeekFrom::Start(offset))
+        .and_then(|_| file.take(LEARN_READ + 1).read_to_end(&mut bytes))
+        .map_err(|_| Refusal::bad("couldn't read the learning log"))?;
+    let mut next = None;
+    if bytes.len() as u64 > LEARN_READ {
+        let end = bytes[..LEARN_READ as usize]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(LEARN_READ as usize, |i| i + 1);
+        bytes.truncate(end);
+        next = Some(offset + end as u64);
+    }
+    let text = String::from_utf8(bytes).map_err(|_| Refusal::bad("the learning log isn't text"))?;
+    Ok(Body::LearnText { text, next })
+}
+
 /// Before a new session's log: removes the logs older than `LEARN_LOG_AGE`,
 /// then the oldest until the new one makes `MAX_LEARN_LOGS`. Best effort: a
 /// log that can't be read or removed is left.
@@ -1320,6 +1386,7 @@ async fn hello(paths: &Paths) -> (Body, bool) {
             "generate",
             "passkeys",
             "learn",
+            "learn-files",
             "forms",
             "save-form",
         ],

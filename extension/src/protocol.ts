@@ -77,6 +77,10 @@ export type Request =
   | { id: number; type: "passkey-cancel"; request: number }
   /** Appends one line to the learning log of `session` (see src/learn.ts). No values, ever. */
   | { id: number; type: "learn"; session: string; line: Record<string, unknown> }
+  /** Part of `session`'s log from byte `offset`, whole lines (capability `learn-files`). */
+  | { id: number; type: "learn-read"; session: string; offset?: number }
+  /** Deletes `session`'s log (capability `learn-files`). */
+  | { id: number; type: "learn-delete"; session: string }
 
 export type RequestBody = Request extends infer R ? (R extends { id: number } ? Omit<R, "id"> : never) : never
 
@@ -183,6 +187,16 @@ export interface PasskeyCancelledReply {
 export interface LearnedReply {
   type: "learned"
 }
+/** `next`: where the rest of the log starts, or null at its end. */
+export interface LearnTextReply {
+  type: "learn-text"
+  text: string
+  next: number | null
+}
+export interface LearnDeletedReply {
+  type: "learn-deleted"
+  found: boolean
+}
 /** An identity a form can be filled from: no values, only which fields it has. */
 export interface FormIdentity {
   ref: string
@@ -247,6 +261,8 @@ export type Reply =
   | PasskeyAssertionReply
   | PasskeyCancelledReply
   | LearnedReply
+  | LearnTextReply
+  | LearnDeletedReply
   | ErrorReply
 
 /** What a request of each type is answered with, besides an error. */
@@ -268,6 +284,8 @@ export interface ReplyFor {
   "passkey-get": PasskeyAssertionReply
   "passkey-cancel": PasskeyCancelledReply
   learn: LearnedReply
+  "learn-read": LearnTextReply
+  "learn-delete": LearnDeletedReply
 }
 
 /** The reply type each request expects. */
@@ -289,6 +307,8 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   "passkey-get": "passkey-assertion",
   "passkey-cancel": "passkey-cancelled",
   learn: "learned",
+  "learn-read": "learn-text",
+  "learn-delete": "learn-deleted",
 }
 
 export type HostMessage =
@@ -483,6 +503,10 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
       return { type: "passkey-cancelled", found: raw.found === true }
     case "learned":
       return { type: "learned" }
+    case "learn-text":
+      return typeof raw.text === "string" ? { type: "learn-text", text: raw.text, next: typeof raw.next === "number" && raw.next > 0 ? raw.next : null } : null
+    case "learn-deleted":
+      return { type: "learn-deleted", found: raw.found === true }
     case "error": {
       const code = CODES.includes(raw.code as ErrorCode) ? (raw.code as ErrorCode) : "failed"
       return { type: "error", code, message: str(raw.message, 1000) ?? "" }

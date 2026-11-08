@@ -23,11 +23,14 @@ declare const DEADBOLT_NATIVE: boolean
 const standalone = DEADBOLT_NATIVE ? null : new StandaloneBackend()
 const host: VaultBackend = DEADBOLT_NATIVE ? new Host() : standalone!
 const saver = new Saver(host)
-const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
+// A recording's REC stays on the toolbar button over an offer's or a prompt's "1".
+const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined, badge: (tabId, text) => learner.badge(tabId, text) })
 const signInWith = new SignInWith(host)
 const providers = new ProviderChain(host, passkeys, signInWith)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith, providers)
-const learner = new Learner(host)
+const learner = new Learner(host, { badgeUnder: (tabId) => (saver.pending(tabId) || passkeys.prompt(tabId) ? "1" : "") })
+saver.badge = (tabId, text) => learner.badge(tabId, text)
+learner.listen()
 const forms = new Forms(host)
 const siteIcons = new SiteIcons(host)
 const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(tabId) !== undefined, providers)
@@ -119,6 +122,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return learner.ask(sender)
     case "db:learn-step":
       return learner.step(sender, String(message.session), message.step)
+    case "db:learn-events":
+      return learner.events(sender, String(message.session), message.events)
     // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
       if (universal.owns(message.token)) return universal.closed(message.token, sender, message.dismissed === true)
@@ -162,12 +167,16 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
       const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
       const savingOff = reply.status.state === "ready" ? await saver.savingOff(message.tabId) : undefined
-      const learning = await learner.status(message.tabId)
-      return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}), ...(savingOff ? { savingOff } : {}), ...(learning ? { learning } : {}) }
+      return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}), ...(savingOff ? { savingOff } : {}) }
     }
+    case "db:popup-record":
+      return fromExtensionPage(sender, "popup.html") ? learner.status(message.tabId) : null
     case "db:popup-learn":
       if (!fromExtensionPage(sender, "popup.html")) return { ok: false, message: "" }
       return message.on ? learner.start(message.tabId) : learner.stop(message.tabId, "stopped")
+    case "db:popup-recorded":
+      if (!fromExtensionPage(sender, "popup.html") || !["download", "delete", "dismiss"].includes(message.action)) return { ok: false, message: "" }
+      return learner.recorded(message.tabId, message.action)
     case "db:popup-fill":
       return fromExtensionPage(sender, "popup.html") ? autofill.popupFill(message.tabId, String(message.ref)) : { ok: false, message: "" }
     case "db:popup-offer":
@@ -251,6 +260,7 @@ chrome.webNavigation.onCommitted.addListener((d) => {
   if (d.tabId === unlockTab && d.frameId === 0 && d.url.split(/[?#]/)[0] !== chrome.runtime.getURL(DEVICE_PAGE)) unlockTab = undefined
   void autofill.navigated(d)
   forms.navigated(d)
+  learner.navigated(d)
   if (d.frameId === 0) {
     void universal.closeTab(d.tabId)
     saver.navigated(d.tabId, d.url, d.transitionType)
@@ -259,6 +269,7 @@ chrome.webNavigation.onCommitted.addListener((d) => {
 })
 // A sign-in with a provider: its popup follows it, and its pages get told the account to point at.
 chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => {
+  learner.opened(d)
   if (providers.active(d.sourceTabId)) void providers.opened(d)
   else signInWith.opened(d.sourceTabId, d.tabId)
 })
@@ -267,6 +278,7 @@ chrome.webNavigation.onDOMContentLoaded.addListener((d) => {
   else void signInWith.loaded(d)
 })
 chrome.webNavigation.onHistoryStateUpdated.addListener((d) => {
+  learner.navigated(d)
   if (providers.active(d.tabId)) { providers.navigated(d); void providers.loaded(d) }
   else void signInWith.loaded(d)
 })

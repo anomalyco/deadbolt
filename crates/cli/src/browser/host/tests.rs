@@ -387,6 +387,68 @@ async fn learn_lines_append_to_the_sessions_log() {
     let reply = host.answer(line_not_object, &frames).await.unwrap();
     assert_eq!(json(&reply)["code"], "bad_request");
     assert_eq!(std::fs::read_dir(paths.learn_dir()).unwrap().count(), 1);
+
+    // The popup's Download reads it back, whole lines at a time, and Delete removes it.
+    let ask = |request: Value| serde_json::to_vec(&request).unwrap();
+    let read = host
+        .answer(
+            &ask(serde_json::json!({"id": 11, "type": "learn-read", "session": session})),
+            &frames,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        json(&read),
+        serde_json::json!({"id": 11, "type": "learn-text", "text": text, "next": null})
+    );
+    let big = serde_json::json!({"event": "timeline", "events": ["x".repeat(40 * 1024)]});
+    for _ in 0..8 {
+        assert!(learn(&paths, session, big.as_object().unwrap()).is_ok());
+    }
+    let (mut offset, mut whole) = (0u64, String::new());
+    loop {
+        let part = host
+            .answer(&ask(serde_json::json!({"id": 12, "type": "learn-read", "session": session, "offset": offset})), &frames)
+            .await
+            .unwrap();
+        let part = json(&part);
+        let chunk = part["text"].as_str().unwrap();
+        assert!(chunk.ends_with('\n') && chunk.len() as u64 <= LEARN_READ);
+        whole.push_str(chunk);
+        match part["next"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert!(offset > 0);
+    assert_eq!(whole, std::fs::read_to_string(&log).unwrap());
+    for (id, found) in [(13, true), (14, false)] {
+        let reply = host
+            .answer(
+                &ask(serde_json::json!({"id": id, "type": "learn-delete", "session": session})),
+                &frames,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            json(&reply),
+            serde_json::json!({"id": id, "type": "learn-deleted", "found": found})
+        );
+    }
+    assert!(!log.exists());
+    let gone = host
+        .answer(
+            &ask(serde_json::json!({"id": 15, "type": "learn-read", "session": session})),
+            &frames,
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&gone)["code"], "not_found");
+    let escape = host
+        .answer(&ask(serde_json::json!({"id": 16, "type": "learn-delete", "session": "../../etc/passwd"})), &frames)
+        .await
+        .unwrap();
+    assert_eq!(json(&escape)["code"], "bad_request");
 }
 
 /// A new session's log prunes logs past 30 days and beyond the newest 50,

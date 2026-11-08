@@ -142,6 +142,8 @@ export interface PasskeyOptions {
   openPopup?: (tabId: number, current: () => boolean) => Promise<void>
   /** Whether the tab's badge is still needed for something else (a save offer). */
   keepBadge?: (tabId: number) => boolean
+  /** Sets the tab's toolbar badge: "1" while a prompt waits, "" after. */
+  badge?: (tabId: number, text: string) => void
   now?: () => number
 }
 
@@ -160,6 +162,7 @@ export class Passkeys {
   private lists = new Map<string, Lister>()
   private openPopup: NonNullable<PasskeyOptions["openPopup"]>
   private keepBadge: NonNullable<PasskeyOptions["keepBadge"]>
+  private badge: NonNullable<PasskeyOptions["badge"]>
   private now: () => number
 
   constructor(
@@ -168,6 +171,7 @@ export class Passkeys {
   ) {
     this.openPopup = options.openPopup ?? openPopupFor
     this.keepBadge = options.keepBadge ?? (() => false)
+    this.badge = options.badge ?? ((tabId, text) => void Promise.all([chrome.action.setBadgeBackgroundColor({ tabId, color: BADGE }), chrome.action.setBadgeText({ tabId, text })]).catch(() => {}))
     this.now = options.now ?? Date.now
   }
 
@@ -458,14 +462,14 @@ export class Passkeys {
         resolve(choice)
       }
       p.timer = setTimeout(() => this.finish(p, fail("NotAllowedError")), ms)
-      void Promise.all([chrome.action.setBadgeBackgroundColor({ tabId: p.tabId, color: BADGE }), chrome.action.setBadgeText({ tabId: p.tabId, text: "1" })]).catch(() => {})
+      this.badge(p.tabId, "1")
       void this.openPopup(p.tabId, () => p.prompt?.id === prompt.id)
     })
   }
 
   private unbadge(tabId: number) {
     if (this.keepBadge(tabId) || [...this.pending.values()].some((p) => p.tabId === tabId && p.prompt)) return
-    void chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {})
+    this.badge(tabId, "")
   }
 
   /**

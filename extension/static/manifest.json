@@ -39,6 +39,12 @@
     },
     "default_popup": "popup.html"
   },
+  "commands": {
+    "record": {
+      "suggested_key": { "default": "Alt+Shift+D", "mac": "Alt+Shift+R" },
+      "description": "Start or stop recording this tab"
+    }
+  },
   "incognito": "not_allowed",
   "web_accessible_resources": [
     {

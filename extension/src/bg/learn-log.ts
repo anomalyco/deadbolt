@@ -1,11 +1,11 @@
-// The browser-only Deadbolt's learning logs ("Learn this site", src/learn.ts):
+// The browser-only Deadbolt's recordings (Record, src/learn.ts):
 // what the native host writes to ~/.local/state/deadbolt/learn/<session>.jsonl,
 // kept in this extension's IndexedDB instead, with the host's limits (a log is
 // at most 4 MiB, the newest 50 are kept, none past 30 days). Lines carry no
 // values (bg/learn.ts drops them before a line is written), so the logs are
 // kept outside the vault and work while it's locked, as the host's do. The
 // vault's Settings download them for `bun corpus/learned.ts --file`, or delete
-// them.
+// them; the popup downloads or deletes the one it just recorded.
 
 const DB = "deadbolt-learn"
 const STORE = "logs"
@@ -59,6 +59,20 @@ async function withStore<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore
 /** Every log, oldest first. */
 export function learnLogs(): Promise<LearnLog[]> {
   return withStore("readonly", async (store) => ((await done(store.getAll())) as LearnLog[]).sort((a, b) => a.updated - b.updated))
+}
+
+/** One session's log, if it's kept. */
+export function learnLog(session: string): Promise<LearnLog | undefined> {
+  return withStore("readonly", async (store) => (await done(store.get(session))) as LearnLog | undefined)
+}
+
+/** Deletes one session's log: whether it was there. */
+export function deleteLearnLog(session: string): Promise<boolean> {
+  return withStore("readwrite", async (store) => {
+    const found = (await done(store.count(session))) > 0
+    if (found) await done(store.delete(session))
+    return found
+  })
 }
 
 /** Deletes every log. */

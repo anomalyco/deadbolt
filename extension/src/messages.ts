@@ -4,7 +4,7 @@
 // document and form the user chose to fill, and in a capture, sent by a
 // content script after the user submitted a login form.
 
-import type { LearnSession, LearnStep } from "./learn"
+import type { LearnSession, LearnStep, TimelineEvent } from "./learn"
 import type { StoredIcon } from "./ui/icon-store"
 import type { Account, CardField, Change, FieldRules, FormCard, FormField as HostField, FormIdentity, FormKind, HostStatus, IdentityField } from "./protocol"
 
@@ -200,10 +200,12 @@ export type ToBackground =
   | { type: "db:forms-query"; kind: FormKind; form: number; section: string; roles: FormRole[]; explicit?: boolean; box?: Box }
   /** The identity and card sections this frame's forms have now, for card fills that span frames. */
   | { type: "db:forms-page"; kinds: FormKind[]; form: number }
-  /** A frame that just loaded asks whether its tab is learning (see src/learn.ts): a LearnSession or null. */
+  /** A frame that just loaded asks whether its tab is recording (see src/learn.ts): a LearnSession or null. */
   | { type: "db:learn-ask" }
-  /** A step of the learning session `session`, from this frame. */
+  /** A step of the recording `session`, from this frame. */
   | { type: "db:learn-step"; session: string; step: LearnStep }
+  /** What the user did in this frame since its last batch, for the recording's timeline. */
+  | { type: "db:learn-events"; session: string; events: TimelineEvent[] }
   // inline menu
   /** `parent`: the origin of the parent window that handed the menu its token. */
   | { type: "db:menu-load"; token: string; parent: string }
@@ -229,8 +231,12 @@ export type ToBackground =
   | { type: "db:popup-offer"; tabId: number; id: string; choice: OfferChoice }
   /** Turn saving back on for the tab's site after "Never for this site". */
   | { type: "db:popup-saving-on"; tabId: number }
-  /** Start or stop learning the tab's site. Answers with a LearnReply. */
+  /** Whether the tab is recording, or has a recording waiting for Download or Delete. Answers with a Recording. */
+  | { type: "db:popup-record"; tabId: number }
+  /** Start or stop recording the tab. Answers with a LearnReply. */
   | { type: "db:popup-learn"; tabId: number; on: boolean }
+  /** The tab's finished recording: its log for Download (a RecordedReply), or Delete it, or put it away. */
+  | { type: "db:popup-recorded"; tabId: number; action: "download" | "delete" | "dismiss" }
   /** Lock the browser-only Deadbolt now (bg/standalone.ts). Answers with the Status after. */
   | { type: "db:popup-lock" }
   // device.html, the standalone device's own page (bg/standalone.ts): answers with a DeviceReply
@@ -478,18 +484,23 @@ export interface PopupReply {
   passkey?: PasskeyPrompt
   /** The tab's site, when the user said "Never for this site". */
   savingOff?: string
-  /** The tab is learning its site (see src/learn.ts). */
-  learning?: Learning
 }
 
-export interface Learning {
-  site: string
-  /** Steps logged so far. */
-  steps: number
-  until: number
-}
+/**
+ * Record, for the popup (see src/learn.ts): `off` can start, `blocked` is a
+ * page no extension can script, `on` is recording, `done` has a recording
+ * waiting for Download or Delete. `steps` counts what the timeline holds.
+ */
+export type Recording =
+  | { state: "off" }
+  | { state: "blocked"; message: string }
+  | { state: "on"; host: string; startedAt: number; until: number; steps: number }
+  | { state: "done"; host: string; session: string; steps: number }
 
-export type LearnReply = { ok: true; learning?: Learning } | { ok: false; message: string }
+export type LearnReply = { ok: true } | { ok: false; message: string }
+
+/** `text`: the recording's log, as Settings downloads it (bg/learn-log.ts learnExport). */
+export type RecordedReply = { ok: true; text?: string } | { ok: false; message: string }
 
 /** "later" (Not now) also holds back the same login on this site for a day; "never" stops offers for the site. */
 export type OfferChoice = "save" | "later" | "never" | "new"

@@ -1,12 +1,12 @@
 import { beforeAll, describe, expect, test } from "bun:test"
 import { initLearn, learnScanned, learning } from "../src/content/learn"
-import type { LearnSession, LearnStep } from "../src/learn"
+import type { LearnSession, LearnStep, TimelineEvent } from "../src/learn"
 
-// The content side of "Learn this site", in one frame shaped like Apple's
-// sign-in widget: the username box shows, the password box waits hidden.
+// The content side of Record, in one frame shaped like Apple's sign-in
+// widget: the username box shows, the password box waits hidden.
 
-const session: LearnSession = { id: "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", salt: "pepper", until: Date.now() + 60_000 }
-const sent: Array<{ type: string; session?: string; step?: LearnStep }> = []
+const session: LearnSession = { id: "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", salt: "pepper", startedAt: Date.now(), until: Date.now() + 60_000 }
+const sent: Array<{ type: string; session?: string; step?: LearnStep; events?: TimelineEvent[] }> = []
 const listeners: Array<(m: unknown) => void> = []
 /** What the background answers to a step. */
 let stepReply: unknown = true
@@ -133,6 +133,55 @@ describe("a learning frame", () => {
     expect(JSON.stringify(start)).not.toContain("kit@")
   })
 
+  test("the timeline: clicks, named keys and typing by shape, never a typed or pasted value", async () => {
+    for (const f of listeners) f({ type: "db:learn", session: { ...session, id: "3b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", startedAt: Date.now() } })
+    document.body.innerHTML = `
+      <form id="login"><label for="email">Email</label><input id="email" name="email" autocomplete="username">
+      <input id="pw" type="password" name="pw"><button id="go" type="submit">Sign in <span>now</span></button></form>`
+    const email = $<HTMLInputElement>("#email")
+    const pw = $<HTMLInputElement>("#pw")
+    const down = (el: Element, key: string, init: KeyboardEventInit = {}) => el.dispatchEvent(trusted(new KeyboardEvent("keydown", { key, bubbles: true, composed: true, ...init })))
+    const focus = (el: Element) => el.dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+    focus(email)
+    for (const c of "kit@example.com") down(email, c)
+    type(email, "kit@example.com")
+    down(email, "Tab")
+    focus(pw)
+    // A password box's capitals and length stay its own.
+    down(pw, "Shift")
+    down(pw, "C", { shiftKey: true })
+    pw.value = "correct horse battery"
+    pw.dispatchEvent(trusted(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertFromPaste" })))
+    down(pw, "Enter")
+    down(document.body, "k")
+    $("#go span").dispatchEvent(trusted(new MouseEvent("pointerdown", { bubbles: true, composed: true, clientX: 40, clientY: 12 })))
+    $("#go span").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true, clientX: 40, clientY: 12 })))
+    await new Promise((r) => setTimeout(r, 650))
+    const timeline = sent.filter((m) => m.type === "db:learn-events" && m.session?.startsWith("3b5d")).flatMap((m) => m.events!)
+    const brief = timeline.map((e) => [e.type, e.key ?? e.target?.id ?? e.target?.tag, e.shape ?? null])
+    expect(brief).toEqual([
+      ["focus", "email", null],
+      ["input", "email", "email"],
+      ["key", "Tab", "email"],
+      ["focus", "pw", null],
+      ["input", "pw", "secret"],
+      ["key", "Enter", "secret"],
+      ["key", "char", null],
+      ["pointerdown", "go", null],
+      ["click", "go", null],
+    ])
+    expect(timeline[0].target).toMatchObject({ tag: "input", id: "email", name: "email", label: "Email", autocomplete: "username", path: "input#email" })
+    expect(timeline[1]).toMatchObject({ length: "9-16" })
+    expect(timeline[4]).toMatchObject({ inputType: "insertFromPaste" })
+    expect(timeline[4].length).toBeUndefined()
+    // Merged typing keeps no count: that would be the value's length.
+    expect(JSON.stringify(timeline)).not.toContain("count")
+    expect(timeline[7]).toMatchObject({ x: 40, y: 12, target: { tag: "button", type: "submit", text: "Sign in now", path: "button#go" } })
+    expect(timeline.every((e, i) => e.t >= 0 && (i === 0 || e.t >= timeline[i - 1].t))).toBe(true)
+    const all = JSON.stringify(sent)
+    for (const never of ["kit@example.com", "correct horse battery", "kit@"]) expect(all).not.toContain(never)
+  })
+
   test("ends here when the background no longer has the session", async () => {
     expect(learning()).toBe(true)
     stepReply = null
@@ -148,8 +197,11 @@ describe("a learning frame", () => {
     for (const f of listeners) f({ type: "db:learn", session: null })
     expect(learning()).toBe(false)
     const before = sent.length
+    // Not recording, the frame doesn't listen at all.
     $("button").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
-    await settle()
+    $("button").dispatchEvent(trusted(new MouseEvent("pointerdown", { bubbles: true, composed: true })))
+    $("button").dispatchEvent(trusted(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 600))
     expect(sent.length).toBe(before)
   })
 })
