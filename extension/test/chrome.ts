@@ -46,6 +46,12 @@ export interface FakeChrome {
   /** URLs opened with chrome.tabs.create. */
   opened: string[]
   offscreenOpen: boolean
+  /** The open offscreen document's id: a new one each time it's created. */
+  offscreenDoc: number
+  /** chrome.runtime.onInstalled listeners. */
+  installedListeners: Array<(details: { reason: string }) => void>
+  /** This build's manifest version. */
+  version: string
 }
 
 /** A message to the extension from `sender`, answered by the first listener that responds (null if none does). */
@@ -92,6 +98,9 @@ export function installChrome(): FakeChrome {
     idleListeners: [],
     opened: [],
     offscreenOpen: true,
+    offscreenDoc: 1,
+    installedListeners: [],
+    version: "1.0.0",
   }
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
     runtime: {
@@ -102,10 +111,15 @@ export function installChrome(): FakeChrome {
         return fake.runtimeAnswer(message)
       },
       onMessage: { addListener: (l: FakeChrome["listeners"][number]) => void fake.listeners.push(l) },
-      getContexts: async () => (fake.offscreenOpen ? [{ contextType: "OFFSCREEN_DOCUMENT" }] : []),
+      getContexts: async () => (fake.offscreenOpen ? [{ contextType: "OFFSCREEN_DOCUMENT", documentId: `offscreen-${fake.offscreenDoc}` }] : []),
+      onInstalled: { addListener: (l: (details: { reason: string }) => void) => void fake.installedListeners.push(l) },
+      getManifest: () => ({ version: fake.version }),
     },
     offscreen: {
-      createDocument: async () => void (fake.offscreenOpen = true),
+      createDocument: async () => {
+        fake.offscreenOpen = true
+        fake.offscreenDoc++
+      },
       closeDocument: async () => void (fake.offscreenOpen = false),
     },
     alarms: {
@@ -146,6 +160,7 @@ export function installChrome(): FakeChrome {
       local: {
         get: async (key: string | string[]) => Object.fromEntries((Array.isArray(key) ? key : [key]).filter((k) => k in fake.local).map((k) => [k, fake.local[k]])),
         set: async (items: Record<string, unknown>) => void Object.assign(fake.local, structuredClone(items)),
+        remove: async (key: string | string[]) => void (Array.isArray(key) ? key : [key]).forEach((k) => delete fake.local[k]),
       },
     },
     action: {

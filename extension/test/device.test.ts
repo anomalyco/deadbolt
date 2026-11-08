@@ -21,6 +21,8 @@ let held: Record<string, Promise<void>>
 let loads = 0
 /** The vault's Activity, newest first, as device-activity pages it. */
 let activity: ActivityEntry[]
+/** What device-settings answers (the preset, and why it locked). */
+let settings: Record<string, unknown>
 const NOW = 1_800_000_000
 
 const ok = (reply: Record<string, unknown>): DeviceReply => ({ ok: true, reply, ms: 1, status })
@@ -46,6 +48,16 @@ async function answer(c: Command): Promise<DeviceReply> {
       return ok({ type: "device-items", items: [] })
     case "device-devices":
       return ok({ type: "device-devices", devices: [{ id: "d".repeat(64), name: "Chrome on macOS", current: true }] })
+    case "device-settings":
+      return ok({ type: "device-settings", retryAt: 0, ...settings })
+    case "device-preset":
+      // As the service worker: Until you quit takes the passphrase, which the vault checks.
+      if (c.preset === "until-quit" && settings.preset !== "until-quit") {
+        if (!c.passphrase) return { ok: false, message: "Enter your passphrase.", code: "passphrase_needed", status }
+        if (c.passphrase === "wrong") return { ok: false, message: "That passphrase isn't right.", code: "wrong_passphrase", status }
+      }
+      settings = { ...settings, preset: c.preset }
+      return ok({ type: "device-settings", retryAt: 0, ...settings })
     case "device-activity": {
       const before = typeof c.before === "number" ? c.before : Infinity
       const entries = activity.filter((e) => e.id < before).slice(0, typeof c.limit === "number" ? c.limit : 50)
@@ -105,6 +117,7 @@ beforeEach(() => {
   phase = { phase: "idle" }
   held = {}
   activity = []
+  settings = { preset: "comfortable" }
   fake.runtimeAnswer = (m) => ((m as { type: string }).type === "db:device" ? answer((m as { command: Command }).command) : undefined)
   logs = (["log", "info", "debug", "warn", "error"] as const).map((k) => spyOn(console, k))
 })
@@ -352,6 +365,71 @@ describe("reload", () => {
     jest.advanceTimersByTime(POLL_MS * 4)
     await flush()
     expect(sentTypes()).toHaveLength(sent)
+  })
+})
+
+describe("lock", () => {
+  const reason = () => app().querySelector<HTMLElement>(".lock-reason")!
+  const note = () => app().querySelector(".preset-note:not(.lock-reason)")!.textContent
+
+  test("the locked page says quietly why it locked", async () => {
+    status = { state: "locked" }
+    settings = { preset: "relaxed", lockedBy: { reason: "idle", idleMs: 12 * 60 * 60_000 } }
+    await open()
+    expect(headings()).toContain("Unlock Deadbolt")
+    expect(reason().hidden).toBe(false)
+    expect(reason().textContent).toBe("Locked · 12 h idle")
+    expect(note()).toBe("Relaxed · locks after 12 hours idle")
+    settings = { preset: "until-quit", lockedBy: { reason: "quit" } }
+    await open()
+    expect(reason().textContent).toBe("Locked · browser restarted")
+    expect(note()).toBe("Until you quit the browser")
+    for (const [why, line] of [["screen", "screen locked"], ["worker", "vault worker stopped"], ["offscreen", "browser closed the vault's page"], ["manual", "you locked it"], ["update", "extension updated"]]) {
+      settings = { preset: "comfortable", lockedBy: { reason: why } }
+      await open()
+      expect(reason().textContent).toBe(`Locked · ${line}`)
+    }
+    // Nothing known, or something that isn't a reason: nothing said.
+    for (const lockedBy of [undefined, { reason: "password123" }]) {
+      settings = { preset: "comfortable", lockedBy }
+      await open()
+      expect(reason().hidden).toBe(true)
+    }
+  })
+
+  test("choosing Until you quit asks for the passphrase first", async () => {
+    status = { state: "ready", version: "test" }
+    await open()
+    const settingsButton = [...app().querySelectorAll<HTMLButtonElement>("button")].find((b) => nameOf(b) === "Settings")!
+    settingsButton.click()
+    await flush()
+    const radio = (p: string) => app().querySelector<HTMLInputElement>(`input[name="preset"][value="${p}"]`)!
+    const sub = [...app().querySelectorAll(".preset")].find((l) => l.contains(radio("until-quit")))!.querySelector(".sub")!.textContent
+    expect(sub).toBe("Stays unlocked until you quit the browser. Anyone using this computer can fill your passwords meanwhile.")
+    radio("until-quit").checked = true
+    radio("until-quit").dispatchEvent(new Event("change"))
+    await flush()
+    // Asked, not chosen yet.
+    expect(commands().filter((c) => c.type === "device-preset")).toEqual([])
+    expect(radio("comfortable").checked).toBe(true)
+    const pass = input("Passphrase to stay unlocked")
+    pass.value = "wrong"
+    submit(pass.closest("form")!)
+    await flush()
+    expect(shownError()!.textContent).toBe("That passphrase isn't right.")
+    expect(radio("comfortable").checked).toBe(true)
+    pass.value = "right"
+    submit(pass.closest("form")!)
+    await flush()
+    expect(commands().filter((c) => c.type === "device-preset").at(-1)).toEqual({ type: "device-preset", preset: "until-quit", passphrase: "right" })
+    expect(radio("until-quit").checked).toBe(true)
+    expect(input("Passphrase to stay unlocked")).toBeNull()
+    // A stricter one again takes nothing.
+    radio("relaxed").checked = true
+    radio("relaxed").dispatchEvent(new Event("change"))
+    await flush()
+    expect(commands().filter((c) => c.type === "device-preset").at(-1)).toEqual({ type: "device-preset", preset: "relaxed" })
+    expect(radio("relaxed").checked).toBe(true)
   })
 })
 
