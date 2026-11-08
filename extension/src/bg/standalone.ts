@@ -10,12 +10,13 @@
 // offscreen owner locks the vault; no trusted page can read a retained key.
 // Why it last locked is kept (no value), for the locked popup to say.
 
-import { changeNeedsProof, DEFAULT_PRESET, isLockedBy, isPreset, PRESETS, VAULT_NAME } from "../device-rules"
+import { changeNeedsProof, DEFAULT_PRESET, isLockedBy, isPreset, PRESETS, stricter, VAULT_NAME } from "../device-rules"
 import type { DeviceCommand, DeviceReply, ItemInput, LockedBy, LockPreset, LockReason, Reauth, ReauthChanged, Status, UnlockProof } from "../messages"
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type ReauthAsk, type ReauthBody, type ReauthReply, type SendOptions, type VaultBackend } from "./backend"
 import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, digest, isCopied, type Copied } from "./clipboard"
 import { appendLearnLine } from "./learn-log"
+import { readPreset, writePreset } from "./preset-store"
 import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultClipboard, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
 
 export const OFFSCREEN_PAGE = "offscreen.html"
@@ -45,8 +46,6 @@ const SLOW_MS: Partial<Record<string, number>> = {
 const REAUTH_MS = 2 * 60_000
 const EXPIRED = "This request isn't waiting anymore. Try again on the page."
 
-/** The chosen preset (src/device-rules.ts), in chrome.storage.local: a setting, nothing secret. */
-const PRESET_KEY = "deadbolt.lockPreset"
 const SYNC_EVERY_MIN = 5
 /** A sync on wake (the popup opening, say) at most this often. */
 const SYNC_AFTER_MS = 30_000
@@ -67,6 +66,8 @@ const LOCKED_BY_KEY = "deadbolt.lockedBy"
 const OPEN_KEY = "deadbolt.open"
 const OPEN_HERE_KEY = "deadbolt.openHere"
 const UPDATED_KEY = "deadbolt.updated"
+/** In chrome.storage.session: the vault was found removed from its vault and locked for it (or opened knowing): not again. */
+const REMOVED_KEY = "deadbolt.removedSeen"
 /**
  * Wrong passphrases in a row, and until when another try is refused: after
  * three, 1 s, then 2, 4, … up to a minute (backoff). In chrome.storage.session
@@ -176,7 +177,7 @@ const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-st
 /** Commands that open the vault: the worker is told the lock preset with them, and keeps Strict itself. */
 const OPENS = new Set<string>(["device-create", "device-unlock", "device-join-finish"])
 /** Commands that check a passphrase, and back off after wrong ones. */
-const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-delete", "device-item-delete", "device-reauth-confirm", "device-biometric-set", "device-biometric-check", "device-preset"])
+const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-delete", "device-item-delete", "device-reauth-confirm", "device-biometric-set", "device-biometric-check", "device-preset", "device-pair"])
 
 const UNREADABLE = "Deadbolt's vault gave an answer it couldn't read. Reload the extension and try again."
 const unsupported = () => new HostError("failed", "The browser-only Deadbolt can't do this yet.")
@@ -238,6 +239,14 @@ export class StandaloneBackend implements VaultBackend {
   private noting: Promise<void> = Promise.resolve()
   /** Times the vault opened: a "locked" heard from before the latest is stale. */
   private opens = 0
+  /**
+   * The preset the open vault's worker says it keeps (hello). Locking
+   * follows the stricter of it and `preset`, so neither side alone can
+   * loosen it. Null while locked, or if the worker doesn't say.
+   */
+  private workerPreset: LockPreset | null = null
+  /** This browser was found removed from the vault, and locked for it or opened knowing it. */
+  private removedSeen = false
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -252,7 +261,7 @@ export class StandaloneBackend implements VaultBackend {
     })
     chrome.idle.onStateChanged.addListener((state) => {
       if (state === "locked") void this.loaded.then(() => {
-        if (PRESETS[this.preset].screenLock) return this.lock("screen")
+        if (PRESETS[this.policy].screenLock) return this.lock("screen")
       })
     })
     // An update or a reload ends the offscreen document and its worker with
@@ -275,22 +284,25 @@ export class StandaloneBackend implements VaultBackend {
         },
         () => {},
       ),
-      chrome.storage.local.get(PRESET_KEY).then(
-        (got) => {
-          if (isPreset(got[PRESET_KEY])) this.preset = got[PRESET_KEY]
-        },
-        () => {},
-      ),
-      chrome.storage.session.get([TRIES_KEY, COPIED_KEY, UPDATED_KEY]).then(
+      readPreset().then((preset) => {
+        this.preset = preset
+      }),
+      chrome.storage.session.get([TRIES_KEY, COPIED_KEY, UPDATED_KEY, REMOVED_KEY]).then(
         (got) => {
           const t = got[TRIES_KEY] as { fails?: unknown; until?: unknown } | undefined
           if (typeof t?.fails === "number" && typeof t.until === "number") this.tries = { fails: t.fails, until: t.until }
           if (isCopied(got[COPIED_KEY])) this.copied ??= got[COPIED_KEY]
           if (got[UPDATED_KEY] === true) this.updated = true
+          if (got[REMOVED_KEY] === true) this.removedSeen = true
         },
         () => {},
       ),
     ]).then(() => { this.initialized = true })
+  }
+
+  /** The preset locking follows: the chosen one, or the worker's if that's stricter. */
+  get policy(): LockPreset {
+    return this.workerPreset ? stricter(this.preset, this.workerPreset) : this.preset
   }
 
   onChange(listener: Listener): () => void {
@@ -318,25 +330,35 @@ export class StandaloneBackend implements VaultBackend {
       void this.loaded.then(() => this.used(force)).catch(() => {})
       return
     }
-    if (!force && this.lastUse && Date.now() - this.lastUse >= PRESETS[this.preset].idleMs) return
+    if (!force && this.lastUse && Date.now() - this.lastUse >= PRESETS[this.policy].idleMs) return
     this.lastUse = Date.now()
     void chrome.storage.session.set({ [LAST_USE_KEY]: this.lastUse }).catch(() => {})
     if (this.status.state === "ready" && this.lastUse - this.lastSync > SYNC_AFTER_MS) void this.sync()
   }
 
-  /** Asks the vault how it is; `change` is passed on to listeners with the status. */
-  async hello(change?: Change): Promise<void> {
+  /**
+   * Asks the vault how it is; `change` is passed on to listeners with the
+   * status. A "locked" asked for before the vault last opened is stale: it's
+   * asked again rather than shown.
+   */
+  async hello(change?: Change, again = 3): Promise<void> {
     const opens = this.opens
     try {
-      const reply = await this.request({ type: "hello" }, TIMEOUT_MS)
-      if (reply.type !== "hello") throw new HostError("failed", UNREADABLE)
+      const raw = await this.raw({ type: "hello" }, TIMEOUT_MS)
+      const reply = parseReply(raw)
+      if (reply?.type !== "hello") throw new HostError("failed", UNREADABLE)
+      if (reply.status !== "ready" && opens !== this.opens && again > 0) return this.hello(change, again - 1)
       // Only what this build sends on: a capability it would refuse is never offered.
       // The learning log is this side's own, whatever the vault says.
       this.capabilities = [...reply.capabilities.filter((c) => c !== "learn" && (c === "passkeys" || c === "save-form-match" || SUPPORTED.has(c))), "learn"]
       if (reply.protocol !== PROTOCOL) {
         this.setStatus({ state: "unavailable", detail: "This extension and its vault are different versions. Reload the extension." }, change)
-      } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
-      else {
+      } else if (reply.status === "ready") {
+        this.workerPreset = isPreset(raw.preset) ? raw.preset : null
+        if (raw.removed === true && !(await this.removed(change))) return
+        this.setStatus({ state: "ready", version: reply.version }, change)
+      } else {
+        this.workerPreset = null
         if (reply.status === "locked") await this.lost(opens)
         this.setStatus({ state: reply.status, detail: reply.detail }, change)
       }
@@ -344,6 +366,20 @@ export class StandaloneBackend implements VaultBackend {
       this.capabilities = []
       this.setStatus({ state: "unavailable", detail: (err as Error).message }, change)
     }
+  }
+
+  /**
+   * Another device removed this browser from the vault: lock it, once, with
+   * that reason. Opened again after that (the user knows), it stays open.
+   * Answers whether the vault stays open.
+   */
+  private async removed(change?: Change): Promise<boolean> {
+    if (this.removedSeen) return true
+    this.removedSeen = true
+    await chrome.storage.session.set({ [REMOVED_KEY]: true }).catch(() => {})
+    if (change === "unlocked") return true
+    await this.lock("removed")
+    return false
   }
 
   async send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, { timeout = TIMEOUT_MS, signal }: SendOptions = {}): Promise<ReplyFor[T]> {
@@ -412,8 +448,11 @@ export class StandaloneBackend implements VaultBackend {
       await this.loaded
       if (command.type === "device-preset") {
         // Ending idle and screen locking takes the passphrase or Touch ID,
-        // on an open vault, which checks it against its own store too.
-        const proof = changeNeedsProof(this.preset, command.preset)
+        // on an open vault, which checks it against its own store too. A
+        // service worker just woken asks the vault how it is first, so an
+        // open vault isn't taken for a locked one.
+        if (this.status.state === "connecting") await this.connect()
+        const proof = changeNeedsProof(this.policy, command.preset)
         if (proof && this.status.state !== "ready") return fail("Unlock Deadbolt first, then choose this.", "locked")
         if (proof && !command.passphrase && !command.prf) return fail("Enter your passphrase to keep Deadbolt unlocked until you quit the browser.", "passphrase_needed")
         if (proof && command.passphrase) {
@@ -444,16 +483,24 @@ export class StandaloneBackend implements VaultBackend {
           } else told = await tell()
           if (told.type === "error") {
             const message = typeof told.message === "string" && told.message ? told.message : "Deadbolt couldn't change the lock preset."
-            if (told.code === "wrong_passphrase" || told.code === "passphrase_needed") return fail(message, told.code)
+            const code = typeof told.code === "string" ? told.code : undefined
+            // A proof the vault refused (a wrong passphrase, a Touch ID key
+            // that isn't this vault's) changed nothing: the vault stays open
+            // on the preset it had.
+            if (proof) {
+              await this.hello()
+              return fail(message, code)
+            }
             await this.lock("changed")
             return fail(message)
           }
+          this.workerPreset = command.preset
         }
         this.preset = command.preset
-        await chrome.storage.local.set({ [PRESET_KEY]: command.preset }).catch(() => {})
+        await writePreset(command.preset).catch(() => {})
       }
       const by = this.status.state === "ready" ? null : await this.lockedBy()
-      return { ok: true, reply: { type: "device-settings", preset: this.preset, retryAt: this.tries.until, ...(by ? { lockedBy: by } : {}) }, ms: Date.now() - started, status: this.status }
+      return { ok: true, reply: { type: "device-settings", preset: this.policy, retryAt: this.tries.until, ...(by ? { lockedBy: by } : {}) }, ms: Date.now() - started, status: this.status }
     }
     if (command.type === "device-copied") {
       const clears = await this.copiedNow({ salt: command.salt, hash: command.hash })
@@ -467,7 +514,7 @@ export class StandaloneBackend implements VaultBackend {
     if (command.type === "device-secret" && !command.passphrase && !command.prf) {
       await this.loaded
       // Strict: showing a password asks for the passphrase every time.
-      if (PRESETS[this.preset].reauth) return fail("Enter your passphrase to show this password.", "passphrase_needed")
+      if (PRESETS[this.policy].reauth) return fail("Enter your passphrase to show this password.", "passphrase_needed")
     }
     const checks = CHECKS.has(command.type) && typeof (command as { passphrase?: string }).passphrase === "string"
     if (checks) {
@@ -633,7 +680,7 @@ export class StandaloneBackend implements VaultBackend {
   /** Strict asks for the passphrase before a card's number or code is filled (the vault holds the same preset). */
   async asksPassphrase(): Promise<boolean> {
     await this.loaded
-    return PRESETS[this.preset].reauth
+    return PRESETS[this.policy].reauth
   }
 
   /** Drops the waiting fill, if any, with `error`. */
@@ -848,7 +895,7 @@ export class StandaloneBackend implements VaultBackend {
     // Woken by the alarm, the service worker may not have heard from the vault yet.
     if (this.status.state === "connecting") await this.connect()
     if (this.status.state !== "ready") return
-    if (Date.now() - this.lastUse >= PRESETS[this.preset].idleMs) await this.lock("idle")
+    if (Date.now() - this.lastUse >= PRESETS[this.policy].idleMs) await this.lock("idle")
   }
 
   /** The vault opened: noted, with the offscreen document holding it, so losing it can be told from locking it. */
@@ -877,7 +924,7 @@ export class StandaloneBackend implements VaultBackend {
 
   /** Keeps `reason` and forgets that the vault was open. */
   private async keep(reason: LockReason) {
-    const idleMs = PRESETS[this.preset].idleMs
+    const idleMs = PRESETS[this.policy].idleMs
     const by: LockedBy = reason === "idle" && Number.isFinite(idleMs) ? { reason, idleMs } : { reason }
     await chrome.storage.local.set({ [LOCKED_BY_KEY]: by }).catch(() => {})
     await chrome.storage.local.remove(OPEN_KEY).catch(() => {})
@@ -1169,7 +1216,10 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
     case "device-join-finish":
       return text(c.passphrase, 1024) && c.passphrase ? { type: "device-join-finish", passphrase: c.passphrase } : null
     case "device-pair":
-      return text(c.code, 200) && c.code ? { type: "device-pair", code: c.code } : null
+      if (!text(c.code, 200) || !c.code) return null
+      if (prf(c.prf)) return { type: "device-pair", code: c.code, prf: c.prf }
+      if (c.passphrase === undefined) return { type: "device-pair", code: c.code }
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-pair", code: c.code, passphrase: c.passphrase } : null
     case "list":
       return origin(c.origin) ? { type: "list", origin: c.origin } : null
     case "save": {

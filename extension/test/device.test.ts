@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test"
 import type { ActivityEntry, DeviceReply, Status } from "../src/messages"
+import { describePreset, quitKeys } from "../src/device-rules"
 import { activityDetail, activitySection, activityWords } from "../src/vault/activity"
 import type { App } from "../src/vault/app"
 import { installChrome, type FakeChrome } from "./chrome"
@@ -58,6 +59,11 @@ async function answer(c: Command): Promise<DeviceReply> {
       }
       settings = { ...settings, preset: c.preset }
       return ok({ type: "device-settings", retryAt: 0, ...settings })
+    case "device-pair":
+      // As the vault: admitting a device takes the passphrase.
+      if (!c.passphrase && !c.prf) return { ok: false, message: "Enter your passphrase to continue.", code: "passphrase_needed", status }
+      if (c.passphrase === "wrong") return { ok: false, message: "That passphrase isn't right.", code: "wrong_passphrase", status }
+      return ok({ type: "device-pair", ok: true })
     case "device-activity": {
       const before = typeof c.before === "number" ? c.before : Infinity
       const entries = activity.filter((e) => e.id < before).slice(0, typeof c.limit === "number" ? c.limit : 50)
@@ -384,7 +390,7 @@ describe("lock", () => {
     await open()
     expect(reason().textContent).toBe("Locked · browser restarted")
     expect(note()).toBe("Until you quit the browser")
-    for (const [why, line] of [["screen", "screen locked"], ["worker", "vault worker stopped"], ["offscreen", "browser closed the vault's page"], ["manual", "you locked it"], ["update", "extension updated"]]) {
+    for (const [why, line] of [["screen", "screen locked"], ["worker", "vault worker stopped"], ["offscreen", "browser closed the vault's page"], ["manual", "you locked it"], ["update", "extension updated"], ["removed", "removed from vault"]]) {
       settings = { preset: "comfortable", lockedBy: { reason: why } }
       await open()
       expect(reason().textContent).toBe(`Locked · ${line}`)
@@ -405,7 +411,9 @@ describe("lock", () => {
     await flush()
     const radio = (p: string) => app().querySelector<HTMLInputElement>(`input[name="preset"][value="${p}"]`)!
     const sub = [...app().querySelectorAll(".preset")].find((l) => l.contains(radio("until-quit")))!.querySelector(".sub")!.textContent
-    expect(sub).toBe("Stays unlocked until you quit the browser. Anyone using this computer can fill your passwords meanwhile.")
+    expect(sub).toBe(describePreset("until-quit"))
+    expect(sub).toContain("Stays unlocked, even through sleep and screen lock, until you quit the browser (")
+    expect(sub).toEndWith("). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.")
     radio("until-quit").checked = true
     radio("until-quit").dispatchEvent(new Event("change"))
     await flush()
@@ -430,6 +438,44 @@ describe("lock", () => {
     await flush()
     expect(commands().filter((c) => c.type === "device-preset").at(-1)).toEqual({ type: "device-preset", preset: "relaxed" })
     expect(radio("relaxed").checked).toBe(true)
+  })
+})
+
+describe("quitting", () => {
+  test("is ⌘Q on a Mac, and Ctrl+Q or closing every window elsewhere", () => {
+    expect(quitKeys({ platform: "MacIntel" })).toBe("⌘Q")
+    expect(quitKeys({ userAgentData: { platform: "macOS" } })).toBe("⌘Q")
+    expect(quitKeys({ userAgentData: { platform: "Windows" }, platform: "Win32" })).toBe("Ctrl+Q / closing every window")
+    expect(quitKeys({ platform: "Linux x86_64" })).toBe("Ctrl+Q / closing every window")
+    expect(describePreset("until-quit", "⌘Q")).toBe("Stays unlocked, even through sleep and screen lock, until you quit the browser (⌘Q). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.")
+  })
+})
+
+describe("pairing", () => {
+  test("approving a device asks for the passphrase with the code", async () => {
+    status = { state: "ready", version: "test" }
+    await open()
+    ;[...app().querySelectorAll<HTMLButtonElement>("button")].find((b) => nameOf(b) === "Settings")!.click()
+    await flush()
+    ;[...app().querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Pair another device")!.click()
+    await flush()
+    const code = input("Pairing code")
+    const pass = input("Passphrase to approve")
+    code.value = "apple-river-stone-lamp-zoo"
+    // Without the passphrase nothing is sent.
+    submit(code.closest("form")!)
+    await flush()
+    expect(commands().filter((c) => c.type === "device-pair")).toEqual([])
+    pass.value = "wrong"
+    submit(code.closest("form")!)
+    await flush()
+    expect(shownError()!.textContent).toBe("That passphrase isn't right.")
+    expect(pass.value).toBe("")
+    pass.value = "right"
+    submit(code.closest("form")!)
+    await flush()
+    expect(commands().filter((c) => c.type === "device-pair").at(-1)).toEqual({ type: "device-pair", code: "apple-river-stone-lamp-zoo", passphrase: "right" })
+    expect(input("Pairing code")).toBeNull()
   })
 })
 

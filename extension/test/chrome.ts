@@ -52,6 +52,8 @@ export interface FakeChrome {
   installedListeners: Array<(details: { reason: string }) => void>
   /** This build's manifest version. */
   version: string
+  /** IndexedDB, as the fake indexedDB keeps it: database, then object store, then key. */
+  idb: Record<string, Record<string, Record<string, unknown>>>
 }
 
 /** A message to the extension from `sender`, answered by the first listener that responds (null if none does). */
@@ -101,7 +103,9 @@ export function installChrome(): FakeChrome {
     offscreenDoc: 1,
     installedListeners: [],
     version: "1.0.0",
+    idb: {},
   }
+  ;(globalThis as unknown as { indexedDB: unknown }).indexedDB = fakeIndexedDB(fake)
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
     runtime: {
       id: ID,
@@ -170,6 +174,45 @@ export function installChrome(): FakeChrome {
     },
   }
   return fake
+}
+
+/** Just enough IndexedDB for a key-value store: open (with its upgrade), get, put, delete and clear, answered asynchronously. */
+function fakeIndexedDB(fake: FakeChrome) {
+  const answer = <T>(result: () => T) => {
+    const req = { result: undefined as T | undefined, error: null, onsuccess: null as null | (() => void), onerror: null as null | (() => void) }
+    queueMicrotask(() => {
+      req.result = result()
+      req.onsuccess?.()
+    })
+    return req
+  }
+  return {
+    open(name: string) {
+      const req = { result: null as unknown, error: null, onupgradeneeded: null as null | (() => void), onsuccess: null as null | (() => void), onerror: null as null | (() => void) }
+      queueMicrotask(() => {
+        const fresh = !fake.idb[name]
+        const stores = (fake.idb[name] ??= {})
+        req.result = {
+          createObjectStore: (store: string) => (stores[store] ??= {}),
+          transaction: (store: string) => ({
+            objectStore: () => {
+              const map = (stores[store] ??= {})
+              return {
+                get: (key: string) => answer(() => structuredClone(map[key])),
+                put: (value: unknown, key: string) => answer(() => ((map[key] = structuredClone(value)), key)),
+                delete: (key: string) => answer(() => void delete map[key]),
+                clear: () => answer(() => void Object.keys(map).forEach((k) => delete map[k])),
+              }
+            },
+          }),
+          close: () => {},
+        }
+        if (fresh) req.onupgradeneeded?.()
+        req.onsuccess?.()
+      })
+      return req
+    },
+  }
 }
 
 /** A page that shows nothing either way. */

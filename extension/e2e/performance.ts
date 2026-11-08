@@ -268,7 +268,7 @@ try {
       Bun.sleep(45000).then(() => { throw new Error("CLI join did not publish a code") }),
     ])
     const drained = (async () => { while (!(await reader.read()).done) {} })()
-    await rpc(page, { type: "device-pair", code })
+    await rpc(page, { type: "device-pair", code, passphrase })
     if (await joining.exited) throw new Error("CLI join failed")
     await Promise.all([drained, diagnostics])
     await cli("ls") // starts the joined peer's daemon

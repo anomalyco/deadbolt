@@ -17,6 +17,11 @@ export const PRESETS: Record<LockPreset, { name: string; idleMs: number; screenL
   relaxed: { name: "Relaxed", idleMs: 12 * 60 * 60_000, screenLock: false, reauth: false },
   "until-quit": { name: "Until you quit the browser", idleMs: Infinity, screenLock: false, reauth: false },
 }
+/** The stricter of two presets: the one listed first in PRESETS. */
+export function stricter(a: LockPreset, b: LockPreset): LockPreset {
+  const order = Object.keys(PRESETS)
+  return order.indexOf(a) <= order.indexOf(b) ? a : b
+}
 /** Whether changing from `from` to `to` takes the passphrase or Touch ID first, as the vault's worker checks (crates/ext-core/src/policy.rs). */
 export const changeNeedsProof = (from: LockPreset, to: LockPreset) => to === "until-quit" && from !== "until-quit"
 export const DEFAULT_PRESET: LockPreset = "comfortable"
@@ -30,10 +35,16 @@ export function duration(ms: number): string {
   return `${hours} hour${hours === 1 ? "" : "s"}`
 }
 
+/** How to quit the browser here: ⌘Q on a Mac. */
+export function quitKeys(nav: { platform?: string; userAgentData?: { platform?: string } } = globalThis.navigator ?? {}): string {
+  const platform = nav.userAgentData?.platform || nav.platform || ""
+  return /mac/i.test(platform) ? "⌘Q" : "Ctrl+Q / closing every window"
+}
+
 /** A preset in one line, from what it does: "Locks after 5 minutes idle and when the screen locks. …" */
-export function describePreset(preset: LockPreset): string {
+export function describePreset(preset: LockPreset, quit = quitKeys()): string {
   const p = PRESETS[preset]
-  if (!Number.isFinite(p.idleMs)) return "Stays unlocked until you quit the browser. Anyone using this computer can fill your passwords meanwhile."
+  if (!Number.isFinite(p.idleMs)) return `Stays unlocked, even through sleep and screen lock, until you quit the browser (${quit}). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.`
   const idle = `Locks after ${duration(p.idleMs)} idle`
   const screen = p.screenLock ? `${idle} and when the screen locks.` : `${idle}. Stays unlocked when the screen locks.`
   return p.reauth ? `${screen} Asks for your passphrase to show or copy a password.` : screen
@@ -50,6 +61,7 @@ export function lockedLine(by: LockedBy): string {
     manual: "you locked it",
     update: "extension updated",
     changed: "lock setting changed",
+    removed: "removed from vault",
   }[by.reason]
   return `Locked · ${why}`
 }
@@ -60,7 +72,7 @@ function short(ms: number): string {
   return minutes < 60 ? `${minutes} min` : `${Math.round(minutes / 60)} h`
 }
 
-const REASONS = new Set<string>(["idle", "screen", "quit", "worker", "offscreen", "manual", "update", "changed"])
+const REASONS = new Set<string>(["idle", "screen", "quit", "worker", "offscreen", "manual", "update", "changed", "removed"])
 /** A LockedBy read back from storage or a reply, or null. */
 export function isLockedBy(v: unknown): v is LockedBy {
   const by = v as LockedBy | null

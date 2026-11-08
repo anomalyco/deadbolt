@@ -28,6 +28,16 @@ impl Preset {
         }
     }
 
+    /// The name the service worker uses, as `parse` reads it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Comfortable => "comfortable",
+            Self::Relaxed => "relaxed",
+            Self::UntilQuit => "until-quit",
+        }
+    }
+
     /// Whether showing or copying a password asks for the passphrase every time.
     pub fn reauth(self) -> bool {
         self == Self::Strict
@@ -157,6 +167,14 @@ mod tests {
         assert_eq!(Preset::parse("comfortable"), Some(Preset::Comfortable));
         assert_eq!(Preset::parse("relaxed"), Some(Preset::Relaxed));
         assert_eq!(Preset::parse("until-quit"), Some(Preset::UntilQuit));
+        for preset in [
+            Preset::Strict,
+            Preset::Comfortable,
+            Preset::Relaxed,
+            Preset::UntilQuit,
+        ] {
+            assert_eq!(Preset::parse(preset.as_str()), Some(preset));
+        }
         assert_eq!(Preset::parse("Strict"), None);
         assert_eq!(Preset::parse("until_quit"), None);
         assert_eq!(Preset::parse(""), None);

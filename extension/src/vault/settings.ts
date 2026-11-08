@@ -245,6 +245,8 @@ export function settingsView(app: App): View {
   const pairStart = button("btn", [glyph("plus"), "Pair another device"], () => openPair())
   const openPair = () => {
     const code = h("input", { class: "input mono-input", placeholder: "word-word-word-word-word", "aria-label": "Pairing code", spellcheck: "false", autocomplete: "off" })
+    // Admitting a device gives it every item for good: the vault asks for the passphrase (or Touch ID) first.
+    const pass = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase to approve", placeholder: "Passphrase", spellcheck: "false" })
     const error = h("p", { class: "error", role: "alert" })
     error.hidden = true
     const label = h("span", { class: "roll-label" }, "Approve")
@@ -253,29 +255,53 @@ export function settingsView(app: App): View {
     const form = h(
       "form",
       { class: "pair-form", novalidate: "" },
-      para("On the other device, run ", h("code", {}, "deadbolt join"), " or choose Join in the Deadbolt app, then enter the code it shows."),
-      h("div", { class: "reauth-row" }, code, go),
+      para("On the other device, run ", h("code", {}, "deadbolt join"), " or choose Join in the Deadbolt app, then enter the code it shows and your passphrase."),
+      code,
+      h("div", { class: "reauth-row" }, pass, go),
       error,
       h("div", { class: "buttons end" }, button("link", "Cancel", () => pairArea.replaceChildren(pairStart))),
     )
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault()
+    const approve = async (proof: { passphrase: string } | { prf: string }) => {
       const value = code.value.trim().toLowerCase()
-      if (!value) return refuse(code)
       go.disabled = true
-      code.disabled = true
+      code.disabled = pass.disabled = true
       rollLabel(label, "Approving…")
-      const r = await app.run({ type: "device-pair", code: value })
+      const r = await app.run({ type: "device-pair", code: value, ...proof })
       if (!r.ok) {
-        go.disabled = code.disabled = false
+        go.disabled = code.disabled = pass.disabled = false
         rollLabel(label, "Approve")
-        error.textContent = r.message
+        error.textContent = r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.message
         error.hidden = false
+        if (r.code === "wrong_passphrase" || r.code === "backoff") {
+          refuse(pass)
+          return pass.focus()
+        }
         return code.focus()
       }
       pairArea.replaceChildren(pairStart)
       await app.refresh()
       app.announce("Approved.")
+    }
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault()
+      if (go.disabled) return
+      if (!code.value.trim()) return refuse(code)
+      if (!pass.value) return refuse(pass)
+      const value = pass.value
+      pass.value = ""
+      await approve({ passphrase: value })
+    })
+    void enrollment(app).then((enrolled) => {
+      if (!enrolled || !form.isConnected) return
+      go.after(button("btn", "Use Touch ID", async (b) => {
+        if (!code.value.trim()) return refuse(code)
+        b.disabled = true
+        try { await approve({ prf: await verify(app) }) }
+        catch (e) {
+          error.textContent = (e as Error).message
+          error.hidden = false
+        } finally { b.disabled = false }
+      }))
     })
     pairArea.replaceChildren(form)
     code.focus()

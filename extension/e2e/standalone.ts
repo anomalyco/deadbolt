@@ -1618,7 +1618,7 @@ async function pair(device: Page) {
   // Keep draining so the child can finish after the code is consumed.
   const drained = (async () => { while (!(await reader.read()).done) {} })()
   const joinError = new Response(joining.stderr as ReadableStream<Uint8Array>).text()
-  await request(device, { type: "device-pair", code })
+  await request(device, { type: "device-pair", code, passphrase })
   const joined = await joining.exited
   await joinError // Drain diagnostics without logging the one-time pairing code.
   check(joined === 0, "CLI joins the browser vault")
@@ -1754,6 +1754,11 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   const wrong = (await vault(worker, { type: "device-preset", preset: "until-quit", passphrase: "wrong fixture passphrase" })).reply
   check(wrong.type === "error" && wrong.code === "wrong_passphrase", "Rust checks the passphrase for Until you quit against its own store")
   check((await command(device, { type: "device-preset", preset: "until-quit" })).ok === false, "the service worker asks for it too")
+  const strange = await command(device, { type: "device-preset", preset: "until-quit", prf: "00".repeat(32) })
+  check(!strange.ok && await state(device) === "ready" && (await request(device, { type: "device-settings" })).reply.preset === "comfortable", "a Touch ID key the vault refuses changes nothing and doesn't lock it")
+  const pairing = { type: "device-pair", code: "apple-river-stone-lamp-zoo" }
+  check((await vault(worker, pairing)).reply.code === "passphrase_needed", "Rust asks for the passphrase before approving a device")
+  check((await vault(worker, { ...pairing, passphrase: "wrong fixture passphrase" })).reply.code === "wrong_passphrase", "Rust checks the passphrase for approving a device against its own store")
 
   // In Settings: picking it asks first, and chooses it once the passphrase is right.
   await device.bringToFront()
@@ -1781,6 +1786,9 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   await device.getByRole("button", { name: "Choose", exact: true }).click()
   await until("Until you quit chosen", () => device.getByRole("radio", { name: /^Until you quit the browser/ }).isChecked())
   check((await request(device, { type: "device-settings" })).reply.preset === "until-quit", "the passphrase chooses Until you quit")
+  const unasked = (await vault(worker, { type: "device-preset", preset: "until-quit", passphrase: "wrong fixture passphrase" })).reply
+  check(unasked.type === "error" && unasked.code === "wrong_passphrase", "Rust checks a passphrase sent with a preset even when the change needs none")
+  check(await device.locator(".preset", { hasText: "Until you quit the browser" }).locator(".sub").innerText() === "Stays unlocked, even through sleep and screen lock, until you quit the browser (Ctrl+Q / closing every window). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.", "Settings warns what Until you quit means")
   await stills("lock-presets")
   await device.getByRole("button", { name: "Settings", exact: true }).click()
 
@@ -1803,8 +1811,11 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   await idle()
   check(await state(device) === "ready", "Until you quit stays unlocked after 13 h idle")
   await request(device, { type: "device-preset", preset: "comfortable" })
+  // A content script can write chrome.storage.local, where the preset used to be: it's never read now.
+  await worker.evaluate(() => chrome.storage.local.set({ "deadbolt.lockPreset": "until-quit" }))
   await idle()
-  check(await state(device) === "locked", "Comfortable locks after the same 13 h idle")
+  check((await request(device, { type: "device-settings" })).reply.preset === "comfortable", "a preset written to chrome.storage.local isn't the extension's")
+  check(await state(device) === "locked", "Comfortable locks after the same 13 h idle, whatever chrome.storage.local says")
   check((await lockedBy(device))?.reason === "idle", "the vault keeps that it locked for being idle")
   check(await lockedPopupLine("locked-popup-idle") === "Locked · 1 h idle", "the locked popup says Locked · 1 h idle")
 

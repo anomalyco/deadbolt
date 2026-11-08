@@ -564,8 +564,8 @@ export type DeviceCommand =
   | { type: "device-biometric-set"; passphrase: string; prf: string; token: string }
   | { type: "device-biometric-reset" }
   | { type: "device-lock" }
-  /** Admit the device that `deadbolt join` shows this code on. */
-  | { type: "device-pair"; code: string }
+  /** Admit the device that `deadbolt join` shows this code on: the vault asks for the passphrase or a PRF key first. */
+  | { type: "device-pair"; code: string; passphrase?: string; prf?: string }
   /**
    * First run, joining a vault another device has: start waiting to be
    * admitted (`{ type: "device-join-start", code, phase: "waiting" }`; the
@@ -716,7 +716,7 @@ export type LockPreset = "strict" | "comfortable" | "relaxed" | "until-quit"
  * `idleMs` is the idle limit an `idle` lock ran out.
  */
 export type LockedBy = { reason: LockReason; idleMs?: number }
-export type LockReason = "idle" | "screen" | "quit" | "worker" | "offscreen" | "manual" | "update" | "changed"
+export type LockReason = "idle" | "screen" | "quit" | "worker" | "offscreen" | "manual" | "update" | "changed" | "removed"
 
 /** A field to set in device-item-save. `type` only for a field the item's type doesn't know. */
 export interface ItemInput {
