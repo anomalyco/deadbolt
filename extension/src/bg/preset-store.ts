@@ -39,7 +39,7 @@ async function run<T>(mode: IDBTransactionMode, act: (store: IDBObjectStore) => 
  * The preset kept here. The first time, a preset chrome.storage.local kept
  * moves here, except "until-quit", which anyone could have written there: it
  * becomes Relaxed. After that chrome.storage.local isn't read again. If the
- * store can't be read, the default.
+ * store can't be read, Strict: it's the only record that can be trusted.
  */
 export async function readPreset(): Promise<LockPreset> {
   try {
@@ -51,7 +51,7 @@ export async function readPreset(): Promise<LockPreset> {
     await chrome.storage.local.remove(LEGACY_PRESET_KEY).catch(() => {})
     return preset
   } catch {
-    return DEFAULT_PRESET
+    return "strict"
   }
 }
 

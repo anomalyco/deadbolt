@@ -1788,7 +1788,7 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   check((await request(device, { type: "device-settings" })).reply.preset === "until-quit", "the passphrase chooses Until you quit")
   const unasked = (await vault(worker, { type: "device-preset", preset: "until-quit", passphrase: "wrong fixture passphrase" })).reply
   check(unasked.type === "error" && unasked.code === "wrong_passphrase", "Rust checks a passphrase sent with a preset even when the change needs none")
-  check(await device.locator(".preset", { hasText: "Until you quit the browser" }).locator(".sub").innerText() === "Stays unlocked, even through sleep and screen lock, until you quit the browser (Ctrl+Q / closing every window). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.", "Settings warns what Until you quit means")
+  check(await device.locator(".preset", { hasText: "Until you quit the browser" }).locator(".sub").innerText() === "Stays unlocked, even through sleep and screen lock, until you quit the browser (close every window, or Ctrl+Shift+Q on Linux). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.", "Settings warns what Until you quit means")
   await stills("lock-presets")
   await device.getByRole("button", { name: "Settings", exact: true }).click()
 

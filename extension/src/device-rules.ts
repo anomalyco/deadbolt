@@ -35,10 +35,10 @@ export function duration(ms: number): string {
   return `${hours} hour${hours === 1 ? "" : "s"}`
 }
 
-/** How to quit the browser here: ⌘Q on a Mac. */
+/** How to quit the browser here: ⌘Q on a Mac. Elsewhere Ctrl+Q doesn't quit Chrome. */
 export function quitKeys(nav: { platform?: string; userAgentData?: { platform?: string } } = globalThis.navigator ?? {}): string {
   const platform = nav.userAgentData?.platform || nav.platform || ""
-  return /mac/i.test(platform) ? "⌘Q" : "Ctrl+Q / closing every window"
+  return /mac/i.test(platform) ? "⌘Q" : "close every window, or Ctrl+Shift+Q on Linux"
 }
 
 /** A preset in one line, from what it does: "Locks after 5 minutes idle and when the screen locks. …" */

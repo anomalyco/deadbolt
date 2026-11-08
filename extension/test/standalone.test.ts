@@ -714,6 +714,35 @@ describe("why it locked", () => {
     expect(backend.status.state).toBe("ready")
   })
 
+  test("a status read beside an unlock doesn't lock a vault opened already removed", async () => {
+    vault = "locked"
+    removed = true
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let opened!: () => void
+    const open = new Promise<void>((resolve) => (opened = resolve))
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-unlock") {
+        // The worker is open (and knows it was removed) before the unlock's answer arrives.
+        vault = "ready"
+        opened()
+        return new Promise((resolve) => (release = () => resolve({ reply: { type: "device-unlock", ok: true } })))
+      }
+      return answer(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const unlock = backend.device({ type: "device-unlock", passphrase: "right" })
+    await open
+    await backend.device({ type: "device-status" })
+    release()
+    expect((await unlock).ok).toBe(true)
+    expect(backend.status.state).toBe("ready")
+    expect(locks()).toBe(0)
+    expect(await lockedBy(backend)).toBeUndefined()
+  })
+
   test("another device removing this browser locks it once, saying so", async () => {
     const backend = await opened()
     // A sync brings the removal: the vault says so when asked after it.
@@ -742,6 +771,36 @@ describe("why it locked", () => {
 })
 
 describe("a lock preset nobody chose", () => {
+  test("if the extension's store can't be read, Strict", async () => {
+    ;(globalThis as unknown as { indexedDB: unknown }).indexedDB = { open: () => { throw new Error("no IndexedDB") } }
+    fake.local["deadbolt.lockPreset"] = "relaxed"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(backend.preset).toBe("strict")
+  })
+
+  test("a screen lock that wakes the service worker follows the worker's stricter preset", async () => {
+    setPreset("until-quit")
+    workerPreset = "comfortable"
+    const backend = new StandaloneBackend()
+    expect(backend.status.state).toBe("connecting")
+    fake.idleListeners.forEach((l) => l("locked"))
+    await settle()
+    expect(locks()).toBe(1)
+    expect(await lockedBy(backend)).toBeUndefined()
+    expect(backend.status.state).toBe("locked")
+  })
+
+  test("Lock forgets the worker's preset: Settings shows the one chosen", async () => {
+    setPreset("until-quit")
+    workerPreset = "comfortable"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(await settingsOf(backend)).toMatchObject({ preset: "comfortable" })
+    await backend.device({ type: "device-lock" })
+    expect(await settingsOf(backend)).toMatchObject({ preset: "until-quit" })
+  })
+
   test("written to chrome.storage.local before it moved, until-quit comes over as Relaxed, and still idle-locks", async () => {
     fake.local["deadbolt.lockPreset"] = "until-quit"
     const start = new Date("2026-10-29T12:00:00Z")
@@ -878,10 +937,37 @@ describe("lock preset in the worker", () => {
     expect(await backend.device({ type: "device-pair", code })).toMatchObject({ ok: false, code: "passphrase_needed" })
     for (let i = 0; i < 3; i++) expect(await backend.device({ type: "device-pair", code, passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
     expect(await backend.device({ type: "device-pair", code, passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
-    expect(requests().filter((b) => b.type === "device-pair")).toHaveLength(4)
+    // A wrong passphrase is caught by its check and never starts a pairing.
+    expect(requests().filter((b) => b.type === "device-pair")).toHaveLength(1)
+    expect(requests().filter((b) => b.type === "device-biometric-check")).toHaveLength(3)
     expect(deviceCommand({ type: "device-pair", code, passphrase: "p", extra: 1 })).toEqual({ type: "device-pair", code, passphrase: "p" })
     expect(deviceCommand({ type: "device-pair", code, prf: "ab".repeat(32) })).toEqual({ type: "device-pair", code, prf: "ab".repeat(32) })
     expect(deviceCommand({ type: "device-pair", code, passphrase: "" })).toBeNull()
+  })
+
+  test("a pairing waiting on the other device doesn't hold up other passphrase checks", async () => {
+    setPreset("strict")
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let reached!: () => void
+    const waiting = new Promise<void>((resolve) => (reached = resolve))
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-pair") {
+        reached()
+        return new Promise((resolve) => (release = () => resolve({ reply: { type: "device-pair", ok: true } })))
+      }
+      return answer(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const pairing = backend.device({ type: "device-pair", code: "apple-river-stone-lamp-zoo", passphrase: "right" })
+    await waiting
+    // The passphrase was checked in its turn; the pairing now waits outside the queue.
+    expect(requests().find((b) => b.type === "device-pair")).toMatchObject({ passphrase: "right" })
+    expect(await backend.device({ type: "device-secret", ref: "v:i", passphrase: "right" })).toMatchObject({ ok: true })
+    release()
+    expect((await pairing).ok).toBe(true)
   })
 
   test("a page's preset change is rebuilt with its passphrase or PRF only", () => {
