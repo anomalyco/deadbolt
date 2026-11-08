@@ -55,6 +55,14 @@ export const MENU_MOTION = {
   foldIn: 0.38,
   /** The pill's label fading in. */
   pillLabel: 0.3,
+  /** The ring round a picked avatar coming in, its arc drawing on as it turns (ui/ring.ts). */
+  ringIn: 0.45,
+  /** The ring closing into a full circle as the fill lands. */
+  ringClose: 0.45,
+  /** The ring going: drawing back when the fill doesn't land, cooling away once it closed when it does. */
+  ringOut: 0.3,
+  /** The tile's ground flashing green and cooling as the ring closes. */
+  ringFlash: 0.9,
   /** The frame springing to a new mode's place, size and corners. */
   frameMode: 0.38,
   /** The frame springing to a new size in the same mode, and the offer's corners. */
@@ -216,6 +224,9 @@ export class Spring {
   }
 }
 
+/** How long a shrinking label's width waits for its old word to start going (rollLabel). */
+export const SHRINK_WAITS_MS = 120
+
 /**
  * Rolls a label to new text: the letters both words start with stay still
  * and only the rest rolls up, while the label's width springs ahead of the
@@ -242,9 +253,11 @@ export function rollLabel(el: HTMLElement, text: string): number {
   const old = current.slice(same)
   el.replaceChildren(rollParts(text, old, text.slice(same), same))
   const after = el.getBoundingClientRect().width
-  // Width leads: a slightly shorter spring than the roll.
+  // Width leads a growing label: a slightly shorter spring than the roll. A
+  // shrinking one waits a beat, so the old word lifts and fades before its
+  // end is cut at the side.
   if (Math.abs(after - before) > 0.5) {
-    const anim = el.animate([{ width: `${before}px` }, { width: `${after}px` }], spring(0.37))
+    const anim = el.animate([{ width: `${before}px` }, { width: `${after}px` }], { ...spring(0.37), delay: after < before ? SHRINK_WAITS_MS : 0, fill: "backwards" })
     anim.finished.then(() => anim.cancel(), () => {})
   }
   // A growing label lets its width get a head start, so the new word is

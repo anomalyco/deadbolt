@@ -119,8 +119,7 @@ body {
   display: none;
 }
 
-/* A press shows at once: the highlight darkens and the avatar gets a ring
-   while the pick passes its checks. */
+/* A press shows at once: the highlight darkens while the pick passes its checks. */
 .highlight {
   transition: background-color 100ms ease-out;
 }
@@ -136,37 +135,60 @@ body {
 }
 
 /* A provider's logo (menu.ts providerMark), on the tile's own ground. */
-.avatar.provider.mark svg {
+.avatar.provider.mark > svg {
   width: 16px;
   height: 16px;
 }
 
-/* Still while the press is checked: nothing in the frame may animate then,
-   or the browser's visibility readings, which the check relies on, pause.
-   It spins once the pick goes ahead. */
-.avatar.busy::after {
-  content: "";
+/* The ring round a picked avatar while it fills (ui/ring.ts). It comes only
+   once the pick goes ahead: nothing in the frame may animate while a press
+   is checked, or the browser's visibility readings, which the check relies
+   on, pause. Its selectors outrank the tile's own `svg` rules. */
+.ring {
   position: absolute;
   inset: -4px;
-  border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--text) 14%, transparent);
-  border-top-color: color-mix(in srgb, var(--text) 70%, transparent);
+  pointer-events: none;
 }
 
-.avatar.busy.spinning::after {
-  animation: spin 700ms linear infinite;
+.avatar .ring .ring-turn {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.ring circle {
+  fill: none;
+  stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
+  transition: stroke 300ms ease-out;
+}
+
+.ring .track {
+  stroke: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.ring .arc {
+  stroke: color-mix(in srgb, var(--text) 70%, transparent);
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+/* The track only tints, so the arc can be seen closing round it. */
+.ring.ok .track {
+  stroke: color-mix(in srgb, var(--text-success) 25%, transparent);
+}
+
+.ring.ok .arc {
+  stroke: var(--text-success);
 }
 
 /* While a press is checked, nothing transitions either. */
 body.held *,
 body.held *::after {
   transition: none !important;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .text {
@@ -246,7 +268,18 @@ body.held *::after {
   font-size: 11px;
 }
 
-.pill .avatar svg {
+/* Room between the tile (and the ring just outside it) and the name. The slot
+   it travels into has the same, so nothing shifts when it lands. */
+.pill > :first-child:not(.pill-label) {
+  margin-right: 4px;
+}
+
+/* A pick from a row with no tile: only its ring shows. */
+.pill .avatar.bare {
+  background: none;
+}
+
+.pill .avatar > svg {
   width: 13px;
   height: 13px;
 }
@@ -295,6 +328,11 @@ body.held *::after {
 
 .pill.failed .pill-label {
   color: var(--danger);
+}
+
+/* Only the new words turn: the old ones keep their colour as they go. */
+.pill.failed .pill-label .roll-out {
+  color: var(--text);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -530,12 +568,6 @@ body[data-offer="dot"] .offer {
 @media (prefers-reduced-motion: reduce) {
   .surface {
     transition: none;
-  }
-
-  /* No spinning: a still ring says the same. */
-  .avatar.busy.spinning::after {
-    animation: none;
-    border-color: color-mix(in srgb, var(--text) 40%, transparent);
   }
 
   .offer .btn.pressed {

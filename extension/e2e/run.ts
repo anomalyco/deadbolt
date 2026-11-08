@@ -1657,9 +1657,9 @@ async function fillAndTotp(scheme: Scheme) {
       await until("username and password fill", async () => (await page.inputValue("#password")) === "correct horse")
       check((await page.inputValue("#email")) === "kit@acme.test", "username filled")
       check((await page.inputValue("#password")) === "correct horse", "password filled")
-      // The menu folded into a pill on the field, which says Filled and goes by itself.
-      const filled = await until("the pill says Filled", async () => (await menu.locator(".pill.ok .pill-label[data-text='Filled']").count().catch(() => 0)) > 0)
-      check(!!filled, "the menu folds into a pill that says Filled")
+      // The menu folded into a pill on the field, named for the login, whose ring closes green; it goes by itself.
+      const filled = await until("the pill's ring closes", async () => (await menu.locator(".pill.ok:has(.ring.ok) .pill-label[data-text='kit@acme.test']").count().catch(() => 0)) > 0)
+      check(!!filled, "the menu folds into a pill named for the login, whose ring closes green")
       await Bun.sleep(350)
       await shotAround(page, `surface-filled-${scheme}`, menu, "#email")
       check(!!(await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)), "and goes by itself")
@@ -3992,8 +3992,9 @@ async function frameLogins() {
     await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
     check(!!(await until("the frame's username fills", async () => (await inner.inputValue("#account_name_text_field")) === "kit@acme.test")), "picking a login fills the frame's username box")
     check((await inner.inputValue("#password_text_field")) === "", "and not its collapsed password box")
-    const pill = await pillOn("Filled")
-    const pillBox = pill ? await (await pill.frameElement()).boundingBox() : null
+    const pill = await pillOn("kit@acme.test")
+    // Read once it's drawn: a pill is put away for a moment while a frame's field is checked (inline.ts hold).
+    const pillBox = pill ? await until("the pill is drawn", async () => { const b = await (await pill.frameElement()).boundingBox(); return b && b.width > 0 ? b : null }) : null
     check(!!pillBox && !!field && pillBox.y >= field.y - 2 && pillBox.y + pillBox.height <= field.y + field.height + 2, `its pill sits on the frame's field in the top page (${JSON.stringify(pillBox)})`)
     await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
     // Esc in the frame's field once the pick has filled it says nothing of the sign-in.
@@ -4005,7 +4006,7 @@ async function frameLogins() {
     const stepPill = await pillOn("Password filled")
     check(!!stepPill && stepPill.parentFrame() === page.mainFrame(), "and its pill, in the top page, says Password filled")
     const password = await inner.locator("#password_text_field").boundingBox()
-    const stepBox = stepPill ? await (await stepPill.frameElement()).boundingBox() : null
+    const stepBox = stepPill ? await until("the step's pill is drawn", async () => { const b = await (await stepPill.frameElement()).boundingBox(); return b && b.width > 0 ? b : null }) : null
     check(!!stepBox && !!password && stepBox.y >= password.y - 2 && stepBox.y + stepBox.height <= password.y + password.height + 2, `on the frame's password box (${JSON.stringify(stepBox)} vs ${JSON.stringify(password)})`)
     await shotAround(page, "frame-login-pill", stepPill ?? menu, "#aid-auth-widget-iFrame")
     const frameOrigin = `http://idmsa.apple.test:${server.port}`
@@ -4367,7 +4368,7 @@ async function midFill() {
     const menu = await menuOn(page)
     if (menu) {
       await menu.locator("button.row").first().click()
-      await until("the menu folds into a Filling pill", async () => ((await menu.locator(".pill .pill-label").textContent().catch(() => "")) ?? "").includes("Filling"))
+      await until("the menu folds into a pill whose ring turns", async () => (await menu.locator(".pill:not(.ok) .ring:not(.ok)").count().catch(() => 0)) > 0)
       await page.goto(`${site}/login?next=home`)
       await until("the delayed fill reaches the host", async () => (await fillCount(run)) > 0)
       await Bun.sleep(3000)

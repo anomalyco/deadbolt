@@ -14,8 +14,9 @@ import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, P
 import { provider as providerOf } from "./signin"
 import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
-import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
+import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, SHRINK_WAITS_MS, spring, Spring, timing, type SpringState } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
+import { ring } from "./ui/ring"
 import { offerTitle } from "./ui/offer"
 import { brandBySlug, siteTile } from "./ui/site-icon"
 
@@ -459,7 +460,7 @@ function highlight(slide = false) {
   el.scrollIntoView({ block: "nearest" })
 }
 
-/** The row (or button) being pressed: a darker highlight and a ring on its avatar, until the pick goes ahead or doesn't. */
+/** The row (or button) being pressed: a darker highlight, until the pick goes ahead or doesn't. */
 function press(el: HTMLElement) {
   relax()
   // Nothing in the frame animates while the press is checked: running
@@ -467,17 +468,13 @@ function press(el: HTMLElement) {
   for (const a of surface.getAnimations()) a.cancel()
   document.body.classList.add("held")
   el.classList.add("pressed")
-  if (el.classList.contains("row")) {
-    highlightEl.classList.add("pressing")
-    el.querySelector(".avatar")?.classList.add("busy")
-  }
+  if (el.classList.contains("row")) highlightEl.classList.add("pressing")
 }
 
 function relax() {
   document.body.classList.remove("held")
   highlightEl.classList.remove("pressing")
   for (const el of Array.from(document.querySelectorAll(".pressed"))) el.classList.remove("pressed")
-  for (const el of Array.from(document.querySelectorAll(".avatar.busy"))) el.classList.remove("busy")
 }
 
 // A press that didn't become a click (dragged off, or refused) lets go.
@@ -616,13 +613,16 @@ async function pick(i: number) {
   }
   // "Sign in with …" fills nothing: the page's own button for it gets a ring, and the user clicks it.
   if ("provider" in a) return signInWith(i, a.provider)
-  // Checked: now it may move. The ring spins while the fill is on its way.
+  // Checked: now it may move. A ring turns round the avatar while the fill is on its way.
   document.body.classList.remove("held")
   highlightEl.classList.remove("pressing")
-  for (const el of Array.from(rowsEl.querySelectorAll(".avatar.busy"))) el.classList.add("spinning")
   const passkey = "passkey" in a
   const signing = passkey || universal || ("account" in a && signsIn.has(a.account.ref))
-  const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, signing ? "Signing in…" : "Filling…")
+  // A row without a tile (no site icons) gets a bare one in the pill, for the ring to turn round.
+  const tile = rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? h("span", { class: "avatar bare", "aria-hidden": "true" })
+  // The pill names what was picked and keeps that name: the ring says how it's going.
+  const label = fold(tile, pillName(a), { check: false })
+  const turning = ring(tile)
   announce(signing ? "Signing in…" : "Filling…")
   const ref = "identity" in a ? a.identity.ref : "card" in a ? a.card.ref : passkey ? a.passkey.ref : "account" in a ? a.account.ref : ""
   const reply = await send<PickReply>("generate" in a ? { type: "db:menu-generate", token } : { type: "db:menu-pick", token, ref })
@@ -631,7 +631,9 @@ async function pick(i: number) {
     // A passkey's sign-in closes the surface from the background once it's through.
     if (passkey) return
     const going = universal || reply.submitted === true
-    settle(label, going ? "Continuing sign-in" : "Filled", true)
+    turning?.close()
+    label.parentElement?.classList.add("ok")
+    relax()
     announce(going ? "Continuing sign-in" : "Filled")
     return void setTimeout(() => done(), FILLED_STAYS_MS + 450)
   }
@@ -641,8 +643,19 @@ async function pick(i: number) {
   say(message)
   announce(`Couldn't fill. ${message}`)
   label.title = message
+  turning?.stop()
   settle(label, "Couldn't fill", false)
   setTimeout(() => done(), FAILED_STAYS_MS)
+}
+
+/** What a pick's pill calls it: the login's username, or the item's name. */
+function pillName(a: (typeof accounts)[number]): string {
+  if ("identity" in a) return a.identity.title
+  if ("card" in a) return cardLine(a.card)
+  if ("generate" in a) return "Strong password"
+  if ("passkey" in a) return a.passkey.username || "Passkey"
+  if ("account" in a) return a.account.username || a.account.title
+  return ""
 }
 
 /**
@@ -791,18 +804,22 @@ function whenWide(width: number | null, go: () => void) {
  * `persist` (the picked row's avatar, or the Save button's label) and `lead`
  * travel into it, everything else fades and blurs where it is, and the frame
  * contracts from where it is onto the pill, which is laid out at its final
- * size and place from the start. Returns the pill's label.
+ * size and place from the start. Returns the pill's label. Without `check`,
+ * the pill has no check of its own to open when it's done (a pick's ring says so).
  */
-function fold(persist: HTMLElement | null, text: string, persistIsLabel = false, lead?: HTMLElement): HTMLElement {
+function fold(persist: HTMLElement | null, text: string, { persistIsLabel = false, lead, check = true }: { persistIsLabel?: boolean; lead?: HTMLElement; check?: boolean } = {}): HTMLElement {
   mode = "pill"
   const pill = h("div", { class: "pill waiting" })
   const label = persistIsLabel && persist ? h("span", { class: "pill-label" }) : h("span", { class: "pill-label" }, text)
   label.dataset.text = persistIsLabel && persist ? (persist.dataset.text ?? text) : text
-  const mark = h("span", { class: "pill-mark", "aria-hidden": "true" }, icon("check"))
   const slots = { lead: h("span", { class: "pill-slot" }), persist: h("span", { class: "pill-slot" }) }
+  // A `persist` that isn't on the menu has nowhere to travel from: it's in the pill from the start.
+  const inPlace = !!persist && !persistIsLabel && !persist.isConnected
   if (lead) pill.append(slots.lead)
-  if (persist && !persistIsLabel) pill.append(slots.persist)
-  pill.append(label, mark)
+  if (inPlace) pill.append(persist)
+  else if (persist && !persistIsLabel) pill.append(slots.persist)
+  pill.append(label)
+  if (check) pill.append(h("span", { class: "pill-mark", "aria-hidden": "true" }, icon("check")))
   // Whatever goes fades where it is; the pill is the main change. It keeps
   // its size too, so the narrowing frame closes over it instead of reflowing it.
   const fading = Array.from(surface.children) as HTMLElement[]
@@ -822,7 +839,7 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
     slot.style.cssText = `display:inline-block;flex-shrink:0;width:${w}px;height:${w}px`
   }
   size(slots.lead, lead, 22)
-  size(slots.persist, persist && !persistIsLabel ? persist : null, 22)
+  size(slots.persist, persist && !persistIsLabel && !inPlace ? persist : null, 22)
   report()
 
   // Once the content script says where the frame is going, the pill takes
@@ -855,7 +872,7 @@ function fold(persist: HTMLElement | null, text: string, persistIsLabel = false,
     }
     moveIn(lead, slots.lead)
     if (persistIsLabel) moveIn(persist, slots.persist, true)
-    else moveIn(persist, slots.persist)
+    else if (!inPlace) moveIn(persist, slots.persist)
     if (!persistIsLabel) {
       if (host.springs && !reducedMotion()) folding.label = label
       else label.animate([{ opacity: 0 }, { opacity: 1 }], timing(MENU_MOTION.pillLabel))
@@ -876,32 +893,36 @@ function widthOf(label: HTMLElement, text: string): number {
 }
 
 /**
- * The pill says how it went. Its width leads: the new width goes to the
- * content script first, and the label rolls (and the check comes in) only
- * once the frame has started toward it.
+ * The pill says how it went. The frame always holds the pill: growing, its
+ * width leads (the new width goes to the content script first, and the label
+ * rolls, and the check comes in, once the frame has started toward it);
+ * shrinking, the label goes first and the frame follows on the same spring.
  */
 function settle(label: HTMLElement, text: string, ok: boolean) {
   const pill = label.parentElement
   if (!pill) return
   // The check takes 20px when it shows (its 14px, the gap, less its pull-in).
-  const grow = widthOf(label, text) - label.getBoundingClientRect().width + (ok ? 20 : 0)
+  const grow = widthOf(label, text) - label.getBoundingClientRect().width + (ok && pill.querySelector(".pill-mark") ? 20 : 0)
   const width = Math.ceil(pill.getBoundingClientRect().width + grow)
+  const say = () => {
+    const mark = pill.querySelector<HTMLElement>(".pill-mark")
+    if (mark && !reducedMotion()) {
+      const { easing, duration } = spring(0.45)
+      mark.style.transition = `width ${duration}ms ${easing}, margin-left ${duration}ms ${easing}, opacity 200ms ease-out 120ms`
+    }
+    rollLabel(label, text)
+    relax()
+    pill.classList.toggle("ok", ok)
+    pill.classList.toggle("failed", !ok)
+  }
+  if (grow < 0) {
+    say()
+    return void setTimeout(() => report(grow), SHRINK_WAITS_MS)
+  }
   report(grow)
   // The frame's width springs over .37 s from when the content script hears of
   // it; the label rolls over .45 s, a beat later, so the width stays ahead.
-  whenWide(width, () =>
-    setTimeout(() => {
-      const mark = pill.querySelector<HTMLElement>(".pill-mark")
-      if (mark && !reducedMotion()) {
-        const { easing, duration } = spring(0.45)
-        mark.style.transition = `width ${duration}ms ${easing}, margin-left ${duration}ms ${easing}, opacity 200ms ease-out 120ms`
-      }
-      rollLabel(label, text)
-      relax()
-      pill.classList.toggle("ok", ok)
-      pill.classList.toggle("failed", !ok)
-    }, WIDTH_LEAD_MS),
-  )
+  whenWide(width, () => setTimeout(say, WIDTH_LEAD_MS))
 }
 
 // ---- Keys and presses ----------------------------------------------------------
@@ -1398,7 +1419,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     if (!saving) return leaveLikeSave()
     if (reply?.ok) {
       await new Promise((r) => setTimeout(r, Math.max(0, SAVING_READS_MS - (performance.now() - shownAt))))
-      const label = fold(saveLabel, "Saving…", true, mark)
+      const label = fold(saveLabel, "Saving…", { persistIsLabel: true, lead: mark })
       // Once the pill has its place, its label rolls on to the result: "Saved"
       // for a new login and an update alike, so the pill is the same either way.
       return void setTimeout(() => {

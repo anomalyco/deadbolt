@@ -178,7 +178,7 @@ try {
   const delayed = await page("10-escape-in-surface", "/delayed")
   const waiting = await offer(delayed)
   await choose(delayed)
-  await waiting.locator(".pill", { hasText: "Continuing sign-in" }).waitFor()
+  await waiting.locator(".pill.ok .ring.ok").waitFor()
   await waiting.locator("body").press("Escape")
   await delayed.locator("dialog[open]").waitFor()
   await delayed.waitForTimeout(1500)
