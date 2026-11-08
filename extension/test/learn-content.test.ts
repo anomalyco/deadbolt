@@ -196,12 +196,14 @@ describe("a learning frame", () => {
     for (const f of listeners) f({ type: "db:learn", session })
     for (const f of listeners) f({ type: "db:learn", session: null })
     expect(learning()).toBe(false)
-    const before = sent.length
+    // Only this frame's messages: other test files' timers share the process and the chrome stub.
+    const ours = () => sent.filter((m) => m.type.startsWith("db:learn")).length
+    const before = ours()
     // Not recording, the frame doesn't listen at all.
     $("button").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
     $("button").dispatchEvent(trusted(new MouseEvent("pointerdown", { bubbles: true, composed: true })))
     $("button").dispatchEvent(trusted(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, composed: true })))
     await new Promise((r) => setTimeout(r, 600))
-    expect(sent.length).toBe(before)
+    expect(ours()).toBe(before)
   })
 })
