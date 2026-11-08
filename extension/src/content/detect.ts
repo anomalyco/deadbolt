@@ -74,6 +74,18 @@ export function controlText(el: Element): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 120)
 }
 
+/**
+ * Label a button shows: its text, or an input's value. An aria-label that
+ * says something else makes it none, so a button that reads "Delete account"
+ * can't pass as "Continue" (or the other way round).
+ */
+export function visibleLabel(el: Element): string {
+  const input = el instanceof HTMLInputElement ? (el.type === "submit" || el.type === "button" ? el.value : "") : innerText(el)
+  const shown = input.replace(/\s+/g, " ").trim()
+  const aria = (el.getAttribute("aria-label") ?? "").replace(/\s+/g, " ").trim()
+  return aria && aria.toLowerCase() !== shown.toLowerCase() ? "" : shown.slice(0, 120)
+}
+
 // ---- Field facts ---------------------------------------------------------------
 
 /** Closest preceding text when a field has no <label>, e.g. a <span> above it. */

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { AUTOMATIC_STEP_MS, Autofill, FLOWS_KEY, menuAccounts, oneRowEach, signsIn, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
+import { AUTOMATIC_STEP_MS, Autofill, FLOWS_KEY, menuAccounts, oneRowEach, signInHost, signsIn, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
 import { HostError } from "../src/bg/backend"
 import { SIGNIN_SETTING } from "../src/auth-state"
 import { SignInWith } from "../src/bg/signinwith"
@@ -165,7 +165,7 @@ describe("automatic sign-in session", () => {
     expect(await autofill.menuPick(signup, account.ref, menuSender())).toEqual({ ok: true })
     expect(delivered("db:signin-submit")).toHaveLength(0)
   })
-  test.each([["example.com"], ["https://example.com/login"]])("a login saved as %s, picked on www.example.com (google.com on accounts.google.com), signs in there step by step", async (saved) => {
+  test.each([["www.example.com"], ["https://www.example.com/login"], ["example.com"], ["https://example.com/login"]])("a login saved as %s (this host or its www twin, any path), picked on www.example.com, signs in there step by step", async (saved) => {
     account.urls = [saved]
     try {
       fake.fillAck = () => ({ filled: ["email"] })
@@ -176,6 +176,27 @@ describe("automatic sign-in session", () => {
     } finally {
       account.urls = [SITE]
     }
+  })
+  test.each([["accounts.example.com"], ["https://promo.example.com/login"], ["http://www.example.com"], ["https://www.example.com:8443"]])("a login saved only as %s, picked on www.example.com, fills without signing in", async (saved) => {
+    account.urls = [saved]
+    try {
+      const token = await loginMenu()
+      expect((loaded as { signsIn?: string[] }).signsIn).toBeUndefined()
+      expect(await autofill.menuPick(token, account.ref, menuSender())).toEqual({ ok: true })
+      expect(fills()).toHaveLength(1)
+      expect(delivered("db:fill").at(-1)?.message.automatic).toBeUndefined()
+      expect(delivered("db:signin-submit")).toHaveLength(0)
+    } finally {
+      account.urls = [SITE]
+    }
+  })
+  test("signInHost: this host or its www twin, or a provider's sign-in host on the saved site; no other host of the site", () => {
+    expect(signInHost("google.com", "https://accounts.google.com")).toBe(true)
+    expect(signInHost("https://mail.google.com/", "https://accounts.google.com")).toBe(true)
+    expect(signInHost("google.com", "https://promo.google.com")).toBe(false)
+    expect(signInHost("example.com", "https://promo.example.com")).toBe(false)
+    expect(signInHost("https://www.example.com/a", "https://example.com")).toBe(true)
+    expect(signInHost("accounts.google.com", "https://accounts.google.com.evil.test")).toBe(false)
   })
   test("a step on another origin, even one the login names, ends an automatic session unfilled and unsubmitted", async () => {
     const other = "https://accounts.example.com"

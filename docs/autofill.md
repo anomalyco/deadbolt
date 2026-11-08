@@ -124,12 +124,15 @@ Page arrival and detector confidence never authorize a fill. The existing
 500 ms visible dwell and fresh 400 ms post-pick visibility check remain
 mandatory for menu picks (the popup is the browser's own surface). A sign-up
 or change-password form and a frame's field only fill (see the first-step
-rules below). A pick signs in on the origin it was made on, whatever URL the
-login was saved with (an import's `google.com` picked on accounts.google.com):
-the daemon listed it there and the pick fills it there, and once the values are
-in the page's fields its script can post them anyway, so submitting adds
-nothing. The corner offer, which may click the site's own sign-in link, and a
-provider's button keep requiring a saved URL naming the exact origin;
+rules below). A pick signs in only where a saved URL of the login names the
+page's own host (same scheme and port, any path), its `www.` twin, or a known
+provider's sign-in host on the saved site (an import's `google.com` picked on
+accounts.google.com; `signInHost` in `bg/autofill.ts`). The daemon lists a
+login on every host of its site, so on any other host (a forgotten subdomain
+someone else now serves) the pick only fills, and each later step fills only
+after the person's own submit. The corner offer, which may click the site's
+own sign-in link, and a provider's button keep requiring a saved URL naming
+the exact origin;
 Browse-agent fills keep manual submit. A top page asks the service worker
 about an offer or a provider chain only when it shows something of a
 sign-in (a login form, a sign-in path, a provider, “Sign in” or “Sign out”
@@ -156,7 +159,8 @@ Log in, Continue or Next, and neither the form nor the page's title and
 headings may speak of re-authentication or another action (Confirm access,
 delete, withdraw, transfer, turn off, and the like). A password or code box
 on its own, a Confirm access page, a withdrawal or a two-factor setting
-only fills.
+only fills. A code step is held to the same words: a code that confirms a
+transfer or a deletion only fills.
 
 Every automatic submit goes through the content script's checks
 (`content/signin-submit.ts`, `submitPlan`). The step is one of two shapes:
@@ -169,7 +173,11 @@ Every automatic submit goes through the content script's checks
   owns the button, and the button is the only visible control there that
   reads like a submit (Sign in, Next, Continue, Verify…).
 
-Either way the button is visible and enabled, every field still holds its
+Either way the page is a secure context (an e2e build's plain-http test
+sites excepted), and the button is visible and enabled, not inside a link,
+and reads like a submit by the text it shows (an `aria-label` must say the
+same). A button that names or sits in a form it doesn't belong to (a
+`form` attribute pointing nowhere) refuses. Every field still holds its
 value and shows, no CAPTCHA shows anywhere on the page, no error shows in the
 step (a `role=alert` or `aria-live=assertive` with text, a field with
 `aria-invalid=true`), and a code step's prompt doesn't say the code was sent

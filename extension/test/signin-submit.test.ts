@@ -7,6 +7,8 @@ const rect = Element.prototype.getBoundingClientRect
 const hit = document.elementFromPoint
 let measured: Element | null = null
 beforeAll(() => {
+  // happy-dom has no isSecureContext; the test page is https.
+  Object.defineProperty(window, "isSecureContext", { value: true, configurable: true, writable: true })
   Element.prototype.getBoundingClientRect = function (this: Element) {
     if (this instanceof HTMLInputElement) measured = this
     return rect.call(this)
@@ -115,6 +117,48 @@ describe("a form-less step (Google's)", () => {
     expect(plan(false)).toBe("delivered")
   })
 
+  test("a code step that confirms something else only fills", () => {
+    page(`<main><h1>Confirm transfer</h1><p>Send $4,000 to account ending 0042.</p>
+      <p>Enter the code from your authenticator app</p><input type="tel" name="totpPin" id="totpPin" autocomplete="one-time-code" aria-label="Enter code">
+      <button type="button" id="next">Confirm</button></main>`, "Bank")
+    fill("#totpPin", "492039")
+    const el = document.querySelector<HTMLInputElement>("#totpPin")!
+    const scan = scanPage()
+    const fields = [{ el, role: "otp" as const, owner: { form: null, parent: el.parentElement } }] as unknown as typeof scan.fields
+    expect(submitPlan({ kind: "mfa", fields, submit: document.querySelector("#next")!, first: false })).toBe("purpose")
+  })
+
+  test("a button that shows something other than its aria-label refuses", () => {
+    page(email.replace(NEXT, `<button type="button" id="next" aria-label="Continue">Delete account</button>`))
+    fill("#identifierId", "kit@acme.test")
+    const el = document.querySelector<HTMLInputElement>("#identifierId")!
+    const fields = [{ el, role: "email" as const, owner: { form: null, parent: el.parentElement } }] as unknown as ReturnType<typeof scanPage>["fields"]
+    expect(submitPlan({ kind: "login", fields, submit: document.querySelector("#next")!, first: true })).toBe("button")
+    // One that agrees passes.
+    page(email.replace(NEXT, `<button type="button" id="next" aria-label="next">Next</button>`))
+    fill("#identifierId", "kit@acme.test")
+    expect(typeof plan(true)).toBe("object")
+  })
+
+  test("a Next inside a link refuses", () => {
+    page(email.replace(NEXT, `<a href="/elsewhere"><button type="button" id="next">Next</button></a>`))
+    fill("#identifierId", "kit@acme.test")
+    const el = document.querySelector<HTMLInputElement>("#identifierId")!
+    const fields = [{ el, role: "email" as const, owner: { form: null, parent: el.parentElement } }] as unknown as ReturnType<typeof scanPage>["fields"]
+    expect(submitPlan({ kind: "login", fields, submit: document.querySelector("#next")!, first: true })).toBe("button")
+  })
+
+  test("not on a page that isn't a secure context", () => {
+    page(email)
+    fill("#identifierId", "kit@acme.test")
+    Object.defineProperty(window, "isSecureContext", { value: false, configurable: true, writable: true })
+    try {
+      expect(plan(true)).toBe("insecure")
+    } finally {
+      Object.defineProperty(window, "isSecureContext", { value: true, configurable: true, writable: true })
+    }
+  })
+
   test("a code sent by text is the person's to bring", () => {
     page(code("A text message with a 6-digit verification code was just sent to •••• 0123"))
     fill("#totpPin", "492039")
@@ -146,6 +190,14 @@ describe("a form", () => {
       fill("input[name=password]", "correct horse")
       expect(plan(true)).toBe("destination")
     }
+  })
+
+  test("a button naming a form that isn't there refuses", () => {
+    page(form(`method="post" action="/session"`).replace(`<button type="submit">`, `<button type="submit" form="missing">`))
+    fill("input[name=username]", "kit")
+    fill("input[name=password]", "correct horse")
+    const scan = scanPage()
+    expect(submitPlan({ kind: "login", fields: scan.fields, submit: document.querySelector("button")!, first: true })).toBe("scope")
   })
 
   test("a sign-up form isn't a sign-in step", () => {

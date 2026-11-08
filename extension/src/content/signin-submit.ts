@@ -6,13 +6,16 @@
 // a dialog or main region. Either way the button reads sign in, next,
 // continue, verify or the like, every field still holds its value and shows,
 // nothing on the page is a CAPTCHA, no error shows, and a code step's prompt
-// doesn't say the code came by text or email. A step is submitted at most
-// once, after a short settle that checks all of it again.
+// doesn't say the code came by text or email. Nothing is submitted on a page
+// that isn't a secure context. A step is submitted at most once, after a
+// short settle that checks all of it again.
 
 import { IDENTIFIER_ROLES, type SurfaceKind } from "../messages"
-import { CAPTCHA, controlText, deliveredCode, isVisible, sole, type Field } from "./detect"
+import { CAPTCHA, controlText, deliveredCode, isVisible, sole, visibleLabel, type Field } from "./detect"
 import { fillable } from "./fill"
 import { deepQueryAll, openRoots } from "./shadow"
+
+declare const DEADBOLT_E2E: boolean | undefined
 
 /** A step's submit button: signing in, going on, or confirming a code. */
 export const SUBMIT_LABEL = /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i
@@ -58,7 +61,7 @@ export interface SubmitPlan {
   form: HTMLFormElement | null
   button: HTMLElement
 }
-export type Refusal = "kind" | "button" | "scope" | "destination" | "captcha" | "values" | "first" | "error" | "delivered"
+export type Refusal = "insecure" | "kind" | "button" | "scope" | "destination" | "captcha" | "values" | "first" | "purpose" | "error" | "delivered"
 
 /** The form a step's fields and button post with, checked: a POST to this origin, in this tab. */
 function formScope(form: HTMLFormElement, fields: Field[], button: HTMLElement): Refusal | null {
@@ -90,7 +93,7 @@ function regionOf(fields: Field[], button: HTMLElement): Element | null {
   if (regions.size !== 1) return null
   const region = [...regions][0] ?? document.body
   if (!region?.contains(button)) return null
-  const candidates = Array.from(region.querySelectorAll(BUTTONS)).filter((el) => isVisible(el) && SUBMIT_LABEL.test(controlText(el)))
+  const candidates = Array.from(region.querySelectorAll(BUTTONS)).filter((el) => isVisible(el) && (SUBMIT_LABEL.test(controlText(el)) || SUBMIT_LABEL.test(visibleLabel(el))))
   return sole(candidates) === button ? region : null
 }
 
@@ -103,12 +106,19 @@ function errorShown(scope: Element, fields: Field[]): boolean {
 /** What an automatic session may submit of the step the scan found, or why not. */
 export function submitPlan(step: SubmitStep): SubmitPlan | Refusal {
   const { kind, fields, submit } = step
+  // Over plain http anyone on the network can rewrite the page; an e2e build serves its sites that way.
+  if (!window.isSecureContext && !(typeof DEADBOLT_E2E !== "undefined" && DEADBOLT_E2E === true)) return "insecure"
   if ((kind !== "login" && kind !== "mfa") || !fields.length) return "kind"
   const button = submit
-  if (!(button instanceof HTMLElement) || !isVisible(button) || button.matches(":disabled, [aria-disabled=true]")) return "button"
-  const label = controlText(button)
+  // A button inside a link would follow it too.
+  if (!(button instanceof HTMLElement) || !isVisible(button) || button.matches(":disabled, [aria-disabled=true]") || button.closest("a[href]")) return "button"
+  // What the button shows, which an aria-label must agree with.
+  const label = visibleLabel(button)
   if (!SUBMIT_LABEL.test(label)) return "button"
   const control = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button : null
+  // A button that names, or sits in, a form it doesn't belong to submits nothing of these fields.
+  const named = control?.getAttribute("form")
+  if (control && (named != null ? control.form?.id !== named : !control.form && control.closest("form"))) return "scope"
   const form = control?.form ?? fields[0].el.form
   let scope: Element
   if (form) {
@@ -129,6 +139,8 @@ export function submitPlan(step: SubmitStep): SubmitPlan | Refusal {
   // of something else to confirm (Confirm access, delete, withdraw, turn off
   // two-factor) on the form or the page's headings.
   if (step.first && !(FIRST_LABEL.test(label) && fields.some((f) => IDENTIFIER_ROLES.includes(f.role)) && !notSignIn(scope))) return "first"
+  // A code step is held to the same words: a code that confirms a transfer or a deletion isn't a sign-in's.
+  if (fields.some((f) => f.role === "otp") && notSignIn(scope)) return "purpose"
   if (errorShown(scope, fields)) return "error"
   // A code step's prompt that describes delivery by SMS or email takes a
   // code the person brings, never the login's authenticator code.
