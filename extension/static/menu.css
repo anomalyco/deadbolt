@@ -259,7 +259,8 @@ body.held *::after {
 
 .pill-label {
   display: inline-flex;
-  overflow: hidden;
+  /* Clipped across while its width springs, never up or down: the roll travels there. */
+  overflow: clip visible;
   white-space: nowrap;
   line-height: 16px;
 }
@@ -453,7 +454,7 @@ body.save .surface {
 
 .roll-label {
   display: inline-flex;
-  overflow: hidden;
+  overflow: clip visible;
   white-space: nowrap;
 }
 

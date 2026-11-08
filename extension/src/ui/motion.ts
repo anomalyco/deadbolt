@@ -249,11 +249,14 @@ export function rollLabel(el: HTMLElement, text: string): number {
   }
   // A growing label lets its width get a head start, so the new word is
   // never readable while it's still cut off at the side.
+  // No window clips the roll: a hard edge slices the letters mid-move and
+  // cuts descenders off the moment it starts. Each part travels under half a
+  // line and blurs out of the way instead.
   const roll = { ...spring(0.45), delay: after > before + 0.5 ? 100 : 0 }
   const out = el.querySelector<HTMLElement>(".roll-out")
   const into = el.querySelector<HTMLElement>(".roll-in")
-  out?.animate([{ transform: "translateY(0)", opacity: 1 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "both" }).finished.then(() => out.remove(), () => {})
-  into?.animate([{ transform: "translateY(100%)", opacity: 0 }, { transform: "translateY(0)", opacity: 1 }], { ...roll, fill: "backwards" })
+  out?.animate([{ transform: "translateY(0)", opacity: 1, filter: "blur(0)" }, { transform: "translateY(-45%)", opacity: 0, filter: "blur(2px)" }], { ...roll, fill: "both" }).finished.then(() => out.remove(), () => {})
+  into?.animate([{ transform: "translateY(45%)", opacity: 0, filter: "blur(2px)" }, { transform: "translateY(0)", opacity: 1, filter: "blur(0)" }], { ...roll, fill: "backwards" })
   return after - before
 }
 
@@ -282,4 +285,4 @@ function rollParts(text: string, old: string, fresh: string, same = text.length 
 }
 
 /** The styles rollLabel needs, for pages that use it. */
-export const ROLL_CSS = `.roll-text{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.roll-still{white-space:pre}.roll-window{position:relative;display:inline-block;overflow:hidden;height:1lh;vertical-align:bottom;white-space:pre}.roll-in{display:inline-block}.roll-out{position:absolute;left:0;top:0}`
+export const ROLL_CSS = `.roll-text{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.roll-still{white-space:pre}.roll-window{position:relative;display:inline-block;height:1lh;vertical-align:bottom;white-space:pre}.roll-in{display:inline-block}.roll-out{position:absolute;left:0;top:0}`
