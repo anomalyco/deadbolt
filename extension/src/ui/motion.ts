@@ -51,10 +51,16 @@ export const MENU_MOTION = {
   rowIn: 0.3,
   /** What doesn't go into the pill fading where it is, as the list folds. */
   foldOut: 0.25,
-  /** The picked row's avatar (or the Save label) travelling into the pill. */
+  /** The picked row's avatar (or the Save label) travelling into the pill, when the frame's springs never came (it goes with them otherwise). */
   foldIn: 0.38,
   /** The pill's label fading in. */
   pillLabel: 0.3,
+  /** The ring round a picked avatar coming in, its comet's tail growing as it turns (ui/ring.ts). */
+  ringIn: 0.45,
+  /** The ring going when the fill doesn't land: the tail draws back into the head as it fades. */
+  ringOut: 0.3,
+  /** The tile's ground flashing green and cooling as the ring closes. */
+  ringFlash: 0.9,
   /** The frame springing to a new mode's place, size and corners. */
   frameMode: 0.38,
   /** The frame springing to a new size in the same mode, and the offer's corners. */
@@ -124,8 +130,48 @@ export interface SpringState {
   w: number
 }
 
-/** Milliseconds since the epoch, comparable between documents. */
-export const epochNow = () => performance.timeOrigin + performance.now()
+/** The frame being drawn, in ms since the epoch, while inFrame runs. */
+let drawing: number | null = null
+
+/**
+ * Milliseconds since the epoch, comparable between documents. Inside
+ * inFrame it's the frame's own instant, so two documents that move one
+ * picture between them (the host and the pill inside it) read their springs
+ * at the same moment, not whenever each one's turn in the frame came: off
+ * by a millisecond, a fast fold put the pill a pixel either way, a jiggle.
+ */
+export const epochNow = () => drawing ?? performance.timeOrigin + performance.now()
+
+/**
+ * `v` CSS pixels, on the screen's pixel grid. The host's box and the pill's
+ * offset inside it are both put on it, so the frame's edge (which the
+ * browser snaps to whole device pixels anyway) and the pill's counter-move
+ * cancel exactly, instead of each rounding its own way.
+ */
+export const devicePx = (v: number) => Math.round(v * devicePixelRatio) / devicePixelRatio
+
+type Edges<T> = { left: T; top: T; width: T; height: T }
+/** `box` moved by springs `by`, its edges and the offsets alike on the pixel grid (content/inline.ts position), so a pill (ui/pill-frame.ts placePill) can undo the same numbers. */
+export function gridBox(box: Edges<number>, by: Edges<{ value: number }>): Edges<number> {
+  const left = devicePx(box.left)
+  const top = devicePx(box.top)
+  return {
+    left: left + devicePx(by.left.value),
+    top: top + devicePx(by.top.value),
+    width: Math.max(1, devicePx(box.left + box.width) - left + devicePx(by.width.value)),
+    height: Math.max(1, devicePx(box.top + box.height) - top + devicePx(by.height.value)),
+  }
+}
+
+/** Runs `go` for the frame at `time` (a requestAnimationFrame time), reading epochNow as that frame's instant. */
+export function inFrame(time: number, go: () => void) {
+  drawing = performance.timeOrigin + time
+  try {
+    go()
+  } finally {
+    drawing = null
+  }
+}
 
 /**
  * A number that springs toward a target, stepped once per frame. Changing
@@ -216,6 +262,9 @@ export class Spring {
   }
 }
 
+/** How long a shrinking label's width waits for its old word to start going (rollLabel). */
+export const SHRINK_WAITS_MS = 120
+
 /**
  * Rolls a label to new text: the letters both words start with stay still
  * and only the rest rolls up, while the label's width springs ahead of the
@@ -242,18 +291,23 @@ export function rollLabel(el: HTMLElement, text: string): number {
   const old = current.slice(same)
   el.replaceChildren(rollParts(text, old, text.slice(same), same))
   const after = el.getBoundingClientRect().width
-  // Width leads: a slightly shorter spring than the roll.
+  // Width leads a growing label: a slightly shorter spring than the roll. A
+  // shrinking one waits a beat, so the old word lifts and fades before its
+  // end is cut at the side.
   if (Math.abs(after - before) > 0.5) {
-    const anim = el.animate([{ width: `${before}px` }, { width: `${after}px` }], spring(0.37))
+    const anim = el.animate([{ width: `${before}px` }, { width: `${after}px` }], { ...spring(0.37), delay: after < before ? SHRINK_WAITS_MS : 0, fill: "backwards" })
     anim.finished.then(() => anim.cancel(), () => {})
   }
   // A growing label lets its width get a head start, so the new word is
   // never readable while it's still cut off at the side.
+  // No window clips the roll: a hard edge slices the letters mid-move and
+  // cuts descenders off the moment it starts. Each part travels under half a
+  // line and blurs out of the way instead.
   const roll = { ...spring(0.45), delay: after > before + 0.5 ? 100 : 0 }
   const out = el.querySelector<HTMLElement>(".roll-out")
   const into = el.querySelector<HTMLElement>(".roll-in")
-  out?.animate([{ transform: "translateY(0)", opacity: 1 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "both" }).finished.then(() => out.remove(), () => {})
-  into?.animate([{ transform: "translateY(100%)", opacity: 0 }, { transform: "translateY(0)", opacity: 1 }], { ...roll, fill: "backwards" })
+  out?.animate([{ transform: "translateY(0)", opacity: 1, filter: "blur(0)" }, { transform: "translateY(-45%)", opacity: 0, filter: "blur(2px)" }], { ...roll, fill: "both" }).finished.then(() => out.remove(), () => {})
+  into?.animate([{ transform: "translateY(45%)", opacity: 0, filter: "blur(2px)" }, { transform: "translateY(0)", opacity: 1, filter: "blur(0)" }], { ...roll, fill: "backwards" })
   return after - before
 }
 
@@ -282,4 +336,4 @@ function rollParts(text: string, old: string, fresh: string, same = text.length 
 }
 
 /** The styles rollLabel needs, for pages that use it. */
-export const ROLL_CSS = `.roll-text{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.roll-still{white-space:pre}.roll-window{position:relative;display:inline-block;overflow:hidden;height:1lh;vertical-align:bottom;white-space:pre}.roll-in{display:inline-block}.roll-out{position:absolute;left:0;top:0}`
+export const ROLL_CSS = `.roll-text{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.roll-still{white-space:pre}.roll-window{position:relative;display:inline-block;height:1lh;vertical-align:bottom;white-space:pre}.roll-in{display:inline-block}.roll-out{position:absolute;left:0;top:0}`

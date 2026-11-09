@@ -425,7 +425,7 @@ main {
 
 .roll-label {
   display: inline-flex;
-  overflow: hidden;
+  overflow: clip visible;
   white-space: nowrap;
 }
 

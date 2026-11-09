@@ -242,10 +242,8 @@ try {
     await web.waitForFunction(() => (document.querySelector("#password") as HTMLInputElement).value === "synthetic-only-password")
     record("inline pick to filled fields", performance.now() - pick)
     // Ignore the live region / screen-reader copy; time the visible pill's
-    // settled label, including its roll animation.
-    const filled = menu.locator('.pill-label[data-text="Filled"]')
-    await filled.waitFor()
-    await filled.evaluate((label) => Promise.all(label.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {}))))
+    // ring turning green (not its speeding away and fading after).
+    await menu.locator(".pill.ok .ring.ok").waitFor()
     record("inline pick to Filled", performance.now() - pick)
     await web.close()
   }

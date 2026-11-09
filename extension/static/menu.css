@@ -119,8 +119,7 @@ body {
   display: none;
 }
 
-/* A press shows at once: the highlight darkens and the avatar gets a ring
-   while the pick passes its checks. */
+/* A press shows at once: the highlight darkens while the pick passes its checks. */
 .highlight {
   transition: background-color 100ms ease-out;
 }
@@ -136,37 +135,85 @@ body {
 }
 
 /* A provider's logo (menu.ts providerMark), on the tile's own ground. */
-.avatar.provider.mark svg {
+.avatar.provider.mark > svg {
   width: 16px;
   height: 16px;
 }
 
-/* Still while the press is checked: nothing in the frame may animate then,
-   or the browser's visibility readings, which the check relies on, pause.
-   It spins once the pick goes ahead. */
-.avatar.busy::after {
-  content: "";
+/* The ring round a picked avatar while it fills (ui/ring.ts). It comes only
+   once the pick goes ahead: nothing in the frame may animate while a press
+   is checked, or the browser's visibility readings, which the check relies
+   on, pause. Its selectors outrank the tile's own `svg` rules. */
+.ring {
   position: absolute;
   inset: -4px;
-  border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--text) 14%, transparent);
-  border-top-color: color-mix(in srgb, var(--text) 70%, transparent);
+  pointer-events: none;
 }
 
-.avatar.busy.spinning::after {
-  animation: spin 700ms linear infinite;
+/* The track and the comet are both a 1.75px band: a disc masked to its rim. */
+.ring-track,
+.ring-spin,
+.ring-comet {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+/* Registered so the green comet's closing can animate them (ui/ring.ts closeNow). */
+@property --tail {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0turn;
+}
+
+/* Where the head is, once the turning stops and the closing draws it (ui/ring.ts closeNow). */
+@property --head {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0turn;
+}
+
+@property --solid {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+
+.ring-track,
+.ring-comet {
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.25px), #000 calc(100% - 1.75px), #000 calc(100% - 0.5px), transparent 100%);
+}
+
+.ring-track {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+/* The head at the top, bright; the tail fading out behind it, the way it came.
+   Its own layer, so turning it never repaints the gradient. */
+.ring-spin,
+.ring-comet {
+  will-change: transform, opacity;
+}
+
+.ring-comet {
+  --ring-color: color-mix(in srgb, var(--text) 80%, transparent);
+  /* Behind the tail is clear while it turns; `--solid` fills it in as the ring closes. */
+  background: conic-gradient(from var(--head), color-mix(in srgb, var(--ring-color) calc(var(--solid) * 100%), transparent) calc(1turn - var(--tail)), var(--ring-color) 1turn);
+}
+
+.ring-comet.lit {
+  --ring-color: var(--text-success);
+}
+
+/* The light that runs round a closed ring. */
+.ring-comet.glint {
+  --ring-color: color-mix(in srgb, white 85%, var(--text-success));
 }
 
 /* While a press is checked, nothing transitions either. */
 body.held *,
 body.held *::after {
   transition: none !important;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .text {
@@ -246,7 +293,18 @@ body.held *::after {
   font-size: 11px;
 }
 
-.pill .avatar svg {
+/* Room between the tile (and the ring just outside it) and the name. The slot
+   it travels into has the same, so nothing shifts when it lands. */
+.pill > :first-child:not(.pill-label) {
+  margin-right: 4px;
+}
+
+/* A pick from a row with no tile: only its ring shows. */
+.pill .avatar.bare {
+  background: none;
+}
+
+.pill .avatar > svg {
   width: 13px;
   height: 13px;
 }
@@ -257,9 +315,30 @@ body.held *::after {
   height: 22px;
 }
 
+/* The pill's flash as its fill lands, or fails (menu.ts land), under its content. */
+.pill-glow {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  --glow: var(--text-success);
+  border-radius: inherit;
+  /* The pill's edge lights up with it: a bright rim, and a little light just inside it. */
+  background: color-mix(in srgb, var(--glow) 16%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--glow) 75%, transparent),
+    inset 0 0 10px color-mix(in srgb, var(--glow) 30%, transparent);
+  pointer-events: none;
+  will-change: opacity;
+}
+
+.pill-glow.failed {
+  --glow: var(--danger);
+}
+
 .pill-label {
   display: inline-flex;
-  overflow: hidden;
+  /* Clipped across while its width springs, never up or down: the roll travels there. */
+  overflow: clip visible;
   white-space: nowrap;
   line-height: 16px;
 }
@@ -294,6 +373,28 @@ body.held *::after {
 
 .pill.failed .pill-label {
   color: var(--danger);
+}
+
+/* Only the new words turn: the old ones keep their colour as they go. */
+.pill.failed .pill-label .roll-out {
+  color: var(--text);
+}
+
+/* It draws itself in as it opens. */
+@media (prefers-reduced-motion: no-preference) {
+  .pill.ok .pill-mark path {
+    stroke-dasharray: 18;
+    animation: draw-check 320ms cubic-bezier(.3,0,.2,1) 140ms backwards;
+  }
+}
+
+@keyframes draw-check {
+  from {
+    stroke-dashoffset: 18;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -453,7 +554,7 @@ body.save .surface {
 
 .roll-label {
   display: inline-flex;
-  overflow: hidden;
+  overflow: clip visible;
   white-space: nowrap;
 }
 
@@ -529,12 +630,6 @@ body[data-offer="dot"] .offer {
 @media (prefers-reduced-motion: reduce) {
   .surface {
     transition: none;
-  }
-
-  /* No spinning: a still ring says the same. */
-  .avatar.busy.spinning::after {
-    animation: none;
-    border-color: color-mix(in srgb, var(--text) 40%, transparent);
   }
 
   .offer .btn.pressed {
