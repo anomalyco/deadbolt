@@ -40,7 +40,12 @@ export function authState(s: AuthSignals, remembered = false): "signed-in" | "si
   return score >= 6 ? "signed-out" : "unknown"
 }
 
-/** Deliberately stricter than ordinary autofill: no sibling hosts or ports. */
+/**
+ * A saved URL naming exactly this origin: scheme, host and port. The corner
+ * offer and a provider's button need it; a pick's own sign-in takes the same
+ * host on any path, its `www.` twin or a provider's sign-in host (see
+ * bg/autofill.ts signInHost). Ordinary autofill takes any host of the site.
+ */
 export function exactSignInOrigin(saved: string, origin: string): boolean {
   try {
     return new URL(saved.includes("://") ? saved : `https://${saved}`).origin === origin

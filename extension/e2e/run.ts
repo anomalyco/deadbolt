@@ -3771,7 +3771,8 @@ async function pickSignsIn() {
  * step swapped into one document. One pick fills and submits the email, the
  * password and the authenticator code, each once, and lands signed in. A
  * CAPTCHA, a texted code or a sign-up step stops it; with "Offer to sign in"
- * off, a pick only fills.
+ * off, a pick only fills. A login saved as a bare domain signs in on the
+ * provider's sign-in host of that site, and only fills on another host of it.
  */
 async function googleSignIn() {
   const run = await launch({ universal: true, offerToSignIn: "default" })
@@ -3850,25 +3851,47 @@ async function googleSignIn() {
     await close(run)
   }
 
-  // A login saved under its bare domain, as imports save `google.com`, signs in on accounts.acme.test all the same,
-  // over plain http too (no secure context, so no crypto.randomUUID in the page).
-  const bare = await launch({ saved: "acme.test", offerToSignIn: "default" })
-  const tab = await bare.context.newPage()
+  // A login saved under its bare domain, as imports save `google.com`, signs in on Google's own sign-in host of that site,
+  // over plain http too (no secure context, so no crypto.randomUUID in the page; an e2e build may submit there).
+  const gmail = () => flowPosts.filter((p) => p.path.startsWith("/flow/gmail/")).map((p) => p.path.slice("/flow/gmail/".length))
+  const google = await launch({ saved: "google.test", offerToSignIn: "default" })
+  const tab = await google.context.newPage()
   try {
-    const before = flowPosts.length
-    await tab.goto(`http://accounts.acme.test:${server.port}/flow/gmail`)
+    const before = gmail().length
+    await tab.goto(`http://accounts.google.test:${server.port}/flow/gmail`)
     const menu = await menuOn(tab, "#identifierId")
     if (!menu) throw new Error(`no menu on ${tab.url()}`)
     await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
     const signedIn = await until("signed in", async () => (await tab.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
-    const posted = JSON.stringify(flowPosts.slice(before).filter((p) => p.path.startsWith("/flow/gmail/")).map((p) => p.path.slice("/flow/gmail/".length)))
-    check(!!signedIn && posted === JSON.stringify(["identifier", "pwd", "totp"]), `a login saved as "acme.test" signs in on accounts.acme.test with one pick (posted ${posted})`)
-    if (!signedIn) await diagnose(bare, tab, "Google sign-in, bare domain")
+    const posted = JSON.stringify(gmail().slice(before))
+    check(!!signedIn && posted === JSON.stringify(["identifier", "pwd", "totp"]), `a login saved as "google.test" signs in on accounts.google.test with one pick (posted ${posted})`)
+    if (!signedIn) await diagnose(google, tab, "Google sign-in, bare domain")
   } catch (err) {
     check(false, `Google sign-in with a bare saved domain threw: ${(err as Error).message.split("\n")[0]}`)
-    await diagnose(bare, tab, "Google sign-in, bare domain")
+    await diagnose(google, tab, "Google sign-in, bare domain")
   } finally {
-    await close(bare)
+    await close(google)
+  }
+
+  // Saved as the bare "acme.test", a pick on its sibling accounts.acme.test (a subdomain someone else may serve) only fills:
+  // nothing is submitted, and the next step waits for the person's own Next.
+  const sibling = await launch({ saved: "acme.test", offerToSignIn: "default" })
+  const other = await sibling.context.newPage()
+  try {
+    const before = gmail().length
+    await other.goto(`http://accounts.acme.test:${server.port}/flow/gmail`)
+    const menu = await menuOn(other, "#identifierId")
+    if (!menu) throw new Error(`no menu on ${other.url()}`)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    await until("the email fills", async () => (await other.inputValue("#identifierId")) === "kit@acme.test")
+    await Bun.sleep(2500)
+    const posted = JSON.stringify(gmail().slice(before))
+    check(new URL(other.url()).pathname === "/flow/gmail" && posted === "[]", `a login saved as "acme.test", picked on accounts.acme.test, fills without submitting (posted ${posted})`)
+  } catch (err) {
+    check(false, `a sibling-subdomain pick threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(sibling, other, "Google sign-in, sibling subdomain")
+  } finally {
+    await close(sibling)
   }
 }
 

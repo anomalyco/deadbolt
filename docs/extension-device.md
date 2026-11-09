@@ -340,28 +340,130 @@ cannot retract secrets already received by a removed member.
 Every preset keeps unlocked keys in the dedicated worker's memory only. Worker,
 offscreen or renderer loss locks every preset; there is no session restoration.
 
-| | Strict | Comfortable (default) | Relaxed |
-| --- | --- | --- | --- |
-| Idle lock | 5 min | 1 h | 12 h |
-| Screen lock / sleep (`chrome.idle` locked) | locks | locks | stays unlocked |
-| Browser quit | locks | locks | locks |
-| Worker/offscreen loss | locks | locks | locks |
-| Touch ID / passkey unlock | allowed | allowed | allowed |
-| Reveal/copy password; card number/CVV | re-auth every time | no re-auth | no re-auth |
+| | Strict | Comfortable (default) | Relaxed | Until you quit the browser |
+| --- | --- | --- | --- | --- |
+| Idle lock | 5 min | 1 h | 12 h | none |
+| Screen lock / sleep (`chrome.idle` locked) | locks | locks | stays unlocked | stays unlocked |
+| Browser quit, extension update or reload | locks | locks | locks | locks |
+| Worker/offscreen loss | locks | locks | locks | locks |
+| Service worker stopped by Chrome | stays unlocked | stays unlocked | stays unlocked | stays unlocked |
+| Touch ID / passkey unlock | allowed | allowed | allowed | allowed |
+| Reveal/copy password; card number/CVV | re-auth every time | no re-auth | no re-auth | no re-auth |
+| Choosing it | no check | no check | no check | passphrase or Touch ID PRF, on an open vault |
+
+Until you quit the browser (`until-quit`) stays unlocked until the browser
+quits, someone chooses Lock, the extension is updated, reloaded or removed,
+another device removes this browser from the vault, or the worker or its
+offscreen document is lost. Settings says: "Stays unlocked, even through sleep
+and screen lock, until you quit the browser (⌘Q). Anyone using this computer
+can see and fill your passwords, cards and codes meanwhile." Off a Mac it says
+"close every window, or Ctrl+Shift+Q on Linux" instead of ⌘Q: Ctrl+Q doesn't
+quit Chrome on Windows or Linux.
+
+Choosing it from another preset needs the passphrase or a Touch ID PRF
+assertion, and only while the vault is open. A service worker that has just
+woken asks the vault how it is first, so an open vault isn't refused as
+locked. The service worker refuses the change while locked or without a
+proof. The worker checks the proof against its own store
+(`Preset::change_needs_proof`) before taking it, and keeps the old preset on a
+wrong one. A wrong passphrase or a PRF key the vault refuses changes nothing
+and doesn't lock the vault. The worker checks any passphrase or PRF key sent
+with `device-preset`, even when the change needs none, so a passphrase nobody
+checked is never counted as right. Wrong passphrases here count toward the
+same backoff as unlocking. Moving to a stricter preset, or between the other
+three, asks nothing yet.
+
+**Where the preset is kept.** The preset is kept in the extension's own
+IndexedDB (`bg/preset-store.ts`, database `deadbolt-lock`). Only the
+extension's pages and service worker can open it, which is the same reason the
+kept site icons live there (`ui/icon-store.ts`). It used to be in
+`chrome.storage.local`, which content scripts can write: one write there could
+have turned an open vault into one that never locks. The first time a service
+worker reads the preset, it moves a value from `chrome.storage.local` once and
+removes it there. `until-quit` found there becomes Relaxed, since anyone could
+have written it. After that, `chrome.storage.local` isn't read again. If the
+database can't be read, the service worker uses Strict. The worker reports
+the preset it keeps in every `hello`, and the service worker locks by the
+stricter of the two, so neither side alone can loosen locking. A screen lock
+that wakes the service worker asks the worker first, as the idle alarm does.
+Lock forgets the worker's preset, so Settings shows the chosen one again.
+
+**Approving a device** (Settings › Pair another device) takes the passphrase
+or Touch ID with the code, under every preset. The service worker checks a
+passphrase in its turn among the other passphrase checks
+(`device-biometric-check`), counting a wrong one toward the backoff. The
+pairing then runs outside that queue, so a pairing that waits minutes for the
+other device doesn't hold up a Strict reveal or an unlock. The worker checks
+the proof again before it starts pairing.
+Admitting a device gives it every item for good. Under Until you quit,
+someone with a moment at the browser could otherwise add a device of their
+own. The pair form already asks for the code, so the passphrase sits beside
+it. Native's `deadbolt approve` and the app's Approve run on an unlocked
+daemon without asking again.
+
+**Removed from the vault.** When a sync brings this browser's removal, the
+vault answers `removed` in `hello`. The service worker then locks it once,
+with the reason "removed from vault". A vault unlocked when it was already
+removed isn't locked for it: neither by the unlock's own `hello` nor by a
+status read running beside the unlock. Once opened knowing it, it stays open
+for the rest of the browser session (`chrome.storage.session`).
+
+**Why it locked.** When the vault locks, the service worker keeps why, with no
+value, in `chrome.storage.local` until it unlocks again, and the locked popup
+and device page say it quietly: "Locked · 12 h idle", "Locked · screen
+locked", "Locked · browser restarted", "Locked · extension updated",
+"Locked · vault worker stopped", "Locked · browser closed the vault's page",
+"Locked · you locked it", "Locked · removed from vault" or "Locked · lock
+setting changed". Idle, screen, removal and Lock are recorded as they happen.
+
+Losses are inferred when the vault answers locked while `deadbolt.open` (local
+storage, set on every unlock) says it was open. An answer asked for before the
+vault last opened is stale: it's asked again rather than shown. Telling the
+losses apart:
+
+- `storage.session` is gone after a browser restart and after an update or
+  reload. `runtime.onInstalled` or a version change tells an update from a
+  restart.
+- The offscreen document's `documentId`, kept there on unlock, tells a
+  replaced document from a worker lost inside the same one.
+
+These keys only decide the line shown: no lock depends on them. A content
+script could write a misleading reason, but not keep a vault open. Activity
+has no lock entry, so the reason isn't there.
+
+**What relocks a vault (measured 2026-11-08, headless Chrome for Testing
+156.0.8078.4 on Linux, Relaxed).** Chrome stopping the service worker (`ServiceWorker.stopWorker`,
+under every preset, and once a minute for 8 minutes alongside moderate and
+critical `Memory.simulatePressureNotification` and `tabs.discard` of every
+other tab) never locked it and never replaced the offscreen document. These
+lock it, by design: closing the offscreen document; the extension's renderer
+crashing (`Page.crash` on the offscreen target), which takes its pages with it
+and stops the extension until it's reloaded; reloading the extension in place
+(`Extensions.loadUnpacked`, what reloading after `deadbolt update` does); a
+WebAssembly trap in the worker (e2e/crash.ts); and the browser restarting.
+`chrome.idle` "locked" can't be raised headless; Chrome reports it when the
+screen locks or the screen saver runs (display sleep counts once the system
+locks the screen), and only Strict and Comfortable act on it. None of our code closes the
+offscreen document except Lock, when the document doesn't answer; a lost one
+is recreated by the next request only to answer locked. So in normal use a
+Relaxed vault relocks at 12 h idle (overnight), when the browser restarts
+(including for a Chrome update), and when the extension is reloaded after an
+update.
 
 Use means a pick, fill, save, opening the popup, opening a login, or reveal. Passive
 listing for a page menu is not use, and neither is a page reading the vault again
 (an open login's details ask for each new one-time code). The standalone build
-implements the three presets' idle limits and screen-lock handling, and Strict's
-passphrase check before a password is shown or copied. The choice is a setting in
-`chrome.storage.local`, never a key. The service worker sends it to the vault's
+implements the presets' idle limits and screen-lock handling, and Strict's
+passphrase check before a password is shown or copied. The choice is a setting
+in the extension's IndexedDB, never a key. The service worker sends it to the vault's
 worker with every unlock and change, and the Rust core enforces Strict itself
 (`crates/ext-core/src/policy.rs`): under Strict it returns no password without a
 passphrase or PRF key, which it checks against the open store's key set, and a
 worker that was never told assumes Strict. Card number/CVV fills require the
 same verification on every Strict fill.
-Comfortable and Relaxed currently follow the native rule with Touch ID off (the
-explicit pick is enough), rather than claiming biometric reauthentication.
+Comfortable, Relaxed and Until you quit currently follow the native rule with
+Touch ID off (the explicit pick is enough), rather than claiming biometric
+reauthentication.
 Opt-in **Unlock with Touch ID** uses a platform WebAuthn passkey with PRF. Strict
 reveals/copies and card fills accept a new PRF assertion or the passphrase. Rust
 checks the actual PRF key against the enrolled store slot, never a JS boolean.
@@ -557,8 +659,8 @@ scenario named.
 | Feature | Standalone |
 | --- | --- |
 | Every item type: view, search, copy, add, edit, delete | Same (#97); item links (billing identity, sign-in account) kept, not edited |
-| Devices, pairing, sync, rename | Same |
-| Lock presets, idle and screen lock | Same; optional platform PRF unlock with passphrase fallback |
+| Devices, pairing, sync, rename | Same, but approving a device here takes the passphrase or Touch ID |
+| Lock presets, idle and screen lock | Same, plus "Until you quit the browser" (no idle or screen lock; native's locking is the daemon's); optional platform PRF unlock with passphrase fallback |
 | Several vaults, switching | Missing: one vault per browser |
 | Import from other password managers | Missing: import on a native device and sync |
 | Export | Neither build has one |
@@ -875,8 +977,8 @@ no item, site, username, device name or setting.
 
 Both builds have the extension id the manifest key fixes, so one replaces the
 other in place: the profile keeps its pinned icon and site access, and
-`chrome.storage.local` (the native build's preferences, the standalone build's
-lock preset) carries over. The standalone vault itself is in the extension's
+`chrome.storage.local` (the native build's preferences) and the extension's
+IndexedDB (the standalone build's lock preset) carry over. The standalone vault itself is in the extension's
 OPFS, so switching back and forth keeps it.
 
 1. Have an unpacked copy registered: `deadbolt browser install --extension-dir
@@ -948,5 +1050,12 @@ name "this Mac" grants nothing: it only changes the wording.
   unlock) and doesn't fold a caller's entries past a rate; see "Activity".
 - Item-to-item links (a card's billing identity, a login's sign-in account)
   are kept but not edited on the vault page.
-- Worker/offscreen loss locks every preset; no session-key restoration. Chrome
-  extension removal or storage clearing destroys this replica.
+- Worker/offscreen loss locks every preset, Until you quit included; no
+  session-key restoration. So does an extension update or reload: Chrome ends
+  the offscreen document with it. Chrome extension removal or storage
+  clearing destroys this replica.
+- Only a change to Until you quit asks for the passphrase or Touch ID. Other
+  loosening, like Strict to Comfortable or Relaxed, doesn't yet.
+- A removal reaches this browser only through a sync with a device that has
+  it. If the browser can't reach any device (offline, or every peer gone), it
+  doesn't learn it was removed and stays unlocked under its preset.

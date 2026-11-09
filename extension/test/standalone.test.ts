@@ -11,27 +11,54 @@ const HOUR = 60 * 60_000
 let fake: FakeChrome
 /** What the vault says hello with. */
 let vault: "ready" | "locked" | "not-set-up"
+/** The preset the vault's worker keeps, as it says in hello; unset until it's told. */
+let workerPreset: string | undefined
+/** Whether another device removed this browser from the vault. */
+let removed: boolean
+/** A PRF key that isn't this vault's. */
+const STRANGE_PRF = "00".repeat(32)
+/** The vault's own proof check, as device.rs's reauthenticate: none is passphrase_needed. */
+const proofError = (body: Record<string, unknown>) => {
+  if (body.passphrase === undefined && body.prf === undefined) return { reply: { type: "error", code: "passphrase_needed", message: "Enter your passphrase to continue." } }
+  if (body.passphrase === "wrong") return { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } }
+  if (body.prf === STRANGE_PRF) return { reply: { type: "error", code: "bad_request", message: "Touch ID didn't unlock this vault. Use your passphrase, then reset Touch ID in Settings." } }
+  return null
+}
 
 const requests = () => fake.sent.filter((m): m is VaultRequest => (m as VaultRequest).type === VAULT_REQUEST).map((m) => m.body)
 const locks = () => fake.sent.filter((m) => (m as { type: string }).type === VAULT_LOCK).length
 const fireAlarm = (name: string) => fake.alarmListeners.forEach((l) => l({ name }))
+/** The lock preset as the extension keeps it (bg/preset-store.ts): in its own IndexedDB. */
+const setPreset = (preset: string) => void (fake.idb["deadbolt-lock"] = { settings: { preset } })
+const storedPreset = () => fake.idb["deadbolt-lock"]?.settings?.preset
+const lockedBy = async (backend: StandaloneBackend) => {
+  const r = await backend.device({ type: "device-settings" })
+  return r.ok ? r.reply.lockedBy : undefined
+}
+const settingsOf = async (backend: StandaloneBackend) => {
+  const r = await backend.device({ type: "device-settings" })
+  return r.ok ? r.reply : null
+}
 
 beforeEach(() => {
   fake = installChrome()
   chrome.storage.session.setAccessLevel = async () => {}
   vault = "ready"
+  workerPreset = undefined
+  removed = false
   // The offscreen document, answering for its worker.
   fake.runtimeAnswer = (message) => {
     const m = message as VaultRequest
     if ((m.type as string) === VAULT_LOCK) {
       // A fresh worker: locked if a vault was persisted, else still not set up.
       if (vault === "ready") vault = "locked"
+      workerPreset = undefined
       return true
     }
     if (m.type !== VAULT_REQUEST) return undefined
     switch (m.body.type) {
       case "hello":
-        return { reply: { type: "hello", protocol: 3, version: "test", status: vault, capabilities: [] } }
+        return { reply: { type: "hello", protocol: 3, version: "test", status: vault, capabilities: [], ...(vault === "ready" ? { removed, ...(workerPreset ? { preset: workerPreset } : {}) } : {}) } }
       case "device-unlock":
       case "device-secret":
         // The vault's own check: "wrong" is a wrong passphrase.
@@ -41,6 +68,7 @@ beforeEach(() => {
       case "device-create":
       case "device-join-finish":
         vault = "ready"
+        if (typeof m.body.preset === "string") workerPreset = m.body.preset
         return { reply: { type: m.body.type, ok: true } }
       case "fill-form":
         // Strict: a card's number needs the passphrase, every time.
@@ -52,6 +80,16 @@ beforeEach(() => {
           return { reply: { type: "error", code: "locked", message: "Deadbolt is locked" } }
         }
         return { reply: { type: "fill-form", values: { number: "4242424242424242" }, verified: true } }
+      case "device-preset": {
+        // Until you quit: the vault checks the proof itself, and any proof sent.
+        const needs = m.body.preset === "until-quit" && workerPreset !== "until-quit"
+        const refused = needs || m.body.passphrase !== undefined || m.body.prf !== undefined ? proofError(m.body) : null
+        if (refused) return refused
+        workerPreset = m.body.preset as string
+        return { reply: { type: "device-preset", ok: true } }
+      }
+      case "device-pair":
+        return proofError(m.body) ?? { reply: { type: "device-pair", ok: true } }
       case "device-biometric-check":
         // Touch ID enrollment checks the passphrase first, without opening anything.
         if (m.body.passphrase === "wrong") return { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } }
@@ -95,9 +133,9 @@ describe("the vault's worker lost", () => {
   })
 
   test("every preset locks once its worker or offscreen document is gone", async () => {
-    for (const preset of ["comfortable", "relaxed", "strict"] as const) {
+    for (const preset of ["comfortable", "relaxed", "strict", "until-quit"] as const) {
+      setPreset(preset)
       const first = new StandaloneBackend()
-      await first.device({ type: "device-preset", preset })
       expect((await first.device({ type: "device-unlock", passphrase: "right" })).ok).toBe(true)
       // Chrome discarded the worker or closed the offscreen document: a fresh one answers, locked.
       vault = "locked"
@@ -105,6 +143,26 @@ describe("the vault's worker lost", () => {
       await restarted.connect()
       expect(restarted.status.state).toBe("locked")
       vault = "ready"
+    }
+  })
+
+  test("a service worker restarting locks no preset", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    for (const preset of ["strict", "comfortable", "relaxed", "until-quit"] as const) {
+      setPreset(preset)
+      const first = new StandaloneBackend()
+      await first.device({ type: "device-unlock", passphrase: "right" })
+      // Chrome stops the service worker; the offscreen document keeps the vault open.
+      fake.listeners.length = 0
+      fake.alarmListeners.length = 0
+      const restarted = new StandaloneBackend()
+      fireAlarm("deadbolt-idle")
+      await restarted.connect()
+      await settle()
+      expect(restarted.status.state).toBe("ready")
+      expect(locks()).toBe(0)
+      expect(await settingsOf(restarted)).not.toHaveProperty("lockedBy")
     }
   })
 
@@ -138,7 +196,7 @@ describe("the vault's worker lost", () => {
     const backend = new StandaloneBackend()
     await backend.connect()
     expect(backend.status.state).toBe("unavailable")
-    await backend.lock()
+    await backend.lock("manual")
     expect(vault).toBe("locked")
     expect(locks()).toBe(1)
   })
@@ -386,14 +444,14 @@ describe("idle lock", () => {
     expect(backend.status.state).toBe("locked")
   })
 
-  test("Strict locks after five minutes; the preset is kept in local storage", async () => {
+  test("Strict locks after five minutes; the preset is kept in the extension's own IndexedDB", async () => {
     const start = new Date("2026-10-29T12:00:00Z")
     setSystemTime(start)
     const backend = new StandaloneBackend()
     await backend.connect()
     const reply = await backend.device({ type: "device-preset", preset: "strict" })
     expect(reply.ok && reply.reply).toMatchObject({ type: "device-settings", preset: "strict" })
-    expect(fake.local["deadbolt.lockPreset"]).toBe("strict")
+    expect(storedPreset()).toBe("strict")
     backend.used()
     setSystemTime(new Date(start.getTime() + 5 * 60_000 - 1000))
     fireAlarm("deadbolt-idle")
@@ -410,7 +468,7 @@ describe("idle lock", () => {
   })
 
   test("Relaxed stays unlocked when the screen locks, and for longer than an hour", async () => {
-    fake.local["deadbolt.lockPreset"] = "relaxed"
+    setPreset("relaxed")
     const start = new Date("2026-10-29T12:00:00Z")
     setSystemTime(start)
     const backend = new StandaloneBackend()
@@ -428,8 +486,51 @@ describe("idle lock", () => {
     expect(locks()).toBe(1)
   })
 
+  test("Until you quit stays unlocked through 13 hours idle and the screen locking", async () => {
+    setPreset("until-quit")
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    backend.used()
+    fake.idleListeners.forEach((l) => l("locked"))
+    setSystemTime(new Date(start.getTime() + 13 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(0)
+    expect(backend.status.state).toBe("ready")
+    // Not even a restarted service worker, woken by the alarm.
+    const restarted = new StandaloneBackend()
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(0)
+    expect(await restarted.asksPassphrase()).toBe(false)
+  })
+
+  test("Until you quit locks when the browser quits, and on Lock", async () => {
+    setPreset("until-quit")
+    vault = "locked"
+    const backend = new StandaloneBackend()
+    await backend.device({ type: "device-unlock", passphrase: "right" })
+    expect(backend.status.state).toBe("ready")
+    // The browser quits: the worker and session storage go; local storage stays.
+    vault = "locked"
+    fake.session = {}
+    fake.offscreenOpen = false
+    const restarted = new StandaloneBackend()
+    await restarted.connect()
+    expect(restarted.status.state).toBe("locked")
+    expect(await settingsOf(restarted)).toMatchObject({ preset: "until-quit", lockedBy: { reason: "quit" } })
+    await restarted.device({ type: "device-unlock", passphrase: "right" })
+    expect(await settingsOf(restarted)).not.toHaveProperty("lockedBy")
+    await restarted.device({ type: "device-lock" })
+    expect(locks()).toBe(1)
+    expect(restarted.status.state).toBe("locked")
+    expect(await settingsOf(restarted)).toMatchObject({ lockedBy: { reason: "manual" } })
+  })
+
   test("Strict asks for the passphrase before a password is shown", async () => {
-    fake.local["deadbolt.lockPreset"] = "strict"
+    setPreset("strict")
     const backend = new StandaloneBackend()
     await backend.connect()
     fake.sent.length = 0
@@ -512,9 +613,249 @@ describe("use", () => {
   })
 })
 
+describe("why it locked", () => {
+  const opened = async (preset = "relaxed") => {
+    setPreset(preset)
+    vault = "locked"
+    const backend = new StandaloneBackend()
+    await backend.device({ type: "device-unlock", passphrase: "right" })
+    expect(backend.status.state).toBe("ready")
+    return backend
+  }
+
+  test("idle, with how long; the screen; Lock", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const idle = await opened()
+    setSystemTime(new Date(start.getTime() + 12 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(await lockedBy(idle)).toEqual({ reason: "idle", idleMs: 12 * HOUR })
+    const screen = await opened("comfortable")
+    fake.idleListeners.forEach((l) => l("locked"))
+    await settle()
+    expect(await lockedBy(screen)).toEqual({ reason: "screen" })
+    const manual = await opened()
+    await manual.device({ type: "device-lock" })
+    expect(await lockedBy(manual)).toEqual({ reason: "manual" })
+  })
+
+  test("its worker or its offscreen document lost, told apart", async () => {
+    const worker = await opened()
+    // The worker trapped: the same offscreen document says so, and a fresh worker is locked.
+    vault = "locked"
+    fake.listeners.forEach((l) => l({ type: VAULT_CHANGED, change: "locked" }, { id: ID, url: OFFSCREEN_URL }, () => {}))
+    await settle()
+    expect(worker.status.state).toBe("locked")
+    expect(await lockedBy(worker)).toEqual({ reason: "worker" })
+    const offscreen = await opened()
+    // Chrome closed the offscreen document: the next request opens another, locked.
+    vault = "locked"
+    fake.offscreenOpen = false
+    await offscreen.connect()
+    expect(offscreen.status.state).toBe("locked")
+    expect(await lockedBy(offscreen)).toEqual({ reason: "offscreen" })
+    expect(locks()).toBe(0)
+  })
+
+  test("an update or reload of the extension, or the browser starting again", async () => {
+    await opened()
+    // Reloaded or updated: session storage goes, and onInstalled says so.
+    vault = "locked"
+    fake.session = {}
+    fake.listeners.length = 0
+    const updated = new StandaloneBackend()
+    fake.installedListeners.forEach((l) => l({ reason: "update" }))
+    await updated.connect()
+    expect(await lockedBy(updated)).toEqual({ reason: "update" })
+    // A new version says so too, even if onInstalled came to a service worker that's gone.
+    await updated.device({ type: "device-unlock", passphrase: "right" })
+    vault = "locked"
+    fake.session = {}
+    fake.version = "1.0.1"
+    const newer = new StandaloneBackend()
+    await newer.connect()
+    expect(await lockedBy(newer)).toEqual({ reason: "update" })
+    // The browser updating restarts it: that's quitting.
+    await newer.device({ type: "device-unlock", passphrase: "right" })
+    vault = "locked"
+    fake.session = {}
+    fake.installedListeners.length = 0
+    const restarted = new StandaloneBackend()
+    fake.installedListeners.forEach((l) => l({ reason: "chrome_update" }))
+    await restarted.connect()
+    expect(await lockedBy(restarted)).toEqual({ reason: "quit" })
+  })
+
+  test("a locked answer from before the vault opened again isn't taken for losing it", async () => {
+    const backend = await opened()
+    await backend.device({ type: "device-lock" })
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let asked!: () => void
+    const reached = new Promise<void>((resolve) => (asked = resolve))
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "hello" && !release) {
+        asked()
+        return new Promise((resolve) => (release = () => resolve({ reply: { type: "hello", protocol: 3, version: "test", status: "locked", capabilities: [] } })))
+      }
+      return answer(message)
+    }
+    const status = backend.device({ type: "device-status" })
+    await reached
+    await backend.device({ type: "device-unlock", passphrase: "right" })
+    release()
+    await status
+    await settle()
+    expect(fake.local["deadbolt.open"]).toBeDefined()
+    expect(fake.local["deadbolt.lockedBy"]).toBeUndefined()
+    // Asked again rather than shown: the open vault doesn't look locked, and its idle lock still runs.
+    expect(backend.status.state).toBe("ready")
+  })
+
+  test("a status read beside an unlock doesn't lock a vault opened already removed", async () => {
+    vault = "locked"
+    removed = true
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let opened!: () => void
+    const open = new Promise<void>((resolve) => (opened = resolve))
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-unlock") {
+        // The worker is open (and knows it was removed) before the unlock's answer arrives.
+        vault = "ready"
+        opened()
+        return new Promise((resolve) => (release = () => resolve({ reply: { type: "device-unlock", ok: true } })))
+      }
+      return answer(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const unlock = backend.device({ type: "device-unlock", passphrase: "right" })
+    await open
+    await backend.device({ type: "device-status" })
+    release()
+    expect((await unlock).ok).toBe(true)
+    expect(backend.status.state).toBe("ready")
+    expect(locks()).toBe(0)
+    expect(await lockedBy(backend)).toBeUndefined()
+  })
+
+  test("another device removing this browser locks it once, saying so", async () => {
+    const backend = await opened()
+    // A sync brings the removal: the vault says so when asked after it.
+    removed = true
+    fake.listeners.forEach((l) => l({ type: VAULT_CHANGED, change: "items" }, { id: ID, url: OFFSCREEN_URL }, () => {}))
+    await settle()
+    expect(backend.status.state).toBe("locked")
+    expect(locks()).toBe(1)
+    expect(await lockedBy(backend)).toEqual({ reason: "removed" })
+    // Opened again, knowing: it stays open, even for a restarted service worker.
+    await backend.device({ type: "device-unlock", passphrase: "right" })
+    expect(backend.status.state).toBe("ready")
+    const restarted = new StandaloneBackend()
+    await restarted.connect()
+    expect(restarted.status.state).toBe("ready")
+    expect(locks()).toBe(1)
+  })
+
+  test("nothing while it's open, and no value is kept", async () => {
+    const backend = await opened()
+    expect(await lockedBy(backend)).toBeUndefined()
+    await backend.device({ type: "device-lock" })
+    expect(JSON.stringify(fake.local)).not.toContain("right")
+    expect(Object.keys(fake.local).sort()).toEqual(["deadbolt.lockedBy", "deadbolt.unlockMethod"])
+  })
+})
+
+describe("a lock preset nobody chose", () => {
+  test("if the extension's store can't be read, Strict", async () => {
+    ;(globalThis as unknown as { indexedDB: unknown }).indexedDB = { open: () => { throw new Error("no IndexedDB") } }
+    fake.local["deadbolt.lockPreset"] = "relaxed"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(backend.preset).toBe("strict")
+  })
+
+  test("a screen lock that wakes the service worker follows the worker's stricter preset", async () => {
+    setPreset("until-quit")
+    workerPreset = "comfortable"
+    const backend = new StandaloneBackend()
+    expect(backend.status.state).toBe("connecting")
+    fake.idleListeners.forEach((l) => l("locked"))
+    await settle()
+    expect(locks()).toBe(1)
+    expect(await lockedBy(backend)).toBeUndefined()
+    expect(backend.status.state).toBe("locked")
+  })
+
+  test("Lock forgets the worker's preset: Settings shows the one chosen", async () => {
+    setPreset("until-quit")
+    workerPreset = "comfortable"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(await settingsOf(backend)).toMatchObject({ preset: "comfortable" })
+    await backend.device({ type: "device-lock" })
+    expect(await settingsOf(backend)).toMatchObject({ preset: "until-quit" })
+  })
+
+  test("written to chrome.storage.local before it moved, until-quit comes over as Relaxed, and still idle-locks", async () => {
+    fake.local["deadbolt.lockPreset"] = "until-quit"
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(backend.preset).toBe("relaxed")
+    expect(storedPreset()).toBe("relaxed")
+    expect(fake.local["deadbolt.lockPreset"]).toBeUndefined()
+    backend.used()
+    setSystemTime(new Date(start.getTime() + 13 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(1)
+    expect(backend.status.state).toBe("locked")
+  })
+
+  test("written to chrome.storage.local later, it's never read: the idle lock still runs", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    await new StandaloneBackend().connect()
+    expect(storedPreset()).toBe("comfortable")
+    // A content script (or a compromised renderer) writes it, and the service worker restarts.
+    fake.local["deadbolt.lockPreset"] = "until-quit"
+    fake.idleListeners.length = 0
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    backend.used()
+    expect(await backend.device({ type: "device-settings" })).toMatchObject({ reply: { preset: "comfortable" } })
+    fake.idleListeners.forEach((l) => l("locked"))
+    await settle()
+    expect(locks()).toBe(1)
+    expect(backend.status.state).toBe("locked")
+  })
+
+  test("the worker's preset, if stricter, is the one locking follows", async () => {
+    setPreset("until-quit")
+    workerPreset = "comfortable"
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    backend.used()
+    expect(await backend.device({ type: "device-settings" })).toMatchObject({ reply: { preset: "comfortable" } })
+    setSystemTime(new Date(start.getTime() + 2 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(1)
+    expect(await lockedBy(backend)).toBeUndefined()
+  })
+})
+
 describe("lock preset in the worker", () => {
   test("goes with every unlock, and to an unlocked worker when it changes", async () => {
-    fake.local["deadbolt.lockPreset"] = "strict"
+    setPreset("strict")
     vault = "locked"
     const backend = new StandaloneBackend()
     await backend.connect()
@@ -524,8 +865,121 @@ describe("lock preset in the worker", () => {
     expect(requests().filter((b) => b.type === "device-preset")).toEqual([{ type: "device-preset", preset: "relaxed" }])
   })
 
+  test("Until you quit takes the passphrase, checked by the vault, on an open vault only", async () => {
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const presets = () => requests().filter((b) => b.type === "device-preset")
+    expect(await backend.device({ type: "device-preset", preset: "until-quit" })).toMatchObject({ ok: false, code: "passphrase_needed" })
+    expect(presets()).toEqual([])
+    expect(await backend.device({ type: "device-preset", preset: "until-quit", passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
+    // A wrong passphrase leaves the old preset, and the vault open.
+    expect(backend.status.state).toBe("ready")
+    expect(locks()).toBe(0)
+    expect(storedPreset()).toBe("comfortable")
+    expect(backend.preset).toBe("comfortable")
+    const chosen = await backend.device({ type: "device-preset", preset: "until-quit", passphrase: "right" })
+    expect(chosen.ok && chosen.reply.preset).toBe("until-quit")
+    expect(presets().at(-1)).toEqual({ type: "device-preset", preset: "until-quit", passphrase: "right" })
+    expect(storedPreset()).toBe("until-quit")
+    // Back to a stricter one takes nothing.
+    expect((await backend.device({ type: "device-preset", preset: "strict" })).ok).toBe(true)
+    expect(presets().at(-1)).toEqual({ type: "device-preset", preset: "strict" })
+    // Locked, there's no vault to check it: refused, not saved for later.
+    await backend.device({ type: "device-lock" })
+    expect(await backend.device({ type: "device-preset", preset: "until-quit", passphrase: "right" })).toMatchObject({ ok: false, code: "locked" })
+    expect(storedPreset()).toBe("strict")
+  })
+
+  test("a service worker just woken asks the vault first: no 'Unlock first' on an open vault, and no skipped check", async () => {
+    fake.session["deadbolt.passphraseTries"] = { fails: 2, until: 0 }
+    // Woken by the page's own message: nobody asked the vault how it is yet.
+    const backend = new StandaloneBackend()
+    expect(backend.status.state).toBe("connecting")
+    expect(await backend.device({ type: "device-preset", preset: "until-quit" })).toMatchObject({ ok: false, code: "passphrase_needed" })
+    expect(await backend.device({ type: "device-preset", preset: "until-quit", passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
+    // Counted: the third wrong one in a row starts the wait.
+    expect(fake.session["deadbolt.passphraseTries"]).toMatchObject({ fails: 3 })
+    expect(await backend.device({ type: "device-preset", preset: "until-quit", passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
+    expect(backend.status.state).toBe("ready")
+    expect(locks()).toBe(0)
+  })
+
+  test("a passphrase nobody needed to check isn't taken as right: the backoff stays", async () => {
+    setPreset("until-quit")
+    workerPreset = "until-quit"
+    fake.session["deadbolt.passphraseTries"] = { fails: 2, until: 0 }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect((await backend.device({ type: "device-preset", preset: "until-quit", passphrase: "wrong" })).ok).toBe(true)
+    // Not sent to the vault, so not counted either way.
+    expect(requests().filter((b) => b.type === "device-preset").at(-1)).toEqual({ type: "device-preset", preset: "until-quit" })
+    expect(fake.session["deadbolt.passphraseTries"]).toMatchObject({ fails: 2 })
+  })
+
+  test("a Touch ID key the vault refuses changes nothing and doesn't lock it", async () => {
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const refused = await backend.device({ type: "device-preset", preset: "until-quit", prf: STRANGE_PRF })
+    expect(refused).toMatchObject({ ok: false, code: "bad_request" })
+    expect(locks()).toBe(0)
+    expect(backend.status.state).toBe("ready")
+    expect(backend.preset).toBe("comfortable")
+    expect(storedPreset()).toBe("comfortable")
+    expect((await backend.device({ type: "device-preset", preset: "until-quit", prf: "ab".repeat(32) })).ok).toBe(true)
+    expect(backend.preset).toBe("until-quit")
+  })
+
+  test("pairing a device takes the passphrase or Touch ID, counted as any other", async () => {
+    setPreset("until-quit")
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const code = "apple-river-stone-lamp-zoo"
+    expect(await backend.device({ type: "device-pair", code })).toMatchObject({ ok: false, code: "passphrase_needed" })
+    for (let i = 0; i < 3; i++) expect(await backend.device({ type: "device-pair", code, passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
+    expect(await backend.device({ type: "device-pair", code, passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
+    // A wrong passphrase is caught by its check and never starts a pairing.
+    expect(requests().filter((b) => b.type === "device-pair")).toHaveLength(1)
+    expect(requests().filter((b) => b.type === "device-biometric-check")).toHaveLength(3)
+    expect(deviceCommand({ type: "device-pair", code, passphrase: "p", extra: 1 })).toEqual({ type: "device-pair", code, passphrase: "p" })
+    expect(deviceCommand({ type: "device-pair", code, prf: "ab".repeat(32) })).toEqual({ type: "device-pair", code, prf: "ab".repeat(32) })
+    expect(deviceCommand({ type: "device-pair", code, passphrase: "" })).toBeNull()
+  })
+
+  test("a pairing waiting on the other device doesn't hold up other passphrase checks", async () => {
+    setPreset("strict")
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let reached!: () => void
+    const waiting = new Promise<void>((resolve) => (reached = resolve))
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-pair") {
+        reached()
+        return new Promise((resolve) => (release = () => resolve({ reply: { type: "device-pair", ok: true } })))
+      }
+      return answer(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const pairing = backend.device({ type: "device-pair", code: "apple-river-stone-lamp-zoo", passphrase: "right" })
+    await waiting
+    // The passphrase was checked in its turn; the pairing now waits outside the queue.
+    expect(requests().find((b) => b.type === "device-pair")).toMatchObject({ passphrase: "right" })
+    expect(await backend.device({ type: "device-secret", ref: "v:i", passphrase: "right" })).toMatchObject({ ok: true })
+    release()
+    expect((await pairing).ok).toBe(true)
+  })
+
+  test("a page's preset change is rebuilt with its passphrase or PRF only", () => {
+    const prf = "ab".repeat(32)
+    expect(deviceCommand({ type: "device-preset", preset: "until-quit", passphrase: "p", extra: 1 })).toEqual({ type: "device-preset", preset: "until-quit", passphrase: "p" })
+    expect(deviceCommand({ type: "device-preset", preset: "until-quit", prf })).toEqual({ type: "device-preset", preset: "until-quit", prf })
+    expect(deviceCommand({ type: "device-preset", preset: "until-quit", passphrase: "" })).toBeNull()
+    expect(deviceCommand({ type: "device-preset", preset: "forever" })).toBeNull()
+  })
+
   test("a change the unlocked worker refuses keeps the preset it holds", async () => {
-    fake.local["deadbolt.lockPreset"] = "strict"
+    setPreset("strict")
     const base = fake.runtimeAnswer!
     fake.runtimeAnswer = (message) => {
       const m = message as VaultRequest
@@ -535,7 +989,7 @@ describe("lock preset in the worker", () => {
     const backend = new StandaloneBackend()
     await backend.connect()
     expect(await backend.device({ type: "device-preset", preset: "relaxed" })).toMatchObject({ ok: false })
-    expect(fake.local["deadbolt.lockPreset"]).toBe("strict")
+    expect(storedPreset()).toBe("strict")
     expect(await backend.asksPassphrase()).toBe(true)
     const settings = await backend.device({ type: "device-settings" })
     expect(settings.ok && settings.reply.preset).toBe("strict")
@@ -597,7 +1051,7 @@ describe("wrong passphrases", () => {
   })
 
   test("Strict's passphrase for a password counts too", async () => {
-    fake.local["deadbolt.lockPreset"] = "strict"
+    setPreset("strict")
     const backend = new StandaloneBackend()
     await backend.connect()
     for (let i = 0; i < 3; i++) await backend.device({ type: "device-secret", ref: "v:i", passphrase: "wrong" })
@@ -1013,7 +1467,7 @@ describe("a fill waiting on the passphrase", () => {
     const locked = backend.reauth(body, ask, new AbortController().signal)
     await settle()
     const id = (await waiting(backend))!.id
-    await backend.lock()
+    await backend.lock("manual")
     await expect(locked).rejects.toMatchObject({ code: "locked" })
     expect(requests().filter((b) => b.type === "fill-form")).toHaveLength(0)
     const late = await backend.device({ type: "device-reauth-confirm", id, passphrase: "right" })
@@ -1106,12 +1560,13 @@ describe("the card menu's passphrase hint", () => {
       ["strict", true],
       ["comfortable", false],
       ["relaxed", false],
+      ["until-quit", false],
     ] as const) {
-      fake.local["deadbolt.lockPreset"] = preset
+      setPreset(preset)
       expect(await new StandaloneBackend().asksPassphrase()).toBe(asks)
     }
     // Changing the preset changes it at once.
-    fake.local["deadbolt.lockPreset"] = "comfortable"
+    setPreset("comfortable")
     const backend = new StandaloneBackend()
     await backend.connect()
     await backend.device({ type: "device-preset", preset: "strict" })
@@ -1140,7 +1595,7 @@ describe("clipboard", () => {
     expect(r.ok && r.reply.clears).toBe(false)
     expect(fake.alarms[CLIPBOARD_ALARM]).toBeUndefined()
     expect(fake.session[COPIED_KEY]).toBeUndefined()
-    await backend.lock()
+    await backend.lock("manual")
     expect(clears()).toEqual([])
   })
 
@@ -1173,7 +1628,7 @@ describe("clipboard", () => {
     await backend.device({ type: "device-copied", ...(await record("pw")) })
     const restarted = new StandaloneBackend()
     await restarted.connect()
-    await restarted.lock()
+    await restarted.lock("manual")
     expect(clears()).toHaveLength(1)
     expect(fake.alarms[CLIPBOARD_ALARM]).toBeUndefined()
   })

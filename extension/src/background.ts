@@ -185,7 +185,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return fromExtensionPage(sender, "popup.html") ? saver.savingOn(message.tabId) : false
     case "db:popup-lock":
       if (!fromExtensionPage(sender, "popup.html") || !standalone) return host.status
-      await standalone.lock()
+      await standalone.lock("manual")
       return standalone.status
     case "db:device":
       return device(message.command, sender)

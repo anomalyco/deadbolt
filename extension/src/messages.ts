@@ -573,8 +573,8 @@ export type DeviceCommand =
   | { type: "device-biometric-set"; passphrase: string; prf: string; token: string }
   | { type: "device-biometric-reset" }
   | { type: "device-lock" }
-  /** Admit the device that `deadbolt join` shows this code on. */
-  | { type: "device-pair"; code: string }
+  /** Admit the device that `deadbolt join` shows this code on: the vault asks for the passphrase or a PRF key first. */
+  | { type: "device-pair"; code: string; passphrase?: string; prf?: string }
   /**
    * First run, joining a vault another device has: start waiting to be
    * admitted (`{ type: "device-join-start", code, phase: "waiting" }`; the
@@ -621,9 +621,13 @@ export type DeviceCommand =
   | { type: "device-remove"; id: string }
   /** Renames the vault. */
   | { type: "device-rename"; name: string }
-  /** This browser's settings: `{ type: "device-settings", preset }`. */
+  /**
+   * This browser's settings: `{ type: "device-settings", preset, retryAt,
+   * lockedBy? }`, `lockedBy` being why the vault last locked (a LockedBy).
+   */
   | { type: "device-settings" }
-  | { type: "device-preset"; preset: LockPreset }
+  /** Changing to "until-quit" from another preset takes the passphrase or a PRF key. */
+  | { type: "device-preset"; preset: LockPreset; passphrase?: string; prf?: string }
   /** The user opened something (a login's details): counts as use for the idle lock, once, never on a poll. */
   | { type: "device-used" }
   /** A new password from the core's generator: `{ type: "device-generate", password }`. */
@@ -714,7 +718,14 @@ export type JoinStatus = { type: "device-join-status"; phase: "waiting" | "admit
 export type VaultDevice = { id: string; name: string; current: boolean; lastSeen?: number | null }
 
 /** How soon the browser-only Deadbolt locks by itself (docs/extension-device.md, Lock presets). */
-export type LockPreset = "strict" | "comfortable" | "relaxed"
+export type LockPreset = "strict" | "comfortable" | "relaxed" | "until-quit"
+
+/**
+ * Why the vault last locked, kept until it unlocks again: never a value.
+ * `idleMs` is the idle limit an `idle` lock ran out.
+ */
+export type LockedBy = { reason: LockReason; idleMs?: number }
+export type LockReason = "idle" | "screen" | "quit" | "worker" | "offscreen" | "manual" | "update" | "changed" | "removed"
 
 /** A field to set in device-item-save. `type` only for a field the item's type doesn't know. */
 export interface ItemInput {

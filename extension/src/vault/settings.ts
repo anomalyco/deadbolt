@@ -2,7 +2,7 @@
 // (delete one), the lock preset, Activity, sites never offered to save,
 // recordings and the vault's name.
 
-import { describePreset, PRESETS, VAULT_NAME } from "../device-rules"
+import { changeNeedsProof, describePreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { DevicePasskey, LockPreset, VaultDevice } from "../messages"
 import { h, icon } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
@@ -11,7 +11,7 @@ import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
 import { clearLearnLogs, learnExport, learnLogs } from "../bg/learn-log"
 import { NEVER_KEY } from "../bg/save"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
-import { enroll, enrollment } from "./biometric"
+import { enroll, enrollment, verify } from "./biometric"
 import { aboutSection } from "./about"
 import { activitySection } from "./activity"
 import { appearanceRows } from "../ui/appearance"
@@ -245,6 +245,8 @@ export function settingsView(app: App): View {
   const pairStart = button("btn", [glyph("plus"), "Pair another device"], () => openPair())
   const openPair = () => {
     const code = h("input", { class: "input mono-input", placeholder: "word-word-word-word-word", "aria-label": "Pairing code", spellcheck: "false", autocomplete: "off" })
+    // Admitting a device gives it every item for good: the vault asks for the passphrase (or Touch ID) first.
+    const pass = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase to approve", placeholder: "Passphrase", spellcheck: "false" })
     const error = h("p", { class: "error", role: "alert" })
     error.hidden = true
     const label = h("span", { class: "roll-label" }, "Approve")
@@ -253,49 +255,128 @@ export function settingsView(app: App): View {
     const form = h(
       "form",
       { class: "pair-form", novalidate: "" },
-      para("On the other device, run ", h("code", {}, "deadbolt join"), " or choose Join in the Deadbolt app, then enter the code it shows."),
-      h("div", { class: "reauth-row" }, code, go),
+      para("On the other device, run ", h("code", {}, "deadbolt join"), " or choose Join in the Deadbolt app, then enter the code it shows and your passphrase."),
+      code,
+      h("div", { class: "reauth-row" }, pass, go),
       error,
       h("div", { class: "buttons end" }, button("link", "Cancel", () => pairArea.replaceChildren(pairStart))),
     )
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault()
+    const approve = async (proof: { passphrase: string } | { prf: string }) => {
       const value = code.value.trim().toLowerCase()
-      if (!value) return refuse(code)
       go.disabled = true
-      code.disabled = true
+      code.disabled = pass.disabled = true
       rollLabel(label, "Approving…")
-      const r = await app.run({ type: "device-pair", code: value })
+      const r = await app.run({ type: "device-pair", code: value, ...proof })
       if (!r.ok) {
-        go.disabled = code.disabled = false
+        go.disabled = code.disabled = pass.disabled = false
         rollLabel(label, "Approve")
-        error.textContent = r.message
+        error.textContent = r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.message
         error.hidden = false
+        if (r.code === "wrong_passphrase" || r.code === "backoff") {
+          refuse(pass)
+          return pass.focus()
+        }
         return code.focus()
       }
       pairArea.replaceChildren(pairStart)
       await app.refresh()
       app.announce("Approved.")
+    }
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault()
+      if (go.disabled) return
+      if (!code.value.trim()) return refuse(code)
+      if (!pass.value) return refuse(pass)
+      const value = pass.value
+      pass.value = ""
+      await approve({ passphrase: value })
+    })
+    void enrollment(app).then((enrolled) => {
+      if (!enrolled || !form.isConnected) return
+      go.after(button("btn", "Use Touch ID", async (b) => {
+        if (!code.value.trim()) return refuse(code)
+        b.disabled = true
+        try { await approve({ prf: await verify(app) }) }
+        catch (e) {
+          error.textContent = (e as Error).message
+          error.hidden = false
+        } finally { b.disabled = false }
+      }))
     })
     pairArea.replaceChildren(form)
     code.focus()
   }
   pairArea.append(pairStart)
 
-  // The lock preset, as a radio group.
+  // The lock preset, as a radio group. "Until you quit" asks for the passphrase (or Touch ID) first.
   const presets = h("div", { class: "presets", role: "radiogroup", "aria-label": "Lock" })
+  const presetProof = h("div", { class: "preset-proof" })
+  const choose = async (p: LockPreset, proof: { passphrase: string } | { prf: string } | null = null) => {
+    // Strict clears copied passwords if Chrome allows it: ask now, from this click.
+    const asking = PRESETS[p].reauth && !(await app.clears()) ? app.askClearing() : null
+    const r = await app.run({ type: "device-preset", preset: p, ...proof })
+    // What the vault answered, which keeps the preset it holds when the change didn't reach it.
+    if (r.ok && typeof r.reply.preset === "string") app.preset = r.reply.preset as LockPreset
+    if (asking) clearing.checked = await asking
+    return r
+  }
+  const askProof = (p: LockPreset) => {
+    const pass = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase to stay unlocked", placeholder: "Passphrase" })
+    const submit = h("button", { class: "btn primary", type: "submit" }, "Choose")
+    const error = h("p", { class: "error", role: "alert" })
+    const done = (r: Awaited<ReturnType<typeof choose>>) => {
+      if (r.ok) {
+        presetProof.replaceChildren()
+        paintPresets()
+        return app.announce(`${PRESETS[app.preset].name}.`)
+      }
+      error.textContent = r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.message
+      refuse(pass)
+      pass.focus()
+    }
+    const form = h(
+      "form",
+      { novalidate: "" },
+      h("p", { class: "hint" }, "Enter your passphrase to keep Deadbolt unlocked until you quit the browser."),
+      h("div", { class: "reauth-row" }, pass, submit),
+      error,
+      h("div", { class: "buttons end" }, button("link", "Cancel", () => presetProof.replaceChildren())),
+    )
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault()
+      if (!pass.value || submit.disabled) return refuse(pass)
+      submit.disabled = true
+      const value = pass.value
+      pass.value = ""
+      const r = await choose(p, { passphrase: value })
+      submit.disabled = false
+      done(r)
+    })
+    void enrollment(app).then((enrolled) => {
+      if (!enrolled || !form.isConnected) return
+      submit.after(button("btn", "Use Touch ID", async (b) => {
+        b.disabled = true
+        try { done(await choose(p, { prf: await verify(app) })) }
+        catch (e) { error.textContent = (e as Error).message }
+        finally { b.disabled = false }
+      }))
+    })
+    presetProof.replaceChildren(form)
+    pass.focus()
+  }
   const paintPresets = () => {
     presets.replaceChildren(
       ...(Object.keys(PRESETS) as LockPreset[]).map((p) => {
         const info = PRESETS[p]
         const input = h("input", { type: "radio", name: "preset", value: p, ...(p === app.preset ? { checked: "" } : {}) })
         input.addEventListener("change", async () => {
-          // Strict clears copied passwords if Chrome allows it: ask now, from this click.
-          const asking = info.reauth && !(await app.clears()) ? app.askClearing() : null
-          const r = await app.run({ type: "device-preset", preset: p })
-          // What the vault answered, which keeps the preset it holds when the change didn't reach it.
-          if (r.ok && typeof r.reply.preset === "string") app.preset = r.reply.preset as LockPreset
-          if (asking) clearing.checked = await asking
+          if (changeNeedsProof(app.preset, p)) {
+            // Not chosen until the passphrase says so.
+            paintPresets()
+            return askProof(p)
+          }
+          presetProof.replaceChildren()
+          const r = await choose(p)
           paintPresets()
           app.announce(r.ok ? `${PRESETS[app.preset].name}.` : r.message)
         })
@@ -350,7 +431,7 @@ export function settingsView(app: App): View {
     toolbar("Settings", () => app.go({ name: "list" }, -1)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Devices")), devices, pairArea),
     passkeysGroup,
-    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Lock")), presets, h("p", { class: "hint" }, "Every preset locks when the browser quits.")),
+    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Lock")), presets, presetProof, h("p", { class: "hint" }, "Every preset locks when the browser quits.")),
     biometrics,
     h(
       "section",
