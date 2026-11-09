@@ -17,6 +17,24 @@ main.vault.popup {
   height: 560px;
 }
 
+/* Locked, or a request waiting on the passphrase: the popup is the toolbar
+   popup's 360 wide and only as tall as its form, as 1Password's is, not the
+   vault's full size. */
+main.vault.popup:has(> .stage > .view.unlock) {
+  height: auto;
+}
+
+body:has(main.vault.popup > .stage > .view.unlock) {
+  width: 360px;
+}
+
+main.vault.popup .view.unlock {
+  flex: none;
+  justify-content: flex-start;
+  padding: 14px 14px 16px;
+  overflow: visible;
+}
+
 .vault [hidden] {
   display: none !important;
 }
@@ -619,6 +637,18 @@ main.vault.popup {
 
 .unlock .state {
   margin-bottom: 6px;
+}
+
+/* The lock over the title reads at a glance. */
+.unlock .state-icon {
+  width: 40px;
+  height: 40px;
+  color: var(--text);
+}
+
+.unlock .state-icon svg {
+  width: 20px;
+  height: 20px;
 }
 
 .preset-note {

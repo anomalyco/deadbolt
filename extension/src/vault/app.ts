@@ -11,8 +11,8 @@ import type { DeviceCommand, DevicePasskey, DeviceReply, ItemKind, ItemSummary, 
 import { CLIPBOARD_PERMISSIONS, record } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
-import { rollLabel, ROLL_CSS } from "../ui/motion"
-import { UNLOCK_FEEL } from "../ui/unlock"
+import { ROLL_CSS } from "../ui/motion"
+import { swapText, UNLOCK_FEEL } from "../ui/unlock"
 import { PANEL_PORT, type PanelAnswer, type PanelHello } from "../bg/panel-unlock"
 import { iconSettings, onIconSettings, type IconSettings } from "../ui/icon-store"
 import { passkeyCard } from "../ui/passkey"
@@ -348,7 +348,7 @@ export class App {
     const state = this.header.querySelector<HTMLElement>(".pill")
     if (state) state.className = "pill ok"
     const label = state?.querySelector<HTMLElement>(".pill-text")
-    if (label) rollLabel(label, "Unlocked")
+    if (label) swapText(label, "Unlocked")
     setTimeout(() => window.close(), UNLOCK_FEEL.beat * 1000)
     return true
   }

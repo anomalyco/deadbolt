@@ -11,6 +11,7 @@ import { reducedMotion, rollLabel, timing } from "../ui/motion"
 import type { App, View } from "./app"
 import { button, copied, field, glyph, para, refuse, toolbar } from "./kit"
 import { enrollment, verify } from "./biometric"
+import { swapText } from "../ui/unlock"
 import { fromCli } from "./about"
 
 type Join =
@@ -426,8 +427,11 @@ export function unlockView(app: App): View {
   const unlocked = () => {
     for (const el of [input, submit, touch]) el.disabled = true
     error.hidden = true
-    rollLabel(heading, "Unlocked")
-    if (label.dataset.text === "Unlocking…") rollLabel(label, "Unlock")
+    swapText(heading, "Unlocked")
+    // Its ask is answered: the line under the title goes, softly, where it is.
+    const ask = heading.nextElementSibling
+    if (ask instanceof HTMLElement) ask.animate([{ opacity: 1 }, { opacity: 0 }], { ...timing(0.25), fill: "forwards" })
+    if (label.dataset.text === "Unlocking…") swapText(label, "Unlock")
     const check = icon("check") as SVGElement
     check.style.gridArea = "1 / 1"
     mark.style.color = "var(--success)"

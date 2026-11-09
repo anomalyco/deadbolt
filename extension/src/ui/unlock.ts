@@ -5,7 +5,7 @@
 // thing the user does is pick one. The passphrase is never typed here.
 
 import { avatar, h, icon } from "./dom"
-import { MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, timing } from "./motion"
+import { MENU_MOTION, reducedMotion, REDUCED_FADE, spring, timing } from "./motion"
 
 /** How the row waits, how it turns, and the panel's part: each value is one of the choices still open. */
 export const UNLOCK_FEEL = {
@@ -28,6 +28,48 @@ const BREATH_MS = 1400
 /** One pass of the light toward the toolbar, and the pause after it, in ms. */
 const LIGHT_MS = 1800
 
+/**
+ * Swaps `el`'s text (it holds nothing else) for `text` within its own line:
+ * the old line slides up and out as the new one slides in from below, each
+ * fading under a soft edge at the line's top and bottom, so the two never
+ * show at once in the same place and none of the old is left. The width
+ * leads on a slightly quicker spring; nothing is cut at the side.
+ */
+export function swapText(el: HTMLElement, text: string) {
+  const old = el.dataset.text ?? el.textContent ?? ""
+  if (old === text) return
+  el.dataset.text = text
+  if (reducedMotion() || typeof el.animate !== "function" || !el.isConnected) {
+    el.textContent = text
+    el.animate?.([{ opacity: 0.2 }, { opacity: 1 }], REDUCED_FADE)
+    return
+  }
+  const line = (t: string) => {
+    const s = document.createElement("span")
+    s.textContent = t
+    s.style.cssText = "grid-area:1/1;white-space:pre"
+    return s
+  }
+  const out = line(old)
+  const into = line(text)
+  out.setAttribute("aria-hidden", "true")
+  const win = document.createElement("span")
+  win.style.cssText =
+    "display:inline-grid;justify-items:start;vertical-align:top;overflow-x:visible;overflow-y:clip;" +
+    "mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 78%,transparent)"
+  win.append(into, out)
+  el.replaceChildren(win)
+  const [from, to] = [out.offsetWidth, into.offsetWidth]
+  const roll = spring(0.45)
+  // A longer line lets the width get ahead before it shows.
+  const lead = to > from + 0.5 ? 80 : 0
+  if (Math.abs(to - from) > 0.5) win.animate([{ width: `${from}px` }, { width: `${to}px` }], spring(0.37))
+  out.animate([{ transform: "translateY(0)", opacity: 1 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "forwards" })
+  into
+    .animate([{ transform: "translateY(100%)", opacity: 0 }, { transform: "translateY(0)", opacity: 1 }], { ...roll, delay: lead, fill: "backwards" })
+    .finished.then(() => el.dataset.text === text && el.firstChild === win && (el.textContent = text), () => {})
+}
+
 /** The locked row: it unlocks in the toolbar panel. `press` runs on a pointer's own click (Enter goes through the menu's keys). */
 export function lockedRow(press: () => void): HTMLElement {
   const r = h(
@@ -47,7 +89,7 @@ export function waitOnPanel(rows: HTMLElement, on: boolean) {
   row.classList.toggle("waiting", on)
   const sub = row.querySelector<HTMLElement>(".sub")
   const feel = UNLOCK_FEEL.waiting
-  if (feel === "soft" && sub) rollLabel(sub, on ? WAITING : SUB)
+  if (feel === "soft" && sub) swapText(sub, on ? WAITING : SUB)
   if (!on) return cool(row)
   if (reducedMotion()) return
   if (feel === "soft") row.querySelector(".avatar svg")?.animate([{ opacity: 1 }, { opacity: 0.4 }], { duration: BREATH_MS / 2, direction: "alternate", iterations: Infinity, easing: "ease-in-out" })
@@ -122,7 +164,7 @@ export function turnIntoLogins(old: HTMLElement, rows: HTMLElement, highlight: H
   if (feel === "open") {
     openLock(old)
     const line = old.querySelector<HTMLElement>(".sub")
-    if (line) rollLabel(line, "Unlocked")
+    if (line) swapText(line, "Unlocked")
   }
   // The frame grows on its spring (content/inline.ts), and this document's
   // viewport with it: rows that travel ride its bottom edge and come out from
