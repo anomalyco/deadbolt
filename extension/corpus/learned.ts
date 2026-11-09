@@ -1,4 +1,4 @@
-// Summarize "Learn this site" logs (docs/autofill.md, "Learning a site"): for
+// Summarize Record's logs (docs/autofill.md, "Recording a site"): for
 // every field the user typed into while signing in by hand, the role their
 // typing shows (ground truth, unlike the crawl's weak labels) against the
 // detector's, plus whether the detector found the page and its submit control.
@@ -72,7 +72,7 @@ try {
     for (const f of (await readdir(dir)).filter((f) => f.endsWith(".jsonl")).sort()) logs.set(f.replace(/\.jsonl$/, ""), (await readFile(join(dir, f), "utf8")).split("\n"))
   }
 } catch {
-  console.error(`No learning logs in ${file ?? dir}. Use "Learn this site" in the extension's popup first.`)
+  console.error(`No learning logs in ${file ?? dir}. Use Record in the extension's popup first.`)
   process.exit(1)
 }
 for (const [id, lines] of logs) {

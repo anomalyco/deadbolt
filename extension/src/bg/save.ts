@@ -498,6 +498,8 @@ export class Saver {
   private surfaces = new Map<string, Surface>()
   /** Told when a sign-in in a tab worked (confirmed or likely), with its site. */
   signedIn?: (tabId: number, site: string) => void
+  /** Sets the tab's toolbar badge: "1" while an offer waits, "" after. A recording's REC wins (background.ts). */
+  badge: (tabId: number, text: string) => void = (tabId, text) => void Promise.all([chrome.action.setBadgeBackgroundColor({ tabId, color: BADGE }), chrome.action.setBadgeText({ tabId, text })]).catch(() => {})
   /**
    * The username of a sign-in its form said failed (see failed, page), while
    * its capture would have been kept: nothing of it is offered, but the next
@@ -1002,7 +1004,7 @@ export class Saver {
     const id = newToken()
     const timer = setTimeout(() => this.dropOffer(tabId, id), this.ttl.offer)
     this.offers.set(tabId, { offer: { ...pending.offer, id }, ticket, save: pending.save, fallback: pending.fallback, abort: pending.abort, timer, saving: false })
-    void Promise.all([chrome.action.setBadgeBackgroundColor({ tabId, color: BADGE }), chrome.action.setBadgeText({ tabId, text: "1" })]).catch(() => {})
+    this.badge(tabId, "1")
     if (!turn) return
     const current = () => this.offers.get(tabId)?.offer.id === id
     if (target && target.frameId === 0 && (await this.showInPage(target, id))) return
@@ -1136,7 +1138,7 @@ export class Saver {
     o.abort?.abort()
     o.fallback?.abort?.abort()
     this.dropSurfaces(o.offer.id)
-    void chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {})
+    this.badge(tabId, "")
   }
 
   /** The offer waiting in this tab, for the popup. */

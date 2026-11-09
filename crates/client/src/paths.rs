@@ -41,8 +41,8 @@ impl Paths {
         Self::from_vars(|name| env::var_os(name))
     }
 
-    /// Where the browser extension's "Learn this site" sessions are logged,
-    /// one JSON-lines file per session, beside the daemon's log.
+    /// Where the browser extension's recordings (Record) are logged,
+    /// one JSON-lines file per recording, beside the daemon's log.
     pub fn learn_dir(&self) -> PathBuf {
         self.log.with_file_name("learn")
     }

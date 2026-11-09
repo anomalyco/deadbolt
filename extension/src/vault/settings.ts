@@ -1,6 +1,6 @@
 // Settings: the vault's devices (pair another, remove one), its passkeys
 // (delete one), the lock preset, Activity, sites never offered to save,
-// learning logs and the vault's name.
+// recordings and the vault's name.
 
 import { changeNeedsProof, describePreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { DevicePasskey, LockPreset, VaultDevice } from "../messages"
@@ -148,15 +148,15 @@ function neverRows(app: App): HTMLElement {
   return rows
 }
 
-/** "Learn this site" logs (bg/learn-log.ts): how many, Download for `bun corpus/learned.ts --file`, Delete. */
+/** Recordings (Record, bg/learn-log.ts): how many, Download for `bun corpus/learned.ts --file`, Delete. */
 function learnRows(app: App): HTMLElement {
   const box = h("div", {})
   const paint = async () => {
     const logs = await learnLogs().catch(() => [])
-    if (!logs.length) return box.replaceChildren(h("p", { class: "hint" }, "None yet. “Learn this site” in the popup records how a sign-in form is built while you sign in by hand, never what you type."))
+    if (!logs.length) return box.replaceChildren(h("p", { class: "hint" }, "None yet. Record, in the popup's header, keeps what you do on a page Deadbolt gets wrong: the form's shape, clicks and named keys, never what you type."))
     const download = button("btn", [glyph("open"), "Download"], async () => {
       const url = URL.createObjectURL(new Blob([learnExport(await learnLogs())], { type: "application/x-ndjson" }))
-      const a = h("a", { href: url, download: `deadbolt-learn-${new Date().toISOString().slice(0, 10)}.jsonl` })
+      const a = h("a", { href: url, download: `deadbolt-recordings-${new Date().toISOString().slice(0, 10)}.jsonl` })
       document.body.append(a)
       a.click()
       a.remove()
@@ -164,10 +164,10 @@ function learnRows(app: App): HTMLElement {
     })
     const clear = button("btn", [glyph("trash"), "Delete"], async () => {
       await clearLearnLogs().catch(() => {})
-      app.announce("Deleted the learning logs.")
+      app.announce("Deleted the recordings.")
       void paint()
     })
-    box.replaceChildren(h("p", { class: "hint" }, `${logs.length} ${logs.length === 1 ? "session" : "sessions"} kept in this browser, the newest 50 for 30 days.`), h("div", { class: "buttons" }, download, clear))
+    box.replaceChildren(h("p", { class: "hint" }, `${logs.length} ${logs.length === 1 ? "recording" : "recordings"} kept in this browser, the newest 10 for 7 days.`), h("div", { class: "buttons" }, download, clear))
   }
   void paint()
   return box
@@ -448,7 +448,7 @@ export function settingsView(app: App): View {
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")), ...appearanceRows(app.icons, (m) => app.announce(m)), h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks.")),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Saving")), neverRows(app)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Signing in")), signInRow((m) => app.announce(m))),
-    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Learning logs")), learnRows(app)),
+    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Recordings")), learnRows(app)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Vault name")), h("div", { class: "reauth-row" }, name, rename), nameHint),
     aboutSection(app),
     app.surface !== "popup"

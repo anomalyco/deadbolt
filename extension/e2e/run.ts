@@ -1339,7 +1339,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     // *.acme.test is one site on this machine: two origins of it for the sign-in session runs; *.apple.test for Apple's sign-in frame.
     // CDP DPR emulation alone does not change ResizeObserver device pixels
     // or an extension OOPIF's DPR. Scale the renderer too, as a real display does.
-    args: [`--force-device-scale-factor=${options.scale ?? 2}`, `--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1", ...(options.secure ? [`--unsafely-treat-insecure-origin-as-secure=${options.secure.join(",")}`] : [])],
+    args: [`--force-device-scale-factor=${options.scale ?? 2}`, `--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1, MAP intranet.example 127.0.0.1", ...(options.secure ? [`--unsafely-treat-insecure-origin-as-secure=${options.secure.join(",")}`] : [])],
     ignoreDefaultArgs: [...(options.bfcache ? ["--disable-back-forward-cache"] : []), ...(options.scrollbars ? ["--hide-scrollbars"] : [])],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -5490,20 +5490,26 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
   return passed
 }
 
-/** The lines of every learning log: what the native host was asked to write, or what the browser-only vault keeps (bg/learn-log.ts). */
+/** The lines of every recording, each with its session: what the native host was asked to write, or what the browser-only vault keeps (bg/learn-log.ts). */
 async function learnLines(run: Run): Promise<Array<Record<string, unknown>>> {
-  if (!standalone) return (await hostLog(run)).filter((r) => r.type === "learn").map((r) => r.line as Record<string, unknown>)
+  if (!standalone) return (await hostLog(run)).filter((r) => r.type === "learn").map((r) => ({ session: r.session, ...(r.line as Record<string, unknown>) }))
   const page = await run.context.newPage()
   try {
     await page.goto(`chrome-extension://${ID}/device.html`)
     return await page.evaluate(
       () =>
         new Promise<Array<Record<string, unknown>>>((resolve) => {
-          const req = indexedDB.open("deadbolt-learn", 1)
-          req.onupgradeneeded = () => req.result.createObjectStore("logs", { keyPath: "session" })
+          const req = indexedDB.open("deadbolt-learn", 2)
+          req.onupgradeneeded = () => {
+            req.result.createObjectStore("logs", { keyPath: "session" })
+            req.result.createObjectStore("lines", { autoIncrement: true }).createIndex("session", "session")
+          }
           req.onsuccess = () => {
-            const all = req.result.transaction("logs").objectStore("logs").getAll()
-            all.onsuccess = () => resolve((all.result as Array<{ lines: string[] }>).flatMap((l) => l.lines.map((x) => JSON.parse(x))))
+            const all = req.result.transaction("lines").objectStore("lines").getAll()
+            all.onsuccess = () => {
+              req.result.close()
+              resolve((all.result as Array<{ session: string; text: string }>).map((l) => ({ session: l.session, ...JSON.parse(l.text) })))
+            }
           }
         }),
     )
@@ -5513,47 +5519,174 @@ async function learnLines(run: Run): Promise<Array<Record<string, unknown>>> {
 }
 
 /**
- * "Learn this site" from the popup: a sign-in by hand is logged as steps
- * (never what's typed) and the session ends after it works. Then "Never for
- * this site" on an offer: the popup says saving is off, and Turn on undoes
- * it (the browser-only vault also lists it in Settings).
+ * The browser-only vault's store already holds eleven recordings, one eight
+ * days old, ten an hour old, in version 1's layout (each log's lines in its
+ * record): the extension's first write moves them to version 2's.
  */
-async function learnAndNever() {
-  const run = await launch()
+async function seedRecordings(run: Run) {
   const page = await run.context.newPage()
+  try {
+    await page.goto(`chrome-extension://${ID}/device.html`)
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const req = indexedDB.open("deadbolt-learn", 1)
+          req.onupgradeneeded = () => req.result.createObjectStore("logs", { keyPath: "session" })
+          req.onsuccess = () => {
+            const tx = req.result.transaction("logs", "readwrite")
+            const now = Date.now()
+            for (let i = 0; i < 11; i++) {
+              const session = `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`
+              tx.objectStore("logs").put({ session, updated: i === 0 ? now - 8 * 86_400_000 : now - 3_600_000 + i, bytes: 30, lines: [JSON.stringify({ event: "start", site: "seeded" })] })
+            }
+            tx.oncomplete = () => {
+              req.result.close()
+              resolve()
+            }
+            tx.onerror = () => reject(tx.error)
+          }
+        }),
+    )
+  } finally {
+    await page.close()
+  }
+}
+
+/** The record shortcut, as Chrome would fire it: CDP's key events never reach extension commands, so the e2e build hands the scenario its handler. */
+const recordShortcut = (run: Run, prefix = site) =>
+  run.worker.evaluate(async (prefix) => {
+    for (const t of await chrome.tabs.query({})) {
+      const frame = t.id === undefined ? null : await chrome.webNavigation.getFrame({ tabId: t.id, frameId: 0 }).catch(() => null)
+      if (frame?.url.startsWith(prefix)) (globalThis as unknown as { __command: (c: string, t: chrome.tabs.Tab) => void }).__command("record", t)
+    }
+  }, prefix)
+
+/** Popup stills of Record in `scheme`: the button, recording, and done. Only with --stills. */
+async function recordStills(scheme: Scheme) {
+  const run = await launch({ scheme, reducedMotion: true })
+  const page = await run.context.newPage()
+  // The whole popup: the browser-only vault's is wider than the native one.
+  const still = async (name: string) => {
+    const p = await popup(run, site)
+    const { width, height } = await p.evaluate(() => document.body.getBoundingClientRect())
+    await p.setViewportSize({ width: Math.ceil(width), height: 420 })
+    await shot(p, name, { x: 0, y: 0, width: Math.ceil(width), height: Math.min(420, Math.ceil(height)) })
+    await p.close()
+  }
   try {
     await page.goto(`${site}/login?next=home`)
     await formFound(page)
+    await still(`record-${scheme}-1-button`)
+    await recordShortcut(run)
+    await until("recording", async () => (await badge(run)) === "REC")
+    await page.click("#email")
+    await page.keyboard.press("Escape")
+    await Bun.sleep(1200)
+    await still(`record-${scheme}-2-recording`)
+    await recordShortcut(run)
+    await until("stopped", async () => (await badge(run)) === "")
+    await still(`record-${scheme}-3-done`)
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * Record, from the popup's header: on a plain-http page too, where "Learn
+ * this site" never showed. The toolbar says REC and the popup "Recording ·
+ * 0:0x"; what the user does is logged as steps and a timeline (clicks,
+ * named keys, navigations), never what's typed or pasted, while Deadbolt's
+ * menu stays away. The shortcut stops it; the popup offers Download and
+ * Delete. Then "Never for this site" on an offer: the popup says saving is
+ * off, and Turn on undoes it (the browser-only vault also lists it in
+ * Settings).
+ */
+async function learnAndNever() {
+  if (stills) for (const scheme of ["light", "dark"] as const) await recordStills(scheme)
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    // A plain-http page gets no logins, so Learn this site was hidden there.
+    await page.goto(`http://intranet.example:${server.port}/login?next=home`)
+    const plain = await popup(run, "http://intranet.example")
+    check((await plain.locator(".top button.record:not([disabled])").count()) === 1, "Record shows in the header on a plain-http page, where Learn this site was hidden")
+    await plain.close()
+    const shortcut = (await run.worker.evaluate(() => chrome.commands.getAll())).find((c) => c.name === "record")?.shortcut ?? ""
+    check(/^(Alt\+Shift\+[A-Z]|⌥⇧[A-Z])$/.test(shortcut), `the record command has its shortcut (${shortcut || "none"})`)
+
+    // The browser keeps the newest 10 recordings for 7 days: a new one prunes the rest.
+    if (standalone) await seedRecordings(run)
+    await page.goto(`${site}/login?next=home`)
+    await formFound(page)
     const p = await popup(run, site)
-    await p.locator("button", { hasText: "Learn this site" }).click()
-    const learning = await until("the popup shows the site learning", async () => {
-      const again = await popup(run, site)
-      const shown = (await again.locator(".offer h2", { hasText: "Learning" }).count()) > 0
-      await again.close()
-      return shown
-    })
-    check(!!learning, "Learn this site starts a learning session for the tab")
+    await p.locator(".top button.record").click()
+    check(!!(await until("the toolbar says REC", async () => (await badge(run)) === "REC")), "Record starts recording the tab, and the toolbar button says REC")
     await p.close().catch(() => {})
-    // While the tab learns, Deadbolt keeps its menu out of the way: type as a person would.
+    const live = await popup(run, site)
+    check(/^Recording · 0:0\d/.test((await live.locator(".record-bar[data-state=on] .record-text").textContent()) ?? ""), "the popup says Recording · 0:0x, with Stop")
+    check((await live.locator(".record-bar[data-state=on] button", { hasText: "Stop" }).count()) === 1, "and Stop")
+    await live.close()
+
+    // While recording, Deadbolt keeps its menu out of the way: type and paste as a person would.
+    await run.context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: site })
     await page.click("#email")
     await page.keyboard.type("learner@acme.test", { delay: 20 })
-    await page.click("#password")
+    check(!(await soon(() => extensionFrame(page, "menu.html"), 1500)), "the inline menu stays away while recording")
+    await page.keyboard.press("Tab")
     await page.keyboard.type("typed-by-hand-secret", { delay: 20 })
+    await page.evaluate(() => navigator.clipboard.writeText("pasted-clipboard-secret"))
+    await page.keyboard.press("ControlOrMeta+A")
+    await page.keyboard.press("ControlOrMeta+V")
+    check((await page.inputValue("#password")) === "pasted-clipboard-secret", "the paste went into the page")
     await page.click("button[type=submit]")
     await page.waitForURL("**/home")
-    const lines = await until("the session ends after the sign-in", async () => {
+    await Bun.sleep(1200)
+    await recordShortcut(run)
+    check(!!(await until("the shortcut stops it", async () => (await badge(run)) === "")), "the shortcut stops recording, and REC goes")
+    const logged = await until("the log ends", async () => {
       const got = await learnLines(run)
       return got.some((l) => l.event === "end") ? got : null
     }, 15_000)
+    const recorded = logged?.find((l) => l.event === "start" && l.site === "localhost")?.session
+    const lines = logged?.filter((l) => l.session === recorded) ?? null
+    if (standalone) {
+      const kept = new Set(logged?.map((l) => l.session))
+      check(kept.size === 10 && !kept.has("00000000-0000-4000-8000-000000000000") && !kept.has("00000001-0000-4000-8000-000000000000"), `version 1's logs move over, and a new recording keeps the newest 10, none past 7 days (${kept.size})`)
+    }
     const events = (lines ?? []).map((l) => l.event)
-    check(events[0] === "start" && events.includes("step") && (lines ?? []).at(-1)?.reason === "signed-in", `the log has the start, the steps and a signed-in end (${events.join(",")})`)
-    check(!JSON.stringify(lines).includes("typed-by-hand-secret") && !JSON.stringify(lines).includes("learner@acme.test"), "and never what was typed")
+    check(events[0] === "start" && events.includes("step") && events.includes("timeline") && (lines ?? []).at(-1)?.reason === "stopped", `the log has the start, steps, the timeline and the end (${[...new Set(events)].join(",")})`)
+    const timeline = (lines ?? []).filter((l) => l.event === "timeline").flatMap((l) => l.events as Array<{ type: string; key?: string; target?: { id?: string }; frame?: { path: string } }>)
+    const has = (f: (e: (typeof timeline)[number]) => boolean) => timeline.some(f)
+    check(has((e) => e.type === "click" && e.target?.id === "email") && has((e) => e.type === "pointerdown"), "the timeline has the clicks, with what was clicked")
+    check(has((e) => e.type === "key" && e.key === "Tab") && has((e) => e.type === "input" && e.target?.id === "password"), "named keys and typing by shape")
+    check(has((e) => e.type === "navigate" && e.frame?.path === "/home"), "and navigations")
+    const all = JSON.stringify(lines)
+    check(!all.includes("typed-by-hand-secret") && !all.includes("learner@acme.test") && !all.includes("pasted-clipboard-secret"), "and never what was typed or pasted")
+
+    const done = await popup(run, site)
+    const said = (await done.locator(".record-bar[data-state=done] .record-text").textContent()) ?? ""
+    check(/^Recorded \d+ steps on localhost$/.test(said), `the popup says what was recorded (${said})`)
+    const [download] = await Promise.all([done.waitForEvent("download"), done.locator(".record-bar[data-state=done] button", { hasText: "Download" }).click()])
+    const file = await readFile((await download.path()) ?? "", "utf8").catch(() => "")
+    check(file.includes('"event":"timeline"') && file.includes('"event":"end"') && !file.includes("typed-by-hand-secret") && !file.includes("pasted-clipboard-secret"), "Download hands back the log with its timeline")
+    // Downloading is to share it: the recording stays, Delete beside Download.
+    await Bun.sleep(1200)
+    check((await done.locator(".record-bar[data-state=done] button", { hasText: "Delete" }).count()) === 1, "and keeps it, with Delete next to Download")
+    await done.close()
     if (standalone) {
       const s = await popup(run, site)
       await s.getByRole("button", { name: "Settings", exact: true }).click()
-      check(!!(await until("Settings lists the learning log", async () => (await s.locator(".settings").textContent())?.includes("1 session"))), "Settings keeps the learning log, with Download")
+      check(!!(await until("Settings lists the recordings", async () => (await s.locator(".settings").textContent())?.includes("10 recordings"))), "Settings › Recordings keeps it, with Download")
       await s.close()
     }
+
+    const again = await popup(run, site)
+    await again.locator(".record-bar[data-state=done] button", { hasText: "Delete" }).click()
+    check(!!(await until("Delete removes it", async () => (await again.locator(".record-bar[data-state=done]").count()) === 0)), "Delete removes the recording")
+    await again.close()
+    const sessions = new Set((await learnLines(run)).map((l) => l.session))
+    if (standalone) check(sessions.size === 9 && !sessions.has(recorded), "and it's gone from the browser's recordings")
+    else check((await hostLog(run)).some((r) => r.type === "learn-delete" && r.session === recorded), "and the host deletes its log")
 
     await signIn(run, page, "/login?next=home", "never@acme.test", "never password")
     await page.waitForURL("**/home")
@@ -5853,7 +5986,7 @@ const cost: Record<string, number> = {
   detection: 111, occlusionSweep: 55, signInSessions: 53, pickSignsIn: 65, googleSignIn: 30, quietPages: 50, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
-  formsSurface: 50, formsShapes: 50, formsFrames: 28, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,
+  formsSurface: 50, formsShapes: 50, formsFrames: 28, formsTouchId: 9, learnAndNever: 35, a11y: 18, a11yStates: 4,
   menuReveal: 2, menuScale: 115, menuPosition: 169, menuPositionDpr: 247,
   pageZoom: 11,
   pageDismiss: 6,

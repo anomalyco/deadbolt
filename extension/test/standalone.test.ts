@@ -212,7 +212,7 @@ describe("device page commands", () => {
     }
     const backend = new StandaloneBackend()
     await backend.connect()
-    expect(backend.capabilities).toEqual(["list", "passkeys", "learn"])
+    expect(backend.capabilities).toEqual(["list", "passkeys", "learn", "learn-files"])
   })
   test("only this extension's own device.html and popup may send them", () => {
     expect(fromVaultPage({ id: ID, url: DEVICE_URL })).toBe(true)

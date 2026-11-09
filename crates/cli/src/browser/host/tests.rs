@@ -387,6 +387,68 @@ async fn learn_lines_append_to_the_sessions_log() {
     let reply = host.answer(line_not_object, &frames).await.unwrap();
     assert_eq!(json(&reply)["code"], "bad_request");
     assert_eq!(std::fs::read_dir(paths.learn_dir()).unwrap().count(), 1);
+
+    // The popup's Download reads it back, whole lines at a time, and Delete removes it.
+    let ask = |request: Value| serde_json::to_vec(&request).unwrap();
+    let read = host
+        .answer(
+            &ask(serde_json::json!({"id": 11, "type": "learn-read", "session": session})),
+            &frames,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        json(&read),
+        serde_json::json!({"id": 11, "type": "learn-text", "text": text, "next": null})
+    );
+    let big = serde_json::json!({"event": "timeline", "events": ["x".repeat(40 * 1024)]});
+    for _ in 0..8 {
+        assert!(learn(&paths, session, big.as_object().unwrap()).is_ok());
+    }
+    let (mut offset, mut whole) = (0u64, String::new());
+    loop {
+        let part = host
+            .answer(&ask(serde_json::json!({"id": 12, "type": "learn-read", "session": session, "offset": offset})), &frames)
+            .await
+            .unwrap();
+        let part = json(&part);
+        let chunk = part["text"].as_str().unwrap();
+        assert!(chunk.ends_with('\n') && chunk.len() as u64 <= LEARN_READ);
+        whole.push_str(chunk);
+        match part["next"].as_u64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert!(offset > 0);
+    assert_eq!(whole, std::fs::read_to_string(&log).unwrap());
+    for (id, found) in [(13, true), (14, false)] {
+        let reply = host
+            .answer(
+                &ask(serde_json::json!({"id": id, "type": "learn-delete", "session": session})),
+                &frames,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            json(&reply),
+            serde_json::json!({"id": id, "type": "learn-deleted", "found": found})
+        );
+    }
+    assert!(!log.exists());
+    let gone = host
+        .answer(
+            &ask(serde_json::json!({"id": 15, "type": "learn-read", "session": session})),
+            &frames,
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(&gone)["code"], "not_found");
+    let escape = host
+        .answer(&ask(serde_json::json!({"id": 16, "type": "learn-delete", "session": "../../etc/passwd"})), &frames)
+        .await
+        .unwrap();
+    assert_eq!(json(&escape)["code"], "bad_request");
 }
 
 /// A new session's log prunes logs past 30 days and beyond the newest 50,
@@ -403,8 +465,8 @@ async fn learn_logs_are_pruned_when_a_session_starts() {
     let now = std::time::UNIX_EPOCH + Duration::from_secs(crate::config::now());
     let day = Duration::from_secs(24 * 60 * 60);
     let log = |i: u32| learn.join(format!("{i:08x}-0000-4000-8000-000000000000.jsonl"));
-    // 60 logs, log(i) i days old, plus something that isn't a log.
-    for i in 0..60 {
+    // 12 logs, log(i) i days old, plus something that isn't a log.
+    for i in 0..12 {
         let file = std::fs::File::create(log(i)).unwrap();
         file.set_modified(now - day * i - Duration::from_secs(60))
             .unwrap();
@@ -422,25 +484,25 @@ async fn learn_logs_are_pruned_when_a_session_starts() {
         assert_eq!(json(&reply)["type"], "learned");
     };
     // An ongoing session prunes nothing.
-    send(log(45).file_stem().unwrap().to_str().unwrap().to_owned()).await;
-    assert!(log(59).exists());
+    send(log(9).file_stem().unwrap().to_str().unwrap().to_owned()).await;
+    assert!(log(11).exists());
     let fresh = "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b";
     send(fresh.to_owned()).await;
 
     let mode = std::fs::metadata(&learn).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700);
-    // Past 30 days: gone, though 50 weren't reached.
-    let kept: Vec<u32> = (0..60).filter(|i| log(*i).exists()).collect();
-    assert_eq!(kept, (0..30).chain([45]).collect::<Vec<_>>());
+    // Past 7 days: gone, though 10 weren't reached.
+    let kept: Vec<u32> = (0..12).filter(|i| log(*i).exists()).collect();
+    assert_eq!(kept, (0..7).chain([9]).collect::<Vec<_>>());
     assert!(learn.join(format!("{fresh}.jsonl")).exists());
     assert!(learn.join("notes.txt").exists());
 
-    // Then at most 50, oldest first: 49 more recent ones push out the 30
+    // Then at most 10, oldest first: 9 more recent ones push out the 7
     // left from before and the two oldest of them.
     let recent = |i: u32| learn.join(format!("{i:08x}-1111-4000-8000-000000000000.jsonl"));
-    for i in 0..49u32 {
+    for i in 0..9u32 {
         let file = std::fs::File::create(recent(i)).unwrap();
-        file.set_modified(now - Duration::from_secs(u64::from(49 - i)))
+        file.set_modified(now - Duration::from_secs(u64::from(9 - i)))
             .unwrap();
     }
     send("ffffffff-2222-4000-8000-000000000000".to_owned()).await;
@@ -455,9 +517,9 @@ async fn learn_logs_are_pruned_when_a_session_starts() {
         })
         .count();
     assert_eq!(logs, MAX_LEARN_LOGS);
-    assert!((0..60).all(|i| i == 45 || !log(i).exists()));
+    assert!((0..12).all(|i| i == 9 || !log(i).exists()));
     assert!(!recent(0).exists() && !recent(1).exists() && recent(2).exists());
-    assert!(log(45).exists() && learn.join(format!("{fresh}.jsonl")).exists());
+    assert!(log(9).exists() && learn.join(format!("{fresh}.jsonl")).exists());
 }
 
 fn framed(request: Value) -> Vec<u8> {

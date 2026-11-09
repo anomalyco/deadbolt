@@ -48,7 +48,7 @@ swaps builds in place ([installing and updating](../docs/extension-device.md#ins
 | `src/payments.ts`        | Payment providers whose card frames get cards                                |
 | `src/bg/signinwith.ts`   | "Sign in with" sessions: popup, provider pages, chooser account              |
 | `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback                     |
-| `src/bg/learn.ts`        | "Learn this site" sessions: saved-username check, log lines                  |
+| `src/bg/learn.ts`        | Record: one per tab, saved-username check, timeline, log lines, REC badge    |
 | `src/learn.ts`           | Learning log records and value-free helpers (shape, scrub)                   |
 | `src/passkey-hook.ts`    | Page-world `navigator.credentials` hook                                      |
 | `src/passkey-options.ts` | The hook's options, serialized whole for the extension                       |
@@ -58,14 +58,14 @@ swaps builds in place ([installing and updating](../docs/extension-device.md#ins
 | `src/content/forms.ts`   | Identity and payment field roles and sections; `transform.ts` shapes values  |
 | `src/content/`           | Detection, Shadow DOM, filling, the menu frame, field rules, passkey channel |
 | `src/menu.ts`            | The in-page surface: account list, generated password, fill pill, save offer |
-| `src/popup.ts`           | Toolbar popup: logins, offers, passkeys, Learn this site                     |
+| `src/popup.ts`           | Toolbar popup: logins, offers, passkeys, Record                              |
 | `src/ui/motion.ts`       | Springs (CSS `linear()` and retargeting), rolled labels                      |
 | `src/protocol.ts`        | Host message types and parsing                                               |
 | `src/signin.ts`          | "Sign in with" providers: names, hosts, button words                         |
 | `src/messages.ts`        | Messages inside the extension                                                |
 | `static/`                | Manifest, pages, CSS (Rune's OpenCode theme), Inter and IBM Plex Mono, icons |
 | `e2e/`                   | Headless Chromium runs against a fake host                                   |
-| `corpus/`                | Real-site crawl, and `learned.ts` for Learn this site logs                   |
+| `corpus/`                | Real-site crawl, and `learned.ts` for Record's logs                          |
 
 Tests in `test/` run under `bun test` with happy-dom: form detection on
 fixtures (including Shadow DOM and frames), origin and same-site rules, frame

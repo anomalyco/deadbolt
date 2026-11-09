@@ -14,7 +14,9 @@ origin, as the daemon holds them: candidates until generate-keep, then
 pending, and check and save resolve only pending ones. Fields that allow
 under 60 bits are weak, as the daemon's floor.
 
-`learn` answers `learned` (the log has each line), locked or not.
+`learn` answers `learned` (the log has each line), locked or not; it also
+keeps the lines in memory, which `learn-read` hands back (all at once) and
+`learn-delete` drops.
 
 `forms` lists two identities and a card, and `fill-form` answers with only
 the fields asked for. DEADBOLT_FAKE_TOUCHID=deny answers a fill-form that
@@ -28,6 +30,8 @@ import json, math, os, secrets, string, struct, sys, time
 
 STATUS = os.environ.get("DEADBOLT_FAKE_STATUS", "ready")
 LOG = os.environ.get("DEADBOLT_FAKE_LOG")
+# Each learning session's lines, for learn-read.
+LEARNED = {}
 RATE_LIMIT = os.environ.get("DEADBOLT_FAKE_RATE_LIMIT", "")
 TOUCHID = os.environ.get("DEADBOLT_FAKE_TOUCHID", "")
 FILL_DELAY = float(os.environ.get("DEADBOLT_FAKE_FILL_DELAY") or 0)
@@ -215,10 +219,19 @@ while True:
         why = refusal(req)
         write({"id": rid, "type": "error", "code": why, "message": "No strong password fits."} if why else {"id": rid, "type": "generate-check"})
     elif kind == "hello":
-        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms", "save-form", "learn"]})
+        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms", "save-form", "learn", "learn-files"]})
     elif kind == "learn":
         # As the host: it works locked too, and keeps no values (the log has the line).
+        LEARNED.setdefault(req.get("session"), []).append(json.dumps(req.get("line")))
         write({"id": rid, "type": "learned"})
+    elif kind == "learn-read":
+        lines = LEARNED.get(req.get("session"))
+        if lines is None:
+            write({"id": rid, "type": "error", "code": "not_found", "message": "no such learning log"})
+        else:
+            write({"id": rid, "type": "learn-text", "text": "".join(l + "\n" for l in lines), "next": None})
+    elif kind == "learn-delete":
+        write({"id": rid, "type": "learn-deleted", "found": LEARNED.pop(req.get("session"), None) is not None})
     elif STATUS != "ready":
         write({"id": rid, "type": "error", "code": "locked", "message": "Deadbolt is locked."})
     elif kind == "list":
