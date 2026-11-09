@@ -2069,6 +2069,87 @@ async function biometricUnlock(device: Page, worker: Worker) {
   await cdp.detach()
 }
 
+/**
+ * Touch ID from the panel's own page (popup.html, as the toolbar shows it),
+ * with DevTools' virtual platform authenticator standing in for the sensor:
+ * one without PRF is turned down cleanly and leaves the panel the
+ * passphrase's alone; one with PRF enrolls there, and the locked panel then
+ * shows Touch ID on its first frame and unlocks with it. Real WebAuthn, real
+ * vault; only the finger is missing.
+ */
+async function popupTouch(device: Page) {
+  const popup = await newPage("popup-touch")
+  await popup.setViewportSize({ width: 380, height: 560 })
+  const cdp = await context!.newCDPSession(popup)
+  await cdp.send("WebAuthn.enable")
+  const sensor = (hasPrf: boolean) => cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
+    protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true,
+    hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf,
+  } })
+  const enable = async () => {
+    await popup.getByRole("button", { name: "Settings", exact: true }).click()
+    await popup.getByRole("button", { name: "Set up Touch ID", exact: true }).click()
+    await popup.getByLabel("Passphrase for Touch ID").fill(passphrase)
+    await popup.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
+  }
+  /** The locked panel, as the toolbar opens it while Deadbolt is locked: what its first frame shows, before the vault has answered anything. */
+  const lockedPanel = async () => {
+    await request(device, { type: "device-lock" })
+    await popup.goto(`chrome-extension://${ID}/popup.html#locked`, { waitUntil: "commit" })
+    await popup.waitForFunction(() => document.readyState !== "loading")
+    return popup.evaluate(() => ({
+      touch: !!document.querySelector(".unlock-touch"),
+      title: document.querySelector("h2")?.textContent,
+      focus: document.activeElement?.getAttribute("aria-label"),
+      height: document.documentElement.getBoundingClientRect().height,
+    }))
+  }
+  await request(device, { type: "device-unlock", passphrase }).catch(() => {})
+
+  // A platform authenticator without PRF (a browser's own "saved on this device" passkeys, on macOS).
+  const without = await sensor(false)
+  await popup.goto(`chrome-extension://${ID}/popup.html`)
+  await enable()
+  await popup.getByText(/This authenticator doesn't support PRF unlock/).waitFor()
+  check((await request(device, { type: "device-biometric-info" })).reply.token === null, "the panel: an authenticator without PRF is explained and saves no unlock slot")
+  const plain = await lockedPanel()
+  check(!plain.touch && plain.title === "Unlock Deadbolt" && plain.focus === "Passphrase", `the panel: with no Touch ID set up, its first frame is the lock, the title and the passphrase field, focused (${JSON.stringify(plain)})`)
+  check(plain.height < 300, `the panel: locked, its first frame is already the locked panel's size, not the vault's (${plain.height} px tall)`)
+  await popup.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+  await popup.getByLabel("Passphrase", { exact: true }).press("Enter")
+  await popup.getByRole("searchbox", { name: "Search the vault" }).waitFor({ timeout: 60_000 })
+  check(await state(device) === "ready", "the panel: the passphrase unlocks it")
+  await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId: without.authenticatorId })
+
+  // One with PRF: enrolled in the panel, then the locked panel's way in.
+  const withPrf = await sensor(true)
+  await enable()
+  await popup.getByRole("button", { name: "Reset Touch ID", exact: true }).waitFor({ timeout: 60_000 })
+  check((await cdp.send("WebAuthn.getCredentials", { authenticatorId: withPrf.authenticatorId })).credentials.length === 1, "the panel: Touch ID enrolls with a real WebAuthn PRF passkey")
+  const enrolled = await lockedPanel()
+  check(enrolled.touch && enrolled.focus === "Passphrase", `the panel: with Touch ID set up, its first frame already offers it, the passphrase field focused (${JSON.stringify(enrolled)})`)
+  check(enrolled.height === plain.height, `the panel: both ways in are the same size (${enrolled.height} and ${plain.height} px)`)
+  // Return on the empty field asks Touch ID; the authenticator answers.
+  await popup.getByLabel("Passphrase", { exact: true }).press("Enter")
+  await popup.getByRole("searchbox", { name: "Search the vault" }).waitFor({ timeout: 60_000 })
+  check(await state(device) === "ready", "the panel: Touch ID unlocks it, asked by Return on the empty field")
+
+  // A prompt that ends without verifying (the passkey is gone): no error, back to how it opened.
+  await cdp.send("WebAuthn.clearCredentials", { authenticatorId: withPrf.authenticatorId })
+  const gone = await lockedPanel()
+  await popup.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await popup.getByText("Touch ID didn't unlock Deadbolt. Use your passphrase.", { exact: true }).waitFor({ state: "attached", timeout: 70_000 })
+  const after = await popup.evaluate(() => ({ wrong: !!document.querySelector(".unlock-under.wrong"), label: document.querySelector<HTMLElement>(".unlock-touch-label")?.dataset.text, height: document.documentElement.getBoundingClientRect().height }))
+  check(await state(device) === "locked" && !after.wrong && after.label === "Unlock with Touch ID" && after.height === gone.height, `the panel: a prompt that ends without verifying is no error and moves nothing (${JSON.stringify(after)})`)
+
+  await request(device, { type: "device-unlock", passphrase })
+  await request(device, { type: "device-biometric-reset" })
+  await popup.evaluate(() => chrome.storage.local.remove("deadbolt.unlockMethod"))
+  await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId: withPrf.authenticatorId })
+  await cdp.detach()
+  await popup.close()
+}
+
 /** Settings' About: the version, no update check for a build from source, and an issue with no vault data. */
 async function about(device: Page) {
   await device.getByRole("button", { name: "Settings", exact: true }).click()
@@ -2212,6 +2293,7 @@ try {
   await panelUnlock(device)
   worker = await inlineUnlock(device, worker)
   await biometricUnlock(device, worker)
+  await popupTouch(device)
   await request(device, { type: "device-lock" })
   check(await state(device) === "locked", "lock closes the vault")
   // Worker termination releases the exclusive OPFS handle asynchronously.

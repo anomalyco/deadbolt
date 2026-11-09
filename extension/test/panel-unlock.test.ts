@@ -31,8 +31,12 @@ beforeEach(() => {
 
 describe("the toolbar panel the locked row opens", () => {
   test("opens over the sender's window, and the panel that comes up there learns the row opened it, once", async () => {
+    // The panel's address says the row asked while it opens, and only then (the panel reads it for its first frame).
+    const named: string[] = []
+    ;(chrome.action as unknown as { setPopup: (d: { popup: string }) => Promise<void> }).setPopup = async ({ popup }) => void named.push(popup)
     expect(await panel.open(1)).toBe(true)
     expect(fake.popups).toEqual([7])
+    expect(named).toEqual(["popup.html#locked,menu", "popup.html#locked"])
     const first = port()
     first.hello(7)
     expect(first.heard).toEqual([{ fromMenu: true }])

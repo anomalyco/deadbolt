@@ -414,7 +414,7 @@ describe("lock", () => {
     const credentials = Object.getOwnPropertyDescriptor(navigator, "credentials")
     // What the label says now (its text swaps over a moment: ui/unlock.ts swapText).
     const touchLabel = () => app().querySelector<HTMLElement>(".unlock-touch-label")!.dataset.text
-    const errorLine = () => app().querySelector(".unlock-msg.on")
+    const errorLine = () => app().querySelector(".unlock-under.wrong")
     /** The browser's prompt: `get` is the platform authenticator's. */
     const prompt = (get: (o: CredentialRequestOptions) => Promise<Credential | null>) => Object.defineProperty(navigator, "credentials", { configurable: true, value: { get } })
     beforeEach(() => {
@@ -450,7 +450,7 @@ describe("lock", () => {
       await flush()
       expect(asked).toHaveLength(1)
       // The system's prompt says what to do; the panel only says it's waiting.
-      expect(touchLabel()).toBe("Waiting for Touch ID…")
+      expect(touchLabel()).toBe("Waiting for macOS…")
       expect(document.activeElement).toBe(input("Passphrase"))
       input("Passphrase").value = "browser pass"
       submit(form)
@@ -459,6 +459,30 @@ describe("lock", () => {
       expect(asked[0]!.aborted).toBe(true)
       expect(errorLine()).toBeNull()
     })
+  })
+
+  test("a wrong passphrase is said in the line that says why it locked, and typing again gives the line back", async () => {
+    status = { state: "locked" }
+    settings = { preset: "comfortable", lockedBy: { reason: "idle", idleMs: 60 * 60_000 } }
+    fake.runtimeAnswer = (m) => {
+      const c = (m as { command?: Command }).command
+      if (c?.type === "device-unlock") return Promise.resolve({ ok: false, code: "wrong_passphrase", message: "That passphrase isn't right.", status } as DeviceReply)
+      return (m as { type: string }).type === "db:device" ? answer(c!) : undefined
+    }
+    await open()
+    const under = app().querySelector(".unlock-under")!
+    expect(reason().textContent).toBe("Locked · 1 h idle")
+    expect(under.classList.contains("wrong")).toBe(false)
+    input("Passphrase").value = "nope"
+    submit(app().querySelector("form.unlock")!)
+    await flush()
+    // The same line, in the room it always has: nothing under the field moves.
+    expect(under.classList.contains("wrong")).toBe(true)
+    expect(under.querySelector(".unlock-line")!.textContent).toBe("That passphrase isn't right.")
+    expect(reason().textContent).toBe("Locked · 1 h idle")
+    input("Passphrase").value = "n"
+    input("Passphrase").dispatchEvent(new Event("input"))
+    expect(under.classList.contains("wrong")).toBe(false)
   })
 
   test("choosing Until you quit asks for the passphrase first", async () => {

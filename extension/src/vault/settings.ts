@@ -203,7 +203,7 @@ export function settingsView(app: App): View {
       pass.focus()
     })
     biometrics.replaceChildren(h("div", { class: "section-head" }, h("span", { class: "label" }, "Touch ID")),
-      h("p", { class: "hint" }, enabled ? "Touch ID unlocks Deadbolt in this browser. Reset turns it off here; the passkey it made stays in your browser's settings until you remove it." : "Unlock with Touch ID instead of typing your passphrase. Your browser may ask for its PIN instead. Your passphrase always works."), action, error)
+      h("p", { class: "hint" }, enabled ? "Touch ID unlocks Deadbolt in this browser. Reset turns it off here; the passkey it made stays in your browser's settings until you remove it." : "Unlock with Touch ID instead of typing your passphrase. Where there's no Touch ID to use, macOS asks for your Mac's password, or your browser for its PIN. Your passphrase always works."), action, error)
   }
   void paintBiometric()
 

@@ -88,6 +88,10 @@ export class App {
    * closes, leaving the menu by the field to list the logins.
    */
   fromMenu = false
+  /** Whether the row opened this panel, once the background has said (the unlock view waits on it). */
+  menuAsked: Promise<boolean> = Promise.resolve(false)
+  /** The panel's address says the row opened it (bg/panel-unlock.ts): its first frame already waits on Touch ID. */
+  readonly hintedAsk = location.hash === "#locked,menu"
   /** Touch ID was asked for on its own already (see unlockView). */
   touchAsked = false
   private closing = false
@@ -475,12 +479,19 @@ export class App {
     // A vault slow to answer shows that it's starting, never an empty frame.
     const slow = setTimeout(() => this.shell === "" && this.render(), 250)
     const panel = this.surface === "popup" ? panelPort().then((fromMenu) => (this.fromMenu = fromMenu)) : null
+    if (panel) this.menuAsked = panel
+    // The background names a locked panel in its address: the first frame the browser shows is the locked panel at its own size, not the vault's waiting to shrink.
+    if (this.surface === "popup" && location.hash.startsWith("#locked")) {
+      this.status = { state: "locked" }
+      this.render()
+    }
     void Promise.all([this.run({ type: "device-status" }), iconSettings().then((icons) => (this.icons = icons)), panel]).then(async () => {
       clearTimeout(slow)
       if (this.status.state === "not-set-up") await this.setup.check()
       if (this.status.state === "locked") await this.loadPreset()
       if (this.status.state === "ready") await this.loadReauth()
-      this.render()
+      // Already drawn from the address, and right: the view stays as it is.
+      if (this.shell !== this.status.state) this.render()
       if (this.status.state === "ready") void this.refresh()
     })
   }

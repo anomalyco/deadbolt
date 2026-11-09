@@ -7,6 +7,19 @@
 
 import { fromExtensionPage } from "./frames"
 
+/**
+ * The toolbar panel's address while Deadbolt is locked, and when the locked
+ * row opens it. The panel reads it as it starts (vault/app.ts), before any
+ * answer can reach it: the browser shows the panel after its first frame, so
+ * that frame is already the locked panel at its own size, and says it's
+ * waiting on Touch ID when the row asked. Only a hint: the status and the
+ * port's answer still decide.
+ */
+export const LOCKED_PANEL = "popup.html#locked"
+export const ASKED_PANEL = "popup.html#locked,menu"
+/** Sets the toolbar panel's address; nothing where the browser has no such call. */
+export const namePanel = (popup: string) => void Promise.resolve((chrome.action as { setPopup?: (d: { popup: string }) => Promise<void> }).setPopup?.({ popup })).catch(() => {})
+
 /** The port popup.html opens to the background as it starts. */
 export const PANEL_PORT = "db:panel"
 /** How long a panel the row opened has to say it's up before the row stops waiting for it. */
@@ -48,10 +61,13 @@ export class PanelUnlock {
     let up = () => {}
     const hello = new Promise<boolean>((resolve) => (up = () => resolve(true)))
     this.asked = { windowId, at: Date.now(), up, timer: setTimeout(() => this.asked?.windowId === windowId && (this.forget(), this.closed()), this.askMs) }
-    const browser = Promise.resolve()
+    const browser = Promise.resolve((chrome.action as { setPopup?: (d: { popup: string }) => Promise<void> }).setPopup?.({ popup: ASKED_PANEL }))
+      .catch(() => {})
       .then(() => action.openPopup!({ windowId }))
       .then(() => true, () => false)
     const opened = await Promise.race([browser, hello])
+    // The next one the user opens wasn't asked for by the row.
+    namePanel(LOCKED_PANEL)
     if (!opened && this.asked?.windowId === windowId) this.forget()
     return opened
   }

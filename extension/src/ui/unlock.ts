@@ -15,8 +15,10 @@ export const UNLOCK_FEEL = {
   turn: "open" as "crossfade" | "emerge" | "open",
   /** The panel's unlock on its first frame: "rest", or "rise" (fades up into place). */
   panelIn: "rest" as "rest" | "rise",
-  /** Seconds the panel says "Unlocked" before it closes itself; 0 closes it at once. */
-  beat: 0.45,
+  /** The panel's lock as Deadbolt unlocks: "swing" (its shackle dips, springs up and swings open, the disc warms to green and a light runs once round it), "lift" (the shackle lifts and the disc warms, nothing else), "check" (the glyph gives way to a check). */
+  moment: "swing" as "swing" | "lift" | "check",
+  /** Seconds the panel says "Unlocked" before it closes itself; 0 closes it at once. The moment above takes about 0.7. */
+  beat: 0.8,
 }
 
 const SUB = "Opens in the toolbar"
@@ -59,11 +61,13 @@ export function swapText(el: HTMLElement, text: string) {
     "mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 78%,transparent)"
   win.append(into, out)
   el.replaceChildren(win)
-  const [from, to] = [out.offsetWidth, into.offsetWidth]
+  // To the fraction of a pixel: a rounded width would let the line step sideways as it lands (it's centred in the panel).
+  const [from, to] = [out.getBoundingClientRect().width, into.getBoundingClientRect().width]
   const roll = spring(0.45)
   // A longer line lets the width get ahead before it shows.
   const lead = to > from + 0.5 ? 80 : 0
-  if (Math.abs(to - from) > 0.5) win.animate([{ width: `${from}px` }, { width: `${to}px` }], spring(0.37))
+  // The width holds where it lands until the line is plain text again: let go sooner, it would spring back to the wider of the two.
+  if (Math.abs(to - from) > 0.5) win.animate([{ width: `${from}px` }, { width: `${to}px` }], { ...spring(0.37), fill: "forwards" })
   // The old line is gone by half way and the new one shows only from a third: only one is ever readable.
   out.animate([{ transform: "translateY(0)", opacity: 1 }, { opacity: 0, offset: 0.5 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "forwards" })
   into
@@ -182,7 +186,8 @@ export function turnIntoLogins(old: HTMLElement, rows: HTMLElement, highlight: H
     for (const r of riding) {
       r.style.transform = lift ? `translateY(${-lift}px)` : ""
       const cut = slot - (rows.offsetTop + r.offsetTop - lift)
-      r.style.maskImage = lift && cut > -8 ? `linear-gradient(to bottom, transparent ${grid(cut)}px, #000 ${grid(cut + 8)}px)` : ""
+      // The soft edge narrows to nothing as the row arrives, so letting go of it shows no change.
+      r.style.maskImage = lift && cut > -8 ? `linear-gradient(to bottom, transparent ${grid(cut)}px, #000 ${grid(cut + Math.min(8, lift))}px)` : ""
     }
     if (!riding.length) {
       const edge = grid(innerHeight - rows.getBoundingClientRect().top)

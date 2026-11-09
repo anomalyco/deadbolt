@@ -687,6 +687,20 @@ main.vault.popup .view.unlock.locked {
   height: 28px;
 }
 
+/* The light that runs once round the disc as it unlocks (src/vault/unlock.ts open): a short bright arc on the disc's own edge. */
+.unlock-disc {
+  position: relative;
+}
+
+.unlock-glint {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(transparent 0 58%, color-mix(in srgb, var(--success) 70%, transparent) 84%, var(--success) 94%, transparent 100%);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+}
+
 .unlock-title {
   margin: 0;
   font-size: 15px;
@@ -694,13 +708,13 @@ main.vault.popup .view.unlock.locked {
   font-weight: var(--weight-strong);
 }
 
-/* Touch ID: the disc and its label are one button. */
+/* Touch ID: the disc and its label are one button, the same size as the lock and the title it stands in for. */
 .unlock-touch {
   all: unset;
   display: grid;
   justify-items: center;
   gap: 10px;
-  padding: 6px 14px 0;
+  padding: 0 14px;
   border-radius: var(--radius-xl);
   cursor: pointer;
 }
@@ -761,43 +775,65 @@ main.vault.popup .view.unlock.locked {
   height: 28px;
 }
 
+/* Busy, and then unlocked: the field and its arrow step back softly, as everything around them does. */
+.unlock-field .input {
+  transition: box-shadow 120ms ease-out, opacity 200ms var(--settle);
+}
+
+.unlock-field .icon-button,
+.unlock-go svg {
+  transition: opacity 200ms var(--settle);
+}
+
+/* The arrow is there with the field on the panel's first frame: it doesn't settle in as other icons do. */
+.unlock-go svg {
+  animation: none;
+}
+
 .unlock-go.busy svg {
   opacity: 0.4;
 }
 
-/* The line under the field opens only while it says something. */
-.unlock-msg {
+/* The one line under the field: why it locked, or what went wrong, in the same place. Its room is always there, so nothing it says moves the panel or its bubble. One leaves before the other comes: only one is ever readable. */
+.unlock-under {
   display: grid;
-  grid-template-rows: 0fr;
-  margin-top: -10px;
-  transition: grid-template-rows 240ms var(--settle), margin-top 240ms var(--settle);
-}
-
-.unlock-msg > div {
-  min-height: 0;
-  overflow: hidden;
-}
-
-.unlock-msg.on {
-  grid-template-rows: 1fr;
-  margin-top: -4px;
-}
-
-.unlock-line {
-  margin: 0;
-  font-size: 12px;
-  line-height: 16px;
-  color: var(--danger);
-}
-
-/* Why it locked. The line's room is always there: the panel is as tall before the reason arrives as after. */
-.lock-reason {
   min-height: 16px;
-  margin: 0;
   font-size: 12px;
   line-height: 16px;
   text-align: center;
+}
+
+.unlock-under > p {
+  grid-area: 1 / 1;
+  margin: 0;
+}
+
+.lock-reason {
   color: var(--text-faint);
+  transition: opacity 220ms var(--settle) 140ms;
+}
+
+.unlock-line {
+  color: var(--danger);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 200ms var(--settle), visibility 0s 200ms;
+}
+
+.unlock-under.wrong .lock-reason {
+  opacity: 0;
+  transition: opacity 200ms var(--settle);
+}
+
+.unlock-under.wrong .unlock-line {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 220ms var(--settle) 140ms, visibility 0s;
+}
+
+.unlock-under.over > p {
+  opacity: 0;
+  transition: opacity 200ms var(--settle);
 }
 
 .state-icon.pulse {

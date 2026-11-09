@@ -17,7 +17,7 @@ import { ProviderChain } from "./bg/provider-chain"
 import { SiteIcons } from "./bg/site-icons"
 import { UniversalSignIn } from "./bg/universal"
 import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
-import { PanelUnlock } from "./bg/panel-unlock"
+import { LOCKED_PANEL, namePanel, PanelUnlock } from "./bg/panel-unlock"
 import type { DeviceReply, MenuUnlockReply, PanelClosed, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
 declare const DEADBOLT_NATIVE: boolean
@@ -82,6 +82,8 @@ function title(status: Status): string {
 host.onChange((status, change) => {
   void chrome.runtime.sendMessage({ type: "db:status", status, ...(change ? { change } : {}) } satisfies StatusChanged).catch(() => {})
   void chrome.action.setTitle({ title: title(status) }).catch(() => {})
+  // The browser-only panel is told it's locked in its address, so its first frame is the locked panel (bg/panel-unlock.ts).
+  if (!DEADBOLT_NATIVE) namePanel(status.state === "locked" ? LOCKED_PANEL : "popup.html")
 })
 
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
