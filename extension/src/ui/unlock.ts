@@ -64,9 +64,10 @@ export function swapText(el: HTMLElement, text: string) {
   // A longer line lets the width get ahead before it shows.
   const lead = to > from + 0.5 ? 80 : 0
   if (Math.abs(to - from) > 0.5) win.animate([{ width: `${from}px` }, { width: `${to}px` }], spring(0.37))
-  out.animate([{ transform: "translateY(0)", opacity: 1 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "forwards" })
+  // The old line is gone by half way and the new one shows only from a third: only one is ever readable.
+  out.animate([{ transform: "translateY(0)", opacity: 1 }, { opacity: 0, offset: 0.5 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "forwards" })
   into
-    .animate([{ transform: "translateY(100%)", opacity: 0 }, { transform: "translateY(0)", opacity: 1 }], { ...roll, delay: lead, fill: "backwards" })
+    .animate([{ transform: "translateY(100%)", opacity: 0 }, { opacity: 0, offset: 0.35 }, { transform: "translateY(0)", opacity: 1 }], { ...roll, delay: lead, fill: "backwards" })
     .finished.then(() => el.dataset.text === text && el.firstChild === win && (el.textContent = text), () => {})
 }
 
