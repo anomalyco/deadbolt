@@ -442,11 +442,11 @@ describe("lock", () => {
 })
 
 describe("quitting", () => {
-  test("is ⌘Q on a Mac, and Ctrl+Q or closing every window elsewhere", () => {
+  test("is ⌘Q on a Mac, and closing every window (or Ctrl+Shift+Q on Linux) elsewhere", () => {
     expect(quitKeys({ platform: "MacIntel" })).toBe("⌘Q")
     expect(quitKeys({ userAgentData: { platform: "macOS" } })).toBe("⌘Q")
-    expect(quitKeys({ userAgentData: { platform: "Windows" }, platform: "Win32" })).toBe("Ctrl+Q / closing every window")
-    expect(quitKeys({ platform: "Linux x86_64" })).toBe("Ctrl+Q / closing every window")
+    expect(quitKeys({ userAgentData: { platform: "Windows" }, platform: "Win32" })).toBe("close every window, or Ctrl+Shift+Q on Linux")
+    expect(quitKeys({ platform: "Linux x86_64" })).toBe("close every window, or Ctrl+Shift+Q on Linux")
     expect(describePreset("until-quit", "⌘Q")).toBe("Stays unlocked, even through sleep and screen lock, until you quit the browser (⌘Q). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.")
   })
 })

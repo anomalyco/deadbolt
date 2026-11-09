@@ -247,6 +247,8 @@ export class StandaloneBackend implements VaultBackend {
   private workerPreset: LockPreset | null = null
   /** This browser was found removed from the vault, and locked for it or opened knowing it. */
   private removedSeen = false
+  /** Commands opening the vault (OPENS) under way. */
+  private opening = 0
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -260,7 +262,9 @@ export class StandaloneBackend implements VaultBackend {
       if (alarm.name === CLIPBOARD_ALARM) void this.clearClipboard()
     })
     chrome.idle.onStateChanged.addListener((state) => {
-      if (state === "locked") void this.loaded.then(() => {
+      if (state === "locked") void this.loaded.then(async () => {
+        // Woken by the event, the service worker may not have heard the worker's preset yet.
+        if (this.status.state === "connecting") await this.connect()
         if (PRESETS[this.policy].screenLock) return this.lock("screen")
       })
     })
@@ -377,7 +381,9 @@ export class StandaloneBackend implements VaultBackend {
     if (this.removedSeen) return true
     this.removedSeen = true
     await chrome.storage.session.set({ [REMOVED_KEY]: true }).catch(() => {})
-    if (change === "unlocked") return true
+    // Opened already removed (this hello is the unlock's, or a status read
+    // that ran beside it): the user unlocked past it.
+    if (change === "unlocked" || this.opening > 0) return true
     await this.lock("removed")
     return false
   }
@@ -426,6 +432,17 @@ export class StandaloneBackend implements VaultBackend {
 
   /** device.html's commands (see DeviceCommand); the background checks the sender (fromVaultPage). */
   async device(command: DeviceCommand): Promise<DeviceReply> {
+    if (!OPENS.has(command.type)) return this.deviceNow(command)
+    // Until it's open and has said so, a removal it finds was unlocked past.
+    this.opening++
+    try {
+      return await this.deviceNow(command)
+    } finally {
+      this.opening--
+    }
+  }
+
+  private async deviceNow(command: DeviceCommand): Promise<DeviceReply> {
     const started = Date.now()
     const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}), ...(this.tries.until > Date.now() ? { retryAt: this.tries.until } : {}) })
     // The user working on the vault's own page is use. The page reading the
@@ -546,7 +563,19 @@ export class StandaloneBackend implements VaultBackend {
     const operation = this.epoch
     try {
       const run = () => this.raw(body, SLOW_MS[command.type] ?? TIMEOUT_MS)
-      if (checks) {
+      if (checks && command.type === "device-pair") {
+        // The passphrase is checked in its turn, and counted; the pairing,
+        // which can wait minutes for the other device, runs after, so other
+        // checks (a Strict reveal, an unlock) don't wait behind it. The vault
+        // checks the passphrase again before it pairs.
+        const checked = await this.oneCheck(async () => {
+          const r = await this.raw({ type: "device-biometric-check", passphrase: command.passphrase }, SLOW_MS["device-biometric-check"]!)
+          await this.tried(r.type === "error" && r.code === "wrong_passphrase" ? "wrong" : r.type === "error" ? "other" : "right")
+          return r
+        })
+        if (!checked.ran) return fail(checked.message, "backoff")
+        raw = checked.value.type === "error" ? checked.value : await run()
+      } else if (checks) {
         // Counted before the next check may start, whatever happened meanwhile.
         const checked = await this.oneCheck(async () => {
           const r = await run()
@@ -603,6 +632,8 @@ export class StandaloneBackend implements VaultBackend {
 
   private async lockNow(reason: LockReason): Promise<void> {
     const unlocked = this.status.state === "ready"
+    // A fresh worker keeps no preset: Settings shows the chosen one again.
+    this.workerPreset = null
     // Before the worker goes, so a status read meanwhile doesn't take it for lost.
     await this.remember(reason)
     this.endReauth(new HostError("locked", "Deadbolt locked. Nothing was filled."))
