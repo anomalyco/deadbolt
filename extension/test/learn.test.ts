@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test"
 import { Learner } from "../src/bg/learn"
 import { frameOf, IDLE_MS, keypadText, keyName, LEARN_TTL_MS, lengthBand, MAX_CROSS_EVENTS, MAX_EVENTS, MAX_ORIGIN_EVENTS, noDigits, scrub, shapeOf, truthOf, usernameDigest, wordDigest, type LearnSession, type LearnStep } from "../src/learn"
 import type { RequestBody as Request } from "../src/protocol"
+import { appendLearnLine, learnLogs } from "../src/bg/learn-log"
 import { fakeHost, installChrome, pageSender, type FakeChrome } from "./chrome"
 
 describe("what a typed value shows", () => {
@@ -34,6 +35,20 @@ describe("what a typed value shows", () => {
     expect(scrub("Welcome back, Octocat (kit@example.com), card 4242", ["octocat"])).toBe("Welcome back, <typed> (<email>), card <n>")
     expect(scrub("Enter the code sent to ••••1234")).toBe("Enter the code sent to ••••<n>")
     expect(scrub("a.b+c (1)", ["a.b+c"])).toBe("<typed> (1)")
+  })
+})
+
+describe("the browser's recordings store", () => {
+  test("an upgrade that fails is rolled back and its connection closed, so the next open upgrades again", async () => {
+    const fake = installChrome()
+    // The fake has no indexes: version 2's upgrade fails partway, after making the logs store.
+    await expect(learnLogs()).rejects.toThrow()
+    expect(fake.idbAborted).toEqual(["deadbolt-learn"])
+    expect(fake.idbClosed).toContain("deadbolt-learn")
+    expect(fake.idb["deadbolt-learn"]).toBeUndefined()
+    expect(await appendLearnLine("0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", { event: "start" }).catch(() => "failed")).toBe("failed")
+    expect(fake.idbAborted).toEqual(["deadbolt-learn", "deadbolt-learn"])
+    expect(fake.idb["deadbolt-learn"]).toBeUndefined()
   })
 })
 
