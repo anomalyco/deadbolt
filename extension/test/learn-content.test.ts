@@ -226,9 +226,83 @@ describe("a learning frame", () => {
     const timeline = timelineOf(s.id)
     expect(timeline.length).toBe(16)
     expect(timeline.every((e) => e.target?.keypad === true && e.x === undefined && e.y === undefined && !e.target.text && !e.target.label)).toBe(true)
-    expect(timeline[0].target).toEqual({ tag: "button", path: "div#pad > button.key", keypad: true })
+    expect(timeline[0].target).toEqual({ tag: "button", path: "html > body > div > button", keypad: true })
     expect(JSON.stringify(timeline.map((e) => e.target))).not.toMatch(/\d/)
     expect(JSON.stringify(sent.filter((m) => m.session === s.id))).not.toMatch(/"(text|label)":"[^"]*\d/)
+  })
+
+  test("a phone pad's 2580 logs no digit or letters on focus, blur or click", async () => {
+    const s = fresh()
+    join(s)
+    const keys = ["1", "2 ABC", "3 DEF", "4 GHI", "5 JKL", "6 MNO", "7 PQRS", "8 TUV", "9 WXYZ", "0 +"]
+    document.body.innerHTML = `<div class="pad">${keys.map((k, i) => `<button id="key-${k[0]}" name="digit${k[0]}" class="k${i}">${k.replace(" ", "<br>")}</button>`).join("")}</div>`
+    for (const d of "2580") {
+      const key = $(`#key-${d}`)
+      key.dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+      for (const type of ["pointerdown", "pointerup", "click"]) key.dispatchEvent(trusted(new MouseEvent(type, { bubbles: true, composed: true, clientX: 10, clientY: 10 })))
+      down(key, "Enter")
+      key.dispatchEvent(trusted(new FocusEvent("focusout", { bubbles: true, composed: true })))
+    }
+    await new Promise((r) => setTimeout(r, 650))
+    const timeline = timelineOf(s.id)
+    expect(new Set(timeline.map((e) => e.type))).toEqual(new Set(["focus", "pointerdown", "pointerup", "click", "key", "blur"]))
+    expect(timeline.every((e) => e.target === undefined || (e.target.keypad && !e.target.id && !e.target.name && !e.target.text && !e.target.label))).toBe(true)
+    const all = JSON.stringify(timeline.map((e) => e.target))
+    expect(all).not.toMatch(/\d|ABC|JKL|TUV|key-|digit/)
+  })
+
+  test("spelled-out keys nested a wrapper deeper, three to a row, are a keypad's", async () => {
+    const s = fresh()
+    join(s)
+    const rows = [["sieben", "acht", "neun"], ["vier", "fünf", "sechs"]]
+    document.body.innerHTML = `<div id="pad">${rows.map((r) => `<div class="row">${r.map((w) => `<span class="cell"><span class="wrap"><button id="k-${w}">${w}</button></span></span>`).join("")}</div>`).join("")}</div>
+      <button id="pay">Pay seven dollars</button>`
+    const real = Element.prototype.getBoundingClientRect
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      return this.tagName === "BUTTON" && this.id.startsWith("k-") ? ({ x: 0, y: 0, width: 56, height: 56, top: 0, left: 0, right: 56, bottom: 56, toJSON: () => ({}) } as DOMRect) : real.call(this)
+    }
+    try {
+      for (const w of ["sieben", "neun", "vier"]) {
+        $(`#k-${w}`).dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+        $(`#k-${w}`).dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
+      }
+      $("#pay").dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+      await new Promise((r) => setTimeout(r, 650))
+    } finally {
+      Element.prototype.getBoundingClientRect = real
+    }
+    const targets = timelineOf(s.id).map((e) => e.target!)
+    expect(targets.slice(0, 6).every((t) => t.keypad && t.path === "div > span > span > button" && !t.text && !t.id)).toBe(true)
+    expect(targets[6]).toMatchObject({ tag: "button", id: "pay", text: "Pay <n> dollars" })
+    expect(JSON.stringify(targets)).not.toMatch(/sieben|neun|vier/)
+  })
+
+  test("a letter keyboard's keys keep no id or class: they would spell the word", async () => {
+    const s = fresh()
+    join(s)
+    document.body.innerHTML = `<div id="kb">${"qwertyuiop".split("").map((c) => `<button id="key-${c}" class="key key-${c}" data-k="${c}">${c}</button>`).join("")}</div>`
+    for (const c of "hunter".split("").filter((c) => document.getElementById(`key-${c}`)))
+      for (const type of ["focusin", "click"]) $(`#key-${c}`).dispatchEvent(trusted(type === "click" ? new MouseEvent(type, { bubbles: true, composed: true }) : new FocusEvent(type, { bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 650))
+    const targets = timelineOf(s.id).map((e) => e.target!)
+    expect(targets.length).toBeGreaterThan(0)
+    expect(targets.every((t) => t.keypad && !t.id && !t.name && t.path === "html > body > div > button")).toBe(true)
+    expect(JSON.stringify(targets)).not.toMatch(/key-/)
+  })
+
+  test("an echo cut short, or of a typed value's start, is scrubbed, past 256 characters too", async () => {
+    const s = fresh()
+    join(s)
+    document.body.innerHTML = `<textarea id="msg"></textarea><input id="name">
+      <button id="send">Send kit vogel secr…</button><button id="hi">Hello kitt</button><button id="tail">Mention zanzib…</button>`
+    const msg = $<HTMLTextAreaElement>("#msg")
+    msg.value = `kit vogel secret message ${"filler words ".repeat(30)}zanzibar`
+    msg.dispatchEvent(trusted(new Event("input", { bubbles: true, composed: true })))
+    type($<HTMLInputElement>("#name"), "kittens")
+    for (const b of ["send", "hi", "tail"]) $(`#${b}`).dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
+    await new Promise((r) => setTimeout(r, 650))
+    const texts = timelineOf(s.id).filter((e) => e.type === "focus").map((e) => e.target?.text)
+    expect(texts).toEqual(["Send <typed> <typed> <typed>…", "Hello <typed>", "Mention <typed>…"])
   })
 
   test("a password box in a closed shadow root logs only Enter, Tab and Escape", async () => {

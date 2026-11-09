@@ -23,6 +23,8 @@ export const MAX_EVENTS = 4000
 /** Frames on another site than the page (ads, chat widgets) share their own, smaller caps. */
 export const MAX_CROSS_EVENTS = 500
 export const MAX_CROSS_STEPS = 20
+/** And each cross-site origin its own share of those events: the start page's ads don't use up the provider page's. */
+export const MAX_ORIGIN_EVENTS = 200
 /** Digests of typed words a recording keeps, to scrub later pages' addresses and titles. */
 export const MAX_WORDS = 500
 /** What a frame sends of its timeline at once, and how often. */
@@ -260,7 +262,27 @@ export const clip = (s: string | null | undefined, n = MAX_TEXT) => (s ?? "").re
 export const scrub = (text: string, typed: Iterable<string> = []): string => scrubber(typed)(text)
 
 /** A target's text: scrubbed, then with every digit taken out, since a keypad's keys are digits one at a time. */
-export const noDigits = (text: string) => text.replace(/\d+/g, "<n>")
+export const noDigits = (text: string) => text.replace(/\d+/g, "<n>").replace(DIGIT_WORDS, "<n>")
+
+const DIGIT_WORDS = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine)\b/gi
+
+/**
+ * Whether a control's text or label reads as a keypad's key: one or two
+ * characters, a digit or a digit's word, a phone pad's letters ("2 ABC",
+ * "PQRS"), or both. A PIN or a word typed on one would be its keys in order.
+ */
+export const keypadText = (text: string) => {
+  const t = text.trim()
+  return t !== "" && (t.length <= 2 || /^(?:\d|zero|one|two|three|four|five|six|seven|eight|nine)?\s*(?:abc|def|ghi|jkl|mno|pqrs|tuv|wxyz|\+|\*|#)?$/i.test(t))
+}
+
+/** A keypad key's selector path, tags only: an id or a class (`key-h`) would name the key. */
+export const tagsOnly = (path: string) =>
+  path
+    .split(">")
+    .map((p) => p.trim().match(/^[a-z][a-z0-9-]*/i)?.[0] ?? "")
+    .filter(Boolean)
+    .join(" > ")
 
 /** `scrub` for many texts and the same typed values: their pattern is built once, longest first. */
 export function scrubber(typed: Iterable<string> = []): (text: string) => string {
@@ -280,6 +302,9 @@ export const wordDigest = (salt: string, word: string) => sha256(`${salt}\u0002$
 
 /** The words of a typed value worth a digest: three letters or digits or more, at most 20 of them. */
 export const wordsOf = (value: string) => [...new Set(value.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])].slice(0, 20)
+
+/** A typed value's words of one or two letters, a to z: only a path segment that's one of them is scrubbed (`<seg>`). */
+export const shortWordsOf = (value: string) => [...new Set(value.toLowerCase().match(/(?<![a-z0-9])[a-z]{1,2}(?![a-z0-9])/g) ?? [])].slice(0, 10)
 
 /** `text` with each word whose digest is a typed word's replaced by `<typed>`. */
 export async function scrubWords(text: string, words?: Words): Promise<string> {
@@ -307,7 +332,9 @@ export const ROUTE_WORD = /^[a-z_-]{1,24}$/
  * a typed word; parameter names are scrubbed like page text and of typed words.
  */
 export async function frameOf(url: URL, top: boolean, depth: number, typed: Iterable<string> = [], words?: Words): Promise<LearnFrame> {
-  const own = scrubber(typed)
+  const values = [...typed]
+  const own = scrubber(values)
+  const short = new Set(values.flatMap(shortWordsOf))
   const segments = await Promise.all(
     url.pathname
       .split("/")
@@ -316,6 +343,8 @@ export async function frameOf(url: URL, top: boolean, depth: number, typed: Iter
         if (i === 0 || raw === "") return raw
         const seg = decode(raw)
         if (!ROUTE_WORD.test(seg) || own(seg) !== seg) return "<seg>"
+        // A one- or two-letter word typed before: `/u/kv` names whoever typed "kv".
+        if (/^[a-z]{1,2}$/.test(seg) && (short.has(seg) || (words && words.digests.has(await wordDigest(words.salt, seg))))) return "<seg>"
         return (await scrubWords(seg, words)) === seg ? seg : "<typed>"
       }),
   )

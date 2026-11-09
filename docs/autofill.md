@@ -1245,11 +1245,12 @@ fill nothing, and nothing is added to the page or takes its focus.
   even when Deadbolt's button isn't pinned. While it runs the toolbar
   button says `REC` in red (over an offer's `1`, which shows again after)
   and the popup "Recording · 0:42" with Stop. It ends on Stop, on the
-  shortcut, after 10 minutes, after 2 minutes with no trusted input from
-  the user in any frame (`idle`), with the tab, or when the user takes the
-  top page to another site themselves (`left`: the address bar, a
-  bookmark, a keyword, a start page; links and redirects, a provider's
-  sign-in among them, are followed). A sign-in the save judge sees work
+  shortcut, after 10 minutes, after 2 minutes with no input from the user
+  in any frame (`idle`: a pointer, a key or typing; focus and scrolls
+  don't count, since a page can make those itself), with the tab, or when
+  the user takes the top page to another site themselves (`left`: the
+  address bar, a bookmark, a keyword, a start page, back or forward; links
+  and redirects, a provider's sign-in among them, are followed). A sign-in the save judge sees work
   is a `signed-in` mark on the timeline, not an end. It needs no unlocked
   vault; unlocked, it can also tell a saved username (below). The
   background keeps its recordings in `chrome.storage.session` too, so a
@@ -1274,7 +1275,9 @@ fill nothing, and nothing is added to the page or takes its focus.
   top page are marked `sameSite: false`, judged from the frame's origin as
   Chrome reports it, not from what the frame says, and share caps of
   their own: 500 events and 20 steps a recording. The background's own
-  fields (`seq`, `frameId`, `sameSite`) are set after a frame's.
+  fields (`seq`, `frameId`, `sameSite`) are set after a frame's. Each
+  cross-site origin has its own share of those 500 events, at most 200, so
+  the ads of one page don't use up a provider page's.
 - **A step** is recorded when the recording starts, when the inputs a frame
   shows or the detector's verdict change, and when the user submits: a
   trusted click on a button, Enter in an input or a trusted submit event,
@@ -1301,11 +1304,16 @@ fill nothing, and nothing is added to the page or takes its focus.
   path of up to four elements, whether it's in a shadow root, the
   detector's role for a field as of the frame's last step, and the frame
   (`frameId`); the element is found inside closed shadow roots too
-  (`eventTarget`, content/shadow.ts). Every digit in a target's text,
-  label, id, name and path is `<n>`. A keypad's key (text or label of one
-  or two characters, or, clicked, one of four or more small controls of
-  its size in its row or pad, image keys too) is `keypad: true` with no
-  text, label, `x` or `y`: a PIN would otherwise be its keys in order.
+  (`eventTarget`, content/shadow.ts). Every digit, and every digit's word
+  (zero to nine), in a target's text, label, id, name and path is `<n>`.
+  A keypad's key is `keypad: true` with no text, label, id, name, `x` or
+  `y`, and a path of tags only, for every event on it (focus, blur, keys,
+  pointer): a PIN, or a word typed on a letter keyboard, would otherwise
+  be its keys in order. A key is one whose text or label reads as one (one
+  or two characters, a digit or its word, a phone pad's letters such as
+  "2 ABC"), or one of three or more small controls of its size in a row or
+  pad up to four containers around it (keys in wrappers, image keys). The
+  background checks the text again whatever the frame sends.
   Typing into a field isn't a key per character: printable keys there are
   left out, and typing in one field less than a second apart is one event
   with no count (that would be the value's length). In a password box,
@@ -1342,15 +1350,20 @@ fill nothing, and nothing is added to the page or takes its focus.
   and inputmode, selector paths, the form's action host, iframe hosts and
   paths, the frame's path and query parameter names) has email addresses,
   runs of four or more digits and the values typed into the frame's
-  non-password fields, textareas and editable elements (256 characters
-  each) replaced (`<email>`, `<n>`, `<typed>`), since a step 2 often names
-  the account. Labels count only their own text: what's in a field, an
+  non-password fields, textareas and editable elements replaced (`<email>`,
+  `<n>`, `<typed>`), since a step 2 often names the account: each typed
+  value whole (its first 256 characters), then every word that is a typed
+  word or the start of one (three letters or more, from all of the typed
+  text however long), so an echo cut short ("Send kit vogel secr…") is
+  scrubbed too; then, as a batch is sent, words whose salted digest is one
+  typed on an earlier page. Labels count only their own text: what's in a field, an
   editable, or a live region (`aria-live`, `status`, `alert`, `log`,
   `output`) inside or named by `aria-labelledby` is left out.
 - **Addresses** are decoded, then each path segment kept only if it reads
   as a route word (lowercase letters, `-` or `_`, at most 24, no digits)
   and isn't a typed word; anything else (an id, a reset or magic-link
-  token, a search) is `<seg>`. Frames send salted SHA-256 digests (the
+  token, a search), and a one- or two-letter segment that is a short word
+  typed before, is `<seg>`. Frames send salted SHA-256 digests (the
   recording's salt) of each word of three or more letters typed outside
   password boxes, with their next batch, at once on Enter or a submit. The
   background keeps up to 500 a recording, never logs them, scrubs the

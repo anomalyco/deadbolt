@@ -21,7 +21,7 @@
 // the pages that load after, scrub addresses and titles of them.
 
 import type { LearnSession, LearnStep, LearnInput, LearnTaken, LearnTrigger, SubmitBy, Target, TimelineEvent, TimelineType, Typed, Words } from "../learn"
-import { BATCH_MS, clip, EVENTS_PER_BATCH, frameOf, keyName, lengthBand, MAX_FRAMES, MAX_INPUTS, modsOf, noDigits, scrubber, scrubWords, sha256, shapeOf, truthOf, usernameDigest, wordDigest, wordsOf } from "../learn"
+import { BATCH_MS, clip, EVENTS_PER_BATCH, frameOf, keyName, keypadText, lengthBand, MAX_FRAMES, MAX_INPUTS, modsOf, noDigits, scrubber, scrubWords, sha256, shapeOf, shortWordsOf, truthOf, usernameDigest, wordDigest, wordsOf } from "../learn"
 import type { ToBackground, ToContent } from "../messages"
 import { controlText, isVisible, masked, scanPage } from "./detect"
 import { deepQueryAll, eventTarget, openRoots, shadowRootOf } from "./shadow"
@@ -35,12 +35,14 @@ const TEXTUAL = new Set(["a", "button", "summary"])
 const TEXT_ROLES = new Set(["button", "link", "tab", "menuitem", "option", "checkbox", "radio", "switch"])
 /** Keys a password box gets recorded, unmodified: the rest would tell its length or where its capitals are. */
 const SECRET_KEYS = new Set(["Enter", "Tab", "Escape"])
-/** Typed text kept to scrub page text, per field: a textarea or an editable element's, this much. */
+/** Typed text matched whole against page text, per field: this much. Its words are matched however long it is (MAX_KEPT). */
 const MAX_TYPED = 256
+const MAX_KEPT = 10_000
 /** Text that may be what the user is typing, or what the page says back: never a label's. */
 const LIVE = 'input, textarea, select, output, [contenteditable=""], [contenteditable="true"], [aria-live], [role="status"], [role="alert"], [role="log"]'
-/** A keypad: at least this many small controls of one size around the one clicked. */
-const KEYPAD_KEYS = 4
+/** A keypad: at least this many small controls of one size in a row or pad around the one acted on, this many containers up. */
+const KEYPAD_KEYS = 3
+const KEYPAD_UP = 4
 const KEYPAD_SIZE = 120
 /** Typing in one field this close together is one input event. */
 const INPUT_MERGE_MS = 1000
@@ -66,6 +68,10 @@ let secrets = new WeakSet<HTMLInputElement>()
 /** Values typed into fields that aren't password boxes, to scrub page text; and their pattern, built when they change. */
 let identifiers = new Set<string>()
 let scrubTyped: ((text: string) => string) | null = null
+/** Which elements are a keypad's keys, as found (see inKeypad). */
+let keypads = new WeakMap<Element, boolean>()
+/** The frame's batches, sent one after another. */
+let sending: Promise<void> = Promise.resolve()
 /** Each field's latest typed value, and the salted digests of typed words (sent: the background has them). */
 let latest = new Map<Element, string>()
 let wordDigests = new Map<string, string>()
@@ -170,18 +176,33 @@ function makeSecret(el: HTMLInputElement) {
  * (an edit) keeps both.
  */
 function remember(el: Element, raw: string) {
-  const value = raw.trim().slice(0, MAX_TYPED)
+  const value = raw.trim().slice(0, MAX_KEPT)
   const prev = latest.get(el)
   if (prev && prev.length >= 3 && !value.startsWith(prev)) identifiers.add(prev)
   latest.set(el, value)
   scrubTyped = null
   if (!session) return
   const salt = session.salt
-  for (const w of wordsOf(value)) if (!wordDigests.has(w)) void wordDigest(salt, w).then((d) => session?.salt === salt && wordDigests.set(w, d))
+  for (const w of [...wordsOf(value), ...shortWordsOf(value)]) if (!wordDigests.has(w)) void wordDigest(salt, w).then((d) => session?.salt === salt && wordDigests.set(w, d))
 }
 
 /** Every typed value still to scrub page text of: the fields' latest, and earlier ones edited away. */
-const typedValues = () => [...identifiers, ...latest.values()]
+const typedValues = () => [...identifiers, ...latest.values()].map((v) => v.slice(0, MAX_TYPED))
+
+/**
+ * Page text scrubbed of what was typed in this frame: each typed value whole,
+ * then any word that's a typed word or the start of one (three letters or
+ * more), however long the text typed: an echo cut short ("Send kit vogel
+ * secr…") names it as well as a whole one.
+ */
+function ownScrubber(): (text: string) => string {
+  const whole = scrubber(typedValues())
+  const starts = new Set<string>()
+  for (const v of [...identifiers, ...latest.values()])
+    for (const w of new Set(v.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])) for (let i = 3; i <= Math.min(w.length, 40); i++) starts.add(w.slice(0, i))
+  if (!starts.size) return whole
+  return (text) => whole(text).replace(/[\p{L}\p{N}]{3,}/gu, (w) => (starts.has(w.toLowerCase()) ? "<typed>" : w))
+}
 
 function onInput(event: Event) {
   if (!session || !event.isTrusted) return
@@ -238,8 +259,9 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
   const form = result?.fields.find((f) => f.owner.form)?.owner.form ?? null
   const values = [...typedValues(), ...typedEls.filter((el) => !secrets.has(el)).map((el) => el.value)]
   const words = known()
+  const own = (scrubTyped ??= ownScrubber())
   const scrubValues = scrubber(values)
-  const text = (s: string | null | undefined, n?: number) => scrubValues(clip(s, n))
+  const text = (s: string | null | undefined, n?: number) => clip(own(scrubValues(clip(s, 1000))), n)
 
   const inputs: LearnInput[] = []
   for (const [i, el] of picked.entries()) {
@@ -382,12 +404,17 @@ const realTarget = (event: Event) => {
 // ---- The timeline -------------------------------------------------------------
 
 /** Page text in a timeline, scrubbed of what the user typed here and of every digit, then clipped (so no clipped address escapes). */
-const said = (s: string | null | undefined, n = 80) => clip(noDigits((scrubTyped ??= scrubber(typedValues()))(clip(s, 1000))), n)
+const said = (s: string | null | undefined, n = 80) => clip(noDigits((scrubTyped ??= ownScrubber())(clip(s, 1000))), n)
 
 /** `form#login > div.row > input[name=email]`: up to four elements, in the element's own root. */
-function pathOf(el: Element): string {
+function pathOf(el: Element, keypad = false): string {
   const parts: string[] = []
   for (let e: Element | null = el; e && parts.length < 4; e = e.parentElement) {
+    // A keypad key's path is tags only: an id or class (key-h) names the key.
+    if (keypad) {
+      parts.unshift(e.tagName.toLowerCase())
+      continue
+    }
     const tag = e.tagName.toLowerCase()
     const name = e.getAttribute("name")
     const cls = typeof e.className === "string" ? e.className.trim().split(/\s+/)[0] : ""
@@ -399,40 +426,46 @@ function pathOf(el: Element): string {
 
 const labelText = (el: Element) => labelOf(el) || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || el.getAttribute("alt") || ""
 
-/** Whether `el` is one of a cluster of small controls of its size in one container: a keypad, its keys images perhaps. */
+/**
+ * Whether `el` is one of a cluster of small controls of its size: a row of
+ * three or more, or a pad of rows, in a container a few levels up (keys in
+ * wrappers, images for keys). Found once per element and recording.
+ */
 function inKeypad(el: Element): boolean {
+  const known = keypads.get(el)
+  if (known !== undefined) return known
+  let found = false
   const r = el.getBoundingClientRect()
-  if (r.width < 2 || r.height < 2 || r.width > KEYPAD_SIZE || r.height > KEYPAD_SIZE) return false
-  // The row it's in, or the pad around the rows.
-  for (let box = el.parentElement, up = 0; box && up < 2; box = box.parentElement, up++) {
-    let same = 0
-    for (const other of Array.from(box.querySelectorAll(el.tagName)).slice(0, 40)) {
-      const o = other.getBoundingClientRect()
-      if (Math.abs(o.width - r.width) <= 1 && Math.abs(o.height - r.height) <= 1) same++
+  if (r.width >= 2 && r.height >= 2 && r.width <= KEYPAD_SIZE && r.height <= KEYPAD_SIZE)
+    for (let box = el.parentElement, up = 0; box && up < KEYPAD_UP && !found; box = box.parentElement, up++) {
+      let same = 0
+      for (const other of Array.from(box.querySelectorAll(el.tagName)).slice(0, 60)) {
+        const o = other.getBoundingClientRect()
+        if (Math.abs(o.width - r.width) <= 1 && Math.abs(o.height - r.height) <= 1) same++
+      }
+      found = same >= KEYPAD_KEYS
     }
-    if (same >= KEYPAD_KEYS) return true
-  }
-  return false
+  keypads.set(el, found)
+  return found
 }
 
 /**
  * The element acted on, in the probe's terms: never its value, text only for
- * a button or link, every digit out. A keypad's key (one or two characters
- * of text or label, or, for `pointer` events, one of a cluster of small
- * same-size controls) keeps neither: a PIN would be its keys in order.
+ * a button or link, every digit (and digit word) out. A keypad's key (its
+ * text or label reads as one, see keypadText, or it's one of a cluster of
+ * small same-size controls) keeps no text, label, id or name and a path of
+ * tags, for every event (focus, blur, keys, pointer): a PIN or a word would
+ * be its keys in order.
  */
-function describe(node: EventTarget | null | undefined, pointer = false): Target | undefined {
+function describe(node: EventTarget | null | undefined): Target | undefined {
   const hit = node instanceof Element ? node : node instanceof Node ? node.parentElement : null
   if (!hit) return undefined
   const el = hit.closest(INTERACTIVE) ?? hit
   const tag = el.tagName.toLowerCase()
-  const t: Target = { tag, path: pathOf(el) }
+  const t: Target = { tag, path: "" }
   const attr = (name: string) => said(el.getAttribute(name))
   const type = attr("type").toLowerCase()
   if (type) t.type = type
-  const name = attr("name")
-  if (name) t.name = name
-  if (el.id) t.id = said(el.id)
   const role = attr("role")
   if (role) t.role = role
   const autocomplete = attr("autocomplete").toLowerCase()
@@ -440,8 +473,14 @@ function describe(node: EventTarget | null | undefined, pointer = false): Target
   const button = el instanceof HTMLInputElement && (type === "submit" || type === "button" || type === "image")
   const rawLabel = clip(labelText(el))
   const rawText = TEXTUAL.has(tag) || TEXT_ROLES.has(role) || button ? clip(button ? (el as HTMLInputElement).value : staticText(el), 40) : ""
-  if ((rawText && rawText.length <= 2) || (rawLabel && rawLabel.length <= 2) || (pointer && inKeypad(el))) t.keypad = true
-  else {
+  if (keypadText(rawText) || keypadText(rawLabel) || inKeypad(el)) {
+    t.keypad = true
+    t.path = pathOf(el, true)
+  } else {
+    t.path = pathOf(el)
+    const name = attr("name")
+    if (name) t.name = name
+    if (el.id) t.id = said(el.id)
     const label = said(rawLabel)
     if (label) t.label = label
     const text = said(rawText, 40)
@@ -526,11 +565,20 @@ function flush() {
     dropped = 0
   }
   const id = session.id
-  void send({ type: "db:learn-events", session: id, events, ...(words.length ? { words } : {}) }).then((taken) => {
+  const wordsKnown = known()
+  // Text that names a word typed on another page (known only by digest) goes too; batches stay in order.
+  sending = sending.then(async () => {
+    for (const e of events) for (const t of [e.target, e.submitter]) if (t) await scrubTarget(t, wordsKnown)
+    const taken = await send({ type: "db:learn-events", session: id, events, ...(words.length ? { words } : {}) })
     if (taken === "full") eventsFull = true
     else if (taken !== true && session?.id === id) end()
   })
   if (typing || wordDigests.size > sentWords.size) schedule()
+}
+
+/** A target's text, label, id, name and path, of words whose digest is a typed word's. */
+async function scrubTarget(t: Target, words?: Words) {
+  for (const k of ["text", "label", "id", "name", "path"] as const) if (t[k]) t[k] = await scrubWords(t[k]!, words)
 }
 
 function typedInto(event: Event, el: EventTarget | null) {
@@ -552,7 +600,7 @@ function typedInto(event: Event, el: EventTarget | null) {
 function onPointer(event: MouseEvent) {
   if (!event.isTrusted || !session || eventsFull) return
   const mods = modsOf(event)
-  const target = describe(realTarget(event), true)
+  const target = describe(realTarget(event))
   // A keypad's key: where it was pressed would tell which.
   push(event.type as TimelineType, { target, ...(target?.keypad ? {} : { x: event.clientX, y: event.clientY }), ...(mods ? { mods } : {}) })
 }
@@ -676,6 +724,7 @@ function begin(next: LearnSession) {
   secrets = new WeakSet()
   identifiers = new Set()
   scrubTyped = null
+  keypads = new WeakMap()
   latest = new Map()
   wordDigests = new Map()
   sentWords = new Set()
@@ -710,6 +759,7 @@ function end() {
   secrets = new WeakSet()
   identifiers = new Set()
   scrubTyped = null
+  keypads = new WeakMap()
   latest = new Map()
   wordDigests = new Map()
   sentWords = new Set()

@@ -15,7 +15,7 @@
 // and never reach the log. Recordings are kept in chrome.storage.session too,
 // so a service worker that restarts picks them up where they were.
 
-import { frameOf, IDLE_MS, keyName, LEARN_TTL_MS, MAX_CROSS_EVENTS, MAX_CROSS_STEPS, MAX_EVENTS, MAX_INPUTS, MAX_STEPS, MAX_WORDS, noDigits, truthOf, usernameDigest, type LearnEnd, type LearnSession, type LearnStep, type LearnTaken, type Target, type TimelineEvent, type TimelineType } from "../learn"
+import { frameOf, IDLE_MS, keyName, LEARN_TTL_MS, MAX_CROSS_EVENTS, MAX_CROSS_STEPS, MAX_EVENTS, MAX_ORIGIN_EVENTS, MAX_INPUTS, MAX_STEPS, MAX_WORDS, keypadText, noDigits, tagsOnly, truthOf, usernameDigest, type LearnEnd, type LearnSession, type LearnStep, type LearnTaken, type Target, type TimelineEvent, type TimelineType } from "../learn"
 import type { LearnReply, RecordedReply, Recording } from "../messages"
 import type { VaultBackend } from "./backend"
 import { learnExport } from "./learn-log"
@@ -48,9 +48,11 @@ interface Stored {
   /** What frames on other sites than the page have used of their own caps. */
   crossSteps: number
   crossEvents: number
+  /** Each cross-site origin's share of crossEvents. */
+  byOrigin: Record<string, number>
   /** The site the tab's top page is on now: where a navigation by hand leaves from. */
   top: string
-  /** When the user last did anything in a frame of the tab. */
+  /** When the user last did anything in a frame of the tab: a pointer, a key, typing. A page's own focus() or scrollTo() isn't. */
   lastInput: number
   /** Salted digests of the saved usernames for the site. */
   usernames: string[]
@@ -78,6 +80,8 @@ interface Done {
   steps: number
 }
 
+/** What the user did, not the page: these keep a recording from going idle. */
+const INPUT = new Set<TimelineType>(["pointerdown", "pointerup", "click", "dblclick", "key", "input"])
 const TYPES = new Set<TimelineType>(["pointerdown", "pointerup", "click", "dblclick", "key", "focus", "blur", "input", "change", "submit", "scroll", "unload"])
 const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
 
@@ -105,12 +109,13 @@ const BANDS = new Set(["1-3", "4-8", "9-16", "17-32", "33+"])
 function target(v: unknown): Target | undefined {
   const t = v as Record<string, unknown> | null
   if (!t || typeof t !== "object" || typeof t.tag !== "string") return undefined
-  const out: Target = { tag: t.tag.slice(0, 20), path: noDigits(str(t.path, 200) ?? "") }
-  // A keypad's key, as the frame says or as its text shows: none of its text.
-  const keypad = t.keypad === true || [t.text, t.label].some((v) => typeof v === "string" && v.trim() !== "" && v.trim().length <= 2)
+  // A keypad's key, as the frame says or as its text shows (keypadText): no text, label, id or name, a path of tags.
+  const keypad = t.keypad === true || [t.text, t.label].some((v) => typeof v === "string" && keypadText(v))
+  const path = str(t.path, 200) ?? ""
+  const out: Target = { tag: t.tag.slice(0, 20), path: keypad ? tagsOnly(path) : noDigits(path) }
   for (const k of ["type", "name", "id", "role", "label", "autocomplete", "text", "detected"] as const) {
     const s = str(t[k], k === "text" ? 40 : 80)
-    if (s && !(keypad && (k === "text" || k === "label"))) out[k] = k === "role" || k === "autocomplete" || k === "type" || k === "detected" ? s : noDigits(s)
+    if (s && !(keypad && (k === "text" || k === "label" || k === "id" || k === "name"))) out[k] = k === "role" || k === "autocomplete" || k === "type" || k === "detected" ? s : noDigits(s)
   }
   if (keypad) out.keypad = true
   if (t.inShadow === true) out.inShadow = true
@@ -247,6 +252,7 @@ export class Learner {
       events: 0,
       crossSteps: 0,
       crossEvents: 0,
+      byOrigin: {},
       top: site,
       lastInput: now,
       usernames,
@@ -333,20 +339,26 @@ export class Learner {
     if (Array.isArray(words)) for (const w of words.slice(0, 50)) if (typeof w === "string" && /^[0-9a-f]{64}$/.test(w) && a.words.size < MAX_WORDS) a.words.add(w)
     const frameId = sender.frameId ?? 0
     const sameSite = this.sameSite(sender, a)
+    // Each cross-site origin's share; past 50 origins, the rest share one.
+    const origin = String(sender.origin ?? "")
+    const share = Object.hasOwn(a.byOrigin, origin) || Object.keys(a.byOrigin).length < 50 ? origin : "*"
     let full = false
     for (const raw of events.slice(0, 200)) {
       const dropped = num((raw as { dropped?: unknown } | null)?.dropped)
       if (dropped) a.dropped += Math.max(0, Math.min(10_000, dropped))
       const e = timelineEvent(raw)
       if (!e) continue
-      if (a.events >= MAX_EVENTS || (!sameSite && a.crossEvents >= MAX_CROSS_EVENTS)) {
+      if (a.events >= MAX_EVENTS || (!sameSite && (a.crossEvents >= MAX_CROSS_EVENTS || (a.byOrigin[share] ?? 0) >= MAX_ORIGIN_EVENTS))) {
         a.dropped++
         full = true
         continue
       }
-      if (!sameSite) a.crossEvents++
-      // The user did something: the recording isn't idle.
-      a.lastInput = Date.now()
+      if (!sameSite) {
+        a.crossEvents++
+        a.byOrigin[share] = (a.byOrigin[share] ?? 0) + 1
+      }
+      // The user did something: the recording isn't idle. A page can focus and scroll on its own.
+      if (INPUT.has(e.type)) a.lastInput = Date.now()
       this.add(tabId!, a, { ...e, frameId, sameSite })
     }
     return full ? "full" : true
@@ -369,7 +381,8 @@ export class Learner {
     }
     if (d.frameId === 0) {
       const site = siteOf(url.hostname) ?? url.hostname
-      const byHand = BY_HAND.has(d.transitionType ?? "") || !!d.transitionQualifiers?.includes("from_address_bar")
+      // Back or forward is by hand too, whatever took the entry there first.
+      const byHand = BY_HAND.has(d.transitionType ?? "") || !!d.transitionQualifiers?.some((q) => q === "from_address_bar" || q === "forward_back")
       if (site !== a.top && byHand) return void this.stop(d.tabId, "left")
       a.top = site
       this.badge(d.tabId)
@@ -557,6 +570,7 @@ export class Learner {
         events: Number(s.events) || 0,
         crossSteps: Number(s.crossSteps) || 0,
         crossEvents: Number(s.crossEvents) || 0,
+        byOrigin: s.byOrigin && typeof s.byOrigin === "object" ? { ...s.byOrigin } : {},
         top: typeof s.top === "string" ? s.top : s.site,
         lastInput,
         usernames: new Set(s.usernames),
@@ -588,6 +602,7 @@ export class Learner {
       events: a.events,
       crossSteps: a.crossSteps,
       crossEvents: a.crossEvents,
+      byOrigin: a.byOrigin,
       top: a.top,
       lastInput: a.lastInput,
       usernames: [...a.usernames],

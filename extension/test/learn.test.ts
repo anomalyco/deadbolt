@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { Learner } from "../src/bg/learn"
-import { frameOf, IDLE_MS, keyName, LEARN_TTL_MS, lengthBand, MAX_CROSS_EVENTS, MAX_EVENTS, scrub, shapeOf, truthOf, usernameDigest, wordDigest, type LearnSession, type LearnStep } from "../src/learn"
+import { frameOf, IDLE_MS, keypadText, keyName, LEARN_TTL_MS, lengthBand, MAX_CROSS_EVENTS, MAX_EVENTS, MAX_ORIGIN_EVENTS, noDigits, scrub, shapeOf, truthOf, usernameDigest, wordDigest, type LearnSession, type LearnStep } from "../src/learn"
 import type { RequestBody as Request } from "../src/protocol"
 import { fakeHost, installChrome, pageSender, type FakeChrome } from "./chrome"
 
@@ -157,17 +157,25 @@ describe("Learner", () => {
       { t: 2, type: "click", target: { tag: "button", label: "9", path: "div.key-9" }, x: 40, y: 10 },
       { t: 3, type: "click", target: { tag: "img", keypad: true, id: "k8", path: "div > img.d8" }, x: 70, y: 10 },
       { t: 4, type: "click", target: { tag: "button", text: "Pay 1984 now", id: "pay-4", path: "form > button" }, x: 9, y: 9 },
+      // A phone pad's key, focused, and a letter keyboard's: its id and class would spell what's typed.
+      { t: 5, type: "focus", target: { tag: "button", text: "2 ABC", name: "k2", path: "div.pad > button.two" } },
+      { t: 6, type: "key", key: "Enter", target: { tag: "button", label: "seven", id: "key-h", path: "div#kb > span.row > button#key-h" } },
     ])
     await learner.stop(1, "stopped")
     const events = lines.filter((l) => (l.line as { event: string }).event === "timeline").flatMap((l) => (l.line as { events: Array<Record<string, unknown>> }).events)
     expect(events.map((e) => e.target)).toEqual([
-      { tag: "button", path: "div#pad > button", keypad: true },
-      { tag: "button", path: "div.key-<n>", keypad: true },
-      { tag: "img", id: "k<n>", path: "div > img.d<n>", keypad: true },
+      { tag: "button", path: "div > button", keypad: true },
+      { tag: "button", path: "div", keypad: true },
+      { tag: "img", path: "div > img", keypad: true },
       { tag: "button", id: "pay-<n>", text: "Pay <n> now", path: "form > button" },
+      { tag: "button", path: "div > button", keypad: true },
+      { tag: "button", path: "div > span > button", keypad: true },
     ])
     expect(events.slice(0, 3).every((e) => e.x === undefined && e.y === undefined)).toBe(true)
-    expect(JSON.stringify(lines)).not.toMatch(/1984|"[19]"/)
+    expect(JSON.stringify(lines)).not.toMatch(/1984|"[19]"|ABC|key-h|seven/)
+    expect(["2 ABC", "PQRS", "seven", "0 +", "#", "h"].every(keypadText)).toBe(true)
+    expect(["Sign in", "Continue", "Pay now"].some(keypadText)).toBe(false)
+    expect(noDigits("Press Seven, then nine or 1")).toBe("Press <n>, then <n> or <n>")
   })
 
   test("typed words scrub the addresses Chrome reports, and later pages are told them", async () => {
@@ -202,6 +210,57 @@ describe("Learner", () => {
     expect(fake.badges[1]).toBe("")
   })
 
+  test("going back to another site ends it, however that entry was reached", async () => {
+    await learner.start(1)
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/next", transitionType: "link" })
+    // Back within the site goes on; back to the page before it, on another site, doesn't.
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/login", transitionType: "link", transitionQualifiers: ["forward_back"] })
+    expect(await learner.status(1)).toMatchObject({ state: "on" })
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://search.other.net/results", transitionType: "link", transitionQualifiers: ["forward_back"] })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "left" })
+  })
+
+  test("a one- or two-letter word typed before is no path segment", async () => {
+    await learner.start(1)
+    const { id, salt } = broadcast()[0]!
+    await learner.events(pageSender(), id, [], [await wordDigest(salt, "kv")])
+    learner.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/u/kv/settings/en", transitionType: "link" })
+    await learner.stop(1, "stopped")
+    const nav = lines.filter((l) => (l.line as { event: string }).event === "timeline").flatMap((l) => (l.line as { events: Array<{ type: string; frame?: { path: string } }> }).events).find((e) => e.type === "navigate")
+    expect(nav?.frame?.path).toBe("/u/<seg>/settings/en")
+    expect((await frameOf(new URL("https://x.test/to/me/ok"), true, 0, ["ok me"])).path).toBe("/to/<seg>/<seg>")
+  })
+
+  test("a page that focuses and scrolls on its own doesn't keep a recording from going idle", async () => {
+    await learner.start(1)
+    const key = Object.keys(fake.session)[0]
+    ;(fake.session[key] as { lastInput: number }).lastInput = Date.now() - IDLE_MS + 150
+    kill(learner)
+    const again = new Learner(h.host)
+    const { id } = (await joins(again))!
+    // focus() and scrollTo() every few ms here, as a page could every 5 s for two minutes.
+    for (let i = 0; i < 6; i++) {
+      await again.events(pageSender(), id, [{ t: i, type: "focus", target: { tag: "input", path: "input" } }, { t: i, type: "blur" }, { t: i, type: "scroll", x: 0, y: i }])
+      await new Promise((r) => setTimeout(r, 40))
+    }
+    await new Promise((r) => setTimeout(r, 60))
+    expect(lines.at(-1)?.line).toMatchObject({ event: "end", reason: "idle" })
+  })
+
+  test("a key or a click does keep it going", async () => {
+    await learner.start(1)
+    const key = Object.keys(fake.session)[0]
+    ;(fake.session[key] as { lastInput: number }).lastInput = Date.now() - IDLE_MS + 100
+    kill(learner)
+    const again = new Learner(h.host)
+    const { id } = (await joins(again))!
+    await again.events(pageSender(), id, [{ t: 1, type: "key", key: "Tab" }])
+    await new Promise((r) => setTimeout(r, 200))
+    expect(await again.status(1)).toMatchObject({ state: "on" })
+    await again.stop(1, "stopped")
+  })
+
   test("two minutes without input end a recording", async () => {
     expect(IDLE_MS).toBe(2 * 60_000)
     await learner.start(1)
@@ -218,10 +277,16 @@ describe("Learner", () => {
   test("a full cross-site frame is told so, and the page's frames go on", async () => {
     await learner.start(1)
     const { id } = broadcast()[0]!
-    const ad = pageSender({ frameId: 9, origin: "https://ads.other.net", url: "https://ads.other.net/x" })
-    const burst = () => Array.from({ length: 200 }, (_, t) => ({ t, type: "scroll", x: 0, y: t }))
-    const answers = [await learner.events(ad, id, burst()), await learner.events(ad, id, burst()), await learner.events(ad, id, burst())]
-    expect(answers).toEqual([true, true, "full"])
+    const from = (host: string) => pageSender({ frameId: 9, origin: `https://${host}`, url: `https://${host}/x` })
+    const ad = from("ads.other.net")
+    const burst = (n = 200) => Array.from({ length: n }, (_, t) => ({ t, type: "scroll", x: 0, y: t }))
+    // Each cross-site origin has its own share, under the cross-site total.
+    expect(await learner.events(ad, id, burst())).toBe(true)
+    expect(await learner.events(ad, id, burst(1))).toBe("full")
+    expect(MAX_ORIGIN_EVENTS).toBe(200)
+    expect(await learner.events(from("accounts.provider.net"), id, burst())).toBe(true)
+    expect(await learner.events(from("chat.widget.net"), id, burst(100))).toBe(true)
+    expect(await learner.events(from("cdn.widget.net"), id, burst(100))).toBe("full")
     expect(await learner.events(pageSender(), id, [{ t: 1, type: "click" }])).toBe(true)
     for (let i = 0; i < 25; i++) await learner.step(ad, id, step({}))
     expect(await learner.step(ad, id, step({}))).toBe("full")
