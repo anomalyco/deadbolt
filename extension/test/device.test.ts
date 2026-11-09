@@ -24,6 +24,8 @@ let loads = 0
 let activity: ActivityEntry[]
 /** What device-settings answers (the preset, and why it locked). */
 let settings: Record<string, unknown>
+/** Touch ID's enrollment as device-biometric-info answers it, when it's set up. */
+let touchToken: string | undefined
 const NOW = 1_800_000_000
 
 const ok = (reply: Record<string, unknown>): DeviceReply => ({ ok: true, reply, ms: 1, status })
@@ -51,6 +53,8 @@ async function answer(c: Command): Promise<DeviceReply> {
       return ok({ type: "device-devices", devices: [{ id: "d".repeat(64), name: "Chrome on macOS", current: true }] })
     case "device-settings":
       return ok({ type: "device-settings", retryAt: 0, ...settings })
+    case "device-biometric-info":
+      return ok({ type: "device-biometric-info", token: touchToken })
     case "device-preset":
       // As the service worker: Until you quit takes the passphrase, which the vault checks.
       if (c.preset === "until-quit" && settings.preset !== "until-quit") {
@@ -124,6 +128,7 @@ beforeEach(() => {
   held = {}
   activity = []
   settings = { preset: "comfortable" }
+  touchToken = undefined
   fake.runtimeAnswer = (m) => ((m as { type: string }).type === "db:device" ? answer((m as { command: Command }).command) : undefined)
   logs = (["log", "info", "debug", "warn", "error"] as const).map((k) => spyOn(console, k))
 })
@@ -376,31 +381,84 @@ describe("reload", () => {
 
 describe("lock", () => {
   const reason = () => app().querySelector<HTMLElement>(".lock-reason")!
-  const note = () => app().querySelector(".preset-note:not(.lock-reason)")!.textContent
 
   test("the locked page says quietly why it locked", async () => {
     status = { state: "locked" }
     settings = { preset: "relaxed", lockedBy: { reason: "idle", idleMs: 12 * 60 * 60_000 } }
     await open()
     expect(headings()).toContain("Unlock Deadbolt")
-    expect(reason().hidden).toBe(false)
     expect(reason().textContent).toBe("Locked · 12 h idle")
-    expect(note()).toBe("Relaxed · locks after 12 hours idle")
+    // The lock setting itself is Settings' to say, not the locked page's.
+    expect(app().textContent).not.toContain("Relaxed")
     settings = { preset: "until-quit", lockedBy: { reason: "quit" } }
     await open()
     expect(reason().textContent).toBe("Locked · browser restarted")
-    expect(note()).toBe("Until you quit the browser")
-    for (const [why, line] of [["screen", "screen locked"], ["worker", "vault worker stopped"], ["offscreen", "browser closed the vault's page"], ["manual", "you locked it"], ["update", "extension updated"], ["removed", "removed from vault"]]) {
+    for (const [why, line] of [["screen", "screen locked"], ["worker", "vault worker stopped"], ["offscreen", "browser closed the vault's page"], ["update", "extension updated"], ["removed", "removed from vault"]]) {
       settings = { preset: "comfortable", lockedBy: { reason: why } }
       await open()
       expect(reason().textContent).toBe(`Locked · ${line}`)
     }
+    // A lock the user made needs no telling.
+    settings = { preset: "comfortable", lockedBy: { reason: "manual" } }
+    await open()
+    expect(reason().textContent).toBe("")
     // Nothing known, or something that isn't a reason: nothing said.
     for (const lockedBy of [undefined, { reason: "password123" }]) {
       settings = { preset: "comfortable", lockedBy }
       await open()
-      expect(reason().hidden).toBe(true)
+      expect(reason().textContent).toBe("")
     }
+  })
+
+  describe("with Touch ID set up", () => {
+    const credentials = Object.getOwnPropertyDescriptor(navigator, "credentials")
+    // What the label says now (its text swaps over a moment: ui/unlock.ts swapText).
+    const touchLabel = () => app().querySelector<HTMLElement>(".unlock-touch-label")!.dataset.text
+    const errorLine = () => app().querySelector(".unlock-msg.on")
+    /** The browser's prompt: `get` is the platform authenticator's. */
+    const prompt = (get: (o: CredentialRequestOptions) => Promise<Credential | null>) => Object.defineProperty(navigator, "credentials", { configurable: true, value: { get } })
+    beforeEach(() => {
+      status = { state: "locked" }
+      touchToken = JSON.stringify({ id: "ab".repeat(16), salt: "cd".repeat(32) })
+    })
+    afterEach(() => {
+      if (credentials) Object.defineProperty(navigator, "credentials", credentials)
+      else delete (navigator as unknown as { credentials?: unknown }).credentials
+    })
+
+    test("a prompt the user cancels is no error: the panel is as it opened, the passphrase field ready", async () => {
+      prompt(() => Promise.reject(new DOMException("The operation either timed out or was not allowed.", "NotAllowedError")))
+      await open()
+      expect(document.activeElement).toBe(input("Passphrase"))
+      buttonNamed("Unlock with Touch ID").click()
+      await flush()
+      expect(touchLabel()).toBe("Unlock with Touch ID")
+      expect(errorLine()).toBeNull()
+      expect(document.activeElement).toBe(input("Passphrase"))
+      expect(sentTypes()).not.toContain("device-unlock")
+    })
+
+    test("Return on the empty field asks Touch ID, and the passphrase ends its prompt", async () => {
+      const asked: AbortSignal[] = []
+      prompt((o) => new Promise((_, reject) => {
+        asked.push(o.signal!)
+        o.signal!.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")))
+      }))
+      await open()
+      const form = app().querySelector("form.unlock")!
+      submit(form)
+      await flush()
+      expect(asked).toHaveLength(1)
+      // The system's prompt says what to do; the panel only says it's waiting.
+      expect(touchLabel()).toBe("Waiting for Touch ID…")
+      expect(document.activeElement).toBe(input("Passphrase"))
+      input("Passphrase").value = "browser pass"
+      submit(form)
+      await flush()
+      expect(commands().find((c) => c.type === "device-unlock")).toMatchObject({ passphrase: "browser pass" })
+      expect(asked[0]!.aborted).toBe(true)
+      expect(errorLine()).toBeNull()
+    })
   })
 
   test("choosing Until you quit asks for the passphrase first", async () => {

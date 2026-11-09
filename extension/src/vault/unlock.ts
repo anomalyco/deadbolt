@@ -1,38 +1,39 @@
 // Unlocking the browser-only Deadbolt, in the toolbar panel and on
-// device.html: Touch ID when it's set up, and the passphrase. One thing to
-// do: Touch ID, when it's there, is the way in and says what it's doing
-// itself ("Touch the sensor…", "Try Touch ID again"); the passphrase is one
-// field whose arrow submits it. An error shows under the field only while
-// there is one. UNLOCK_FEEL.panel picks the arrangement while it's open.
+// device.html: Touch ID when it's set up, and the passphrase. Touch ID's own
+// prompt is the system's, drawn away from this panel (a dialog in the middle
+// of the screen, the browser's own over the panel when it fails), and it says
+// what to do; the panel only says it's waiting, and keeps the passphrase
+// field ready under it. A cancelled prompt is not an error: the panel goes
+// back to how it opened. The line under the field shows only while there is
+// something wrong to say.
 
-import { describePreset, duration, isLockedBy, lockedLine, PRESETS } from "../device-rules"
+import { isLockedBy, lockedLine } from "../device-rules"
 import { h, icon } from "../ui/dom"
 import { reducedMotion, timing } from "../ui/motion"
-import { swapText, UNLOCK_FEEL } from "../ui/unlock"
+import { swapText } from "../ui/unlock"
 import type { App, View } from "./app"
-import { enrollment, verify } from "./biometric"
+import { enrollment, TouchDeclined, verify } from "./biometric"
 import { glyph, refuse } from "./kit"
 
 type TouchState = "idle" | "asking" | "failed"
 
-const TOUCH_LABEL: Record<TouchState, string> = { idle: "Unlock with Touch ID", asking: "Touch the sensor…", failed: "Try Touch ID again" }
+const TOUCH_LABEL: Record<TouchState, string> = { idle: "Unlock with Touch ID", asking: "Waiting for Touch ID…", failed: "Try Touch ID again" }
 
 export function unlockView(app: App): View {
-  const layout = UNLOCK_FEEL.panel
   let timer: ReturnType<typeof setTimeout> | undefined
   let touchState: TouchState = "idle"
   let enrolled = false
+  /** Ends the Touch ID prompt that's up, when the passphrase is used instead. */
+  let asking: AbortController | undefined
 
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
   const submit = h("button", { class: "icon-button unlock-go", type: "submit", title: "Unlock", "aria-label": "Unlock" }, glyph("enter"))
   const fieldRow = h("div", { class: "unlock-field" }, input, submit)
-  // The one line under the field: an error, or what Touch ID is doing when it has no label of its own. Its room opens only while it says something.
-  const line = h("p", { class: "unlock-line" })
-  const lineWrap = h("div", { class: "unlock-msg", "aria-live": "polite" }, h("div", {}, line))
-  const say = (text: string, kind: "error" | "status" = "error") => {
+  // The one line under the field: what went wrong. Its room opens only while it says something.
+  const line = h("p", { class: "unlock-line", role: "alert" })
+  const lineWrap = h("div", { class: "unlock-msg" }, h("div", {}, line))
+  const say = (text: string) => {
     line.textContent = text
-    line.classList.toggle("error", kind === "error")
-    line.setAttribute("role", kind === "error" ? "alert" : "status")
     lineWrap.classList.toggle("on", !!text)
   }
 
@@ -40,47 +41,19 @@ export function unlockView(app: App): View {
   const mark = h("span", { class: "unlock-disc", "aria-hidden": "true" }, icon("lock"))
   const touchLabel = h("span", { class: "unlock-touch-label" }, TOUCH_LABEL.idle)
   touchLabel.dataset.text = TOUCH_LABEL.idle
-  // The Touch ID control, in the layout's own shape: the disc itself (hero), a button in the field (field), or a wide button (tidy).
-  const touch =
-    layout === "field"
-      ? h("button", { class: "icon-button unlock-touch-mini", type: "button", title: TOUCH_LABEL.idle, "aria-label": TOUCH_LABEL.idle }, glyph("fingerprint"))
-      : layout === "tidy"
-        ? h("button", { class: "btn primary wide unlock-touch-wide", type: "button" }, glyph("fingerprint"), touchLabel)
-        : h("button", { class: "unlock-touch", type: "button" }, h("span", { class: "unlock-disc", "aria-hidden": "true" }, glyph("fingerprint")), touchLabel)
+  // Touch ID's control: the disc and its label are the button.
+  const touch = h("button", { class: "unlock-touch", type: "button" }, h("span", { class: "unlock-disc", "aria-hidden": "true" }, glyph("fingerprint")), touchLabel)
+  // Why it locked, quietly, when it wasn't the user's own doing. Its line is kept either way, so the panel doesn't grow once the service worker says.
+  const why = h("p", { class: "lock-reason" })
 
-  const preset = PRESETS[app.preset]
-  const idle = h("p", { class: "preset-note", title: describePreset(app.preset) }, icon("clock"), h("span", {}, Number.isFinite(preset.idleMs) ? `${preset.name} · locks after ${duration(preset.idleMs)} idle` : preset.name))
-  // Why it locked, quietly, once the service worker says.
-  const why = h("p", { class: "preset-note lock-reason" })
-  why.hidden = true
-
-  const head = layout === "tidy" ? h("div", { class: "state" }, h("span", { class: "state-icon" }, icon("lock")), heading) : layout === "hero" ? h("div", { class: "unlock-hero" }, mark, heading) : heading
-  const form = h("form", { class: `view center unlock unlock--${layout}`, novalidate: "" }, head, fieldRow, lineWrap, idle, why)
-
-  /** Touch ID is set up: it becomes the way in, in the layout's place for it. */
-  const showTouch = () => {
-    enrolled = true
-    if (layout === "hero") {
-      // The disc and its label are the button; the title stays for screen readers.
-      head.replaceChildren(heading, touch)
-      heading.classList.add("sr-only")
-    } else if (layout === "field") {
-      fieldRow.insertBefore(touch, submit)
-      fieldRow.classList.add("with-touch")
-    } else form.insertBefore(touch, fieldRow)
-  }
+  const head = h("div", { class: "unlock-hero" }, mark, heading)
+  const form = h("form", { class: "view center unlock locked", novalidate: "" }, head, fieldRow, lineWrap, why)
 
   const setTouch = (state: TouchState) => {
     touchState = state
     touch.classList.toggle("asking", state === "asking")
     touch.setAttribute("aria-busy", String(state === "asking"))
-    if (layout === "field") {
-      touch.title = TOUCH_LABEL[state]
-      touch.setAttribute("aria-label", TOUCH_LABEL[state])
-      if (state === "asking") say(TOUCH_LABEL.asking, "status")
-      else if (line.getAttribute("role") === "status") say("")
-    } else swapText(touchLabel, TOUCH_LABEL[state])
-    if (state === "asking") app.announce("Touch the sensor to unlock.")
+    swapText(touchLabel, TOUCH_LABEL[state])
   }
 
   const backoff = (until: number) => {
@@ -100,34 +73,45 @@ export function unlockView(app: App): View {
 
   input.addEventListener("input", () => {
     input.classList.remove("invalid")
-    if (line.classList.contains("error") && !submit.disabled) say("")
+    if (line.textContent && !submit.disabled) say("")
   })
 
   // `pressed`: the user asked for it. Asked on its own (see below), a cancel doesn't make the passphrase their choice.
   const viaTouch = async (pressed: boolean) => {
     if (touchState === "asking") return
     setTouch("asking")
-    if (line.classList.contains("error")) say("")
+    if (!submit.disabled) say("")
+    const mine = (asking = new AbortController())
     try {
-      const r = await app.run({ type: "device-unlock", prf: await verify(app, pressed) })
+      const r = await app.run({ type: "device-unlock", prf: await verify(app, pressed, mine.signal) })
       if (!r.ok) throw new Error(r.message)
       return app.opened()
     } catch (e) {
-      setTouch("failed")
-      say((e as Error).message)
+      // The passphrase took over, or the view is gone: nothing to say.
+      if (mine.signal.aborted || !form.isConnected) return
+      // Cancelled, timed out or turned down in the system's prompt, which said so itself: back to how the panel opened.
+      if (e instanceof TouchDeclined) {
+        setTouch("idle")
+        app.announce("Touch ID didn't unlock Deadbolt. Use your passphrase.")
+      } else {
+        setTouch("failed")
+        say((e as Error).message)
+      }
       input.focus()
+    } finally {
+      if (asking === mine) asking = undefined
     }
   }
   touch.addEventListener("click", () => void viaTouch(true))
 
   void Promise.all([enrollment(app), chrome.storage.local.get("deadbolt.unlockMethod")]).then(([token, settings]) => {
-    if (!form.isConnected) return
-    if (!token) return input.focus()
-    showTouch()
-    if (settings["deadbolt.unlockMethod"] === "passphrase") return input.focus()
-    touch.focus()
+    if (!form.isConnected || !token) return
+    enrolled = true
+    // The disc and its label are the button; the title stays for screen readers.
+    head.replaceChildren(heading, touch)
+    heading.classList.add("sr-only")
     // The inline menu's locked row opened this panel: Touch ID is asked at once, once, so unlocking is one step.
-    if (app.fromMenu && !app.touchAsked) {
+    if (app.fromMenu && !app.touchAsked && settings["deadbolt.unlockMethod"] !== "passphrase") {
       app.touchAsked = true
       void viaTouch(false)
     }
@@ -136,13 +120,19 @@ export function unlockView(app: App): View {
   form.addEventListener("submit", async (e) => {
     e.preventDefault()
     if (submit.disabled) return
-    if (!input.value) return refuse(input)
+    // Return on the empty field asks Touch ID, when it's set up.
+    if (!input.value) return enrolled && touchState !== "asking" ? void viaTouch(true) : refuse(input)
     submit.disabled = true
     submit.classList.add("busy")
     const r = await app.run({ type: "device-unlock", passphrase: input.value })
     input.value = ""
     submit.classList.remove("busy")
-    if (r.ok || r.status.state !== "locked") return app.opened()
+    if (r.ok || r.status.state !== "locked") {
+      // Touch ID's prompt, still up, goes with it.
+      asking?.abort()
+      if (enrolled) setTouch("idle")
+      return app.opened()
+    }
     submit.disabled = false
     say(!r.ok && r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.ok ? "" : r.message)
     if (!r.ok && r.retryAt) backoff(r.retryAt)
@@ -153,8 +143,9 @@ export function unlockView(app: App): View {
   void app.ask({ type: "device-settings" }).then((r) => {
     if (r.ok && typeof r.reply.retryAt === "number" && r.reply.retryAt > Date.now() && form.isConnected) backoff(r.reply.retryAt)
     if (r.ok && isLockedBy(r.reply.lockedBy)) {
-      why.textContent = lockedLine(r.reply.lockedBy)
-      why.hidden = false
+      why.dataset.reason = r.reply.lockedBy.reason
+      // A lock the user made needs no telling.
+      if (r.reply.lockedBy.reason !== "manual") why.textContent = lockedLine(r.reply.lockedBy)
     }
   })
 
@@ -164,20 +155,14 @@ export function unlockView(app: App): View {
     // Nothing is left to press: no focus ring on the check.
     ;(document.activeElement as HTMLElement | null)?.blur()
     touch.classList.remove("asking")
+    touch.setAttribute("aria-busy", "false")
     touch.setAttribute("aria-disabled", "true")
     say("")
+    why.textContent = ""
     // What says the state now says Unlocked: the Touch ID label, or the title.
-    if (layout !== "field" && enrolled && layout === "hero") swapText(touchLabel, "Unlocked")
-    else {
-      heading.classList.remove("sr-only")
-      swapText(heading, "Unlocked")
-    }
-    if (layout === "tidy" && enrolled) {
-      touch.setAttribute("disabled", "")
-      swapText(touchLabel, TOUCH_LABEL.idle)
-    }
+    swapText(enrolled ? touchLabel : heading, "Unlocked")
     // The lock (or the fingerprint) turns into a check, in place.
-    const host = (layout === "hero" ? (enrolled ? touch.querySelector(".unlock-disc") : mark) : layout === "tidy" ? form.querySelector(".state-icon") : enrolled ? touch : submit) as HTMLElement | null
+    const host = (enrolled ? touch.querySelector(".unlock-disc") : mark) as HTMLElement | null
     if (!host) return
     const was = host.firstElementChild as SVGElement | null
     const check = icon("check") as SVGElement
@@ -190,5 +175,6 @@ export function unlockView(app: App): View {
     check.animate([...soft].reverse(), { ...timing(0.3), fill: "backwards" })
   }
 
-  return { el: form, focus: () => (enrolled && touchState !== "failed" ? touch.focus() : input.focus()), leave: () => clearTimeout(timer), unlocked }
+  // The field has the keyboard from the start and while Touch ID's prompt is up (the prompt is a window of its own): typing the passphrase is never a click away.
+  return { el: form, focus: () => input.focus(), leave: () => { clearTimeout(timer); asking?.abort() }, unlocked }
 }

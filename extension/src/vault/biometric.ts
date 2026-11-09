@@ -32,8 +32,11 @@ function output(credential: PublicKeyCredential): string {
   return result
 }
 
-async function get(t: Token): Promise<string> {
-  const credential = await navigator.credentials.get({ publicKey: {
+/** The browser's prompt ended without verifying: cancelled, timed out, turned down, or the passkey is gone. The browser has said so itself. */
+export class TouchDeclined extends Error {}
+
+async function get(t: Token, signal?: AbortSignal): Promise<string> {
+  const credential = await navigator.credentials.get({ signal, publicKey: {
     challenge: random(), userVerification: "required", timeout: 60_000,
     allowCredentials: [{ type: "public-key", id: bytes(t.id), transports: ["internal"] }],
     extensions: { prf: { eval: { first: bytes(t.salt) } } } as AuthenticationExtensionsClientInputs,
@@ -42,14 +45,16 @@ async function get(t: Token): Promise<string> {
   return output(credential)
 }
 
-export async function verify(app: App, unlocking = false): Promise<string> {
+/** `signal` ends the browser's prompt (the unlock view, once the passphrase is used instead). */
+export async function verify(app: App, unlocking = false, signal?: AbortSignal): Promise<string> {
   try {
     const t = await enrollment(app)
     if (!t) throw new Error("Touch ID isn't set up. Use your passphrase instead.")
-    return await get(t)
+    return await get(t, signal)
   } catch (e) {
-    if (unlocking && e instanceof DOMException && e.name === "NotAllowedError") await chrome.storage.local.set({ "deadbolt.unlockMethod": "passphrase" }).catch(() => {})
-    throw new Error(explain(e))
+    const declined = e instanceof DOMException && e.name === "NotAllowedError"
+    if (unlocking && declined) await chrome.storage.local.set({ "deadbolt.unlockMethod": "passphrase" }).catch(() => {})
+    throw declined ? new TouchDeclined(explain(e)) : new Error(explain(e))
   }
 }
 

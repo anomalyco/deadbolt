@@ -1725,8 +1725,9 @@ async function lockedPopupLine(shots?: string): Promise<string> {
   const popup = await newPage("locked-popup")
   await popup.setViewportSize({ width: 380, height: 560 })
   await popup.goto(`chrome-extension://${ID}/popup.html`)
-  const line = popup.locator(".lock-reason")
-  await line.waitFor()
+  // The line is there either way; its reason arrives with the settings.
+  const line = popup.locator(".lock-reason[data-reason]")
+  await line.waitFor({ state: "attached" })
   const text = await line.innerText()
   if (video && shots) {
     await mkdir(video, { recursive: true })
@@ -1825,7 +1826,7 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   await request(device, { type: "device-preset", preset: "until-quit", passphrase })
   await request(device, { type: "device-lock" })
   check(await state(device) === "locked", "Until you quit locks on Lock")
-  check(await lockedPopupLine() === "Locked · you locked it", "the locked popup says Locked · you locked it")
+  check(await lockedPopupLine() === "", "the locked popup says nothing about a lock the user made")
   await request(device, { type: "device-unlock", passphrase })
   await request(device, { type: "device-preset", preset: "comfortable" })
   return worker
@@ -2043,8 +2044,9 @@ async function biometricUnlock(device: Page, worker: Worker) {
   await cdp.send("WebAuthn.clearCredentials", { authenticatorId })
   await request(device, { type: "device-lock" })
   await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
-  await device.getByText(/Touch ID was cancelled, unavailable, or its passkey was removed/).waitFor({ timeout: 70_000 })
-  check(await state(device) === "locked", "a deleted authenticator passkey cannot unlock and explains passphrase fallback")
+  // The browser's own prompt says what went wrong; Deadbolt goes back to how it opened, the passphrase field ready.
+  await device.getByText("Touch ID didn't unlock Deadbolt. Use your passphrase.", { exact: true }).waitFor({ state: "attached", timeout: 70_000 })
+  check(await state(device) === "locked" && await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).count() === 1 && await device.evaluate(() => document.activeElement?.getAttribute("aria-label")) === "Passphrase", "a deleted authenticator passkey cannot unlock: no error shouted, the passphrase field has the keyboard")
   check(await device.evaluate(async () => (await chrome.storage.local.get("deadbolt.unlockMethod"))["deadbolt.unlockMethod"]) === "passphrase", "unavailable passkey resets the preferred unlock method")
   await request(device, { type: "device-unlock", passphrase })
   await request(device, { type: "device-biometric-reset" })

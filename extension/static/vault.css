@@ -647,8 +647,7 @@ main.vault.popup .view.unlock {
 }
 
 /* The lock over the title reads at a glance. */
-.unlock .state-icon,
-.unlock-disc {
+.unlock .state-icon {
   width: 40px;
   height: 40px;
   color: var(--text);
@@ -659,11 +658,88 @@ main.vault.popup .view.unlock {
   height: 20px;
 }
 
+main.vault.popup .view.unlock.locked {
+  padding-top: 20px;
+  padding-bottom: 12px;
+}
+
+/* The lock, or Touch ID's fingerprint, over its one line. */
+.unlock-hero {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.unlock-disc {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: var(--layer-02);
+}
+
+.unlock-disc svg {
+  width: 28px;
+  height: 28px;
+}
+
 .unlock-title {
   margin: 0;
   font-size: 15px;
   line-height: 20px;
   font-weight: var(--weight-strong);
+}
+
+/* Touch ID: the disc and its label are one button. */
+.unlock-touch {
+  all: unset;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 6px 14px 0;
+  border-radius: var(--radius-xl);
+  cursor: pointer;
+}
+
+.unlock-touch:hover:not(.asking, [aria-disabled="true"]) .unlock-disc {
+  background: var(--pressed);
+}
+
+/* Keyboard focus rings the disc, the control's shape, not the label's box. */
+.unlock-touch:focus-visible {
+  outline: none;
+}
+
+.unlock-touch:focus-visible .unlock-disc {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+}
+
+.unlock-touch-label {
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: var(--weight-strong);
+  transition: color 160ms var(--settle);
+}
+
+/* While the system's prompt is up it has the say: the button steps back and only says it's waiting. */
+.unlock-touch.asking {
+  cursor: default;
+}
+
+.unlock-touch.asking .unlock-disc svg {
+  opacity: 0.45;
+}
+
+.unlock-touch.asking .unlock-touch-label {
+  color: var(--muted);
+}
+
+.unlock-touch .unlock-disc svg {
+  transition: opacity 160ms var(--settle);
 }
 
 /* The passphrase: one field, its arrow inside it submits. */
@@ -678,19 +754,11 @@ main.vault.popup .view.unlock {
   padding-right: 40px;
 }
 
-.unlock-field.with-touch .input {
-  padding-right: 70px;
-}
-
 .unlock-field .icon-button {
   position: absolute;
   right: 4px;
   width: 28px;
   height: 28px;
-}
-
-.unlock-field .unlock-touch-mini {
-  right: 34px;
 }
 
 .unlock-go.busy svg {
@@ -719,129 +787,17 @@ main.vault.popup .view.unlock {
   margin: 0;
   font-size: 12px;
   line-height: 16px;
-  color: var(--muted);
-}
-
-.unlock-line.error {
   color: var(--danger);
 }
 
-/* Hero: Touch ID's disc is the way in, centred over the field. */
-main.vault.popup .view.unlock.unlock--hero {
-  padding-top: 20px;
-}
-
-.unlock-hero {
-  display: grid;
-  justify-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
+/* Why it locked. The line's room is always there: the panel is as tall before the reason arrives as after. */
+.lock-reason {
+  min-height: 16px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
   text-align: center;
-}
-
-.unlock--hero .unlock-disc {
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  background: var(--layer-02);
-}
-
-.unlock--hero .unlock-disc svg {
-  width: 28px;
-  height: 28px;
-}
-
-.unlock-touch {
-  all: unset;
-  display: grid;
-  justify-items: center;
-  gap: 10px;
-  padding: 6px 14px 8px;
-  border-radius: var(--radius-xl);
-  cursor: pointer;
-}
-
-.unlock-touch:hover:not([aria-disabled="true"]) .unlock-disc {
-  background: var(--pressed);
-}
-
-/* Keyboard focus rings the disc, the control's shape, not the label's box. */
-.unlock-touch:focus-visible {
-  outline: none;
-}
-
-.unlock-touch:focus-visible .unlock-disc {
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
-}
-
-.unlock-touch-label {
-  font-size: 13px;
-  line-height: 18px;
-  font-weight: var(--weight-medium);
-}
-
-.unlock--hero .preset-note {
-  justify-content: center;
-}
-
-/* While macOS asks for a finger, the fingerprint breathes a ring: it's working, not greyed out. */
-.unlock-touch.asking .unlock-disc,
-.unlock-touch-mini.asking,
-.unlock-touch-wide.asking svg {
-  animation: unlock-asking 1.6s ease-out infinite;
-  color: var(--focus);
-}
-
-.unlock-touch-mini.asking,
-.unlock-touch-wide.asking svg {
-  border-radius: 50%;
-}
-
-@keyframes unlock-asking {
-  from {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--focus) 40%, transparent);
-  }
-  to {
-    box-shadow: 0 0 0 10px color-mix(in srgb, var(--focus) 0%, transparent);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .unlock-touch.asking .unlock-disc,
-  .unlock-touch-mini.asking,
-  .unlock-touch-wide.asking svg {
-    animation: none;
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 35%, transparent);
-  }
-}
-
-.unlock-touch-wide {
-  gap: 8px;
-}
-
-.unlock-touch-wide svg {
-  width: 16px;
-  height: 16px;
-}
-
-.preset-note {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  font-size: 11.5px;
   color: var(--text-faint);
-}
-
-.preset-note svg {
-  width: 13px;
-  height: 13px;
-}
-
-.preset-note.lock-reason {
-  margin-top: 2px;
 }
 
 .state-icon.pulse {
