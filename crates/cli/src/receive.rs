@@ -40,7 +40,7 @@ pub async fn run(args: ReceiveArgs) -> Result<ExitCode> {
     let endpoint = receiver_endpoint(network)
         .await
         .context("starting the receive endpoint")?;
-    let progress = args.json || !std::io::stderr().is_terminal();
+    let progress = !args.json && std::io::stderr().is_terminal();
     let result = receive(&endpoint, &ticket, |step| {
         if !progress {
             return;
