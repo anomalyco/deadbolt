@@ -10,7 +10,7 @@
 // labels roll. Every pick and button waits for the visibility guard and the
 // dwell (see ui/dom.ts) before it does anything.
 
-import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
+import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, MenuUnlockReply, OfferChoice, PanelClosed, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
 import { provider as providerOf } from "./signin"
 import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
@@ -20,6 +20,7 @@ import { folding, host, MARK_ROOM, onFold, PILL_HEIGHT, placePill, riding, whenW
 import { ring } from "./ui/ring"
 import { offerTitle } from "./ui/offer"
 import { brandBySlug, siteTile } from "./ui/site-icon"
+import { lockedRow, turnInFlight, turnIntoLogins, waitOnPanel } from "./ui/unlock"
 
 /** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
 type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account } | { generate: true } | { identity: FormIdentity } | { card: FormCard }
@@ -359,30 +360,17 @@ function notice(glyph: Element, title: string, sub: string): HTMLElement {
 }
 
 /**
- * The browser-only Deadbolt unlocks on its own page (device.html), never in
- * the page or this frame: the row opens that page in a new tab. Like a pick,
- * it waits for the menu to have been visible and still (see pick).
+ * The locked row (ui/unlock.ts), pressed: the browser-only Deadbolt unlocks in
+ * the toolbar panel, never in the page or this frame, and the row waits there
+ * by its field. Like a pick, it waits for the menu to have been visible and still.
  */
-function unlockRow(): HTMLElement {
-  const r = h(
-    "button",
-    { class: "row", type: "button" },
-    avatar("", icon("lock")),
-    h("span", { class: "text" }, h("span", { class: "title" }, "Unlock Deadbolt"), h("span", { class: "sub" }, "Opens Deadbolt in a new tab")),
-  )
-  // A pointer's click; Enter goes through the keydown handler, which checks Entry first.
-  r.addEventListener("click", (e) => e.isTrusted && e.detail > 0 && void unlock())
-  return r
-}
-
-/** The unlock row, pressed: it waits for the menu to have been visible and still, as a pick does. */
 async function unlock() {
   if (busy) return
   if (!pressedScale || !dwell.settled(pressedAt)) return say(pressedScale && dwell.visible ? "Click again in a moment." : "This menu is covered.")
   busy = true
   try {
     if (!(await confirmScale(pressedAt))) return say("This menu is covered.")
-    await send<boolean>({ type: "db:menu-unlock", token })
+    if ((await send<MenuUnlockReply>({ type: "db:menu-unlock", token })) === "panel") waitOnPanel(rowsEl, true)
   } finally {
     busy = false
   }
@@ -581,7 +569,7 @@ function showStatus(status: Status) {
   listbox(null)
   highlightEl.hidden = true
   if (status.state === "locked" && !native) {
-    rowsEl.replaceChildren(unlockRow())
+    rowsEl.replaceChildren(lockedRow(() => void unlock()))
     say("")
   } else if (status.state === "locked") {
     rowsEl.replaceChildren(notice(icon("lock"), "Deadbolt is locked", "Unlock it in the app, then come back"))
@@ -941,6 +929,8 @@ function show(reply: MenuLoadReply) {
   if (mode !== "accounts") return
   if (reply.kind === "status") return showStatus(reply.status)
   if (reply.kind === "forms") return showForms(reply)
+  // Deadbolt just unlocked under the locked row: it turns into what's next.
+  const locked = rowsEl.querySelector<HTMLElement>(":scope > .row.unlock")
   universal = reply.kind === "accounts" && reply.universal === true
   signsIn = new Set(reply.kind === "accounts" ? (reply.signsIn ?? []) : [])
   surface.classList.toggle("universal", universal)
@@ -962,6 +952,7 @@ function show(reply: MenuLoadReply) {
     listbox(null)
     highlightEl.hidden = true
     rowsEl.replaceChildren(notice(icon("keyhole"), "No logins here", `Nothing saved for ${reply.site}`))
+    if (locked) turnIntoLogins(locked, rowsEl, highlightEl)
     setCaption("")
     return say("")
   }
@@ -981,6 +972,7 @@ function show(reply: MenuLoadReply) {
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]
   highlight()
+  if (locked) setTimeout(() => dwell.moved(performance.now()), turnIntoLogins(locked, rowsEl, highlightEl))
   if (universal) showUniversal()
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
 }
@@ -1399,7 +1391,8 @@ addEventListener("resize", (e) => (resizedAt = e.timeStamp))
 
 async function load() {
   const reply = token && mode === "accounts" ? await send<MenuLoadReply>({ type: "db:menu-load", token, parent: parentOrigin }) : null
-  if (reply) show(reply)
+  // The turn into the logins plays out first: the status pushes that follow an unlock would cut it.
+  if (reply && !turnInFlight()) show(reply)
 }
 
 /**
@@ -1484,6 +1477,7 @@ if (window.parent !== window) window.parent.postMessage({ type: "db:menu-ready" 
 onIconSettings(() => void load())
 
 // Unlocking in the app, or a sync, updates the open menu in place.
-chrome.runtime.onMessage.addListener((message: StatusChanged) => {
+chrome.runtime.onMessage.addListener((message: StatusChanged | PanelClosed) => {
   if (message?.type === "db:status") void load()
+  if (message?.type === "db:panel-closed") waitOnPanel(rowsEl, false)
 })

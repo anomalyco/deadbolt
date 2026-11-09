@@ -43,6 +43,7 @@ main {
   color: var(--muted);
   font-size: 11px;
   font-weight: var(--weight-medium);
+  transition: background-color 300ms ease-out, color 300ms ease-out;
   letter-spacing: var(--tracking-small);
 }
 
@@ -52,6 +53,7 @@ main {
   height: 6px;
   border-radius: 50%;
   background: var(--faint);
+  transition: background-color 300ms ease-out;
 }
 
 .pill.ok {

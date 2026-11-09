@@ -1845,8 +1845,50 @@ async function unlockLifetime(device: Page, worker: Worker) {
   await request(device, { type: "device-unlock", passphrase })
 }
 
+/**
+ * The locked row opens the toolbar panel and waits by its field: the panel
+ * unlocks, closes itself, and the same menu lists the logins. Headless
+ * Chromium may not open an action popup; then the row falls back to the tab,
+ * as below.
+ */
+async function panelUnlock(device: Page) {
+  await request(device, { type: "device-lock" })
+  const page = await newPage("panel-unlock")
+  await page.goto(origin)
+  const locked = await menuOn(page, "#username", "Unlock Deadbolt")
+  const tab = context!.waitForEvent("page", { timeout: 10_000 }).catch(() => null)
+  await locked.getByRole("button", { name: /Unlock Deadbolt/ }).click()
+  const panel = await until("the locked row opens the toolbar panel or a tab", async () => (await popupPrompt(/^Unlock Deadbolt$/, "panel-unlock").catch(() => null)) ?? (await Promise.race([tab, Bun.sleep(200).then(() => null)])), 12_000)
+  if (!("answer" in panel)) {
+    console.log("note: this browser wouldn't open the toolbar panel; the tab fallback is checked below")
+    await panel.close()
+    await request(device, { type: "device-unlock", passphrase })
+    return page.close()
+  }
+  check(await until("the menu waits by its field", async () => (await menuFrame(page)?.locator(".row.unlock.waiting").count()) === 1), "the locked row waits by its field while the toolbar panel is up")
+  await panel.answer(passphrase)
+  await until("the panel closes itself once unlocked", () => panel.gone(), 15_000)
+  await until("the same menu lists the logins", async () => {
+    const frame = menuFrame(page)
+    return frame && (await frame.locator("button.row").count()) > 0 && !(await frame.getByText("Unlock Deadbolt", { exact: true }).count())
+  })
+  check(await page.inputValue("#password") === "", "the toolbar panel unlocks, closes itself, and the menu by the field lists the logins without filling")
+  check(await state(device) === "ready", "the panel's unlock reached the vault")
+  panel.close()
+  await page.close()
+}
+
+/** The browser won't open the panel: what the locked row does instead. */
+const refusePopup = (worker: Worker) =>
+  worker.evaluate(() => {
+    ;(chrome.action as unknown as { openPopup: () => Promise<void> }).openPopup = async () => {
+      throw new Error("Refused by the standalone proof")
+    }
+  })
+
 async function inlineUnlock(device: Page, previous: Worker) {
   await request(device, { type: "device-lock" })
+  await refusePopup(previous)
   const page = await newPage("inline-unlock")
   await page.goto(origin)
   const locked = await menuOn(page, "#username", "Unlock Deadbolt")
@@ -1889,6 +1931,7 @@ async function inlineUnlock(device: Page, previous: Worker) {
     global.nativeCalls = 0
     chrome.runtime.connectNative = () => { global.nativeCalls++; throw new Error("Native host forbidden by standalone proof") }
   })
+  await refusePopup(worker)
   await cdp.detach()
   // A new locked-row click must reuse the first surface, not orphan it.
   // A menu token minted by the old worker is intentionally invalid now;
@@ -2162,6 +2205,7 @@ try {
   const keptPasskeys = (await devicePasskeys(device)).map((k) => k.credentialId).sort()
   worker = await untilQuit(device, worker)
   await unlockLifetime(device, worker)
+  await panelUnlock(device)
   worker = await inlineUnlock(device, worker)
   await biometricUnlock(device, worker)
   await request(device, { type: "device-lock" })

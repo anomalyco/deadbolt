@@ -110,6 +110,29 @@ body {
   cursor: default;
 }
 
+/* The locked row (ui/unlock.ts): its line rolls while the toolbar panel is
+   up, so it clips only sideways; the light that heads for the toolbar stays
+   inside the row. */
+.row.unlock {
+  overflow: hidden;
+}
+
+.row.unlock .sub {
+  overflow: clip visible;
+}
+
+.unlock-light {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 40%;
+  height: 100%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--text) 14%, transparent), transparent);
+  pointer-events: none;
+  opacity: 0;
+}
+
 /* "Site icons in the fill menu" off: a login's row is its title and username. */
 .rows.bare .row {
   padding: 0 12px;

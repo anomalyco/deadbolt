@@ -327,6 +327,18 @@ toolbar popup, which show the same vault UI (`extension/src/vault`); content
 scripts and web pages cannot create/unlock/pair a device or invoke arbitrary worker
 commands. The offscreen route accepts only the extension service worker. Neither
 the pages, offscreen document, worker nor wasm module is web-accessible.
+The inline menu's locked row never takes the passphrase: a page can draw a copy
+of anything placed over it. The row opens the toolbar popup for the sender's
+tab (`chrome.action.openPopup`, `bg/panel-unlock.ts`), whose port tells it the
+row asked: it starts Touch ID at once when that's the chosen method, and closes
+itself a moment after unlocking, while the menu, which waited by its field,
+lists the logins. A popup the user opens from the toolbar stays open. When the
+browser won't open the popup (no `openPopup`, a background tab, a refusal),
+the row opens `device.html#unlock` in a tab as before, which closes after
+unlocking and reopens the menu. Closing the popup before it unlocks (a click
+elsewhere, or a Touch ID sheet taking focus) leaves the vault locked: the PRF
+or passphrase only ever reaches the worker in the one `device-unlock` message,
+and the row stops waiting.
 There is no externally-connectable API and no native-host fallback. Extension CSP
 allows local wasm execution, not remotely hosted executable code. Passphrases and
 vault contents must never enter logs or telemetry.

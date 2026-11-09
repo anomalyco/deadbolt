@@ -7,7 +7,7 @@
 import { describePreset, duration, isLockedBy, lockedLine, PRESETS, VAULT_NAME } from "../device-rules"
 import type { JoinStatus, Reauth } from "../messages"
 import { h, icon, ICONS, svg } from "../ui/dom"
-import { rollLabel } from "../ui/motion"
+import { reducedMotion, rollLabel, timing } from "../ui/motion"
 import type { App, View } from "./app"
 import { button, copied, field, glyph, para, refuse, toolbar } from "./kit"
 import { enrollment, verify } from "./biometric"
@@ -353,10 +353,12 @@ export function unlockView(app: App): View {
   // Why it locked, quietly, once the service worker says.
   const why = h("p", { class: "preset-note lock-reason" })
   why.hidden = true
+  const mark = h("span", { class: "state-icon" }, icon("lock"))
+  const heading = h("h2", {}, "Unlock Deadbolt")
   const form = h(
     "form",
     { class: "view center unlock", novalidate: "" },
-    h("div", { class: "state" }, h("span", { class: "state-icon" }, icon("lock")), h("h2", {}, "Unlock Deadbolt"), para("Enter this browser's passphrase.")),
+    h("div", { class: "state" }, mark, heading, para("Enter this browser's passphrase.")),
     input,
     error,
     submit,
@@ -367,23 +369,31 @@ export function unlockView(app: App): View {
     input.classList.remove("invalid")
     error.hidden = true
   })
-  const touch = button("btn primary wide", "Unlock with Touch ID", async (b) => {
-    b.disabled = true
+  // `pressed`: the user asked for it. Asked on its own (see below), a cancel doesn't make the passphrase their choice.
+  const viaTouch = async (pressed: boolean) => {
+    touch.disabled = true
     error.hidden = true
     try {
-      const r = await app.run({ type: "device-unlock", prf: await verify(app, true) })
+      const r = await app.run({ type: "device-unlock", prf: await verify(app, pressed) })
       if (!r.ok) throw new Error(r.message)
       return app.opened()
     } catch (e) {
       error.textContent = (e as Error).message
       error.hidden = false
       input.focus()
-    } finally { b.disabled = false }
-  })
+    } finally { touch.disabled = false }
+  }
+  const touch = button("btn primary wide", "Unlock with Touch ID", () => void viaTouch(true))
   void Promise.all([enrollment(app), chrome.storage.local.get("deadbolt.unlockMethod")]).then(([enrolled, settings]) => {
     if (!enrolled || !form.isConnected) return
     form.insertBefore(touch, input)
-    if (settings["deadbolt.unlockMethod"] !== "passphrase") touch.focus()
+    if (settings["deadbolt.unlockMethod"] === "passphrase") return
+    touch.focus()
+    // The inline menu's locked row opened this panel: Touch ID is asked at once, once, so unlocking is one step.
+    if (app.fromMenu && !app.touchAsked) {
+      app.touchAsked = true
+      void viaTouch(false)
+    }
   })
   form.addEventListener("submit", async (e) => {
     e.preventDefault()
@@ -410,7 +420,23 @@ export function unlockView(app: App): View {
       why.hidden = false
     }
   })
-  return { el: form, focus: () => input.focus(), leave: () => clearTimeout(timer) }
+  // Unlocked for the menu's locked row: the panel says so for a moment before it closes (App.unlockedForMenu).
+  const unlocked = () => {
+    for (const el of [input, submit, touch]) el.disabled = true
+    error.hidden = true
+    rollLabel(heading, "Unlocked")
+    if (label.dataset.text === "Unlocking…") rollLabel(label, "Unlock")
+    const check = icon("check") as SVGElement
+    check.style.gridArea = "1 / 1"
+    mark.style.color = "var(--success)"
+    const lock = mark.firstElementChild as SVGElement | null
+    if (lock) lock.style.gridArea = "1 / 1"
+    mark.append(check)
+    const soft = reducedMotion() ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: "none", filter: "blur(0px)" }, { opacity: 0, transform: "scale(0.8)", filter: "blur(3px)" }]
+    lock?.animate(soft, { ...timing(0.25), fill: "forwards" })
+    check.animate([...soft].reverse(), { ...timing(0.3), fill: "backwards" })
+  }
+  return { el: form, focus: () => input.focus(), leave: () => clearTimeout(timer), unlocked }
 }
 
 /** What a request waiting on the passphrase says: its heading, why, and its button (and that button busy). */
