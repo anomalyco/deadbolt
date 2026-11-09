@@ -777,6 +777,12 @@ function stepFold(s: Record<Edge, Spring>, moving: boolean) {
 
 /** The pill's frame at rest (inline.ts targetRect), and the pill itself (menu.css .pill). */
 const PILL_HEIGHT = 32
+/** The check (menu.css .pill-mark): its width, its pull-in while closed, and the room it takes open (its 14px, the gap, less its pull-in). */
+const MARK_WIDTH = 14
+const MARK_PULL = -8
+const MARK_ROOM = 20
+/** The check opening with the frame (placePill), till the frame stops. */
+let opening: HTMLElement | null = null
 
 function placePill() {
   const pill = document.querySelector<HTMLElement>(".pill")
@@ -792,6 +798,18 @@ function placePill() {
   pill.style.right = `${ox + ow}px`
   pill.style.top = `${PILL_HEIGHT / 2 - oy}px`
   const moving = !!s && !(s.left.done && s.top.done && s.width.done && s.height.done)
+  // A check opening takes exactly the room the frame has gained so far, so the
+  // tile stays at the frame's left edge, on the frame's own clock.
+  if (opening) {
+    const k = Math.min(1, Math.max(0, 1 + ow / MARK_ROOM))
+    opening.style.width = `${MARK_WIDTH * k}px`
+    opening.style.marginLeft = `${MARK_PULL + (MARK_ROOM - MARK_WIDTH) * k}px`
+    if (!moving) {
+      opening.style.width = ""
+      opening.style.marginLeft = ""
+      opening = null
+    }
+  }
   if (s) stepFold(s, moving)
   // One loop, however often this is called directly.
   if (moving && !host.raf)
@@ -949,9 +967,21 @@ function widthOf(label: HTMLElement, text: string): number {
 function settle(label: HTMLElement, text: string, ok: boolean) {
   const pill = label.parentElement
   if (!pill) return
-  // The check takes 20px when it shows (its 14px, the gap, less its pull-in).
-  const grow = widthOf(label, text) - label.getBoundingClientRect().width + (ok && pill.querySelector(".pill-mark") ? 20 : 0)
+  const mark = ok ? pill.querySelector<HTMLElement>(".pill-mark") : null
+  const grow = widthOf(label, text) - label.getBoundingClientRect().width + (mark ? MARK_ROOM : 0)
   const width = Math.ceil(pill.getBoundingClientRect().width + grow)
+  // Only the check comes, the words staying: it opens with the frame itself, from the moment the frame starts toward it.
+  if (mark && (label.dataset.text ?? label.textContent) === text && grow > 0) {
+    report(grow)
+    return whenWide(width, () => {
+      mark.style.transition = "opacity 200ms ease-out 120ms"
+      if (!reducedMotion()) opening = mark
+      relax()
+      pill.classList.remove("failed")
+      pill.classList.add("ok")
+      placePill()
+    })
+  }
   const say = () => {
     const mark = pill.querySelector<HTMLElement>(".pill-mark")
     if (mark && !reducedMotion()) {
