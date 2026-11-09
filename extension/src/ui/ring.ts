@@ -11,7 +11,7 @@
 // frame. Green is a second comet that crossfades in. Only the closing, once
 // the fold is over, draws its gradient anew each frame.
 
-import { MENU_FEEL, MENU_MOTION, reducedMotion, spring, timing } from "./motion"
+import { MENU_FEEL, MENU_MOTION, reducedMotion, timing } from "./motion"
 
 const span = (cls: string) => {
   const s = document.createElement("span")
@@ -84,28 +84,78 @@ export function ring(avatar: HTMLElement): Ring {
     comet.animate([{ opacity: 1 }, { opacity: 0 }], swap)
   }
 
+  /**
+   * The head catches its tail. The turning stops where it is and, from that
+   * frame, the head and the tail are drawn by one animation on one thread: the
+   * tail's end holds still while the head runs on at the pace it had (or eases
+   * to rest as it arrives, "settle"), and what it leaves behind fills in. Its
+   * length growing on the main thread while the compositor turned it is what
+   * made it close unevenly and jitter.
+   */
   function closeNow() {
     wrap.classList.add("ok")
-    goGreen(150)
-    // The head runs on and catches its tail; what it leaves behind fills in.
-    const whole = spring(MENU_MOTION.ringWhole)
-    lit.style.setProperty("--tail", "1turn")
-    lit.style.setProperty("--solid", "1")
+    const green = reduced ? "fade" : MENU_FEEL.green
+    const period = MENU_FEEL.turn * 1000
+    const at = turn ? (Number(turn.currentTime ?? 0) % period) / period : 0
+    turn?.cancel()
+    spin.style.rotate = `${at}turn`
+    const gap = 1 - MENU_FEEL.tail
+    // At its own pace the head covers the gap in gap × period; easing to rest evenly takes twice that.
+    const close = { duration: Math.round(gap * period * (green === "settle" ? 2 : 1)), easing: green === "settle" ? "cubic-bezier(.333,.667,.667,1)" : "linear" }
+    const arcs = [comet, lit]
+    for (const c of arcs) {
+      c.style.setProperty("--head", `${gap}turn`)
+      c.style.setProperty("--tail", "1turn")
+      c.style.setProperty("--solid", "1")
+    }
+    if (green === "paint") paint(close, gap)
+    else goGreen(green === "settle" ? close.duration * 0.7 : green === "heat" ? 80 : close.duration * 0.6)
     if (!reduced)
-      lit.animate(
-        [
-          { "--tail": `${MENU_FEEL.tail}turn`, "--solid": 0 },
-          { "--tail": "1turn", "--solid": 1 },
-        ],
-        whole,
-      )
-    track.animate([{ opacity: 1 }, { opacity: 0 }], { duration: reduced ? 180 : whole.duration, fill: "forwards" })
-    // Whole, its turning can't be seen: it stops there.
-    if (turn) setTimeout(() => turn.pause(), whole.duration)
-    const closed = reduced ? 0 : whole.duration * 0.6
+      for (const c of arcs)
+        c.animate(
+          [
+            { "--head": "0turn", "--tail": `${MENU_FEEL.tail}turn`, "--solid": 0 },
+            { "--head": `${gap}turn`, "--tail": "1turn", "--solid": 1 },
+          ],
+          close,
+        )
+    if (green === "heat") heat(close.duration)
+    if (green === "breathe") breathe(close.duration)
+    track.animate([{ opacity: 1 }, { opacity: 0 }], { duration: reduced ? 180 : close.duration, fill: "forwards" })
+    const closed = reduced ? 0 : close.duration
     if (lands === "glint" && !reduced) glint(closed)
     if (lands === "absorb" && !reduced) return absorb(closed)
     flashTile()
+  }
+
+  /** Green spreads back from the head along the tail and on round, over the grey, as the head runs on, until the ring is whole. */
+  function paint(close: { easing: string; duration: number }, gap: number) {
+    const ink = span("ring-comet paint")
+    ink.style.setProperty("--head", `${gap}turn`)
+    ink.style.setProperty("--tail", "1turn")
+    boost.append(ink)
+    if (reduced) return
+    ink.animate(
+      [
+        { "--head": "0turn", "--tail": "0turn" },
+        { "--head": `${gap}turn`, "--tail": "1turn" },
+      ],
+      close,
+    )
+    // Covered by then, the grey goes from under it.
+    comet.animate([{ opacity: 1 }, { opacity: 0 }], { duration: close.duration * 0.4, delay: close.duration * 0.5, fill: "forwards" })
+  }
+
+  /** The green comet flares white-hot as it takes over, and cools to green as it closes. */
+  function heat(duration: number) {
+    const green = getComputedStyle(lit).getPropertyValue("--ring-color").trim()
+    const hot = `color-mix(in srgb, white 80%, ${green})`
+    lit.animate([{ "--ring-color": hot }, { "--ring-color": hot, offset: 0.12 }, { "--ring-color": green }], { duration: duration + 400, easing: "ease-out" })
+  }
+
+  /** The ring swells a little as it greens, and settles back. */
+  function breathe(duration: number) {
+    wrap.animate([{ scale: "1", easing: "cubic-bezier(.2,.7,.3,1)" }, { scale: "1.09", offset: 0.35, easing: "cubic-bezier(.4,0,.4,1)" }, { scale: "1" }], duration + 250)
   }
 
   /** A short light runs once round the closed ring, and goes. */

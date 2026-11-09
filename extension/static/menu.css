@@ -166,6 +166,20 @@ body {
   initial-value: 0turn;
 }
 
+/* Where the head is, once the turning stops and the closing draws it (ui/ring.ts closeNow). */
+@property --head {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0turn;
+}
+
+/* Registered so "heat" can cool the green comet from white (ui/ring.ts). */
+@property --ring-color {
+  syntax: "<color>";
+  inherits: false;
+  initial-value: transparent;
+}
+
 @property --solid {
   syntax: "<number>";
   inherits: false;
@@ -192,11 +206,17 @@ body {
 .ring-comet {
   --ring-color: color-mix(in srgb, var(--text) 80%, transparent);
   /* Behind the tail is clear while it turns; `--solid` fills it in as the ring closes. */
-  background: conic-gradient(color-mix(in srgb, var(--ring-color) calc(var(--solid) * 100%), transparent) calc(1turn - var(--tail)), var(--ring-color) 1turn);
+  background: conic-gradient(from var(--head), color-mix(in srgb, var(--ring-color) calc(var(--solid) * 100%), transparent) calc(1turn - var(--tail)), var(--ring-color) 1turn);
 }
 
 .ring-comet.lit {
   --ring-color: var(--text-success);
+}
+
+/* Green poured back from the head: a hard back edge, softened a little. */
+.ring-comet.paint {
+  --ring-color: var(--text-success);
+  background: conic-gradient(from var(--head), transparent calc(1turn - var(--tail) - 0.04turn), var(--ring-color) calc(1turn - var(--tail)), var(--ring-color) 1turn);
 }
 
 /* The light that runs round a closed ring. */
@@ -392,6 +412,23 @@ body.held *::after {
 /* Only the new words turn: the old ones keep their colour as they go. */
 .pill.failed .pill-label .roll-out {
   color: var(--text);
+}
+
+/* It draws itself in as it opens. */
+@media (prefers-reduced-motion: no-preference) {
+  .pill.ok .pill-mark path {
+    stroke-dasharray: 18;
+    animation: draw-check 320ms cubic-bezier(.3,0,.2,1) 140ms backwards;
+  }
+}
+
+@keyframes draw-check {
+  from {
+    stroke-dashoffset: 18;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

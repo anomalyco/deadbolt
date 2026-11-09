@@ -621,7 +621,8 @@ async function pick(i: number) {
   // A row without a tile (no site icons) gets a bare one in the pill, for the ring to turn round.
   const tile = rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? h("span", { class: "avatar bare", "aria-hidden": "true" })
   // The pill names what was picked and keeps that name: the ring says how it's going.
-  const label = fold(tile, pillName(a), { check: false })
+  const name = pillName(a)
+  const label = fold(tile, name, { check: MENU_FEEL.mark })
   const turning = ring(tile)
   announce(signing ? "Signing in…" : "Filling…")
   const ref = "identity" in a ? a.identity.ref : "card" in a ? a.card.ref : passkey ? a.passkey.ref : "account" in a ? a.account.ref : ""
@@ -632,8 +633,13 @@ async function pick(i: number) {
     if (passkey) return
     const going = universal || reply.submitted === true
     const pill = label.parentElement
-    turning.close(() => pill && land(pill, true))
-    pill?.classList.add("ok")
+    turning.close(() => {
+      if (!pill) return
+      land(pill, true)
+      // The check opens as the ring closes, the frame widening for it first.
+      if (MENU_FEEL.mark) settle(label, name, true)
+    })
+    if (!MENU_FEEL.mark) pill?.classList.add("ok")
     relax()
     announce(going ? "Continuing sign-in" : "Filled")
     return void setTimeout(() => done(), FILLED_STAYS_MS + 450)

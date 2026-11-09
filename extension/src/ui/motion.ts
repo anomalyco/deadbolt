@@ -59,8 +59,6 @@ export const MENU_MOTION = {
   ringIn: 0.45,
   /** The comet speeding away green and fading as the fill lands (a plain duration: it accelerates). */
   ringClose: 0.6,
-  /** The green head catching its tail as the ring fills in whole. */
-  ringWhole: 0.5,
   /** The ring going when the fill doesn't land: the tail draws back into the head as it fades. */
   ringOut: 0.3,
   /** The tile's ground flashing green and cooling as the ring closes. */
@@ -79,6 +77,8 @@ export const MENU_MOTION = {
 export type Landed = "tile" | "pill" | "pop" | "sweep"
 /** What the ring itself does as the fill lands (ui/ring.ts). */
 export type RingLands = "close" | "glint" | "absorb" | "away"
+/** How the grey comet becomes green as the fill lands (ui/ring.ts). */
+export type RingGreen = "fade" | "paint" | "settle" | "heat" | "breathe"
 
 /** The fold's and the pill's feel, beyond its springs. */
 export const MENU_FEEL = {
@@ -100,6 +100,16 @@ export const MENU_FEEL = {
    * tile, which nods. away: the comet speeds away green and fades.
    */
   ring: "glint" as RingLands,
+  /**
+   * fade: the comet fades to green as its head runs on and meets its tail.
+   * paint: green spreads back from the head along the tail and on round.
+   * settle: the head slows to rest as it meets its tail, fading to green.
+   * heat: it turns nearly white, then cools to green. breathe: it grows a
+   * little as it greens, and settles back.
+   */
+  green: "fade" as RingGreen,
+  /** A check opens on the pill's right as the fill lands (the pill widens for it). */
+  mark: false,
 }
 
 /** The fade that stands in for travel, scale and blur when motion is reduced. */
