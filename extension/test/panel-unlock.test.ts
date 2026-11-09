@@ -42,6 +42,18 @@ describe("the toolbar panel the locked row opens", () => {
     expect(again.heard).toEqual([{ fromMenu: false }])
   })
 
+  test("opened once the panel says it's up, though the browser holds openPopup's answer until the panel goes", async () => {
+    let shut = () => {}
+    ;(chrome.action as unknown as { openPopup: () => Promise<void> }).openPopup = () => new Promise<void>((resolve) => (shut = resolve))
+    const opening = panel.open(1)
+    await settle()
+    const up = port()
+    up.hello(7)
+    expect(await opening).toBe(true)
+    expect(up.heard).toEqual([{ fromMenu: true }])
+    shut()
+  })
+
   test("a panel in another window isn't the row's", async () => {
     await panel.open(1)
     const other = port()

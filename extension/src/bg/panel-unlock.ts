@@ -24,7 +24,7 @@ export interface PanelAnswer {
 
 export class PanelUnlock {
   /** The window whose panel the row opened, until that panel says it's up. */
-  private asked: { windowId: number; at: number; timer: ReturnType<typeof setTimeout> } | null = null
+  private asked: { windowId: number; at: number; up: () => void; timer: ReturnType<typeof setTimeout> } | null = null
 
   /** `closed`: the panel the row opened went (or never came up), so the menu stops waiting. */
   constructor(
@@ -32,7 +32,12 @@ export class PanelUnlock {
     private askMs = PANEL_ASK_MS,
   ) {}
 
-  /** Opens the toolbar panel over `tabId`'s window. False when the browser won't: no openPopup, a tab in the background, or a refusal. */
+  /**
+   * Opens the toolbar panel over `tabId`'s window. False when the browser
+   * won't: no openPopup, a tab in the background, or a refusal. True as soon
+   * as either the browser says it opened or the panel says it's up, whichever
+   * comes first: a browser can hold openPopup's answer until the panel goes.
+   */
   async open(tabId: number): Promise<boolean> {
     const action = chrome.action as typeof chrome.action & { openPopup?: (options?: { windowId?: number }) => Promise<void> }
     if (typeof action.openPopup !== "function") return false
@@ -40,10 +45,13 @@ export class PanelUnlock {
     if (!tab?.active || tab.windowId === undefined) return false
     this.forget()
     const windowId = tab.windowId
-    this.asked = { windowId, at: Date.now(), timer: setTimeout(() => this.asked?.windowId === windowId && (this.forget(), this.closed()), this.askMs) }
-    const opened = await Promise.resolve()
+    let up = () => {}
+    const hello = new Promise<boolean>((resolve) => (up = () => resolve(true)))
+    this.asked = { windowId, at: Date.now(), up, timer: setTimeout(() => this.asked?.windowId === windowId && (this.forget(), this.closed()), this.askMs) }
+    const browser = Promise.resolve()
       .then(() => action.openPopup!({ windowId }))
       .then(() => true, () => false)
+    const opened = await Promise.race([browser, hello])
     if (!opened && this.asked?.windowId === windowId) this.forget()
     return opened
   }
@@ -55,7 +63,10 @@ export class PanelUnlock {
     port.onMessage.addListener((hello: PanelHello) => {
       const asked = this.asked
       fromMenu = !!asked && hello?.windowId === asked.windowId && Date.now() - asked.at < this.askMs
-      if (fromMenu) this.forget()
+      if (fromMenu) {
+        asked!.up()
+        this.forget()
+      }
       port.postMessage({ fromMenu } satisfies PanelAnswer)
     })
     port.onDisconnect.addListener(() => fromMenu && this.closed())

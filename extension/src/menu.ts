@@ -569,7 +569,8 @@ function showStatus(status: Status) {
   listbox(null)
   highlightEl.hidden = true
   if (status.state === "locked" && !native) {
-    rowsEl.replaceChildren(lockedRow(() => void unlock()))
+    // Still locked: the row stays the same one, waiting on the panel if it is (every vault answer pushes the status again).
+    if (!rowsEl.querySelector(":scope > .row.unlock")) rowsEl.replaceChildren(lockedRow(() => void unlock()))
     say("")
   } else if (status.state === "locked") {
     rowsEl.replaceChildren(notice(icon("lock"), "Deadbolt is locked", "Unlock it in the app, then come back"))

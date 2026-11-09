@@ -1788,7 +1788,7 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   check((await request(device, { type: "device-settings" })).reply.preset === "until-quit", "the passphrase chooses Until you quit")
   const unasked = (await vault(worker, { type: "device-preset", preset: "until-quit", passphrase: "wrong fixture passphrase" })).reply
   check(unasked.type === "error" && unasked.code === "wrong_passphrase", "Rust checks a passphrase sent with a preset even when the change needs none")
-  check(await device.locator(".preset", { hasText: "Until you quit the browser" }).locator(".sub").innerText() === "Stays unlocked, even through sleep and screen lock, until you quit the browser (close every window, or Ctrl+Shift+Q on Linux). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.", "Settings warns what Until you quit means")
+  check(await device.locator(".preset", { hasText: "Until you quit the browser" }).locator(".sub").innerText() === `Stays unlocked, even through sleep and screen lock, until you quit the browser (${process.platform === "darwin" ? "⌘Q" : "close every window, or Ctrl+Shift+Q on Linux"}). Anyone using this computer can see and fill your passwords, cards and codes meanwhile.`, "Settings warns what Until you quit means")
   await stills("lock-presets")
   await device.getByRole("button", { name: "Settings", exact: true }).click()
 
@@ -1817,7 +1817,8 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   check((await request(device, { type: "device-settings" })).reply.preset === "comfortable", "a preset written to chrome.storage.local isn't the extension's")
   check(await state(device) === "locked", "Comfortable locks after the same 13 h idle, whatever chrome.storage.local says")
   check((await lockedBy(device))?.reason === "idle", "the vault keeps that it locked for being idle")
-  check(await lockedPopupLine("locked-popup-idle") === "Locked · 1 h idle", "the locked popup says Locked · 1 h idle")
+  const idleLine = await lockedPopupLine("locked-popup-idle")
+  check(idleLine === "Locked · 1 h idle", `the locked popup says Locked · 1 h idle (${idleLine})`)
 
   await request(device, { type: "device-unlock", passphrase })
   check(await lockedBy(device) === undefined, "unlocking forgets why it locked")
@@ -2082,7 +2083,7 @@ async function about(device: Page) {
   await issue.close()
   const body = url.searchParams.get("body") ?? ""
   check(url.origin + url.pathname === "https://github.com/anomalyco/deadbolt/issues/new" && url.searchParams.get("labels") === "standalone", "Report an issue opens a standalone issue on anomalyco/deadbolt")
-  check(body.includes(`Deadbolt standalone extension ${version}`) && /Browser: .+/.test(body) && /OS: linux/.test(body), "the issue carries the version, browser and OS")
+  check(body.includes(`Deadbolt standalone extension ${version}`) && /Browser: .+/.test(body) && /OS: (linux|mac)/.test(body), "the issue carries the version, browser and OS")
   check(![browserPassword, passphrase, "browser@example.test", "From browser"].some((secret) => url.href.includes(encodeURIComponent(secret)) || url.href.includes(secret)), "the issue carries no vault data")
   await device.getByRole("button", { name: "Back", exact: true }).click()
 }
@@ -2106,7 +2107,7 @@ try {
   if (smoke) {
     const offline = await device.evaluate(() => fetch("https://example.com/", { mode: "no-cors" }).then(() => false, () => true))
     check(offline, "Chromium can't reach the network beyond loopback")
-    await device.getByRole("button", { name: "Pair with Deadbolt on this computer", exact: true }).click()
+    await device.getByRole("button", { name: /^Pair with Deadbolt on this (computer|Mac)$/ }).click()
     await device.getByRole("heading", { name: "Pairing didn't work", exact: true }).waitFor({ timeout: 60_000 })
     check(/sync service/i.test(await device.locator(".notice .error").innerText()), "offline joining says Deadbolt's sync service can't be reached")
     await device.getByRole("button", { name: "Cancel", exact: true }).click()
