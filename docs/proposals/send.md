@@ -1,6 +1,6 @@
 # Deadbolt Send
 
-2026-10-27. One-time links that hand files, secrets or vault items to someone who doesn't use Deadbolt. Built in `crates/send` (protocol and crypto, native and WebAssembly), `crates/send-web` (the browser wrapper), the daemon (`crates/cli/src/daemon/send.rs`), the CLI (`crates/cli/src/send.rs`) and the site's receive page (`site/r.html`, `site/src/receive/`).
+2026-10-27. One-time links that hand files, secrets or vault items to someone who doesn't use Deadbolt. Built in `crates/send` (protocol and crypto, native and WebAssembly), `crates/send-web` (the browser wrapper), the daemon (`crates/cli/src/daemon/send.rs`), the CLI (`crates/cli/src/send.rs`, `crates/cli/src/receive.rs`) and the site's receive page (`site/r.html`, `site/src/receive/`).
 
 ## Model
 
@@ -49,6 +49,7 @@ The secret is proved, never sent, and the proof is bound to the connection, so i
 deadbolt send [PATH|-]... [--item NAME|ID [--field NAME]]... [--title T] [--note N]
               [--sensitive] [--opens N] [--ttl 1h] [--qr] [--yes] [--json] [--wait]
 deadbolt send ls [--json] | show <id> [--json] | revoke <id>
+deadbolt receive <LINK|#FRAGMENT> [--output DIR] [--force] [--json]
 ```
 
 `ls`, `show` and `revoke` are subcommands when they come first, never paths: a file named `ls` goes as `./ls`.
@@ -71,6 +72,9 @@ deadbolt send ls [--json] | show <id> [--json] | revoke <id>
 - Prints the link on stdout (`--json`: `{"id", "link", "expires"}`), a summary on stderr, and with `--qr` a QR code on stderr.
 - `--wait` blocks until the link is picked up (exit 0), expires (exit 4) or is revoked (exit 5); other failures exit 1. Waiting doesn't hold the vault unlocked.
 - `DEADBOLT_SEND_URL` points links at another copy of the receive page (a local `bun run dev`, or a self-hosted site).
+- `deadbolt receive <link>` opens a link from a terminal through the same `crates/send` `receive` as the browser page, using direct addresses as well as the relay. It never contacts deadbolt.pw and needs no vault or daemon. It takes the whole link or only the fragment after `#`, so links can be shared terminal to terminal.
+- Values go to stdout: a short text entry (the browser page's rule: `text/*` or no type, valid UTF-8, at most 4 KB, no file extension) prints alone, several print as `name<TAB>value` with groups as `group/field`; the title and note go to stderr. Everything else is written under `--output` (default `.`), refusing existing files without `--force` and any name that isn't a single path component (no `..`, no separators). `--json` prints `{title, note, values, files}` on one line instead.
+- Receive errors are the page's (`invalid-link`, `offline`, `expired`, `used`, `revoked`, `unknown`, `corrupt`) and exit 1. Connecting is capped at 20 seconds, each step at 30.
 - Control protocol 10: `send-create`, `send-list`, `send-show`, `send-revoke`, `send-wait` (`crates/client/src/protocol.rs`).
 
 ## Receive page

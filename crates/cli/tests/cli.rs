@@ -3763,6 +3763,41 @@ fn send_files_secrets_and_items() {
 }
 
 #[test]
+fn receive_opens_a_send_link_from_the_terminal() {
+    let a = Device::new();
+    let sent = a.try_run_stdin(
+        &[
+            "send",
+            "-",
+            "--title",
+            "for you",
+            "--note",
+            "rotate after",
+            "--yes",
+            "--json",
+        ],
+        "tok_123\n",
+    );
+    assert!(sent.status.success(), "{sent:?}");
+    let sent: serde_json::Value = serde_json::from_slice(&sent.stdout).unwrap();
+    let link = sent["link"].as_str().unwrap();
+
+    // Another invocation, on a device with no vault and no daemon: receiving
+    // needs neither, only the link.
+    let b = Device::new();
+    let out = b.try_run(&["receive", link]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), "tok_123");
+    assert!(stderr.contains("title\tfor you"), "{stderr}");
+    assert!(stderr.contains("note\trotate after"), "{stderr}");
+
+    // The link opened once. A second receive is refused, not retried.
+    let err = b.fail(&["receive", link]);
+    assert!(err.contains("this link was already used"), "{err}");
+}
+
+#[test]
 fn send_resolves_inputs_strictly_and_asks_first() {
     let a = Device::new();
     let file = a.path("hello.txt");
