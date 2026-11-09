@@ -79,6 +79,8 @@ export type Landed = "tile" | "pill" | "pop" | "sweep"
 export type RingLands = "close" | "glint" | "absorb" | "away"
 /** How the grey comet becomes green as the fill lands (ui/ring.ts). */
 export type RingGreen = "fade" | "paint" | "settle" | "heat" | "breathe"
+/** How a filled pill goes (menu.ts toCircle). */
+export type PillExit = "fade" | "circle" | "dot" | "stay"
 
 /** The fold's and the pill's feel, beyond its springs. */
 export const MENU_FEEL = {
@@ -107,9 +109,17 @@ export const MENU_FEEL = {
    * heat: it turns nearly white, then cools to green. breathe: it grows a
    * little as it greens, and settles back.
    */
-  green: "fade" as RingGreen,
+  green: "settle" as RingGreen,
   /** A check opens on the pill's right as the fill lands (the pill widens for it). */
-  mark: false,
+  mark: true,
+  /**
+   * How a filled pill goes. fade: it fades where it is. circle: its words go,
+   * it shrinks into the circle at its right end, and that fades. dot: the
+   * circle shrinks away to nothing as it fades. stay: the circle stays a few seconds, then fades.
+   */
+  exit: "fade" as PillExit,
+  /** Shrinking into its circle, the words fade first (fade), or keep their place and slide under the logo as it passes over them (under). */
+  words: "fade" as "fade" | "under",
 }
 
 /** The fade that stands in for travel, scale and blur when motion is reduced. */

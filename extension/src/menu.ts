@@ -183,7 +183,7 @@ function send<T>(message: ToBackground): Promise<T | null> {
 }
 
 /** The surface is done: the content script fades it out (or, `travel`, sends it to the toolbar button). */
-const done = (travel = false) => port?.postMessage({ type: "db:surface-done", travel })
+const done = (travel = false, away = false) => port?.postMessage({ type: "db:surface-done", travel, away })
 /**
  * The save offer leaves the way a saved login does, toward the toolbar
  * button, whether it was saved, put away, turned off or timed out: the page
@@ -642,7 +642,7 @@ async function pick(i: number) {
     if (!MENU_FEEL.mark) pill?.classList.add("ok")
     relax()
     announce(going ? "Continuing sign-in" : "Filled")
-    return void setTimeout(() => done(), FILLED_STAYS_MS + 450)
+    return void setTimeout(() => (MENU_FEEL.exit === "fade" || !label.parentElement ? done() : toCircle(label.parentElement)), FILLED_STAYS_MS + 450)
   }
   // The corner offer gone under the pick (its page no longer qualifies): it leaves without a word.
   if (universal && !reply?.message) return done()
@@ -688,6 +688,48 @@ function land(pill: HTMLElement, ok: boolean) {
       700,
     ).finished.then(() => band.remove(), () => band.remove())
   }
+}
+
+/**
+ * A filled pill going (MENU_FEEL.exit, all but "fade"): its words fade where
+ * they are, then the frame shrinks into the circle at its right end, the pill
+ * narrowing with it frame by frame so the tile rides its left edge there
+ * (placePill), and the circle fades, or shrinks away ("dot"), or stays a while ("stay").
+ */
+function toCircle(pill: HTMLElement) {
+  if (reducedMotion()) return done()
+  const exit = MENU_FEEL.exit
+  const under = MENU_FEEL.words === "under"
+  const words = Array.from(pill.querySelectorAll<HTMLElement>(".pill-label, .pill-mark"))
+  if (!under)
+    for (const el of words) el.animate([{ opacity: 1, filter: "blur(0px)" }, { opacity: 0, filter: "blur(2px)" }], { duration: 160, easing: "ease-out", fill: "forwards" })
+  const tile = pill.querySelector<HTMLElement>(".avatar, .offer-mark")
+  for (const el of [tile, ...(under ? words : [])]) if (el) el.style.flexShrink = "0"
+  const shrink = spring(MENU_MOTION.frameSize).duration
+  setTimeout(
+    () => {
+      if (!pill.isConnected) return
+      const box = pill.getBoundingClientRect()
+      // Sliding under: each word keeps its place on the page, and a soft edge at the tile's right hides it as the tile passes over.
+      closingUp = {
+        pill,
+        from: box.width,
+        tileRight: tile ? (tile.querySelector(".ring") ?? tile).getBoundingClientRect().right - box.left : 0,
+        words: under ? words.map((el) => ({ el, left: el.getBoundingClientRect().left - box.left })) : [],
+      }
+      // The green goes as it closes: the ring back to its plain track, the rim's light out.
+      for (const el of pill.querySelectorAll<HTMLElement>(".ring-comet, .ring-ping, .pill-glow"))
+        el.animate([{ opacity: getComputedStyle(el).opacity }, { opacity: 0 }], { duration: shrink * 0.5, easing: "ease-out", fill: "forwards" })
+      report(PILL_HEIGHT - box.width)
+      pill.style.boxSizing = "border-box"
+      pill.style.overflow = "clip"
+      whenWide(PILL_HEIGHT, placePill)
+      // It starts to fade while it's still closing: a dot shrinks on into nothing.
+      const at = exit === "stay" ? shrink + 2500 : exit === "dot" ? shrink * 0.4 : shrink * 0.55
+      setTimeout(() => done(false, exit === "dot"), at)
+    },
+    under ? 0 : 120,
+  )
 }
 
 /** What a pick's pill calls it: the login's username, or the item's name. */
@@ -783,6 +825,10 @@ const MARK_PULL = -8
 const MARK_ROOM = 20
 /** The check opening with the frame (placePill), till the frame stops. */
 let opening: HTMLElement | null = null
+/** A pill shrinking into its circle with the frame (placePill, toCircle). */
+let closingUp: { pill: HTMLElement; from: number; tileRight: number; words: Array<{ el: HTMLElement; left: number }> } | null = null
+/** How far before the tile's right edge the words have faded out as it passes over them. */
+const UNDER_FEATHER = 12
 
 function placePill() {
   const pill = document.querySelector<HTMLElement>(".pill")
@@ -808,6 +854,18 @@ function placePill() {
       opening.style.width = ""
       opening.style.marginLeft = ""
       opening = null
+    }
+  }
+  // Shrinking into its circle, the pill is exactly as wide as the frame is now.
+  if (closingUp?.pill.isConnected) {
+    const width = PILL_HEIGHT + Math.max(0, ow)
+    closingUp.pill.style.width = `${width}px`
+    // The pill's left edge, and the tile with it, has come this far right: the words go back as far, and are hidden up to the tile.
+    const d = Math.max(0, closingUp.from - width)
+    for (const { el, left } of closingUp.words) {
+      const cut = d + closingUp.tileRight - left
+      el.style.translate = `${-d}px 0`
+      el.style.maskImage = `linear-gradient(to right, transparent ${cut}px, #000 ${cut + UNDER_FEATHER}px)`
     }
   }
   if (s) stepFold(s, moving)
