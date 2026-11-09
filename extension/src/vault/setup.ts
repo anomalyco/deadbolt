@@ -378,10 +378,12 @@ export function unlockView(app: App): View {
       if (!r.ok) throw new Error(r.message)
       return app.opened()
     } catch (e) {
+      // Only a failure gives the button back: an unlock leaves it to the vault's view, or to the panel saying Unlocked.
+      touch.disabled = false
       error.textContent = (e as Error).message
       error.hidden = false
       input.focus()
-    } finally { touch.disabled = false }
+    }
   }
   const touch = button("btn primary wide", "Unlock with Touch ID", () => void viaTouch(true))
   void Promise.all([enrollment(app), chrome.storage.local.get("deadbolt.unlockMethod")]).then(([enrolled, settings]) => {
