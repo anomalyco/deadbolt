@@ -390,6 +390,30 @@ describe("a learning frame", () => {
     expect(change.title).toBeUndefined()
   })
 
+  test("a page that goes sends its last events at once, still scrubbed of words typed before it", async () => {
+    const s = fresh({ words: [await wordDigest(session.salt, "kittens")] })
+    join(s)
+    document.body.innerHTML = '<button id="a">Find kittens</button><button id="b">Open kittens</button>'
+    $("#a").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
+    // Long enough for the digests of what shows to be made, not for a batch to go.
+    await new Promise((r) => setTimeout(r, 60))
+    const before = sent.length
+    $("#b").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
+    window.dispatchEvent(trusted(new Event("pagehide")))
+    // Sent before anything is awaited: the page may be gone after this.
+    const last = sent.slice(before).filter((m) => m.type === "db:learn-events" && m.session === s.id)
+    expect(last.length).toBe(1)
+    const events = last[0].events!
+    expect(events.map((e) => e.type)).toEqual(["click", "click", "unload"])
+    expect(events[0].target?.text).toBe("Find <typed>")
+    // Its words weren't checked yet: taken for typed ones.
+    expect(events[1].target?.text).toBe("<typed> <typed>")
+    expect(JSON.stringify(sent.filter((m) => m.session === s.id)).toLowerCase()).not.toContain("kittens")
+    // Nothing is sent twice once the digests come.
+    await new Promise((r) => setTimeout(r, 650))
+    expect(timelineOf(s.id).filter((e) => e.type === "click").length).toBe(2)
+  })
+
   test("a pagehide a page dispatches itself isn't an unload", async () => {
     const s = fresh()
     join(s)

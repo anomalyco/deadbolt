@@ -54,6 +54,9 @@ export interface FakeChrome {
   version: string
   /** IndexedDB, as the fake indexedDB keeps it: database, then object store, then key. */
   idb: Record<string, Record<string, Record<string, unknown>>>
+  /** Databases whose upgrade was aborted (and rolled back), and connections closed, by name. */
+  idbAborted: string[]
+  idbClosed: string[]
 }
 
 /** A message to the extension from `sender`, answered by the first listener that responds (null if none does). */
@@ -104,6 +107,8 @@ export function installChrome(): FakeChrome {
     installedListeners: [],
     version: "1.0.0",
     idb: {},
+    idbAborted: [],
+    idbClosed: [],
   }
   ;(globalThis as unknown as { indexedDB: unknown }).indexedDB = fakeIndexedDB(fake)
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
@@ -188,10 +193,27 @@ function fakeIndexedDB(fake: FakeChrome) {
   }
   return {
     open(name: string) {
-      const req = { result: null as unknown, error: null, onupgradeneeded: null as null | (() => void), onsuccess: null as null | (() => void), onerror: null as null | (() => void) }
+      let aborted = false
+      const req = {
+        result: null as unknown,
+        error: null as unknown,
+        onupgradeneeded: null as null | (() => void),
+        onsuccess: null as null | (() => void),
+        onerror: null as null | (() => void),
+        // The version change: aborting it rolls a new database back to nothing, as IndexedDB does.
+        transaction: null as null | { abort: () => void },
+      }
       queueMicrotask(() => {
         const fresh = !fake.idb[name]
         const stores = (fake.idb[name] ??= {})
+        if (fresh)
+          req.transaction = {
+            abort: () => {
+              aborted = true
+              fake.idbAborted.push(name)
+              delete fake.idb[name]
+            },
+          }
         req.result = {
           createObjectStore: (store: string) => (stores[store] ??= {}),
           transaction: (store: string) => ({
@@ -205,9 +227,14 @@ function fakeIndexedDB(fake: FakeChrome) {
               }
             },
           }),
-          close: () => {},
+          close: () => void fake.idbClosed.push(name),
         }
         if (fresh) req.onupgradeneeded?.()
+        req.transaction = null
+        if (aborted) {
+          req.error = new DOMException("The upgrade was aborted.", "AbortError")
+          return req.onerror?.()
+        }
         req.onsuccess?.()
       })
       return req

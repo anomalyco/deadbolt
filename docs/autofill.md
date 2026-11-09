@@ -1364,7 +1364,10 @@ fill nothing, and nothing is added to the page or takes its focus.
   word or the start of one (three letters or more, from all of the typed
   text however long), so an echo cut short ("Send kit vogel secr…") is
   scrubbed too; then, as a batch is sent, words whose salted digest is one
-  typed on an earlier page. Labels count only their own text: what's in a field, an
+  typed on an earlier page. A page that goes away (`pagehide`) sends what's
+  left at once, without waiting on a digest: its words are checked against
+  the digests already made of what it showed, and one not checked yet
+  counts as typed (`<typed>`). Labels count only their own text: what's in a field, an
   editable, or a live region (`aria-live`, `status`, `alert`, `log`,
   `output`) inside or named by `aria-labelledby` is left out.
 - **Addresses** are decoded, then each path segment kept only if it reads

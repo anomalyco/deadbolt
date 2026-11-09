@@ -33,8 +33,10 @@ export const learnSession = (v: unknown): v is string => typeof v === "string" &
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB, 2)
+    let failed = false
     req.onupgradeneeded = (event) => {
-      // An upgrade that can't be done fails the open, never the page around it.
+      // An upgrade that can't be done fails the open, never the page around it,
+      // and is rolled back: a half-made version 2 committed would never be upgraded again.
       try {
         const db = req.result
         const from = event?.oldVersion ?? 0
@@ -51,10 +53,17 @@ function open(): Promise<IDBDatabase> {
           cursor.continue()
         }
       } catch (err) {
+        failed = true
+        try {
+          req.transaction?.abort()
+        } catch {
+          // Already finished: nothing to roll back.
+        }
+        req.result?.close()
         reject(err)
       }
     }
-    req.onsuccess = () => resolve(req.result)
+    req.onsuccess = () => (failed ? req.result.close() : resolve(req.result))
     req.onerror = () => reject(req.error)
   })
 }

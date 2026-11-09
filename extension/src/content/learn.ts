@@ -70,8 +70,11 @@ let identifiers = new Set<string>()
 let scrubTyped: ((text: string) => string) | null = null
 /** Which elements are a keypad's keys, as found (see inKeypad). */
 let keypads = new WeakMap<Element, boolean>()
-/** The frame's batches, sent one after another. */
+/** The frame's batches, sent one after another; those still being scrubbed, for a page that goes first. */
 let sending: Promise<void> = Promise.resolve()
+let unsent: Array<{ events: TimelineEvent[]; words: string[]; sent: boolean }> = []
+/** Digests of words seen in targets, as they're found: a page going away scrubs with these, never waiting. */
+let tokenDigests = new Map<string, string>()
 /** Each field's latest typed value, and the salted digests of typed words (sent: the background has them). */
 let latest = new Map<Element, string>()
 let wordDigests = new Map<string, string>()
@@ -531,6 +534,8 @@ function push(type: TimelineType, more: Omit<TimelineEvent, "t" | "type"> = {}) 
   if (!session || eventsFull) return
   commitTyping(MOVES_ON.has(type))
   if (!take()) return
+  warm(more.target)
+  warm(more.submitter)
   queue.push({ t: Date.now() - session.startedAt, type, ...more })
   schedule()
 }
@@ -548,8 +553,8 @@ function commitTyping(force = false) {
   if (take()) queue.push(t.event)
 }
 
-/** Sends the frame's waiting events; `final` from pagehide, where nothing waits. */
-function flush() {
+/** Sends the frame's waiting events; `final` from pagehide, where nothing waits: see flushNow. */
+function flush(final = false) {
   clearTimeout(flushTimer)
   flushTimer = undefined
   if (!session) return
@@ -565,15 +570,59 @@ function flush() {
     dropped = 0
   }
   const id = session.id
+  const batch = { events, words, sent: false }
+  unsent.push(batch)
+  if (final) return flushNow(id)
   const wordsKnown = known()
   // Text that names a word typed on another page (known only by digest) goes too; batches stay in order.
   sending = sending.then(async () => {
     for (const e of events) for (const t of [e.target, e.submitter]) if (t) await scrubTarget(t, wordsKnown)
+    if (batch.sent) return
+    batch.sent = true
+    unsent = unsent.filter((b) => b !== batch)
     const taken = await send({ type: "db:learn-events", session: id, events, ...(words.length ? { words } : {}) })
     if (taken === "full") eventsFull = true
     else if (taken !== true && session?.id === id) end()
   })
   if (typing || wordDigests.size > sentWords.size) schedule()
+}
+
+/**
+ * The page is going: every batch not sent yet goes now, in one message,
+ * without waiting on a digest (the page may be gone before one is made).
+ * Each word is checked against the digests already made of the words seen;
+ * one not checked yet is taken for a typed one (`<typed>`): failing closed.
+ */
+function flushNow(id: string) {
+  const batches = unsent.filter((b) => !b.sent)
+  unsent = []
+  for (const b of batches) b.sent = true
+  const events = batches.flatMap((b) => b.events)
+  const words = [...new Set(batches.flatMap((b) => b.words))]
+  const digests = known()?.digests
+  // Words typed here were scrubbed as the target was described; the rest are only digests, from earlier pages.
+  if (digests && session?.words.length)
+    for (const e of events)
+      for (const t of [e.target, e.submitter])
+        if (t)
+          for (const k of ["text", "label", "id", "name", "path"] as const)
+            if (t[k])
+              // A placeholder (<typed>, <n>) stays as it is.
+              t[k] = t[k]!.replace(/<\w+>|[\p{L}\p{N}]{3,}/gu, (w) => {
+                if (w.startsWith("<")) return w
+                const d = tokenDigests.get(w.toLowerCase())
+                return d && !digests.has(d) ? w : "<typed>"
+              })
+  if (events.length || words.length) void send({ type: "db:learn-events", session: id, events, ...(words.length ? { words } : {}) })
+}
+
+/** Starts the digests of a target's words, so a page that goes away can scrub without waiting on them. */
+function warm(t: Target | undefined) {
+  if (!t || !session?.words.length) return
+  const salt = session.salt
+  for (const k of ["text", "label", "id", "name", "path"] as const)
+    for (const w of new Set(t[k]?.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []))
+      if (!tokenDigests.has(w) && tokenDigests.size < 2000) void wordDigest(salt, w).then((d) => session?.salt === salt && tokenDigests.set(w, d))
 }
 
 /** A target's text, label, id, name and path, of words whose digest is a typed word's. */
@@ -594,6 +643,7 @@ function typedInto(event: Event, el: EventTarget | null) {
   commitTyping(true)
   if (!session || eventsFull) return
   typing = { el, at: now, secret, event: { t: Date.now() - session.startedAt, type: "input", target: describe(el), ...shapeFor(el), ...(inputType ? { inputType } : {}) } }
+  warm(typing.event.target)
   schedule()
 }
 
@@ -629,7 +679,7 @@ function onPagehide(event: Event) {
   if (!event.isTrusted) return
   push("unload")
   commitTyping(true)
-  flush()
+  flush(true)
 }
 
 /**
@@ -728,6 +778,8 @@ function begin(next: LearnSession) {
   latest = new Map()
   wordDigests = new Map()
   sentWords = new Set()
+  unsent = []
+  tokenDigests = new Map()
   eventsFull = false
   stepsFull = false
   detected = new WeakMap()
@@ -763,6 +815,8 @@ function end() {
   latest = new Map()
   wordDigests = new Map()
   sentWords = new Set()
+  unsent = []
+  tokenDigests = new Map()
   detected = new WeakMap()
   typedCount = 0
   lastSignature = ""
