@@ -839,10 +839,9 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
 
 /**
  * Fades the surface out, then removes it. `travel`: a saved login leaves
- * toward the toolbar button at the top right, where it now lives. `away`: a
- * pill already shrunk to its circle shrinks away to nothing as it fades.
+ * toward the toolbar button at the top right, where it now lives.
  */
-function leave(travel = false, away = false) {
+function leave(travel = false) {
   if (closing) return
   if (!host || !frame) return closeMenu()
   closing = true
@@ -861,9 +860,9 @@ function leave(travel = false, away = false) {
         ]
       : [
           { opacity: 1, transform: "none" },
-          { opacity: 0, transform: away ? "scale(0.3)" : "scale(0.96)" },
+          { opacity: 0, transform: "scale(0.96)" },
         ]
-  f.style.transformOrigin = travel ? "top right" : away ? `calc(100% - ${(lastTarget?.height ?? 32) / 2}px) 50%` : "center"
+  f.style.transformOrigin = travel ? "top right" : "center"
   const anim = f.animate(keyframes, { ...timing(travel ? MENU_MOTION.leaveTravel : MENU_MOTION.leave), fill: "forwards" })
   anim.finished.then(done, done)
   // In case the page stops the animation from finishing (a hidden tab).
@@ -1380,7 +1379,7 @@ function roundTo(radius: number) {
 let typedSinceOpen = false
 
 /** The frame, over the private channel: its pill or offer is done, or how many rows match what was typed. */
-function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; away?: unknown; count?: unknown; radius?: unknown; version?: unknown; check?: unknown }>) {
+function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown; version?: unknown; check?: unknown }>) {
   if (e.data?.type === "db:menu-check") {
     placementChanges(placementObserver?.takeRecords() ?? [])
     // Do not call position(): check the page's layout, not a restored one.
@@ -1388,7 +1387,7 @@ function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; away?
     port?.postMessage({ type: "db:menu-checked", check: e.data.check, ok })
     return
   }
-  if (e.data?.type === "db:surface-done") return leave(e.data.travel === true, e.data.away === true)
+  if (e.data?.type === "db:surface-done") return leave(e.data.travel === true)
   // The offer changing shape (pill, card, dot): its corners follow its frame's size.
   if (e.data?.type === "db:radius" && mode === "save" && frame && typeof e.data.radius === "number") return roundTo(Math.min(Math.max(e.data.radius, 0), 20))
   if (e.data?.type !== "db:matches" || mode !== "accounts" || !anchor || e.data.count !== 0) return

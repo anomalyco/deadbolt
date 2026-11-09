@@ -173,13 +173,6 @@ body {
   initial-value: 0turn;
 }
 
-/* Registered so "heat" can cool the green comet from white (ui/ring.ts). */
-@property --ring-color {
-  syntax: "<color>";
-  inherits: false;
-  initial-value: transparent;
-}
-
 @property --solid {
   syntax: "<number>";
   inherits: false;
@@ -187,8 +180,7 @@ body {
 }
 
 .ring-track,
-.ring-comet,
-.ring-ping {
+.ring-comet {
   mask: radial-gradient(farthest-side, transparent calc(100% - 2.25px), #000 calc(100% - 1.75px), #000 calc(100% - 0.5px), transparent 100%);
 }
 
@@ -213,24 +205,9 @@ body {
   --ring-color: var(--text-success);
 }
 
-/* Green poured back from the head: a hard back edge, softened a little. */
-.ring-comet.paint {
-  --ring-color: var(--text-success);
-  background: conic-gradient(from var(--head), transparent calc(1turn - var(--tail) - 0.04turn), var(--ring-color) calc(1turn - var(--tail)), var(--ring-color) 1turn);
-}
-
 /* The light that runs round a closed ring. */
 .ring-comet.glint {
   --ring-color: color-mix(in srgb, white 85%, var(--text-success));
-}
-
-/* The ring of light that sinks into the tile. */
-.ring-ping {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: var(--text-success);
-  will-change: transform, opacity;
 }
 
 /* While a press is checked, nothing transitions either. */
@@ -356,17 +333,6 @@ body.held *::after {
 
 .pill-glow.failed {
   --glow: var(--danger);
-}
-
-/* The light that passes across a pill as its fill lands (menu.ts land), under its content. */
-.pill-sheen {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 56px;
-  background: radial-gradient(closest-side, color-mix(in srgb, var(--text-success) 30%, transparent), transparent);
-  pointer-events: none;
 }
 
 .pill-label {

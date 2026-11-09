@@ -57,8 +57,6 @@ export const MENU_MOTION = {
   pillLabel: 0.3,
   /** The ring round a picked avatar coming in, its comet's tail growing as it turns (ui/ring.ts). */
   ringIn: 0.45,
-  /** The comet speeding away green and fading as the fill lands (a plain duration: it accelerates). */
-  ringClose: 0.6,
   /** The ring going when the fill doesn't land: the tail draws back into the head as it fades. */
   ringOut: 0.3,
   /** The tile's ground flashing green and cooling as the ring closes. */
@@ -71,55 +69,6 @@ export const MENU_MOTION = {
   leave: 0.25,
   /** A saved login's surface going toward the toolbar button. */
   leaveTravel: 0.5,
-}
-
-/** What a fill that lands does round the ring closing (menu.ts land). */
-export type Landed = "tile" | "pill" | "pop" | "sweep"
-/** What the ring itself does as the fill lands (ui/ring.ts). */
-export type RingLands = "close" | "glint" | "absorb" | "away"
-/** How the grey comet becomes green as the fill lands (ui/ring.ts). */
-export type RingGreen = "fade" | "paint" | "settle" | "heat" | "breathe"
-/** How a filled pill goes (menu.ts toCircle). */
-export type PillExit = "fade" | "circle" | "dot" | "stay"
-
-/** The fold's and the pill's feel, beyond its springs. */
-export const MENU_FEEL = {
-  /** How much of the frame's rise what fades rides as it goes: 0 stays where it was on the page, 1 rides the frame's top. */
-  foldRide: 1,
-  /** tile: the tile's ground flashes green. pill: the whole pill does, and cools. pop: and the pill gives a little as it lands. sweep: and a light passes from the tile across the name. */
-  landed: "pill" as Landed,
-  /** The whole pill's flash, in seconds: up quickly, then cooling. */
-  flash: 1.1,
-  /** One turn of the ring's comet, in seconds. */
-  turn: 0.65,
-  /** How much of the circle the comet's tail covers, in turns (the green one that takes over as it lands is 1.8× as long). */
-  tail: 0.4,
-  /** How many extra turns the comet gathers as it speeds away when the fill lands ("away"). */
-  landTurns: 1.25,
-  /**
-   * close: the green head catches its tail and the ring fills in whole, and stays.
-   * glint: and a light runs once round it. absorb: and a ring of light sinks into the
-   * tile, which nods. away: the comet speeds away green and fades.
-   */
-  ring: "glint" as RingLands,
-  /**
-   * fade: the comet fades to green as its head runs on and meets its tail.
-   * paint: green spreads back from the head along the tail and on round.
-   * settle: the head slows to rest as it meets its tail, fading to green.
-   * heat: it turns nearly white, then cools to green. breathe: it grows a
-   * little as it greens, and settles back.
-   */
-  green: "settle" as RingGreen,
-  /** A check opens on the pill's right as the fill lands (the pill widens for it). */
-  mark: true,
-  /**
-   * How a filled pill goes. fade: it fades where it is. circle: its words go,
-   * it shrinks into the circle at its right end, and that fades. dot: the
-   * circle shrinks away to nothing as it fades. stay: the circle stays a few seconds, then fades.
-   */
-  exit: "fade" as PillExit,
-  /** Shrinking into its circle, the words fade first (fade), or keep their place and slide under the logo as it passes over them (under). */
-  words: "fade" as "fade" | "under",
 }
 
 /** The fade that stands in for travel, scale and blur when motion is reduced. */
