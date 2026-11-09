@@ -13,6 +13,7 @@ mod health;
 mod import;
 mod items;
 mod prompt;
+mod receive;
 mod secrets;
 mod send;
 use deadbolt_core::site;
@@ -214,11 +215,12 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Send files, a secret or vault items through a one-time link that
-    /// opens in any browser (deadbolt.pw/r, no Deadbolt needed).
+    /// Send files, a secret or vault items through a one-time link: open it
+    /// with `deadbolt receive <link>` or in any browser (deadbolt.pw/r, no
+    /// Deadbolt needed).
     ///
     /// The link is the key: whoever opens it first gets the contents,
-    /// decrypted in their browser. Nothing is uploaded anywhere; the
+    /// decrypted on their computer. Nothing is uploaded anywhere; the
     /// Deadbolt daemon on this computer serves the link live until it is
     /// opened, expires (default 1h) or is revoked, and only while it runs.
     ///
@@ -242,6 +244,28 @@ enum Commands {
     /// path: send a file named ls as ./ls.
     #[command(verbatim_doc_comment)]
     Send(send::SendArgs),
+    /// Open a Deadbolt Send link: a secret or an item's fields go to stdout,
+    /// files to --output.
+    ///
+    ///   deadbolt receive 'https://deadbolt.pw/r#…'
+    ///   deadbolt receive '…#…' --output ./downloads
+    ///
+    /// Takes the whole link or only the part after `#`, so it can be shared
+    /// terminal to terminal. Connects straight to the sender's computer over
+    /// iroh, end to end; nothing is uploaded anywhere, deadbolt.pw is never
+    /// contacted, and no vault or daemon is needed. Opening the link spends
+    /// one of its opens.
+    ///
+    /// Short text values go to stdout: one alone as is, several as
+    /// name<TAB>value (a group's fields as group/field). The title and note
+    /// go to stderr. Other entries are written under --output (default: the
+    /// current directory), never over an existing file without --force, and
+    /// never outside it. --json prints {title, note, values, files} on one
+    /// line instead. Fails, without retrying, when the link is malformed,
+    /// the sender is offline, or the link expired, was already opened or was
+    /// revoked.
+    #[command(verbatim_doc_comment)]
+    Receive(receive::ReceiveArgs),
     /// Audit saved passwords for weak, reused, and breached credentials, and
     /// sites supporting authenticator codes or passkeys.
     Health(health::HealthArgs),
@@ -552,6 +576,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Browser(_)
                 | Commands::BrowserHost { .. }
                 | Commands::Update(_)
+                | Commands::Receive(_)
         ) || matches!(&cli.command, Commands::Send(args) if args.manages()))
     {
         bail!("--vault does not apply to this command");
@@ -559,6 +584,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     caller::install();
     match cli.command {
         Commands::Send(args) => return send::send(&paths, args, vault, from_stdin).await,
+        Commands::Receive(args) => return receive::run(args).await,
         Commands::Item(command) => {
             client::ensure_running(&paths).await?;
             items::run(&paths, command, vault, from_stdin).await?;

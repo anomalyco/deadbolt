@@ -125,11 +125,30 @@ deadbolt agents grants                     # deadbolt agents revoke <id>
 deadbolt activity                          # every resolve, never a value
 ```
 
+## Send
+
+Hand files, a secret or vault items to anyone through a one-time link. The Deadbolt daemon on this computer serves it live until it is opened, expires (default 1h) or is revoked; nothing is uploaded anywhere:
+
+```sh
+deadbolt send ./report.pdf --note "quarterly numbers"   # prints a deadbolt.pw/r link
+cat key.pem | deadbolt send -                           # a secret from stdin
+deadbolt send ls                                        # what is still open
+```
+
+Open the link in any browser, or in a terminal. `receive` needs no vault and no daemon, and takes the whole link or only the part after `#`:
+
+```sh
+deadbolt receive 'https://deadbolt.pw/r#…'                      # a secret or item fields on stdout
+deadbolt receive 'https://deadbolt.pw/r#…' --output ./downloads # files; --force overwrites
+```
+
+A short text value prints alone on stdout, an item's fields as `field<TAB>value`, and the title and note go to stderr. Files are never written over without `--force` or outside `--output`. `--json` prints `{title, note, values, files}`.
+
 ## Docs
 
 - [`docs/design.md`](docs/design.md) — **the current v1 design** (two keys, signed membership, per-device encrypted logs, QR pairing).
 - [`docs/app.md`](docs/app.md) — the desktop app (Rune, in `crates/app`): plan, keyboard, motion, and the first slice.
-- [`docs/proposals/send.md`](docs/proposals/send.md) — Deadbolt Send: one-time links to files, secrets and vault items, served live peer to peer and opened in any browser.
+- [`docs/proposals/send.md`](docs/proposals/send.md) — Deadbolt Send: one-time links to files, secrets and vault items, served live peer to peer and opened in any browser or with `deadbolt receive`.
 - [`docs/autofill.md`](docs/autofill.md) — browser autofill: the native messaging host, its message set, domain rules and threat model.
 - [`docs/agent-control.md`](docs/agent-control.md) — design: how AI agents may use Deadbolt (tiers, Touch ID approvals, caller identity), what is built of it: `deadbolt run`, `inject` and `read` with grants for AI agents, and standing grants for sign-ins: `deadbolt agents` pairs a browser relay such as Browse and allows it to sign AI agents in to chosen sites unattended, without the AI ever seeing a value.
 - `docs/research/` — prior art
