@@ -30,7 +30,7 @@
 // so no transparent area is left over the page to swallow its clicks.
 
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
-import { devicePx, epochNow, inFrame, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
+import { epochNow, gridBox, inFrame, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import { asksNewPassword, findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
@@ -554,17 +554,10 @@ function position() {
   placementChanges(placementObserver?.takeRecords() ?? [])
   watchPlacement()
   if (written && !held && !placed()) placementChanged()
-  const target = targetRect()
-  if (!target) return closeMenu()
-  lastTarget = target
-  // On the pixel grid, edges and offsets alike: a pill's frame (menu.ts placePill) undoes the same numbers.
-  const to = { left: devicePx(target.left), top: devicePx(target.top), width: devicePx(target.left + target.width) - devicePx(target.left), height: devicePx(target.top + target.height) - devicePx(target.top) }
-  const at = {
-    left: to.left + devicePx(offset.left.value),
-    top: to.top + devicePx(offset.top.value),
-    width: Math.max(1, to.width + devicePx(offset.width.value)),
-    height: Math.max(1, to.height + devicePx(offset.height.value)),
-  }
+  const to = targetRect()
+  if (!to) return closeMenu()
+  lastTarget = to
+  const at = gridBox(to, offset)
   written = at
   host.style.cssText = important({
     all: "initial",

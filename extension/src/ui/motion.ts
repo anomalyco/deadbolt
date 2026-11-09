@@ -150,6 +150,19 @@ export const epochNow = () => drawing ?? performance.timeOrigin + performance.no
  */
 export const devicePx = (v: number) => Math.round(v * devicePixelRatio) / devicePixelRatio
 
+type Edges<T> = { left: T; top: T; width: T; height: T }
+/** `box` moved by springs `by`, its edges and the offsets alike on the pixel grid (content/inline.ts position), so a pill (ui/pill-frame.ts placePill) can undo the same numbers. */
+export function gridBox(box: Edges<number>, by: Edges<{ value: number }>): Edges<number> {
+  const left = devicePx(box.left)
+  const top = devicePx(box.top)
+  return {
+    left: left + devicePx(by.left.value),
+    top: top + devicePx(by.top.value),
+    width: Math.max(1, devicePx(box.left + box.width) - left + devicePx(by.width.value)),
+    height: Math.max(1, devicePx(box.top + box.height) - top + devicePx(by.height.value)),
+  }
+}
+
 /** Runs `go` for the frame at `time` (a requestAnimationFrame time), reading epochNow as that frame's instant. */
 export function inFrame(time: number, go: () => void) {
   drawing = performance.timeOrigin + time
