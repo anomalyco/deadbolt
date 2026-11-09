@@ -1,17 +1,17 @@
-// First run and unlock. First run joins a vault another device has (this
+// First run, and a request waiting on the passphrase (unlocking is unlock.ts).
+// First run joins a vault another device has (this
 // browser shows a code; that device admits it; then a passphrase for this
 // browser) or creates a new one. The pairing code lives in the vault's
 // worker, so a popup that closes, or a reloaded page, asks for it again and
 // carries on where it was.
 
-import { describePreset, duration, isLockedBy, lockedLine, PRESETS, VAULT_NAME } from "../device-rules"
+import { VAULT_NAME } from "../device-rules"
 import type { JoinStatus, Reauth } from "../messages"
 import { h, icon, ICONS, svg } from "../ui/dom"
-import { reducedMotion, rollLabel, timing } from "../ui/motion"
+import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { button, copied, field, glyph, para, refuse, toolbar } from "./kit"
 import { enrollment, verify } from "./biometric"
-import { swapText } from "../ui/unlock"
 import { fromCli } from "./about"
 
 type Join =
@@ -325,124 +325,6 @@ export class Setup {
     })
     return { el: form, focus: () => p.pass.focus() }
   }
-}
-
-export function unlockView(app: App): View {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const backoff = (until: number) => {
-    clearTimeout(timer)
-    const seconds = Math.ceil((until - Date.now()) / 1000)
-    submit.disabled = seconds > 0
-    // Over: no longer an error. The red goes and the line clears; it's said rather than shown.
-    if (seconds <= 0) {
-      error.hidden = true
-      input.classList.remove("invalid")
-      app.announce("You can try your passphrase again.")
-      return
-    }
-    error.hidden = false
-    error.textContent = `Too many wrong passphrases. Try again in ${seconds} s.`
-    timer = setTimeout(() => backoff(until), 250)
-  }
-  const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
-  const error = h("p", { class: "error reserve", role: "alert" })
-  error.hidden = true
-  const label = h("span", { class: "roll-label" }, "Unlock")
-  label.dataset.text = "Unlock"
-  const submit = h("button", { class: "btn primary wide", type: "submit" }, label)
-  const preset = PRESETS[app.preset]
-  // Why it locked, quietly, once the service worker says.
-  const why = h("p", { class: "preset-note lock-reason" })
-  why.hidden = true
-  const mark = h("span", { class: "state-icon" }, icon("lock"))
-  const heading = h("h2", {}, "Unlock Deadbolt")
-  const form = h(
-    "form",
-    { class: "view center unlock", novalidate: "" },
-    h("div", { class: "state" }, mark, heading, para("Enter this browser's passphrase.")),
-    input,
-    error,
-    submit,
-    h("p", { class: "preset-note", title: describePreset(app.preset) }, icon("clock"), h("span", {}, Number.isFinite(preset.idleMs) ? `${preset.name} · locks after ${duration(preset.idleMs)} idle` : preset.name)),
-    why,
-  )
-  input.addEventListener("input", () => {
-    input.classList.remove("invalid")
-    error.hidden = true
-  })
-  // `pressed`: the user asked for it. Asked on its own (see below), a cancel doesn't make the passphrase their choice.
-  const viaTouch = async (pressed: boolean) => {
-    touch.disabled = true
-    error.hidden = true
-    try {
-      const r = await app.run({ type: "device-unlock", prf: await verify(app, pressed) })
-      if (!r.ok) throw new Error(r.message)
-      return app.opened()
-    } catch (e) {
-      // Only a failure gives the button back: an unlock leaves it to the vault's view, or to the panel saying Unlocked.
-      touch.disabled = false
-      error.textContent = (e as Error).message
-      error.hidden = false
-      input.focus()
-    }
-  }
-  const touch = button("btn primary wide", "Unlock with Touch ID", () => void viaTouch(true))
-  void Promise.all([enrollment(app), chrome.storage.local.get("deadbolt.unlockMethod")]).then(([enrolled, settings]) => {
-    if (!enrolled || !form.isConnected) return
-    form.insertBefore(touch, input)
-    if (settings["deadbolt.unlockMethod"] === "passphrase") return
-    touch.focus()
-    // The inline menu's locked row opened this panel: Touch ID is asked at once, once, so unlocking is one step.
-    if (app.fromMenu && !app.touchAsked) {
-      app.touchAsked = true
-      void viaTouch(false)
-    }
-  })
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault()
-    if (submit.disabled) return
-    if (!input.value) return refuse(input)
-    submit.disabled = true
-    rollLabel(label, "Unlocking…")
-    const r = await app.run({ type: "device-unlock", passphrase: input.value })
-    input.value = ""
-    if (r.ok || r.status.state !== "locked") return app.opened()
-    submit.disabled = false
-    rollLabel(label, "Unlock")
-    if (!r.ok && r.code === "wrong_passphrase") error.textContent = "That passphrase isn't right."
-    else error.textContent = r.ok ? "" : r.message
-    error.hidden = false
-    if (!r.ok && r.retryAt) backoff(r.retryAt)
-    refuse(input)
-    input.focus()
-  })
-  void app.ask({ type: "device-settings" }).then((r) => {
-    if (r.ok && typeof r.reply.retryAt === "number" && r.reply.retryAt > Date.now() && form.isConnected) backoff(r.reply.retryAt)
-    if (r.ok && isLockedBy(r.reply.lockedBy)) {
-      why.textContent = lockedLine(r.reply.lockedBy)
-      why.hidden = false
-    }
-  })
-  // Unlocked for the menu's locked row: the panel says so for a moment before it closes (App.unlockedForMenu).
-  const unlocked = () => {
-    for (const el of [input, submit, touch]) el.disabled = true
-    error.hidden = true
-    swapText(heading, "Unlocked")
-    // Its ask is answered: the line under the title goes, softly, where it is.
-    const ask = heading.nextElementSibling
-    if (ask instanceof HTMLElement) ask.animate([{ opacity: 1 }, { opacity: 0 }], { ...timing(0.25), fill: "forwards" })
-    if (label.dataset.text === "Unlocking…") swapText(label, "Unlock")
-    const check = icon("check") as SVGElement
-    check.style.gridArea = "1 / 1"
-    mark.style.color = "var(--success)"
-    const lock = mark.firstElementChild as SVGElement | null
-    if (lock) lock.style.gridArea = "1 / 1"
-    mark.append(check)
-    const soft = reducedMotion() ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: "none", filter: "blur(0px)" }, { opacity: 0, transform: "scale(0.8)", filter: "blur(3px)" }]
-    lock?.animate(soft, { ...timing(0.25), fill: "forwards" })
-    check.animate([...soft].reverse(), { ...timing(0.3), fill: "backwards" })
-  }
-  return { el: form, focus: () => input.focus(), leave: () => clearTimeout(timer), unlocked }
 }
 
 /** What a request waiting on the passphrase says: its heading, why, and its button (and that button busy). */

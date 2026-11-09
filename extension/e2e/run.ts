@@ -2279,7 +2279,7 @@ async function locked(scheme: Scheme) {
     const p = await popup(run, site, `popup-locked-${scheme}`)
     if (standalone) {
       // The browser-only vault unlocks in its own popup.
-      check((await p.locator("input[type=password]").count()) === 1 && (await p.locator("button", { hasText: "Unlock" }).count()) > 0, "popup asks for the passphrase to unlock")
+      check((await p.locator("input[type=password]").count()) === 1 && (await p.getByRole("button", { name: "Unlock", exact: true }).count()) === 1, "popup asks for the passphrase to unlock")
     } else {
       check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
       check(!(await p.locator("input[type=password]").count()), "popup never asks for the passphrase")

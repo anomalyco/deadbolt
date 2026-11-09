@@ -15,6 +15,8 @@ export const UNLOCK_FEEL = {
   turn: "open" as "crossfade" | "emerge" | "open",
   /** The panel's unlock on its first frame: "rest", or "rise" (fades up into place). */
   panelIn: "rest" as "rest" | "rise",
+  /** The locked panel's arrangement: "hero" (Touch ID's disc is the way in, the passphrase under it), "field" (the passphrase field, Touch ID a button in it), "tidy" (today's, without what it said twice). */
+  panel: "hero" as "hero" | "field" | "tidy",
   /** Seconds the panel says "Unlocked" before it closes itself; 0 closes it at once. */
   beat: 0.45,
 }

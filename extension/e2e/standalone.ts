@@ -1994,7 +1994,8 @@ async function biometricUnlock(device: Page, worker: Worker) {
   await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
   await device.getByText("The authenticator didn't verify you. Use your passphrase instead.", { exact: true }).waitFor()
   check(await state(device) === "locked", "PRF output without the UV flag cannot unlock")
-  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  // After a failure the same button offers another try.
+  await device.getByRole("button", { name: "Try Touch ID again", exact: true }).click()
   await until("PRF unlock", async () => await state(device) === "ready")
   check(true, "Touch ID unlock unwraps the second slot without a passphrase")
   const list = await vault(worker, { type: "device-items" })

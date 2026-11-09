@@ -21,7 +21,8 @@ import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from 
 import { itemDetailView, itemEditView, kindsView } from "./items"
 import { detailView, editView, listView } from "./logins"
 import { settingsView } from "./settings"
-import { reauthView, Setup, unlockView } from "./setup"
+import { reauthView, Setup } from "./setup"
+import { unlockView } from "./unlock"
 import { sortItems } from "./tags"
 
 export type Surface = "popup" | "page"
@@ -203,11 +204,12 @@ export class App {
       if (this.route.name === "settings") settings.classList.add("on")
       settings.setAttribute("aria-pressed", String(this.route.name === "settings"))
       right.push(settings, iconButton(icon("lock"), "Lock", (b) => void this.lock(b)))
-    } else right.push(pill(this.status))
+    } else if (this.status.state !== "locked") right.push(pill(this.status))
     this.header.replaceChildren(
       h("span", { class: "logo" }, svg(ICONS.deadbolt)),
       h("h1", { class: "brand" }, "Deadbolt", ready && this.vaultName ? h("span", { class: "vault-name" }, this.vaultName) : null),
-      this.record?.button ?? "",
+      // Recording has nothing to do with unlocking: the locked panel shows one thing to do.
+      this.status.state === "locked" ? "" : (this.record?.button ?? ""),
       ...right,
     )
     this.footer.hidden = !ready
