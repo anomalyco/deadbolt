@@ -10,7 +10,8 @@ name: Release
 # - sign and publish jobs run in the release environment. They check out only
 #   .github/release/ and run only those scripts and SHA-pinned actions, on
 #   artifacts they treat as data: they never build, install dependencies, or
-#   execute repository code or the artifacts.
+#   execute repository code or the artifacts. Their credentials are fetched
+#   from AWS Secrets Manager with the job's GitHub OIDC token.
 # - every artifact carries a SHA256SUMS whose digest the job that made it
 #   reports as an output; every job that downloads it checks that digest
 #   (.github/release/verify-artifacts.sh), so nothing swapped in between jobs
@@ -365,6 +366,9 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     env:
       CHANNEL: ${{ needs.plan.outputs.channel }}
       RELEASE_CHANNEL: ${{ needs.plan.outputs.release-channel }}
@@ -380,27 +384,40 @@ jobs:
           sparse-checkout: /.github/release/
           sparse-checkout-cone-mode: false
           persist-credentials: false
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/deadbolt-release
+          role-session-name: deadbolt-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Fetch the release secrets
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            APPLE_SIGNING_CERTIFICATE,shared/APPLE_SIGNING_CERTIFICATE
+            APPLE_NOTARY_KEY,shared/APPLE_NOTARY_KEY
+          parse-json-secrets: false
       - id: credentials
         name: Require the Apple values
         env:
-          CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
-          KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          CERTIFICATE: ${{ env.APPLE_SIGNING_CERTIFICATE }}
+          KEY: ${{ env.APPLE_NOTARY_KEY }}
           KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
           ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
         run: |
           missing=
-          [ -n "$CERTIFICATE" ] || missing="$missing APPLE_SIGNING_CERTIFICATE"
-          [ -n "$KEY" ] || missing="$missing APPLE_NOTARY_KEY"
-          [ -n "$KEY_ID" ] || missing="$missing APPLE_NOTARY_KEY_ID"
-          [ -n "$ISSUER" ] || missing="$missing APPLE_NOTARY_ISSUER_ID"
+          [ -n "$CERTIFICATE" ] || missing="$missing shared/APPLE_SIGNING_CERTIFICATE"
+          [ -n "$KEY" ] || missing="$missing shared/APPLE_NOTARY_KEY"
+          [ -n "$KEY_ID" ] || missing="$missing var APPLE_NOTARY_KEY_ID"
+          [ -n "$ISSUER" ] || missing="$missing var APPLE_NOTARY_ISSUER_ID"
           if [ -z "$missing" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           elif [ "$RELEASE_CHANNEL" = stable ]; then
-            echo "::error::Stable releases need signed macOS builds, and the release environment lacks:$missing."
+            echo "::error::Stable releases need signed macOS builds, and these are missing:$missing."
             exit 1
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "macOS is unsigned (CLI only, no app): the release environment lacks$missing." >> "$GITHUB_STEP_SUMMARY"
+            echo "macOS is unsigned (CLI only, no app): these are missing:$missing." >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Download
         if: steps.credentials.outputs.available == 'true'
@@ -412,10 +429,6 @@ jobs:
         name: Import the certificate and notary key
         if: steps.credentials.outputs.available == 'true'
         run: bash .github/release/macos-credentials.sh "$RUNNER_TEMP/credentials"
-        env:
-          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
-          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
-          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
       - name: Sign
         if: steps.credentials.outputs.available == 'true'
         run: bash .github/release/sign-enclave.sh "$RUNNER_TEMP/in/build-enclave" "$RUNNER_TEMP/out"
@@ -496,6 +509,9 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     env:
       DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
     outputs:
@@ -511,6 +527,19 @@ jobs:
         with:
           pattern: build-macos-*
           digests: build-macos-app=${{ needs.build-macos.outputs.app-digest }} build-macos-cli=${{ needs.build-macos.outputs.cli-digest }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/deadbolt-release
+          role-session-name: deadbolt-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Fetch the release secrets
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            APPLE_SIGNING_CERTIFICATE,shared/APPLE_SIGNING_CERTIFICATE
+            APPLE_NOTARY_KEY,shared/APPLE_NOTARY_KEY
+          parse-json-secrets: false
       - *import-credentials
       - name: Sign, notarize, and staple
         run: bash .github/release/sign-macos.sh "$RUNNER_TEMP/in/build-macos-app/Deadbolt.app.zip" "$RUNNER_TEMP/in/build-macos-cli" "$RUNNER_TEMP/out"
@@ -744,7 +773,7 @@ jobs:
         run: bash .github/release/publish-github-release.sh "$RUNNER_TEMP/dist"
 
   # Renders the formula and cask from the published stable manifests and
-  # checks them with brew (style, audit, install, test), without secrets.
+  # checks them with brew (style, audit, install, test), with no credentials.
   homebrew-stage:
     name: Homebrew formula and cask
     needs: [plan, publish]
@@ -802,6 +831,9 @@ jobs:
     if: ${{ !cancelled() && needs.homebrew-stage.result == 'success' }}
     runs-on: ubuntu-24.04
     environment: release
+    permissions:
+      contents: read
+      id-token: write
     env:
       DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
     steps:
@@ -810,9 +842,19 @@ jobs:
         with:
           pattern: build-homebrew
           digests: build-homebrew=${{ needs.homebrew-stage.outputs.digest }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/deadbolt-release
+          role-session-name: deadbolt-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Fetch the release secrets
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            HOMEBREW_TAP_KEY,shared/HOMEBREW_TAP_DEPLOY_KEY
+          parse-json-secrets: false
       - name: Push to anomalyco/homebrew-tap
-        env:
-          HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
         run: bash .github/release/push-homebrew.sh "$RUNNER_TEMP/in/build-homebrew" "$DEADBOLT_VERSION"
 
   # Tells Homebrew installs about the version only once the tap serves it.

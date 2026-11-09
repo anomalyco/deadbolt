@@ -2,8 +2,9 @@
 # push-homebrew.sh <dir> <version>: pushes the rendered formula and cask
 # (checked with brew in a job without secrets) to anomalyco/homebrew-tap as
 # deadbolt.rb (the CLI, at the tap root as before) and Casks/deadbolt.rb (the
-# app), with the tap deploy key HOMEBREW_TAP_KEY. Files that already match are
-# left alone, so reruns are no-ops.
+# app), with the tap deploy key HOMEBREW_TAP_KEY, which the job fetches from
+# AWS Secrets Manager (shared/HOMEBREW_TAP_DEPLOY_KEY, the anomaly-release key).
+# Files that already match are left alone, so reruns are no-ops.
 # shellcheck source=.github/release/lib.sh
 . "$(dirname "$0")/lib.sh"
 

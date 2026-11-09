@@ -61,7 +61,8 @@ Release (push dev | production | v*, or workflow_dispatch: channel)
 - **Sign and publish jobs** (`[release]`) run in the `release` environment,
   check out only `.github/release/` (sparse), and run only those scripts and
   SHA-pinned actions on artifacts they treat as data. They never build,
-  install dependencies, or run repository code or the artifacts.
+  install dependencies, or run repository code or the artifacts, and their
+  credentials come from AWS Secrets Manager through GitHub OIDC.
 - **Artifacts** each carry a `SHA256SUMS`; the job that made one reports that
   manifest's digest as an output, and every job that downloads it checks the
   digest and every file (`.github/release/upload`, `download`,
@@ -412,14 +413,22 @@ Both live in `anomalyco/homebrew-tap`, rendered from `packaging/homebrew/` by
 
 ## Secrets and settings (`release` environment)
 
-- macOS: secret `APPLE_SIGNING_CERTIFICATE` (base64 `.p12` with the Developer
-  ID Application identity for team `5NZ4Q7NXJ4`), optional secret
-  `APPLE_SIGNING_CERTIFICATE_PASSWORD`, secret `APPLE_NOTARY_KEY` (App Store
-  Connect API `.p8`), variables `APPLE_NOTARY_KEY_ID` and
-  `APPLE_NOTARY_ISSUER_ID`. `macos-credentials.sh` imports them into a
-  throwaway keychain and prints nothing secret.
-- Homebrew: secret `HOMEBREW_TAP_KEY`, a write deploy key on
-  `anomalyco/homebrew-tap`. Keep it in the environment, not the repository.
+Release secrets live in AWS Secrets Manager (account `anomaly-secrets`, managed
+from [anomalyco/secrets](https://github.com/anomalyco/secrets)). A job that
+needs one runs in the `release` environment and assumes
+`role/github/deadbolt-release` with its GitHub OIDC token, fetching only the
+secrets it uses; the role's trust requires that environment, and it can read
+`deadbolt/release/*` and the shared Apple and Homebrew secrets. Set a value
+with `bun set deadbolt release <NAME>` in that repo; no release secret is
+stored in GitHub.
+
+- macOS: `shared/APPLE_SIGNING_CERTIFICATE` (base64 `.p12`, no password, with
+  the Developer ID Application identity for team `5NZ4Q7NXJ4`),
+  `shared/APPLE_NOTARY_KEY` (the App Store Connect API `.p8`), and variables
+  `APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER_ID`. `macos-credentials.sh`
+  imports them into a throwaway keychain and prints nothing secret.
+- Homebrew: `shared/HOMEBREW_TAP_DEPLOY_KEY`, the `anomaly-release` write
+  deploy key on `anomalyco/homebrew-tap`, shared by every Anomaly app.
 - The environment has no required reviewer (every push to `dev` publishes);
   its deployment policy admits `dev`, `production` and `v*` tags.
 - Publishing needs no secret: the service authorizes the `publish` and
