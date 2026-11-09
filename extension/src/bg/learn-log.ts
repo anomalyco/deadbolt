@@ -34,18 +34,24 @@ function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB, 2)
     req.onupgradeneeded = (event) => {
-      const db = req.result
-      const logs = event.oldVersion < 1 ? db.createObjectStore(LOGS, { keyPath: "session" }) : req.transaction!.objectStore(LOGS)
-      const lines = db.createObjectStore(LINES, { autoIncrement: true })
-      lines.createIndex("session", "session")
-      if (event.oldVersion < 1) return
-      logs.openCursor().onsuccess = (e) => {
-        const cursor = (e.target as IDBRequest<IDBCursorWithValue | null>).result
-        if (!cursor) return
-        const { lines: old = [], ...log } = cursor.value as LogRecord
-        for (const text of old) lines.add({ session: log.session, text })
-        cursor.update(log)
-        cursor.continue()
+      // An upgrade that can't be done fails the open, never the page around it.
+      try {
+        const db = req.result
+        const from = event?.oldVersion ?? 0
+        const logs = from < 1 ? db.createObjectStore(LOGS, { keyPath: "session" }) : req.transaction!.objectStore(LOGS)
+        const lines = db.createObjectStore(LINES, { autoIncrement: true })
+        lines.createIndex("session", "session")
+        if (from < 1) return
+        logs.openCursor().onsuccess = (e) => {
+          const cursor = (e.target as IDBRequest<IDBCursorWithValue | null>).result
+          if (!cursor) return
+          const { lines: old = [], ...log } = cursor.value as LogRecord
+          for (const text of old) lines.add({ session: log.session, text })
+          cursor.update(log)
+          cursor.continue()
+        }
+      } catch (err) {
+        reject(err)
       }
     }
     req.onsuccess = () => resolve(req.result)
