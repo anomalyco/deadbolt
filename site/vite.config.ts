@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react()],
   // Tailscale Serve proxies https://<machine>.<tailnet>.ts.net:5197 here (tailnet only).
   server: { host: "127.0.0.1", port: Number(process.env.PORT) || 5197, strictPort: true, allowedHosts: [".ts.net"] },
-  // knobs is linked from a local checkout (file:../../knobs) that has its own React for its tests.
+  // knobs peers on React, so keep a single copy in the bundle.
   resolve: { dedupe: ["react", "react-dom"] },
   build: {
     rollupOptions: {
