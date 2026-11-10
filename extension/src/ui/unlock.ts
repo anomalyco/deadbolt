@@ -15,8 +15,8 @@ export const UNLOCK_FEEL = {
   turn: "open" as "crossfade" | "emerge" | "open",
   /** The panel's unlock on its first frame: "rest", or "rise" (fades up into place). */
   panelIn: "rest" as "rest" | "rise",
-  /** The panel's lock as Deadbolt unlocks: "swing" (its shackle dips, springs up and swings open, the disc warms to green and a light runs once round it), "lift" (the shackle lifts and the disc warms, nothing else), "check" (the glyph gives way to a check). */
-  moment: "swing" as "swing" | "lift" | "check",
+  /** The panel's lock as Deadbolt unlocks: "slide" (its shackle is pushed in a touch, slides straight up until its short foot is clear of the body, and settles; the disc warms to green and a light runs once round it), "turn" (the same, and then the shackle turns on its long leg), "check" (the glyph gives way to a check). */
+  moment: "slide" as "slide" | "turn" | "check",
   /** Seconds the panel says "Unlocked" before it closes itself; 0 closes it at once. The moment above takes about 0.7. */
   beat: 0.8,
 }
@@ -57,10 +57,16 @@ export function swapText(el: HTMLElement, text: string) {
   out.setAttribute("aria-hidden", "true")
   const win = document.createElement("span")
   win.style.cssText =
-    "display:inline-grid;justify-items:start;vertical-align:top;overflow-x:visible;overflow-y:clip;" +
+    "display:inline-grid;box-sizing:content-box;justify-items:start;vertical-align:top;overflow-x:visible;overflow-y:clip;" +
     "mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 78%,transparent)"
   win.append(into, out)
   el.replaceChildren(win)
+  // The soft edges are a mask, and a mask ends at the window's own box: while the window is narrower than a line still
+  // leaving or already coming, that line would be cut at the side. So the box reaches as far as the wider line does,
+  // in padding that a margin takes back: nothing moves, and no line is ever cut sideways.
+  const reach = Math.ceil(Math.abs(out.getBoundingClientRect().width - into.getBoundingClientRect().width)) + 2
+  win.style.paddingRight = `${reach}px`
+  win.style.marginRight = `${-reach}px`
   // To the fraction of a pixel: a rounded width would let the line step sideways as it lands (it's centred in the panel).
   const [from, to] = [out.getBoundingClientRect().width, into.getBoundingClientRect().width]
   const roll = spring(0.45)

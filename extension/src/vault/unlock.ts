@@ -14,7 +14,8 @@
 
 import { isLockedBy, lockedLine } from "../device-rules"
 import { h, icon } from "../ui/dom"
-import { reducedMotion, spring, timing } from "../ui/motion"
+import { reducedMotion, timing } from "../ui/motion"
+import { padlock, setOpen, slideOpen, tug } from "../ui/padlock"
 import { swapText, UNLOCK_FEEL } from "../ui/unlock"
 import type { App, View } from "./app"
 import { enrollment, sawTouch, touchBefore, TouchDeclined, verify } from "./biometric"
@@ -46,7 +47,7 @@ export function unlockView(app: App): View {
   }
 
   const heading = h("h2", { class: "unlock-title" }, "Unlock Deadbolt")
-  const mark = h("span", { class: "unlock-disc", "aria-hidden": "true" }, icon("lock"))
+  const mark = h("span", { class: "unlock-disc", "aria-hidden": "true" }, padlock())
   const touchLabel = h("span", { class: "unlock-touch-label" }, TOUCH_LABEL.idle)
   touchLabel.dataset.text = TOUCH_LABEL.idle
   // Touch ID's control: the disc and its label are the button.
@@ -156,7 +157,7 @@ export function unlockView(app: App): View {
     say(!r.ok && r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.ok ? "" : r.message)
     if (!r.ok && r.retryAt) backoff(r.retryAt)
     refuse(input)
-    if (!enrolled) rattle(mark)
+    if (!enrolled) tug(mark)
     input.focus()
   })
 
@@ -197,34 +198,24 @@ export function unlockView(app: App): View {
   return { el: form, focus, leave: () => { clearTimeout(timer); asking?.abort() }, unlocked }
 }
 
-/** Where the shackle turns: the foot of its right leg, in the lock's own 24-unit box (ui/dom.ts). */
-const HINGE = "15.8px 10.5px"
-const OPEN = "translateY(-2.6px) rotate(-24deg)"
-const shackleOf = (lock: Element | null) => {
-  const s = lock?.querySelector<SVGPathElement>("path") ?? null
-  if (s) {
-    s.style.transformBox = "view-box"
-    s.style.transformOrigin = HINGE
-  }
-  return s
-}
-
 /**
- * Deadbolt unlocked: the disc's lock opens, as UNLOCK_FEEL.moment says. A
- * fingerprint first gives way to the lock. Each property has one animation
- * that writes it, from where it is. Returns how long until the lock has
- * visibly let go, in ms: the label says "Unlocked" then.
+ * Deadbolt unlocked: the disc's padlock opens (ui/padlock.ts), as
+ * UNLOCK_FEEL.moment says. Where a fingerprint showed, the padlock comes in
+ * over it already opening: one beat, not a lock that arrives and then opens.
+ * Each property has one animation that writes it, from where it is. Returns
+ * how long until the shackle's foot is clear, in ms: the label says
+ * "Unlocked" then.
  */
 function openDisc(disc: HTMLElement): number {
   const feel = UNLOCK_FEEL.moment
   const reduced = reducedMotion()
-  const was = disc.firstElementChild as SVGElement | null
+  const was = disc.firstElementChild as HTMLElement | SVGElement | null
   // From as bright as it is: dimmed while it waited on Touch ID, it doesn't light up to leave.
   const dim = was ? getComputedStyle(was).opacity : "1"
   const out = reduced ? [{ opacity: dim }, { opacity: 0 }] : [{ opacity: dim, transform: "none", filter: "blur(0px)" }, { opacity: 0, transform: "scale(0.8)", filter: "blur(3px)" }]
-  const into = reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: "scale(0.8)", filter: "blur(3px)" }, { opacity: 1, transform: "none", filter: "blur(0px)" }]
+  const into = reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: "scale(0.86)", filter: "blur(3px)" }, { opacity: 1, transform: "none", filter: "blur(0px)" }]
   /** `next` takes the glyph's place, softly. */
-  const replace = (next: SVGElement, seconds: number) => {
+  const replace = (next: HTMLElement | SVGElement, seconds: number) => {
     for (const el of [was, next]) if (el) el.style.gridArea = "1 / 1"
     disc.append(next)
     was?.animate(out, { ...timing(seconds), fill: "forwards" })
@@ -236,41 +227,17 @@ function openDisc(disc: HTMLElement): number {
     replace(check, 0.25)
     return 0
   }
-  const warm = (delay: number) => disc.animate([{}, { backgroundColor: "var(--success-bg)", color: "var(--success)" }], { duration: 320, delay, easing: "ease-out", fill: "forwards" })
-  const isLock = !!was?.querySelector("rect")
-  // With reduced motion nothing travels: an open lock comes in where the glyph was.
-  if (reduced || !isLock) {
-    const lock = icon("lock") as SVGElement
-    const shackle = shackleOf(lock)
-    if (reduced && shackle) shackle.style.transform = OPEN
-    replace(lock, reduced ? 0.2 : 0.16)
-    if (reduced) {
-      warm(0)
-      return 0
-    }
-    return open(disc, shackle, 110, feel, warm)
+  const turn = feel === "turn"
+  let lock = disc.querySelector<HTMLElement>(".padlock")
+  // No padlock there (a fingerprint), or nothing may travel (reduced motion: the open lock fades in whole).
+  if (!lock || reduced) {
+    lock = padlock()
+    if (reduced) setOpen(lock, turn)
+    replace(lock, 0.18)
   }
-  return open(disc, shackleOf(was), 0, feel, warm)
-}
-
-/** The shackle opens after `lead` ms. Swing: a small dip against the way it's going, up past where it rests, and back onto it. */
-function open(disc: HTMLElement, shackle: SVGPathElement | null, lead: number, feel: "swing" | "lift", warm: (delay: number) => unknown): number {
-  if (feel === "lift") {
-    shackle?.animate([{ transform: "none" }, { transform: "translateY(-3px)" }], { ...spring(0.36), delay: lead, fill: "both" })
-    warm(lead + 60)
-    return lead + 120
-  }
-  shackle?.animate(
-    [
-      { transform: "translateY(0px) rotate(0deg)", easing: "ease-out" },
-      { transform: "translateY(0.7px) rotate(0deg)", offset: 0.16, easing: "cubic-bezier(0.3, 0, 0.2, 1)" },
-      { transform: "translateY(-2.9px) rotate(-32deg)", offset: 0.56, easing: "ease-in-out" },
-      { transform: "translateY(-2.5px) rotate(-20deg)", offset: 0.8, easing: "ease-in-out" },
-      { transform: OPEN },
-    ],
-    { duration: 560, delay: lead, fill: "both" },
-  )
-  warm(lead + 110)
+  const free = slideOpen(lock, turn, 30)
+  disc.animate([{}, { backgroundColor: "var(--success-bg)", color: "var(--success)" }], { duration: 320, delay: reduced ? 0 : 150, easing: "ease-out", fill: "forwards" })
+  if (reduced) return 0
   // One soft light round the disc's edge as it warms, as the menu's pick ring closes (ui/ring.ts): it comes up, goes once round, and cools.
   const glint = h("span", { class: "unlock-glint", "aria-hidden": "true" })
   disc.append(glint)
@@ -281,26 +248,8 @@ function open(disc: HTMLElement, shackle: SVGPathElement | null, lead: number, f
       { opacity: 1, offset: 0.6 },
       { transform: "rotate(250deg)", opacity: 0 },
     ],
-    { duration: 640, delay: lead + 110, easing: "cubic-bezier(0.3, 0.1, 0.2, 1)", fill: "both" },
+    { duration: 640, delay: 150, easing: "cubic-bezier(0.3, 0.1, 0.2, 1)", fill: "both" },
   )
   round.finished.then(() => glint.remove(), () => glint.remove())
-  return lead + 150
-}
-
-/** A wrong passphrase: the shackle is tried and holds. A short rattle that dies away; no colour. */
-function rattle(disc: HTMLElement) {
-  const shackle = shackleOf(disc)
-  if (!shackle || reducedMotion() || typeof shackle.animate !== "function") return
-  shackle.animate(
-    [
-      { transform: "translateY(0px) rotate(0deg)" },
-      { transform: "translateY(-1.1px) rotate(-7deg)", offset: 0.18 },
-      { transform: "translateY(0px) rotate(0deg)", offset: 0.4 },
-      { transform: "translateY(-0.6px) rotate(-3.5deg)", offset: 0.58 },
-      { transform: "translateY(0px) rotate(0deg)", offset: 0.78 },
-      { transform: "translateY(-0.2px) rotate(-1deg)", offset: 0.88 },
-      { transform: "translateY(0px) rotate(0deg)" },
-    ],
-    { duration: 420, easing: "ease-out" },
-  )
+  return free
 }
