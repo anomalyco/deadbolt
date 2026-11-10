@@ -13,10 +13,10 @@
 // under the field is always there: why it locked, or what went wrong.
 
 import { isLockedBy, lockedLine } from "../device-rules"
-import { h, icon } from "../ui/dom"
+import { h } from "../ui/dom"
 import { reducedMotion, timing } from "../ui/motion"
 import { padlock, setOpen, slideOpen, tug } from "../ui/padlock"
-import { swapText, UNLOCK_FEEL } from "../ui/unlock"
+import { swapText } from "../ui/unlock"
 import type { App, View } from "./app"
 import { enrollment, sawTouch, touchBefore, TouchDeclined, verify } from "./biometric"
 import { glyph, refuse } from "./kit"
@@ -201,15 +201,15 @@ export function unlockView(app: App): View {
 }
 
 /**
- * Deadbolt unlocked: the disc's padlock opens (ui/padlock.ts), as
- * UNLOCK_FEEL.moment says. Where a fingerprint showed, the padlock comes in
- * over it already opening: one beat, not a lock that arrives and then opens.
- * Each property has one animation that writes it, from where it is. Returns
- * how long until the shackle's foot is clear, in ms: the label says
- * "Unlocked" then.
+ * Deadbolt unlocked: the disc's padlock opens (ui/padlock.ts: its shackle is
+ * pushed in a touch, slides straight up until its short foot is clear of the
+ * body, and settles), the disc warms to green and a light runs once round it.
+ * Where a fingerprint showed, the padlock comes in over it already opening:
+ * one beat, not a lock that arrives and then opens. Each property has one
+ * animation that writes it, from where it is. Returns how long until the
+ * shackle's foot is clear, in ms: the label says "Unlocked" then.
  */
 function openDisc(disc: HTMLElement): number {
-  const feel = UNLOCK_FEEL.moment
   const reduced = reducedMotion()
   const was = disc.firstElementChild as HTMLElement | SVGElement | null
   // From as bright as it is: dimmed while it waited on Touch ID, it doesn't light up to leave.
@@ -223,21 +223,14 @@ function openDisc(disc: HTMLElement): number {
     was?.animate(out, { ...timing(seconds), fill: "forwards" })
     next.animate(into, { ...timing(seconds + 0.05), fill: "backwards" })
   }
-  if (feel === "check") {
-    const check = icon("check") as SVGElement
-    check.style.color = "var(--success)"
-    replace(check, 0.25)
-    return 0
-  }
-  const turn = feel === "turn"
   let lock = disc.querySelector<HTMLElement>(".padlock")
   // No padlock there (a fingerprint), or nothing may travel (reduced motion: the open lock fades in whole).
   if (!lock || reduced) {
     lock = padlock()
-    if (reduced) setOpen(lock, turn)
+    if (reduced) setOpen(lock)
     replace(lock, 0.18)
   }
-  const free = slideOpen(lock, turn, 30)
+  const free = slideOpen(lock, 30)
   disc.animate([{}, { backgroundColor: "var(--success-bg)", color: "var(--success)" }], { duration: 320, delay: reduced ? 0 : 150, easing: "ease-out", fill: "forwards" })
   if (reduced) return 0
   // One soft light round the disc's edge as it warms, as the menu's pick ring closes (ui/ring.ts): it comes up, goes once round, and cools.

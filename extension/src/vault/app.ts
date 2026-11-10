@@ -12,7 +12,7 @@ import { CLIPBOARD_PERMISSIONS, record } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
-import { swapText, UNLOCK_FEEL } from "../ui/unlock"
+import { swapText, UNLOCKED_BEAT } from "../ui/unlock"
 import { PANEL_PORT, PRESS_MS, type PanelAnswer, type PanelHello } from "../bg/panel-unlock"
 import { iconSettings, onIconSettings, type IconSettings } from "../ui/icon-store"
 import { passkeyCard } from "../ui/passkey"
@@ -357,7 +357,7 @@ export class App {
     if (state) state.className = "pill ok"
     const label = state?.querySelector<HTMLElement>(".pill-text")
     if (label) swapText(label, "Unlocked")
-    setTimeout(() => window.close(), UNLOCK_FEEL.beat * 1000)
+    setTimeout(() => window.close(), UNLOCKED_BEAT * 1000)
     return true
   }
 
@@ -382,7 +382,7 @@ export class App {
     if (!this.root.contains(this.stage)) this.root.replaceChildren(this.header, ...(this.record ? [this.record.bar] : []), this.stage, this.footer, this.live)
     const first = this.shell === ""
     this.shell = this.status.state
-    this.show(0, !first || (this.surface === "popup" && this.status.state === "locked" && UNLOCK_FEEL.panelIn === "rise"))
+    this.show(0, !first)
   }
 
   /** The type of item `ref`: as the route says, else as the list has it. */
