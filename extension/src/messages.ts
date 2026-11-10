@@ -212,8 +212,10 @@ export type ToBackground =
   /** The user picked a "Sign in with …" row: point at the site's button for it (see SignInReply). */
   | { type: "db:menu-signin"; token: string; ref: string }
   | { type: "db:menu-dismiss"; token: string }
-  /** The locked row of a browser-only Deadbolt was clicked: open device.html to unlock it. Answers true if it opened. */
+  /** The locked row of a browser-only Deadbolt was clicked: open the toolbar panel (or device.html) to unlock it. Answers a MenuUnlockReply. */
   | { type: "db:menu-unlock"; token: string }
+  /** Whether that press counted: the menu visible and still through it (menu.ts unlock). The panel it opened stays only if so. */
+  | { type: "db:menu-unlock-press"; token: string; ok: boolean }
   /** The size the surface needs; with `mode`, the mode it's folding into (only ever "pill"). */
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
@@ -424,6 +426,14 @@ export interface StatusChanged {
   status: Status
   /** What changed, when the host says (the vault's logins, say), not just that it answered. */
   change?: Change
+}
+
+/** Where the locked row's unlock opened: the toolbar panel (the menu waits on it), device.html in a tab (the menu closed), or nowhere. */
+export type MenuUnlockReply = "panel" | "tab" | false
+
+/** Broadcast when the toolbar panel the locked row opened closes, or never came up: that menu stops waiting on it. */
+export interface PanelClosed {
+  type: "db:panel-closed"
 }
 
 export interface QueryReply {

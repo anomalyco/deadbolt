@@ -229,11 +229,13 @@ code {
   color: var(--text-faint);
 }
 
-/* There for screen readers only. */
+/* There for screen readers only. Its 1px box sits inside what's around it,
+   not a pixel past the page's end, where it would scroll the popup. */
 .sr-only {
   position: absolute;
   width: 1px;
   height: 1px;
+  margin: -1px;
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;

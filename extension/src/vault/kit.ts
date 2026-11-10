@@ -18,6 +18,8 @@ export function run(command: DeviceCommand, status: () => Status): Promise<Devic
 
 /** Icons only these views use, drawn like the rest (24 px grid, 1.8 stroke). */
 export const GLYPHS = {
+  fingerprint: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.3 5.3A8.6 8.6 0 0 1 20.6 12"/><path d="M3.9 9.4A8.6 8.6 0 0 0 3.4 12v1.4"/><path d="M6.6 17.6c.6-1.5.9-3 .9-4.6V12a4.5 4.5 0 0 1 9 0v1"/><path d="M12 11.2V13c0 2.9-.8 5.6-2.2 7.8"/><path d="M16.4 16.4c-.3 1.6-.8 3.1-1.5 4.5"/><path d="M20.4 15.6c.1-.5.2-1.1.2-1.7"/></svg>`,
+  enter: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13.5M13.5 7l5 5-5 5"/></svg>`,
   search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.2"/><path d="m20 20-4.6-4.6"/></svg>`,
   plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>`,
   back: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg>`,

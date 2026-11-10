@@ -16,9 +16,29 @@ function token(value: unknown): Token | null {
   } catch { return null }
 }
 
+/**
+ * Whether Touch ID was set up when this browser last looked, kept where the
+ * locked panel can read it as it starts: its first frame shows the right way
+ * in, not one that changes when the vault answers. Public already (the
+ * enrollment is in the store's header), and only a hint.
+ */
+const SEEN = "deadbolt.touch"
+/** "1": set up. "p": set up, and the passphrase is the way in the user chose (deadbolt.unlockMethod). */
+export function touchBefore(): { enrolled: boolean; passphrase: boolean } {
+  try {
+    const seen = localStorage.getItem(SEEN)
+    return { enrolled: seen === "1" || seen === "p", passphrase: seen === "p" }
+  } catch { return { enrolled: false, passphrase: false } }
+}
+export function sawTouch(enrolled: boolean, passphrase = touchBefore().passphrase) {
+  try { localStorage.setItem(SEEN, !enrolled ? "0" : passphrase ? "p" : "1") } catch {}
+}
+
 export async function enrollment(app: App): Promise<Token | null> {
   const r = await app.ask({ type: "device-biometric-info" })
-  return r.ok ? token(r.reply.token) : null
+  const t = r.ok ? token(r.reply.token) : null
+  if (r.ok) sawTouch(!!t)
+  return t
 }
 
 function output(credential: PublicKeyCredential): string {
@@ -32,8 +52,11 @@ function output(credential: PublicKeyCredential): string {
   return result
 }
 
-async function get(t: Token): Promise<string> {
-  const credential = await navigator.credentials.get({ publicKey: {
+/** The browser's prompt ended without verifying: cancelled, timed out, turned down, or the passkey is gone. The browser has said so itself. */
+export class TouchDeclined extends Error {}
+
+async function get(t: Token, signal?: AbortSignal): Promise<string> {
+  const credential = await navigator.credentials.get({ signal, publicKey: {
     challenge: random(), userVerification: "required", timeout: 60_000,
     allowCredentials: [{ type: "public-key", id: bytes(t.id), transports: ["internal"] }],
     extensions: { prf: { eval: { first: bytes(t.salt) } } } as AuthenticationExtensionsClientInputs,
@@ -42,14 +65,19 @@ async function get(t: Token): Promise<string> {
   return output(credential)
 }
 
-export async function verify(app: App, unlocking = false): Promise<string> {
+/** `signal` ends the browser's prompt (the unlock view, once the passphrase is used instead). */
+export async function verify(app: App, unlocking = false, signal?: AbortSignal): Promise<string> {
   try {
     const t = await enrollment(app)
     if (!t) throw new Error("Touch ID isn't set up. Use your passphrase instead.")
-    return await get(t)
+    return await get(t, signal)
   } catch (e) {
-    if (unlocking && e instanceof DOMException && e.name === "NotAllowedError") await chrome.storage.local.set({ "deadbolt.unlockMethod": "passphrase" }).catch(() => {})
-    throw new Error(explain(e))
+    const declined = e instanceof DOMException && e.name === "NotAllowedError"
+    if (unlocking && declined) {
+      await chrome.storage.local.set({ "deadbolt.unlockMethod": "passphrase" }).catch(() => {})
+      sawTouch(true, true)
+    }
+    throw declined ? new TouchDeclined(explain(e)) : new Error(explain(e))
   }
 }
 
@@ -77,6 +105,7 @@ export async function enroll(app: App, passphrase: string): Promise<void> {
     const r = await app.run({ type: "device-biometric-set", token: JSON.stringify(t), prf, passphrase })
     if (!r.ok) throw new Error(r.message)
     await chrome.storage.local.set({ "deadbolt.unlockMethod": "touch-id" })
+    sawTouch(true, false)
   } catch (e) { throw new Error(explain(e)) }
 }
 

@@ -327,6 +327,52 @@ toolbar popup, which show the same vault UI (`extension/src/vault`); content
 scripts and web pages cannot create/unlock/pair a device or invoke arbitrary worker
 commands. The offscreen route accepts only the extension service worker. Neither
 the pages, offscreen document, worker nor wasm module is web-accessible.
+The inline menu's locked row never takes the passphrase: a page can draw a copy
+of anything placed over it. The row opens the toolbar popup for the sender's
+tab (`chrome.action.openPopup`, `bg/panel-unlock.ts`), whose port tells it the
+row asked: it starts Touch ID at once when that's the chosen method, and closes
+itself a moment after unlocking, while the menu, which waited by its field,
+lists the logins. A popup the user opens from the toolbar stays open. When the
+browser won't open the popup (no `openPopup`, a background tab, a refusal),
+the row opens `device.html#unlock` in a tab as before, which closes after
+unlocking and reopens the menu. Closing the popup before it unlocks (a click
+elsewhere) leaves the vault locked: the PRF or passphrase only ever reaches
+the worker in the one `device-unlock` message, and the row stops waiting.
+Touch ID's prompt is never Deadbolt's to draw. Seen in Brave 157 on macOS 27
+with the browser's own device passkeys: `navigator.credentials.get` from the
+popup brings up macOS's dialog in the middle of the screen ("Brave Browser is
+trying to verify your identity on chrome-extension://<id>."), asking for a
+finger where there's a sensor and for the Mac's password where there isn't;
+the popup stays open behind it and keeps the keyboard, and cancelling brings
+the browser's own "Something went wrong" dialog over the popup before the page
+hears `NotAllowedError`. So while it's asked the popup only says "Waiting for
+macOS…" (true either way; no web API says whether a Mac has a sensor:
+`isUserVerifyingPlatformAuthenticatorAvailable()` is true without one) and
+keeps the passphrase field focused; unlocking with the passphrase aborts the
+prompt; and a prompt that ends without verifying is not an error in the popup,
+which goes back to how it opened. The locked popup never offers to set Touch
+ID up: that's Settings', which says what happens where there's no sensor.
+
+**Nothing moves the locked popup after its first frame.** The browser shows
+the popup once its page has loaded, before any answer from the background can
+reach it, so what it shows first has to be known without asking. The
+background names the popup in its address while Deadbolt is locked
+(`popup.html#locked`, and `#locked,menu` while the row opens it:
+`bg/panel-unlock.ts`, `chrome.action.setPopup`), and the popup draws the
+locked panel from that at once, at its own size, instead of the vault's 380 ×
+560 shell shrinking a moment later. Whether Touch ID is set up is remembered
+from the last look in the extension's `localStorage` (`deadbolt.touch`;
+public already, and only a hint), so the right way in is there from the
+start; both ways in are the same size. The line under the field is always
+there: why it locked, or what went wrong in its place. Hints only: the status
+and the port's answer still decide, and a wrong hint is corrected softly.
+
+**Proof.** `e2e/standalone.ts` enrolls and unlocks in the popup's own page
+with DevTools' virtual platform authenticator, with and without PRF ("the
+panel: …"). `e2e/real/run.ts` (see its README) runs the row's unlock in a
+real, headed browser with its real toolbar popup, the passphrase typed under
+macOS's dialog included. The motion is traced frame by frame in a playground
+outside this repository.
 There is no externally-connectable API and no native-host fallback. Extension CSP
 allows local wasm execution, not remotely hosted executable code. Passphrases and
 vault contents must never enter logs or telemetry.
@@ -413,8 +459,10 @@ value, in `chrome.storage.local` until it unlocks again, and the locked popup
 and device page say it quietly: "Locked · 12 h idle", "Locked · screen
 locked", "Locked · browser restarted", "Locked · extension updated",
 "Locked · vault worker stopped", "Locked · browser closed the vault's page",
-"Locked · you locked it", "Locked · removed from vault" or "Locked · lock
-setting changed". Idle, screen, removal and Lock are recorded as they happen.
+"Locked · removed from vault" or "Locked · lock setting changed". A lock the
+user made is recorded too, and not said: they know. The line's room is kept
+either way, so the popup is as tall before the reason arrives as after. Idle,
+screen, removal and Lock are recorded as they happen.
 
 Losses are inferred when the vault answers locked while `deadbolt.open` (local
 storage, set on every unlock) says it was open. An answer asked for before the
@@ -501,7 +549,10 @@ Changing the passphrase through the store API also clears the biometric slot.
 The standalone e2e exercises registration, assertion, wrapping, unlock, Strict
 secret checks, fake-output rejection and reset. This proves the origin/browser
 plumbing, **not real Touch ID hardware**: exos is Linux. Availability depends on
-the provider. Chromium's legacy local-profile macOS authenticator lacks PRF;
+the provider. Chromium's legacy local-profile macOS authenticator lacks PRF
+(confirmed in Brave 157 on macOS 27: a passkey "saved on this device" answers
+`prf.enabled: false` on create and no PRF result on get, so enrollment stops
+there with "doesn't support PRF unlock");
 Google Password Manager and supported system passkey providers may supply it
 ([Chromium discussion](https://groups.google.com/a/chromium.org/g/blink-dev/c/iTNOgLwD2bI)).
 There is no insecure emulation when PRF is absent: the closest standalone option

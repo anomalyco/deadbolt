@@ -17,6 +17,31 @@ main.vault.popup {
   height: 560px;
 }
 
+/* Locked, or a request waiting on the passphrase: the popup is the toolbar
+   popup's 360 wide and only as tall as its form, as 1Password's is, not the
+   vault's full size. */
+main.vault.popup:has(> .stage > .view.unlock) {
+  height: auto;
+}
+
+body:has(main.vault.popup > .stage > .view.unlock) {
+  width: 360px;
+}
+
+/* Chrome sizes the popup to its content; a sub-pixel overflow would still
+   give it scrollbars, which classic scrollbars draw 15 px wide. */
+html:has(main.vault.popup > .stage > .view.unlock),
+body:has(main.vault.popup > .stage > .view.unlock) {
+  overflow: hidden;
+}
+
+main.vault.popup .view.unlock {
+  flex: none;
+  justify-content: flex-start;
+  padding: 14px 14px 16px;
+  overflow: visible;
+}
+
 .vault [hidden] {
   display: none !important;
 }
@@ -611,7 +636,7 @@ main.vault.popup {
   height: 17px;
 }
 
-/* ---- Unlock ---- */
+/* ---- Unlock (src/vault/unlock.ts) ---- */
 
 .unlock {
   gap: 10px;
@@ -621,22 +646,206 @@ main.vault.popup {
   margin-bottom: 6px;
 }
 
-.preset-note {
+/* The lock over the title reads at a glance. */
+.unlock .state-icon {
+  width: 40px;
+  height: 40px;
+  color: var(--text);
+}
+
+.unlock .state-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* The locked panel has no header (src/vault/app.ts paintChrome): one inset all
+   round, the lock and its title a group, the field a step below them, and
+   its line right under it. */
+main.vault.popup .view.unlock.locked {
+  gap: 0;
+  padding: 20px;
+}
+
+main.vault.popup .view.unlock.locked .unlock-hero {
+  margin-bottom: 20px;
+}
+
+main.vault.popup .view.unlock.locked .unlock-under {
+  margin-top: 8px;
+}
+
+/* The lock, or Touch ID's fingerprint, over its one line. */
+.unlock-hero {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.unlock-disc {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: var(--layer-02);
+}
+
+.unlock-disc svg {
+  width: 28px;
+  height: 28px;
+}
+
+/* The light that runs once round the disc as it unlocks (src/vault/unlock.ts open): a short bright arc on the disc's own edge. */
+.unlock-disc {
+  position: relative;
+}
+
+.unlock-glint {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(transparent 0 58%, color-mix(in srgb, var(--success) 70%, transparent) 84%, var(--success) 94%, transparent 100%);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+}
+
+.unlock-title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: var(--weight-strong);
+}
+
+/* Touch ID: the disc and its label are one button, the same size as the lock and the title it stands in for. */
+.unlock-touch {
+  all: unset;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border-radius: var(--radius-xl);
+  cursor: pointer;
+}
+
+.unlock-touch:hover:not(.asking, [aria-disabled="true"]) .unlock-disc {
+  background: var(--pressed);
+}
+
+/* Keyboard focus rings the disc, the control's shape, not the label's box. */
+.unlock-touch:focus-visible {
+  outline: none;
+}
+
+.unlock-touch:focus-visible .unlock-disc {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+}
+
+.unlock-touch-label {
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: var(--weight-strong);
+  transition: color 160ms var(--settle);
+}
+
+/* While the system's prompt is up it has the say: the button steps back and only says it's waiting. */
+.unlock-touch.asking {
+  cursor: default;
+}
+
+.unlock-touch.asking .unlock-disc svg {
+  opacity: 0.45;
+}
+
+.unlock-touch.asking .unlock-touch-label {
+  color: var(--muted);
+}
+
+.unlock-touch .unlock-disc svg {
+  transition: opacity 160ms var(--settle);
+}
+
+/* The passphrase: one field, its arrow inside it submits. */
+.unlock-field {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  font-size: 11.5px;
+}
+
+.unlock-field .input {
+  height: 36px;
+  padding-right: 40px;
+}
+
+.unlock-field .icon-button {
+  position: absolute;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+}
+
+/* Busy, and then unlocked: the field and its arrow step back softly, as everything around them does. */
+.unlock-field .input {
+  transition: box-shadow 120ms ease-out, opacity 200ms var(--settle);
+}
+
+.unlock-field .icon-button,
+.unlock-go svg {
+  transition: opacity 200ms var(--settle);
+}
+
+/* The arrow is there with the field on the panel's first frame: it doesn't settle in as other icons do. */
+.unlock-go svg {
+  animation: none;
+}
+
+.unlock-go.busy svg {
+  opacity: 0.4;
+}
+
+/* The one line under the field: that it's locked and why, or what went wrong, in the same place. It always says something, so nothing it says moves the panel or its bubble. One leaves before the other comes: only one is ever readable. */
+.unlock-under {
+  display: grid;
+  min-height: 16px;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.unlock-under > p {
+  grid-area: 1 / 1;
+  justify-self: center;
+  margin: 0;
+}
+
+.lock-reason {
   color: var(--text-faint);
+  transition: opacity 220ms var(--settle) 140ms;
 }
 
-.preset-note svg {
-  width: 13px;
-  height: 13px;
+.unlock-line {
+  color: var(--danger);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 200ms var(--settle), visibility 0s 200ms;
 }
 
-.preset-note.lock-reason {
-  margin-top: 2px;
+.unlock-under.wrong .lock-reason {
+  opacity: 0;
+  transition: opacity 200ms var(--settle);
+}
+
+.unlock-under.wrong .unlock-line {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 220ms var(--settle) 140ms, visibility 0s;
+}
+
+.unlock-under.over > p {
+  opacity: 0;
+  transition: opacity 200ms var(--settle);
 }
 
 .state-icon.pulse {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test"
 import { AUTOMATIC_STEP_MS, Autofill, FLOWS_KEY, menuAccounts, oneRowEach, signInHost, signsIn, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
 import { HostError } from "../src/bg/backend"
 import { SIGNIN_SETTING } from "../src/auth-state"
@@ -1348,6 +1348,25 @@ describe("while Deadbolt is locked", () => {
     expect(delivered("db:close-menu").at(-1)?.message).toEqual({ type: "db:close-menu", token, unlock: true })
     expect(delivered("db:unlock-wait")).toHaveLength(1)
     expect(host.requests).toEqual([])
+  })
+
+  test("for the toolbar panel, the locked row keeps its menu open and its token alive until Deadbolt unlocks", async () => {
+    host.setStatus({ state: "locked" })
+    const token = (await autofill.query(pageSender(), ["email", "password"], "email", 1, true)).token!
+    expect((await autofill.menuLoad(token, menuSender(), SITE))?.kind).toBe("status")
+    expect(await autofill.unlockClicked(token, pageSender())).toBe(false)
+    expect(await autofill.unlockClicked(token, menuSender({ documentId: "other-menu" }))).toBe(false)
+    // Nearly two minutes on, the click starts the token's life again.
+    const start = Date.now()
+    setSystemTime(new Date(start + 110_000))
+    expect(await autofill.unlockClicked(token, menuSender())).toBe(true)
+    expect(delivered("db:close-menu")).toEqual([])
+    expect(delivered("db:unlock-wait")).toEqual([])
+    host.setStatus({ state: "ready", version: "0" })
+    setSystemTime(new Date(start + 200_000))
+    expect((await autofill.menuLoad(token, menuSender(), SITE))?.kind).toBe("accounts")
+    expect(await autofill.unlockClicked(token, menuSender())).toBe(false)
+    setSystemTime()
   })
 })
 

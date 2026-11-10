@@ -12,6 +12,8 @@ import { CLIPBOARD_PERMISSIONS, record } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
+import { swapText, UNLOCKED_BEAT } from "../ui/unlock"
+import { PANEL_PORT, PRESS_MS, type PanelAnswer, type PanelHello } from "../bg/panel-unlock"
 import { iconSettings, onIconSettings, type IconSettings } from "../ui/icon-store"
 import { passkeyCard } from "../ui/passkey"
 import { recordControl, type RecordControl } from "../ui/site-notes"
@@ -19,7 +21,8 @@ import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from 
 import { itemDetailView, itemEditView, kindsView } from "./items"
 import { detailView, editView, listView } from "./logins"
 import { settingsView } from "./settings"
-import { reauthView, Setup, unlockView } from "./setup"
+import { reauthView, Setup } from "./setup"
+import { unlockView } from "./unlock"
 import { sortItems } from "./tags"
 
 export type Surface = "popup" | "page"
@@ -36,6 +39,8 @@ export interface View {
   update?: () => void
   focus?: () => void
   leave?: () => void
+  /** Deadbolt unlocked and the panel is about to close: say so (the unlock view). */
+  unlocked?: () => void
 }
 
 /** This tab's site in the popup: logins, offers, passkeys and saving state. */
@@ -77,6 +82,19 @@ export class App {
   reauth: Reauth | null = null
   /** The search, kept across views. */
   query = ""
+  /**
+   * The inline menu's locked row opened this panel (bg/panel-unlock.ts):
+   * Touch ID is asked at once, and once Deadbolt unlocks the panel says so and
+   * closes, leaving the menu by the field to list the logins.
+   */
+  fromMenu = false
+  /** Whether the row opened this panel, once the background has said (the unlock view waits on it). */
+  menuAsked: Promise<boolean> = Promise.resolve(false)
+  /** The panel's address says the row opened it (bg/panel-unlock.ts): its first frame already waits on Touch ID. */
+  readonly hintedAsk = location.hash === "#locked,menu"
+  /** Touch ID was asked for on its own already (see unlockView). */
+  touchAsked = false
+  private closing = false
   /** Where rows show site icons (Settings, Appearance). */
   icons: IconSettings = { menu: false, vault: true }
   private route: Route = { name: "list" }
@@ -190,13 +208,16 @@ export class App {
       if (this.route.name === "settings") settings.classList.add("on")
       settings.setAttribute("aria-pressed", String(this.route.name === "settings"))
       right.push(settings, iconButton(icon("lock"), "Lock", (b) => void this.lock(b)))
-    } else right.push(pill(this.status))
+    } else if (this.status.state !== "locked") right.push(pill(this.status))
     this.header.replaceChildren(
       h("span", { class: "logo" }, svg(ICONS.deadbolt)),
       h("h1", { class: "brand" }, "Deadbolt", ready && this.vaultName ? h("span", { class: "vault-name" }, this.vaultName) : null),
-      this.record?.button ?? "",
+      // Recording has nothing to do with unlocking: the locked panel shows one thing to do.
+      this.status.state === "locked" ? "" : (this.record?.button ?? ""),
       ...right,
     )
+    // The locked panel is the lock, its title and the field: a "Deadbolt" bar over "Unlock Deadbolt" would only say it twice.
+    this.header.hidden = this.surface === "popup" && this.status.state === "locked"
     this.footer.hidden = !ready
     if (ready) this.paintSync()
   }
@@ -321,9 +342,23 @@ export class App {
 
   /** The vault just opened (unlock, create, join): show it, unless a status push already did. */
   opened() {
-    if (this.shell === this.status.state) return
+    if (this.unlockedForMenu() || this.shell === this.status.state) return
     this.render()
     void this.refresh()
+  }
+
+  /** Unlocked in a panel the menu's locked row opened: a moment to say so, then it closes. True if so. */
+  private unlockedForMenu(): boolean {
+    if (!this.fromMenu || this.status.state !== "ready") return false
+    if (this.closing) return true
+    this.closing = true
+    this.view?.unlocked?.()
+    const state = this.header.querySelector<HTMLElement>(".pill")
+    if (state) state.className = "pill ok"
+    const label = state?.querySelector<HTMLElement>(".pill-text")
+    if (label) swapText(label, "Unlocked")
+    setTimeout(() => window.close(), UNLOCKED_BEAT * 1000)
+    return true
   }
 
   private async lock(b: HTMLButtonElement) {
@@ -412,6 +447,7 @@ export class App {
       if (message?.type !== "db:status") return
       const was = this.status.state
       this.status = message.status
+      if (this.unlockedForMenu()) return
       if (this.status.state !== was) {
         if (this.status.state !== "ready") this.route = { name: "list" }
         this.render()
@@ -444,15 +480,49 @@ export class App {
         .catch(() => {})
     // A vault slow to answer shows that it's starting, never an empty frame.
     const slow = setTimeout(() => this.shell === "" && this.render(), 250)
-    void Promise.all([this.run({ type: "device-status" }), iconSettings().then((icons) => (this.icons = icons))]).then(async () => {
+    const panel = this.surface === "popup" ? panelPort().then((fromMenu) => (this.fromMenu = fromMenu)) : null
+    if (panel) this.menuAsked = panel
+    // The background names a locked panel in its address: the first frame the browser shows is the locked panel at its own size, not the vault's waiting to shrink.
+    if (this.surface === "popup" && location.hash.startsWith("#locked")) {
+      this.status = { state: "locked" }
+      this.render()
+    }
+    void Promise.all([this.run({ type: "device-status" }), iconSettings().then((icons) => (this.icons = icons)), panel]).then(async () => {
       clearTimeout(slow)
       if (this.status.state === "not-set-up") await this.setup.check()
       if (this.status.state === "locked") await this.loadPreset()
       if (this.status.state === "ready") await this.loadReauth()
-      this.render()
+      // Already drawn from the address, and right: the view stays as it is.
+      if (this.shell !== this.status.state) this.render()
       if (this.status.state === "ready") void this.refresh()
     })
   }
+}
+
+/**
+ * The panel's port to the background, open while the panel is: the answer
+ * says whether the menu's locked row opened it, and its closing tells the
+ * background the panel went.
+ */
+function panelPort(): Promise<boolean> {
+  return chrome.windows
+    .getCurrent()
+    .then(
+      (w) =>
+        new Promise<boolean>((resolve) => {
+          const port = chrome.runtime.connect({ name: PANEL_PORT })
+          port.onMessage.addListener((a: PanelAnswer) => {
+            // Opened by a press on the row that didn't count (the menu was covered): it goes.
+            if (a?.close) return window.close()
+            resolve(a?.fromMenu === true)
+          })
+          port.onDisconnect.addListener(() => resolve(false))
+          port.postMessage({ windowId: w.id } satisfies PanelHello)
+          // The answer waits on the menu's word on its press (bg/panel-unlock.ts PRESS_MS).
+          setTimeout(() => resolve(false), PRESS_MS + 500)
+        }),
+    )
+    .catch(() => false)
 }
 
 const REAUTH_KINDS: ReadonlyArray<Reauth["kind"]> = ["card", "card-save", "passkey-get", "passkey-create"]
@@ -504,7 +574,7 @@ function vaultDevice(v: unknown): VaultDevice | null {
 
 function pill(status: Status): HTMLElement {
   const [label, tone] = status.state === "locked" ? ["Locked", "warn"] : status.state === "not-set-up" ? ["Not set up", ""] : status.state === "connecting" ? ["Starting", ""] : ["Not running", "bad"]
-  return h("span", { class: `pill ${tone}` }, label)
+  return h("span", { class: `pill ${tone}` }, h("span", { class: "pill-text" }, label))
 }
 
 /** A whole-view message: starting, or something went wrong. */

@@ -596,7 +596,19 @@ export class Autofill {
     await sendToFrame(t.owner ?? t, { type: "db:close-menu", token })
   }
 
-  /** The locked row was clicked in the menu `token` was made for: true if it was, and Deadbolt is still locked. The menu closes. */
+  /**
+   * The locked row was clicked in the menu `token` was made for: true if it
+   * was, and Deadbolt is still locked. The token starts its life again, so the
+   * same menu lists the logins once Deadbolt unlocks in the toolbar panel.
+   */
+  async unlockClicked(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
+    const t = await this.token(token, sender)
+    if (!t || this.host.status.state !== "locked") return false
+    t.createdAt = Date.now()
+    return true
+  }
+
+  /** As unlockClicked, for device.html in a tab: the menu closes, and comes back once Deadbolt unlocks (returnAfterUnlock). */
   async menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
     const t = await this.token(token, sender)
     if (!t || this.host.status.state !== "locked") return false

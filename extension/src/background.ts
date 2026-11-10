@@ -17,7 +17,8 @@ import { ProviderChain } from "./bg/provider-chain"
 import { SiteIcons } from "./bg/site-icons"
 import { UniversalSignIn } from "./bg/universal"
 import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
-import type { DeviceReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
+import { LOCKED_PANEL, namePanel, PanelUnlock } from "./bg/panel-unlock"
+import type { DeviceReply, MenuUnlockReply, PanelClosed, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
 declare const DEADBOLT_NATIVE: boolean
 const standalone = DEADBOLT_NATIVE ? null : new StandaloneBackend()
@@ -44,6 +45,9 @@ providers.submitIdentifier = (target, username, form) => autofill.submitIdentifi
  */
 let unlockTab: number | undefined
 let openingUnlock: Promise<void> | null = null
+/** The toolbar panel the locked row opens instead, when the browser lets it. */
+const panel = new PanelUnlock(() => void chrome.runtime.sendMessage({ type: "db:panel-closed" } satisfies PanelClosed).catch(() => {}))
+chrome.runtime.onConnect.addListener((port) => panel.connected(port))
 saver.formFrames = (tabId) => forms.reported(tabId)
 saver.formFilledFrom = (tabId) => forms.filledFrom(tabId)
 saver.signedIn = (tabId, site) => {
@@ -78,6 +82,8 @@ function title(status: Status): string {
 host.onChange((status, change) => {
   void chrome.runtime.sendMessage({ type: "db:status", status, ...(change ? { change } : {}) } satisfies StatusChanged).catch(() => {})
   void chrome.action.setTitle({ title: title(status) }).catch(() => {})
+  // The browser-only panel is told it's locked in its address, so its first frame is the locked panel (bg/panel-unlock.ts).
+  if (!DEADBOLT_NATIVE) namePanel(status.state === "locked" ? LOCKED_PANEL : "popup.html")
 })
 
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
@@ -149,6 +155,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return autofill.menuDismiss(message.token, sender)
     case "db:menu-unlock":
       return menuUnlock(String(message.token), sender)
+    case "db:menu-unlock-press":
+      return panel.confirm(String(message.token), message.ok === true, sender.documentId)
     case "db:menu-resize":
       if (universal.owns(message.token)) return universal.resize(message.token, sender, Number(message.height), message.width, message.mode)
       if (saver.ownsSurface(message.token)) return saver.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
@@ -208,12 +216,20 @@ async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promi
   return reply
 }
 
-/** The inline menu's locked row, from the menu frame its token was made for: device.html, where the user unlocks. Nothing else is asked of the vault. */
-async function menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
-  if (!standalone || !(await autofill.menuUnlock(token, sender))) return false
+/**
+ * The inline menu's locked row, from the menu frame its token was made for:
+ * the toolbar panel, where the user unlocks while the menu waits by its
+ * field, or device.html in a tab when the browser won't open the panel.
+ * Nothing else is asked of the vault.
+ */
+async function menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<MenuUnlockReply> {
+  if (!standalone || sender.tab?.id === undefined || !(await autofill.unlockClicked(token, sender))) return false
+  const pressed = panel.pressed(token, sender.documentId)
+  if (await panel.open(sender.tab.id, pressed)) return "panel"
+  if (!(await pressed) || !(await autofill.menuUnlock(token, sender))) return false
   openingUnlock ??= openUnlock().finally(() => (openingUnlock = null))
   await openingUnlock
-  return true
+  return "tab"
 }
 
 async function openUnlock(): Promise<void> {
