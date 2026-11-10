@@ -1584,7 +1584,8 @@ async function popup(run: Run, tabPrefix: string, name?: string): Promise<Page> 
     s.src = "popup.js?again"
     document.body.append(s)
   }, tabPrefix)
-  await page.waitForSelector(".top")
+  // Attached, not shown: the locked panel hides its header.
+  await page.waitForSelector(".top", { state: "attached" })
   await Bun.sleep(400)
   if (name) {
     const height = await page.evaluate(() => Math.ceil(document.body.getBoundingClientRect().height))

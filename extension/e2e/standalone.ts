@@ -613,7 +613,7 @@ async function devtools(url: string) {
   return { send, evaluate, close: () => ws.close() }
 }
 /** In the popup's document: the form of the prompt whose heading matches `heading`. */
-const popupForm = (heading: RegExp) => `[...document.querySelectorAll("form.view.center.unlock")].find((f) => ${heading}.test(f.querySelector("h2")?.textContent ?? ""))`
+const popupForm = (heading: RegExp) => `[...document.querySelectorAll("form.view.center.unlock")].find((f) => ${heading}.test(f.querySelector("h1, h2")?.textContent ?? ""))`
 /**
  * The toolbar popup's prompt. Playwright doesn't list an action popup among
  * the context's pages, so this drives it over DevTools, with trusted input:
@@ -635,7 +635,7 @@ async function popupPrompt(heading = CARD_REAUTH, shots = "strict-reauth"): Prom
   await still(`${shots}-prompt`)
   return {
     where: "toolbar popup",
-    heading: () => popup.evaluate<string>(`${POPUP_FORM}?.querySelector("h2")?.textContent ?? ""`),
+    heading: () => popup.evaluate<string>(`${POPUP_FORM}?.querySelector("h1, h2")?.textContent ?? ""`),
     async answer(given) {
       // As a person waits for Fill to come back after a wrong try.
       await until("the popup's submit button is ready", () => popup.evaluate<boolean>(`!!(${POPUP_FORM})?.querySelector("button[type=submit]:not([disabled])")`), 15_000)
@@ -2101,7 +2101,7 @@ async function popupTouch(device: Page) {
     await popup.waitForFunction(() => document.readyState !== "loading")
     return popup.evaluate(() => ({
       touch: !!document.querySelector(".unlock-touch"),
-      title: document.querySelector("h2")?.textContent,
+      title: document.querySelector(".unlock-title")?.textContent,
       focus: document.activeElement?.getAttribute("aria-label"),
       height: document.documentElement.getBoundingClientRect().height,
     }))

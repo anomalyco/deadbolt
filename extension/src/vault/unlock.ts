@@ -46,7 +46,8 @@ export function unlockView(app: App): View {
     under.classList.toggle("wrong", !!text)
   }
 
-  const heading = h("h2", { class: "unlock-title" }, "Unlock Deadbolt")
+  // The popup hides its header while locked (app.ts paintChrome), so this is the page's one h1 there.
+  const heading = h(app.surface === "popup" ? "h1" : "h2", { class: "unlock-title" }, "Unlock Deadbolt")
   const mark = h("span", { class: "unlock-disc", "aria-hidden": "true" }, padlock())
   const touchLabel = h("span", { class: "unlock-touch-label" }, TOUCH_LABEL.idle)
   touchLabel.dataset.text = TOUCH_LABEL.idle

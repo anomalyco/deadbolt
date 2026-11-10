@@ -239,7 +239,7 @@ async function closedAndListed(name: string) {
 // ---- 1. The passphrase, typed into the real popup ----
 if (await lockAndClickRow("passphrase")) {
   await sleep(600)
-  const first = JSON.parse((await inPopup(`JSON.stringify({ w: innerWidth, h: innerHeight, title: document.querySelector("h2")?.textContent, focus: document.activeElement?.getAttribute("aria-label"), hash: location.hash, scrolls: document.documentElement.scrollHeight > innerHeight })`)) ?? "{}")
+  const first = JSON.parse((await inPopup(`JSON.stringify({ w: innerWidth, h: innerHeight, title: document.querySelector(".unlock-title")?.textContent, focus: document.activeElement?.getAttribute("aria-label"), hash: location.hash, scrolls: document.documentElement.scrollHeight > innerHeight })`)) ?? "{}")
   check(first.w === 360 && first.h < 300 && !first.scrolls, `passphrase: the popup is the locked panel's size, 360 wide and as tall as its form, with no scrollbar (${first.w} × ${first.h})`)
   check(first.hash === "#locked,menu", `passphrase: its address says it's locked and the row asked, so its first frame is already the locked panel (${first.hash})`)
   check(first.title === "Unlock Deadbolt" && first.focus === "Passphrase", `passphrase: it shows the lock and the title, the passphrase field focused (${JSON.stringify(first)})`)
