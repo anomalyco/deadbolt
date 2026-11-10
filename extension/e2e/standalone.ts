@@ -1728,6 +1728,8 @@ async function lockedPopupLine(shots?: string): Promise<string> {
   // The line is there either way; its reason arrives with the settings.
   const line = popup.locator(".lock-reason[data-reason]")
   await line.waitFor({ state: "attached" })
+  // Once the panel has shown, the reason rolls in over "Locked": read it once it's plain text again.
+  await popup.waitForFunction(() => !document.querySelector(".lock-reason[data-reason] span"))
   const text = await line.innerText()
   if (video && shots) {
     await mkdir(video, { recursive: true })
@@ -1826,7 +1828,7 @@ async function untilQuit(device: Page, worker: Worker): Promise<Worker> {
   await request(device, { type: "device-preset", preset: "until-quit", passphrase })
   await request(device, { type: "device-lock" })
   check(await state(device) === "locked", "Until you quit locks on Lock")
-  check(await lockedPopupLine() === "", "the locked popup says nothing about a lock the user made")
+  check(await lockedPopupLine() === "Locked", "the locked popup gives no reason for a lock the user made: it says Locked")
   await request(device, { type: "device-unlock", passphrase })
   await request(device, { type: "device-preset", preset: "comfortable" })
   return worker

@@ -658,16 +658,27 @@ main.vault.popup .view.unlock {
   height: 20px;
 }
 
+/* The locked panel has no header (src/vault/app.ts paintChrome): one inset all
+   round, the lock and its title a group, the field a step below them, and
+   its line right under it. */
 main.vault.popup .view.unlock.locked {
-  padding-top: 20px;
-  padding-bottom: 12px;
+  gap: 0;
+  padding: 20px;
+}
+
+main.vault.popup .view.unlock.locked .unlock-hero {
+  margin-bottom: 20px;
+}
+
+main.vault.popup .view.unlock.locked .unlock-under {
+  margin-top: 8px;
 }
 
 /* The lock, or Touch ID's fingerprint, over its one line. */
 .unlock-hero {
   display: grid;
   justify-items: center;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 8px;
   text-align: center;
 }
@@ -713,7 +724,7 @@ main.vault.popup .view.unlock.locked {
   all: unset;
   display: grid;
   justify-items: center;
-  gap: 10px;
+  gap: 12px;
   padding: 0 14px;
   border-radius: var(--radius-xl);
   cursor: pointer;
@@ -794,7 +805,7 @@ main.vault.popup .view.unlock.locked {
   opacity: 0.4;
 }
 
-/* The one line under the field: why it locked, or what went wrong, in the same place. Its room is always there, so nothing it says moves the panel or its bubble. One leaves before the other comes: only one is ever readable. */
+/* The one line under the field: that it's locked and why, or what went wrong, in the same place. It always says something, so nothing it says moves the panel or its bubble. One leaves before the other comes: only one is ever readable. */
 .unlock-under {
   display: grid;
   min-height: 16px;
@@ -805,6 +816,7 @@ main.vault.popup .view.unlock.locked {
 
 .unlock-under > p {
   grid-area: 1 / 1;
+  justify-self: center;
   margin: 0;
 }
 

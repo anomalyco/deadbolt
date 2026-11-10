@@ -24,6 +24,8 @@ export const UNLOCK_FEEL = {
 
 const SUB = "Opens in the toolbar"
 const WAITING = "Waiting in the toolbar ↗"
+/** The row's line rolls to WAITING as it's pressed, quickly (about 180 ms): it answers the press, it doesn't perform. */
+const WAIT_ROLL = 0.16
 /** How long the lock shows open before it gives way to the first login. */
 const OPEN_HOLDS = 0.3
 /** One breath of the waiting lock, in and out, in ms. */
@@ -36,9 +38,10 @@ const LIGHT_MS = 1800
  * the old line slides up and out as the new one slides in from below, each
  * fading under a soft edge at the line's top and bottom, so the two never
  * show at once in the same place and none of the old is left. The width
- * leads on a slightly quicker spring; nothing is cut at the side.
+ * leads on a slightly quicker spring; nothing is cut at the side. `seconds`:
+ * the roll's spring (the width's and the lead scale with it).
  */
-export function swapText(el: HTMLElement, text: string, centred = false) {
+export function swapText(el: HTMLElement, text: string, centred = false, seconds = 0.45) {
   const old = el.dataset.text ?? el.textContent ?? ""
   if (old === text) return
   el.dataset.text = text
@@ -62,7 +65,10 @@ export function swapText(el: HTMLElement, text: string, centred = false) {
     "mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 78%,transparent)"
   win.append(into, out)
   el.replaceChildren(win)
-  const roll = spring(0.45)
+  const roll = spring(seconds)
+  const width = spring(seconds * 0.82)
+  /** A longer line lets the width get ahead before it shows. */
+  const ahead = Math.round((80 * seconds) / 0.45)
   const lines = (lead: number) => {
     // The old line is gone by half way and the new one shows only from a third: only one is ever readable.
     out.animate([{ transform: "translateY(0)", opacity: 1 }, { opacity: 0, offset: 0.5 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "forwards" })
@@ -79,8 +85,8 @@ export function swapText(el: HTMLElement, text: string, centred = false) {
     const wide = Math.max(from, to)
     win.style.width = `${wide}px`
     const side = (w: number) => `${-(wide - w) / 2}px`
-    win.animate([{ marginLeft: side(from), marginRight: side(from) }, { marginLeft: side(to), marginRight: side(to) }], { ...spring(0.37), fill: "forwards" })
-    return lines(to > from + 0.5 ? 80 : 0)
+    win.animate([{ marginLeft: side(from), marginRight: side(from) }, { marginLeft: side(to), marginRight: side(to) }], { ...width, fill: "forwards" })
+    return lines(to > from + 0.5 ? ahead : 0)
   }
   // The soft edges are a mask, and a mask ends at the window's own box: while the window is narrower than a line still
   // leaving or already coming, that line would be cut at the side. So the box reaches as far as the wider line does,
@@ -90,11 +96,9 @@ export function swapText(el: HTMLElement, text: string, centred = false) {
   win.style.marginRight = `${-reach}px`
   // To the fraction of a pixel: a rounded width would step as the line lands.
   const [from, to] = [out.getBoundingClientRect().width, into.getBoundingClientRect().width]
-  // A longer line lets the width get ahead before it shows.
-  const lead = to > from + 0.5 ? 80 : 0
   // The width holds where it lands until the line is plain text again: let go sooner, it would spring back to the wider of the two.
-  if (Math.abs(to - from) > 0.5) win.animate([{ width: `${from}px` }, { width: `${to}px` }], { ...spring(0.37), fill: "forwards" })
-  lines(lead)
+  if (Math.abs(to - from) > 0.5) win.animate([{ width: `${from}px` }, { width: `${to}px` }], { ...width, fill: "forwards" })
+  lines(to > from + 0.5 ? ahead : 0)
 }
 
 /** The locked row: it unlocks in the toolbar panel. `press` runs on a pointer's own click (Enter goes through the menu's keys). */
@@ -117,7 +121,7 @@ export function waitOnPanel(rows: HTMLElement, on: boolean) {
   row.classList.toggle("waiting", on)
   const sub = row.querySelector<HTMLElement>(".sub")
   const feel = UNLOCK_FEEL.waiting
-  if (feel === "soft" && sub) swapText(sub, on ? WAITING : SUB)
+  if (feel === "soft" && sub) swapText(sub, on ? WAITING : SUB, false, WAIT_ROLL)
   if (!on) return cool(row)
   if (reducedMotion()) return
   if (feel === "soft") row.querySelector(".avatar .padlock")?.animate([{ opacity: 1 }, { opacity: 0.4 }], { duration: BREATH_MS / 2, direction: "alternate", iterations: Infinity, easing: "ease-in-out" })

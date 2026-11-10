@@ -30,6 +30,7 @@ import { chromium, type BrowserContext, type Frame, type Page } from "playwright
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { lines, menuStamps, PANEL_STAMPS, stampMenu, stampWorker, watchWindows, workerStamps, type Stamp } from "./timing"
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined }
 const flag = (name: string) => process.argv.includes(name)
@@ -150,6 +151,49 @@ for (const [title, user] of [["Acme", "kit@example.test"], ["Acme (work)", "kit@
 const page = await context.newPage()
 check(true, `${(await context.browser()?.version()) ?? "the browser"} is up, headed, with the built extension and a vault of two logins`)
 
+// ---- 0. Where the time goes, from a press on the row to the panel on screen (--timing <presses>) ----
+const presses = Number(arg("--timing") ?? 0)
+if (presses > 0) {
+  const windows = watchWindows()
+  await stampWorker(worker)
+  const after: number[] = []
+  for (let i = 1; i <= presses; i++) {
+    await send(device, { type: "device-lock" })
+    await page.bringToFront()
+    await page.goto(origin)
+    await sleep(1200)
+    await page.locator("#username").click()
+    const menu = await until("the inline menu", async () => { const f = menuFrame(page); return f && (await f.locator("button.row.unlock").count()) ? f : null })
+    const box = await menu?.locator("button.row.unlock").boundingBox()
+    if (!menu || !box) break
+    // The menu takes a press only once it has sat still.
+    await sleep(1500)
+    await stampMenu(menu)
+    await workerStamps(worker)
+    const from = Date.now()
+    // A person's click: the button is down for about 90 ms.
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await sleep(150)
+    await page.mouse.down()
+    await sleep(90)
+    await page.mouse.up()
+    if (!(await until("the toolbar popup", () => popupTarget(), 10_000))) break
+    await sleep(900)
+    const panel = JSON.parse((await inPopup(PANEL_STAMPS)) ?? "[]") as Stamp[]
+    const awake = (await workerStamps(worker)) as Stamp[]
+    const all = [...((await menuStamps(menu)) as Stamp[]), ...awake, ...panel, ...(windows?.stamps().filter(([, t]) => t >= from) ?? [])]
+    const { text, click, shown } = lines(all)
+    console.log(`note: press ${i} (the worker ${awake.length ? "was awake" : "had to wake"}), in ms after the click:\n${text}`)
+    if (shown !== null) after.push(shown - click)
+    await inPopup("window.close()")
+    await until("the popup closing", async () => !(await popupTarget()), 5000)
+    await sleep(600)
+  }
+  windows?.stop()
+  const median = [...after].sort((a, b) => a - b)[Math.floor(after.length / 2)] ?? NaN
+  check(after.length === presses, `timing: the panel was on screen after each of ${presses} presses: ${after.map((t) => Math.round(t)).join(", ")} ms after the click (median ${Math.round(median)} ms)`)
+}
+
 /** Locks, opens the sign-in page afresh, and clicks the menu's real locked row: the real popup should come up. */
 async function lockAndClickRow(name: string): Promise<boolean> {
   await send(device, { type: "device-lock" })
@@ -201,6 +245,13 @@ if (await lockAndClickRow("passphrase")) {
   check(first.title === "Unlock Deadbolt" && first.focus === "Passphrase", `passphrase: it shows the lock and the title, the passphrase field focused (${JSON.stringify(first)})`)
   check((await menuFrame(page)?.locator("button.row .sub").innerText()) === "Waiting in the toolbar ↗", "passphrase: the row waits by its field while the popup is up")
   await need("shot", "popup-open", "")
+  // Whether a page can round the browser's popup: a see-through page with round corners, photographed, then taken back.
+  if (flag("--corners")) {
+    await inPopup(`(() => { const s = document.createElement("style"); s.id = "corners"; s.textContent = "html,body{background:transparent!important}main{border-radius:14px;overflow:hidden;background:var(--bg)}"; document.head.append(s) })()`)
+    await sleep(300)
+    await need("shot", "popup-corners", "")
+    await inPopup(`document.getElementById("corners")?.remove()`)
+  }
   await typePassphrase("passphrase")
   await closedAndListed("passphrase")
   await need("shot", "menu-lists-logins", "")

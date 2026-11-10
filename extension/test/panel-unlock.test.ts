@@ -39,6 +39,7 @@ describe("the toolbar panel the locked row opens", () => {
     expect(named).toEqual(["popup.html#locked,menu", "popup.html#locked"])
     const first = port()
     first.hello(7)
+    await settle()
     expect(first.heard).toEqual([{ fromMenu: true }])
     // The user opening it again from the toolbar is their own.
     const again = port()
@@ -108,6 +109,32 @@ describe("the toolbar panel the locked row opens", () => {
     expect(late.heard).toEqual([{ fromMenu: false }])
   })
 
+  test("the panel opens at once, and is the row's only once the menu says the press counted; a press that didn't closes it", async () => {
+    const counted = panel.pressed("t1", "doc-1")
+    expect(await panel.open(1, counted)).toBe(true)
+    const up = port()
+    up.hello(7)
+    await settle()
+    // Nothing asks Touch ID yet.
+    expect(up.heard).toEqual([])
+    // Only the document that pressed has a say.
+    panel.confirm("t1", false, "doc-2")
+    panel.confirm("t1", true, "doc-1")
+    await settle()
+    expect(up.heard).toEqual([{ fromMenu: true }])
+
+    const covered = panel.pressed("t2", "doc-1")
+    await panel.open(1, covered)
+    const shut = port()
+    shut.hello(7)
+    panel.confirm("t2", false, "doc-1")
+    await settle()
+    expect(shut.heard).toEqual([{ fromMenu: false, close: true }])
+    // It going isn't the row's panel going: the menu stopped waiting on its own.
+    shut.close()
+    expect(tally.closed).toBe(0)
+  })
+
   test("only popup.html's own port counts", async () => {
     await panel.open(1)
     for (const p of [port(`chrome-extension://${ID}/device.html`), port("https://example.com/"), port(POPUP_URL, "other")]) {
@@ -116,6 +143,7 @@ describe("the toolbar panel the locked row opens", () => {
     }
     const real = port()
     real.hello(7)
+    await settle()
     expect(real.heard).toEqual([{ fromMenu: true }])
     await settle()
   })

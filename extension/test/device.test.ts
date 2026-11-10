@@ -398,15 +398,11 @@ describe("lock", () => {
       await open()
       expect(reason().textContent).toBe(`Locked · ${line}`)
     }
-    // A lock the user made needs no telling.
-    settings = { preset: "comfortable", lockedBy: { reason: "manual" } }
-    await open()
-    expect(reason().textContent).toBe("")
-    // Nothing known, or something that isn't a reason: nothing said.
-    for (const lockedBy of [undefined, { reason: "password123" }]) {
+    // A lock the user made needs no reason, and nothing known (or something that isn't a reason) gives none: the line still says it's locked, never blank.
+    for (const lockedBy of [{ reason: "manual" }, undefined, { reason: "password123" }]) {
       settings = { preset: "comfortable", lockedBy }
       await open()
-      expect(reason().textContent).toBe("")
+      expect(reason().textContent).toBe("Locked")
     }
   })
 

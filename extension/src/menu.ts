@@ -362,15 +362,26 @@ function notice(glyph: Element, title: string, sub: string): HTMLElement {
 /**
  * The locked row (ui/unlock.ts), pressed: the browser-only Deadbolt unlocks in
  * the toolbar panel, never in the page or this frame, and the row waits there
- * by its field. Like a pick, it waits for the menu to have been visible and still.
+ * by its field. Like a pick, the press counts only with the menu visible and
+ * still through it, which takes a moment to know (confirmScale): the row
+ * answers and the panel opens at once, and the menu's word follows. The panel
+ * asks Touch ID only once the press counted, and closes if it didn't.
  */
 async function unlock() {
   if (busy) return
   if (!pressedScale || !dwell.settled(pressedAt)) return say(pressedScale && dwell.visible ? "Click again in a moment." : "This menu is covered.")
   busy = true
+  waitOnPanel(rowsEl, true)
   try {
-    if (!(await confirmScale(pressedAt))) return say("This menu is covered.")
-    if ((await send<MenuUnlockReply>({ type: "db:menu-unlock", token })) === "panel") waitOnPanel(rowsEl, true)
+    const opening = send<MenuUnlockReply>({ type: "db:menu-unlock", token })
+    void opening.then((r) => r !== "panel" && waitOnPanel(rowsEl, false))
+    const ok = await confirmScale(pressedAt)
+    void send({ type: "db:menu-unlock-press", token, ok })
+    if (!ok) {
+      waitOnPanel(rowsEl, false)
+      say("This menu is covered.")
+    }
+    await opening
   } finally {
     busy = false
   }

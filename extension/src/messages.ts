@@ -214,6 +214,8 @@ export type ToBackground =
   | { type: "db:menu-dismiss"; token: string }
   /** The locked row of a browser-only Deadbolt was clicked: open the toolbar panel (or device.html) to unlock it. Answers a MenuUnlockReply. */
   | { type: "db:menu-unlock"; token: string }
+  /** Whether that press counted: the menu visible and still through it (menu.ts unlock). The panel it opened stays only if so. */
+  | { type: "db:menu-unlock-press"; token: string; ok: boolean }
   /** The size the surface needs; with `mode`, the mode it's folding into (only ever "pill"). */
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */

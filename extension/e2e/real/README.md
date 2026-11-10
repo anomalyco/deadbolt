@@ -30,6 +30,12 @@ and macOS each ask a person for once (Continue, then Touch ID or the Mac's
 password). Deadbolt's Touch ID slot is then set with a made-up key, only so
 the panel asks and the dialog comes up.
 
+`--timing <n>` first presses the row `n` times and prints where the time goes
+from the click to the panel on screen (`timing.ts`): the press, each browser
+call the background makes, the panel's loading and painting, and when macOS
+lists the panel's window. `--corners` photographs the panel with a
+see-through page and round corners (Brave's bubble stays square).
+
 `--driver <dir>` is for running it where nobody is at the keyboard (we use a
 throwaway macOS VM driven over VNC, which also records its screen). The run
 writes `<dir>/need/<n>-<kind>-<name>` and waits for the same name in

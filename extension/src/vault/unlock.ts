@@ -37,8 +37,8 @@ export function unlockView(app: App): View {
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
   const submit = h("button", { class: "icon-button unlock-go", type: "submit", title: "Unlock", "aria-label": "Unlock" }, glyph("enter"))
   const fieldRow = h("div", { class: "unlock-field" }, input, submit)
-  // The one line under the field: why it locked, quietly, or what went wrong in its place. Its room is always there.
-  const why = h("p", { class: "lock-reason" })
+  // The one line under the field: that it's locked and why, quietly, or what went wrong in its place. It always says something.
+  const why = h("p", { class: "lock-reason" }, "Locked")
   const line = h("p", { class: "unlock-line", role: "alert" })
   const under = h("div", { class: "unlock-under" }, why, line)
   const say = (text: string) => {
@@ -161,15 +161,17 @@ export function unlockView(app: App): View {
     input.focus()
   })
 
+  let painted = false
+  requestAnimationFrame(() => requestAnimationFrame(() => (painted = true)))
   void app.ask({ type: "device-settings" }).then((r) => {
     if (r.ok && typeof r.reply.retryAt === "number" && r.reply.retryAt > Date.now() && form.isConnected) backoff(r.reply.retryAt)
     if (r.ok && isLockedBy(r.reply.lockedBy)) {
       why.dataset.reason = r.reply.lockedBy.reason
-      // A lock the user made needs no telling.
-      if (r.reply.lockedBy.reason !== "manual") {
-        why.textContent = lockedLine(r.reply.lockedBy)
-        why.animate?.([{ opacity: 0 }, { opacity: 1 }], timing(0.2))
-      }
+      // A lock the user made needs no reason: "Locked" says it.
+      if (r.reply.lockedBy.reason === "manual") return
+      // Before the panel has shown, the reason is simply there; after, it rolls in (unless the panel is still coming in: its line is measured at rest).
+      if (painted && !form.getAnimations?.().length) swapText(why, lockedLine(r.reply.lockedBy), true, 0.3)
+      else why.textContent = lockedLine(r.reply.lockedBy)
     }
   })
 

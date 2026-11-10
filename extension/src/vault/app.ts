@@ -13,7 +13,7 @@ import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
 import { swapText, UNLOCK_FEEL } from "../ui/unlock"
-import { PANEL_PORT, type PanelAnswer, type PanelHello } from "../bg/panel-unlock"
+import { PANEL_PORT, PRESS_MS, type PanelAnswer, type PanelHello } from "../bg/panel-unlock"
 import { iconSettings, onIconSettings, type IconSettings } from "../ui/icon-store"
 import { passkeyCard } from "../ui/passkey"
 import { recordControl, type RecordControl } from "../ui/site-notes"
@@ -216,6 +216,8 @@ export class App {
       this.status.state === "locked" ? "" : (this.record?.button ?? ""),
       ...right,
     )
+    // The locked panel is the lock, its title and the field: a "Deadbolt" bar over "Unlock Deadbolt" would only say it twice.
+    this.header.hidden = this.surface === "popup" && this.status.state === "locked"
     this.footer.hidden = !ready
     if (ready) this.paintSync()
   }
@@ -509,10 +511,15 @@ function panelPort(): Promise<boolean> {
       (w) =>
         new Promise<boolean>((resolve) => {
           const port = chrome.runtime.connect({ name: PANEL_PORT })
-          port.onMessage.addListener((a: PanelAnswer) => resolve(a?.fromMenu === true))
+          port.onMessage.addListener((a: PanelAnswer) => {
+            // Opened by a press on the row that didn't count (the menu was covered): it goes.
+            if (a?.close) return window.close()
+            resolve(a?.fromMenu === true)
+          })
           port.onDisconnect.addListener(() => resolve(false))
           port.postMessage({ windowId: w.id } satisfies PanelHello)
-          setTimeout(() => resolve(false), 1000)
+          // The answer waits on the menu's word on its press (bg/panel-unlock.ts PRESS_MS).
+          setTimeout(() => resolve(false), PRESS_MS + 500)
         }),
     )
     .catch(() => false)
