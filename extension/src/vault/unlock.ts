@@ -67,7 +67,7 @@ export function unlockView(app: App): View {
     touch.classList.toggle("asking", state === "asking")
     touch.setAttribute("aria-busy", String(state === "asking"))
     if (atOnce) touchLabel.textContent = touchLabel.dataset.text = TOUCH_LABEL[state]
-    else swapText(touchLabel, TOUCH_LABEL[state])
+    else swapText(touchLabel, TOUCH_LABEL[state], true)
   }
 
   const backoff = (until: number) => {
@@ -186,7 +186,7 @@ export function unlockView(app: App): View {
     // The lock opens (or the fingerprint gives way to one that does), and then what says the state says Unlocked: the Touch ID label, or the title.
     const disc = (enrolled ? touch.querySelector(".unlock-disc") : mark) as HTMLElement | null
     const lead = disc ? openDisc(disc) : 0
-    setTimeout(() => swapText(enrolled ? touchLabel : heading, "Unlocked"), lead)
+    setTimeout(() => swapText(enrolled ? touchLabel : heading, "Unlocked", true), lead)
   }
 
   const focus = () => {

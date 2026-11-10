@@ -687,38 +687,6 @@ main.vault.popup .view.unlock.locked {
   height: 28px;
 }
 
-/* The padlock (src/ui/padlock.ts): larger than an icon, so its shackle's few units of travel show. The shackle is behind a window that ends at the body's top edge (13 of 24 units down): below that it's inside the body. The window gives the turn on the long leg (15.8 of 24 across) its depth. A little above centre: closed, the lock sits low in its box to leave the shackle room to rise. */
-.padlock {
-  position: relative;
-  display: block;
-  width: 36px;
-  height: 36px;
-  margin-top: -3px;
-}
-
-.unlock-disc .padlock svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-}
-
-.padlock-window {
-  position: absolute;
-  inset: -12px 0 auto;
-  height: calc(12px + 54.167%);
-  overflow: hidden;
-  perspective: 90px;
-  perspective-origin: 65.833% 40%;
-}
-
-.unlock-disc .padlock .padlock-shackle {
-  top: 12px;
-  height: 36px;
-  transform-origin: 65.833% 50%;
-}
-
 /* The light that runs once round the disc as it unlocks (src/vault/unlock.ts open): a short bright arc on the disc's own edge. */
 .unlock-disc {
   position: relative;

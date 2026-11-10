@@ -4,7 +4,8 @@
 // Deadbolt unlocks there, the same menu turns into the logins, so the next
 // thing the user does is pick one. The passphrase is never typed here.
 
-import { avatar, h, icon } from "./dom"
+import { avatar, h } from "./dom"
+import { padlock, slideOpen } from "./padlock"
 import { MENU_MOTION, reducedMotion, REDUCED_FADE, spring, timing } from "./motion"
 
 /** How the row waits, how it turns, and the panel's part: each value is one of the choices still open. */
@@ -37,7 +38,7 @@ const LIGHT_MS = 1800
  * show at once in the same place and none of the old is left. The width
  * leads on a slightly quicker spring; nothing is cut at the side.
  */
-export function swapText(el: HTMLElement, text: string) {
+export function swapText(el: HTMLElement, text: string, centred = false) {
   const old = el.dataset.text ?? el.textContent ?? ""
   if (old === text) return
   el.dataset.text = text
@@ -57,28 +58,43 @@ export function swapText(el: HTMLElement, text: string) {
   out.setAttribute("aria-hidden", "true")
   const win = document.createElement("span")
   win.style.cssText =
-    "display:inline-grid;box-sizing:content-box;justify-items:start;vertical-align:top;overflow-x:visible;overflow-y:clip;" +
+    `display:inline-grid;box-sizing:content-box;justify-items:${centred ? "center" : "start"};vertical-align:top;overflow-x:visible;overflow-y:clip;` +
     "mask-image:linear-gradient(to bottom,transparent,#000 22%,#000 78%,transparent)"
   win.append(into, out)
   el.replaceChildren(win)
+  const roll = spring(0.45)
+  const lines = (lead: number) => {
+    // The old line is gone by half way and the new one shows only from a third: only one is ever readable.
+    out.animate([{ transform: "translateY(0)", opacity: 1 }, { opacity: 0, offset: 0.5 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "forwards" })
+    into
+      .animate([{ transform: "translateY(100%)", opacity: 0 }, { opacity: 0, offset: 0.35 }, { transform: "translateY(0)", opacity: 1 }], { ...roll, delay: lead, fill: "backwards" })
+      .finished.then(() => el.dataset.text === text && el.firstChild === win && (el.textContent = text), () => {})
+  }
+  // A centred line (the panel's label and title): the window is as wide as the wider line from start to end, so its mask
+  // never cuts either, and both lines are centred in it, so each rolls straight up on the one axis it rests on. The
+  // room it takes in the layout still goes from one line's width to the other's, in equal margins either side that
+  // spring: what's sized round it (the Touch ID button) grows or shrinks about the same middle and nothing snaps.
+  if (centred) {
+    const [from, to] = [out.getBoundingClientRect().width, into.getBoundingClientRect().width]
+    const wide = Math.max(from, to)
+    win.style.width = `${wide}px`
+    const side = (w: number) => `${-(wide - w) / 2}px`
+    win.animate([{ marginLeft: side(from), marginRight: side(from) }, { marginLeft: side(to), marginRight: side(to) }], { ...spring(0.37), fill: "forwards" })
+    return lines(to > from + 0.5 ? 80 : 0)
+  }
   // The soft edges are a mask, and a mask ends at the window's own box: while the window is narrower than a line still
   // leaving or already coming, that line would be cut at the side. So the box reaches as far as the wider line does,
   // in padding that a margin takes back: nothing moves, and no line is ever cut sideways.
   const reach = Math.ceil(Math.abs(out.getBoundingClientRect().width - into.getBoundingClientRect().width)) + 2
   win.style.paddingRight = `${reach}px`
   win.style.marginRight = `${-reach}px`
-  // To the fraction of a pixel: a rounded width would let the line step sideways as it lands (it's centred in the panel).
+  // To the fraction of a pixel: a rounded width would step as the line lands.
   const [from, to] = [out.getBoundingClientRect().width, into.getBoundingClientRect().width]
-  const roll = spring(0.45)
   // A longer line lets the width get ahead before it shows.
   const lead = to > from + 0.5 ? 80 : 0
   // The width holds where it lands until the line is plain text again: let go sooner, it would spring back to the wider of the two.
   if (Math.abs(to - from) > 0.5) win.animate([{ width: `${from}px` }, { width: `${to}px` }], { ...spring(0.37), fill: "forwards" })
-  // The old line is gone by half way and the new one shows only from a third: only one is ever readable.
-  out.animate([{ transform: "translateY(0)", opacity: 1 }, { opacity: 0, offset: 0.5 }, { transform: "translateY(-100%)", opacity: 0 }], { ...roll, fill: "forwards" })
-  into
-    .animate([{ transform: "translateY(100%)", opacity: 0 }, { opacity: 0, offset: 0.35 }, { transform: "translateY(0)", opacity: 1 }], { ...roll, delay: lead, fill: "backwards" })
-    .finished.then(() => el.dataset.text === text && el.firstChild === win && (el.textContent = text), () => {})
+  lines(lead)
 }
 
 /** The locked row: it unlocks in the toolbar panel. `press` runs on a pointer's own click (Enter goes through the menu's keys). */
@@ -86,7 +102,8 @@ export function lockedRow(press: () => void): HTMLElement {
   const r = h(
     "button",
     { class: "row unlock", type: "button" },
-    avatar("", icon("lock")),
+    // The panel's padlock, at an icon's size (ui/padlock.ts): it opens the same way.
+    avatar("", padlock(14)),
     h("span", { class: "text" }, h("span", { class: "title" }, "Unlock Deadbolt"), h("span", { class: "sub" }, SUB)),
   )
   r.addEventListener("click", (e) => e.isTrusted && e.detail > 0 && press())
@@ -103,7 +120,7 @@ export function waitOnPanel(rows: HTMLElement, on: boolean) {
   if (feel === "soft" && sub) swapText(sub, on ? WAITING : SUB)
   if (!on) return cool(row)
   if (reducedMotion()) return
-  if (feel === "soft") row.querySelector(".avatar svg")?.animate([{ opacity: 1 }, { opacity: 0.4 }], { duration: BREATH_MS / 2, direction: "alternate", iterations: Infinity, easing: "ease-in-out" })
+  if (feel === "soft") row.querySelector(".avatar .padlock")?.animate([{ opacity: 1 }, { opacity: 0.4 }], { duration: BREATH_MS / 2, direction: "alternate", iterations: Infinity, easing: "ease-in-out" })
   if (feel === "light") {
     const light = h("span", { class: "unlock-light", "aria-hidden": "true" })
     row.append(light)
@@ -121,7 +138,7 @@ export function waitOnPanel(rows: HTMLElement, on: boolean) {
 
 /** Whatever the waiting row was doing comes to rest from where it is: the lock back to full, the light fading where it is. */
 function cool(row: HTMLElement) {
-  const glyph = row.querySelector<SVGElement>(".avatar svg")
+  const glyph = row.querySelector<HTMLElement>(".avatar .padlock")
   if (glyph?.getAnimations().length) {
     const opacity = getComputedStyle(glyph).opacity
     for (const a of glyph.getAnimations()) a.cancel()
@@ -155,7 +172,7 @@ export function turnIntoLogins(old: HTMLElement, rows: HTMLElement, highlight: H
   const fresh = Array.from(rows.children) as HTMLElement[]
   if (!list || !surface || !fresh.length || typeof old.animate !== "function") return 0
   // The breathing lock and the light stop where they are; a line still rolling finishes.
-  for (const a of old.querySelector(".avatar svg")?.getAnimations() ?? []) a.cancel()
+  for (const a of old.querySelector(".avatar .padlock")?.getAnimations() ?? []) a.cancel()
   old.querySelector(".unlock-light")?.remove()
   old.classList.remove("waiting", "active")
   old.style.cssText = `position:absolute;left:${rows.offsetLeft}px;top:${rows.offsetTop}px;width:${rows.offsetWidth}px;margin:0;pointer-events:none;z-index:1`
@@ -207,14 +224,10 @@ export function turnIntoLogins(old: HTMLElement, rows: HTMLElement, highlight: H
   return ms
 }
 
-/** The lock's shackle lifts and swings open on its right leg, and its tile glows green and cools. */
+/** The row's padlock opens as the panel's does (its shackle slides straight up, the short foot coming free), and its tile glows green and cools. */
 function openLock(row: HTMLElement) {
-  const shackle = row.querySelector<SVGPathElement>(".avatar svg path")
-  if (shackle) {
-    shackle.style.transformBox = "view-box"
-    shackle.style.transformOrigin = "15.8px 10.5px"
-    shackle.animate([{ transform: "none" }, { transform: "translateY(-2.6px) rotate(-22deg)" }], { ...timing(OPEN_HOLDS), fill: "forwards" })
-  }
+  const lock = row.querySelector(".avatar .padlock")
+  if (lock) slideOpen(lock, false)
   row.querySelector(".avatar")?.animate(
     [{}, { backgroundColor: "var(--success-bg)", color: "var(--success)", offset: 0.3 }, {}],
     { duration: 900, easing: "ease-out" },
