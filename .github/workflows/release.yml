@@ -338,7 +338,7 @@ jobs:
   build-enclave:
     name: Build Touch ID helper
     needs: plan
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 15
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
@@ -453,7 +453,7 @@ jobs:
     name: Build macOS
     needs: [plan, build-enclave, sign-enclave]
     if: ${{ !cancelled() && needs.sign-enclave.result == 'success' }}
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 120
     env:
       DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
@@ -560,7 +560,7 @@ jobs:
     name: Verify macOS
     needs: [plan, sign-macos]
     if: ${{ !cancelled() && needs.sign-macos.result == 'success' }}
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 30
     env:
       DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
@@ -586,7 +586,7 @@ jobs:
       && needs.build-linux-x64.result == 'success' && needs.build-linux-arm64.result == 'success'
       && needs.build-linux-x64-musl.result == 'success' && needs.build-linux-arm64-musl.result == 'success'
       && needs.verify-macos.result == 'success' }}
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 30
     env:
       DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
@@ -778,7 +778,7 @@ jobs:
     name: Homebrew formula and cask
     needs: [plan, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.release-channel == 'stable' }}
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 30
     env:
       RELEASE: ${{ needs.plan.outputs.service }}
