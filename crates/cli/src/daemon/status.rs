@@ -86,7 +86,8 @@ impl Daemon {
 
     /// Updates the membership gate and closes open sync connections to devices
     /// that are no longer members of any vault.
-    pub(super) fn refresh(&self, session: &Session) {
+    pub(super) fn refresh(&self, session: &mut Session) {
+        session.revoke_stale_approvers();
         *self.members.write().unwrap_or_else(|e| e.into_inner()) = session.peer_set();
         let closed = session.node.enforce_membership();
         if closed > 0 {

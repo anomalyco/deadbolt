@@ -2378,7 +2378,7 @@ login here) and nothing else. The provider must be a known one with sign-in
 hosts (by `sign_in_provider`), the account must be saved at one of them, and
 the login lands in the account's own vault; a login of the site that already
 links to it is returned instead (`created: false`). The daemon's protocol is
-version 27 with it (`SiteLink`).
+version 28; it includes `SiteLink` (introduced in version 27) and the experimental mobile commands.
 
 - **Without `ref`:** creates a login in the default vault with `url`,
   `username` (when not blank) and `password`, named `title` unless that is

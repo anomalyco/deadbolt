@@ -1,7 +1,7 @@
 //! Shared passkey ceremony rules and mutation planning. Adapters establish
 //! user presence/verification and persist the planned write before replying.
 
-use std::collections::BTreeMap;
+use std::{borrow::Borrow, collections::BTreeMap};
 
 use zeroize::Zeroizing;
 
@@ -53,12 +53,13 @@ pub struct NewPasskey {
     pub exclude: Vec<String>,
 }
 
-pub fn check_excluded<'a>(
-    items: impl IntoIterator<Item = &'a Item>,
+pub fn check_excluded<I: Borrow<Item>>(
+    items: impl IntoIterator<Item = I>,
     rp: &str,
     exclude: &[String],
 ) -> Result<()> {
     if items.into_iter().any(|item| {
+        let item = item.borrow();
         matches(item, rp)
             && value(item, "credential-id").is_some_and(|id| exclude.iter().any(|e| e == id))
     }) {

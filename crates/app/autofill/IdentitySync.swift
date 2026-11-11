@@ -1,5 +1,9 @@
-// Synchronizes non-secret credential lookup metadata into macOS's
-// `ASCredentialIdentityStore` (`docs/macos-autofill.md`).
+// Synchronizes non-secret credential lookup metadata into the system
+// `ASCredentialIdentityStore` (`docs/macos-autofill.md`, `docs/mobile.md`).
+// macOS publishes password identities only, matching its advertised
+// capabilities. iOS also publishes passkey and (iOS 18+) one-time-code
+// identities; the iOS app publishes through `IdentitySyncer.publish(_:)`,
+// never the provider around a fill.
 //
 // Passwords, OTP seeds/codes, passkey private keys, notes, and custom fields
 // never enter `ASCredentialIdentityStore`.
@@ -10,7 +14,8 @@ import Foundation
 
 public protocol IdentityStoreProviding: Sendable {
     func isEnabled() async -> Bool
-    func replacePasswordIdentities(_ identities: [PasswordIdentity]) async throws
+    /// Replaces every identity with those of `snapshot` this platform offers.
+    func replaceIdentities(_ snapshot: AutofillIdentitiesReply) async throws
     func removeAllIdentities() async throws
 }
 
@@ -22,8 +27,14 @@ public struct SystemIdentityStoreAdapter: IdentityStoreProviding {
         return state.isEnabled
     }
 
-    public func replacePasswordIdentities(_ identities: [PasswordIdentity]) async throws {
-        let entries: [any ASCredentialIdentity] = identities.map { item in
+    public func replaceIdentities(_ snapshot: AutofillIdentitiesReply) async throws {
+        try await replace(Self.entries(snapshot))
+    }
+
+    /// The system identities for `snapshot`: passwords everywhere; passkeys
+    /// and one-time codes on iOS only (macOS doesn't advertise them).
+    public static func entries(_ snapshot: AutofillIdentitiesReply) -> [any ASCredentialIdentity] {
+        var entries: [any ASCredentialIdentity] = snapshot.passwords.map { item in
             let service = ASCredentialServiceIdentifier(
                 identifier: item.domain,
                 type: .domain
@@ -36,6 +47,39 @@ public struct SystemIdentityStoreAdapter: IdentityStoreProviding {
             identity.rank = Int(clamping: item.rank)
             return identity
         }
+        #if os(iOS)
+        for item in snapshot.passkeys {
+            guard let credentialID = Base64URL.decode(item.credentialId),
+                  let userHandle = Base64URL.decode(item.userHandle)
+            else {
+                continue
+            }
+            let identity = ASPasskeyCredentialIdentity(
+                relyingPartyIdentifier: item.rpId,
+                userName: item.username,
+                credentialID: credentialID,
+                userHandle: userHandle,
+                recordIdentifier: item.recordId
+            )
+            identity.rank = Int(clamping: item.rank)
+            entries.append(identity)
+        }
+        if #available(iOS 18.0, *) {
+            for item in snapshot.oneTimeCodes {
+                let identity = ASOneTimeCodeCredentialIdentity(
+                    serviceIdentifier: ASCredentialServiceIdentifier(identifier: item.domain, type: .domain),
+                    label: item.label,
+                    recordIdentifier: item.recordId
+                )
+                identity.rank = Int(clamping: item.rank)
+                entries.append(identity)
+            }
+        }
+        #endif
+        return entries
+    }
+
+    private func replace(_ entries: [any ASCredentialIdentity]) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             ASCredentialIdentityStore.shared.replaceCredentialIdentities(entries) { ok, error in
                 if ok {
@@ -84,9 +128,15 @@ public struct FileIdentityHashStore: IdentityHashPersisting {
     }
 
     public static func live() -> FileIdentityHashStore {
+        #if os(iOS)
+        let url = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: AutofillWire.iosAppGroup)?
+            .appendingPathComponent("identities.hash", isDirectory: false)
+        #else
         let group = AppGroupContainer.resolve()
         let url = group.socketURL?.deletingLastPathComponent()
             .appendingPathComponent("identities.hash", isDirectory: false)
+        #endif
         return FileIdentityHashStore(fileURL: url)
     }
 
@@ -151,11 +201,22 @@ public struct IdentitySyncer: Sendable {
         else {
             return false
         }
+        return await publish(snapshot)
+    }
+
+    /// Publishes `snapshot` unless the store is disabled or already holds
+    /// it. The iOS app calls this with the core's identity snapshot.
+    @discardableResult
+    public func publish(_ snapshot: AutofillIdentitiesReply) async -> Bool {
+        guard await store.isEnabled() else {
+            hashStore.clearHash()
+            return false
+        }
         if hashStore.readHash() == snapshot.identitiesHash {
             return false
         }
         do {
-            try await store.replacePasswordIdentities(snapshot.passwords)
+            try await store.replaceIdentities(snapshot)
             hashStore.writeHash(snapshot.identitiesHash)
             return true
         } catch {

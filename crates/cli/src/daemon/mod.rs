@@ -19,6 +19,7 @@ mod macos_autofill;
 mod mirror;
 mod pairing;
 mod passkeys;
+mod remote_read;
 mod secrets;
 mod send;
 mod session;
@@ -931,8 +932,8 @@ impl Daemon {
         });
         self.ready.send_replace(false);
         let node = Node::spawn(config, gate, sync::Handler(self.clone())).await?;
-        let session = Session::new(loaded, node);
-        self.refresh(&session);
+        let mut session = Session::new(loaded, node);
+        self.refresh(&mut session);
         self.ready.send_replace(session.peer_set().is_empty());
         let id: DeviceId = session.id;
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);

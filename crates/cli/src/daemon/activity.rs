@@ -109,6 +109,8 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
             Purpose::Inject => (T::Use, "resolve-inject"),
             Purpose::Read => (T::Read, "resolve-read"),
         },
+        C::ExperimentalMobileRead { .. } => (T::Read, "experimental-mobile-read"),
+        C::ExperimentalApproverSet { .. } => (T::Never, "experimental-approver-set"),
         C::SecretGrantSet { .. } => (T::Never, "secret-grant-set"),
         C::SecretGrantList => (T::Look, "secret-grant-list"),
         C::AutofillStatus => (T::Browser, "autofill-status"),
@@ -208,6 +210,8 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             | Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }
+            | Command::ExperimentalApproverSet { .. }
+            | Command::ExperimentalMobileRead { .. }
             | Command::Resolve { .. }
             | Command::SecretGrantSet { .. }
     );
@@ -394,7 +398,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         ),
         // The items and fields named, as given; the reply names what was
         // found. Never a value.
-        Command::Resolve { refs, .. } => {
+        Command::Resolve { refs, .. } | Command::ExperimentalMobileRead { refs } => {
             let mut items: Vec<ActivityItem> = Vec::new();
             let mut fields: Vec<String> = Vec::new();
             for reference in refs {
@@ -637,6 +641,7 @@ impl Daemon {
                 .await
                 .unwrap_or_else(|_| caller::nobody());
         let draft = draft(&request.command, caller.class);
+        let mut approved_on = None;
         let command = request.command;
         let mut result = match super::macos_autofill::check_access(socket, &caller, &command) {
             Err(error) => Err(error),
@@ -644,9 +649,17 @@ impl Daemon {
                 command @ Command::ActivityReport { .. } => self.report(&caller, command),
                 command @ (Command::AgentClientAdd { .. }
                 | Command::AgentGrantSet { .. }
+                | Command::ExperimentalApproverSet { .. }
                 | Command::SecretGrantSet { .. }) => {
                     self.agents_admin(&caller, command, conv).await
                 }
+                Command::ExperimentalMobileRead { refs } => self
+                    .experimental_mobile_read(&caller, &refs, conv)
+                    .await
+                    .map(|(reply, device)| {
+                        approved_on = Some(device);
+                        reply
+                    }),
                 Command::Resolve { refs, purpose } => {
                     self.resolve(&caller, &refs, purpose, conv).await
                 }
@@ -673,6 +686,9 @@ impl Daemon {
             .map(|draft| draft.finish(caller, session::now(), &result));
         if let Some(entry) = &mut entry {
             self.name_agent_entry(entry);
+            if let Some(device) = approved_on {
+                entry.command = format!("experimental-mobile-read (approved on {device})");
+            }
         }
         (result, entry)
     }

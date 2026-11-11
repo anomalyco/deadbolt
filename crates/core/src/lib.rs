@@ -75,6 +75,7 @@
 //! where the inviter is the `Add`'s author.
 
 pub mod autofill;
+pub mod credential_provider;
 mod data;
 mod encoding;
 mod entry;

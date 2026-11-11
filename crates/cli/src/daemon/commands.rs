@@ -518,6 +518,8 @@ impl Daemon {
             Command::AgentClientAdd { .. }
             | Command::AgentGrantSet { .. }
             | Command::SecretGrantSet { .. }
+            | Command::ExperimentalApproverSet { .. }
+            | Command::ExperimentalMobileRead { .. }
             | Command::Resolve { .. }
             | Command::Health { .. }
             | Command::HealthIgnore { .. }

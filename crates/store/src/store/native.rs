@@ -33,6 +33,19 @@ pub fn init_with_params(
     device_secret: [u8; 32],
     params: KdfParams,
 ) -> Result<Unlocked> {
+    init_with_setup(dir, passphrase, device_secret, params, |_| Ok(()))
+}
+
+/// Initializes a native replica, running `setup` against its private pending
+/// file before publishing it. A failed setup never exposes an empty or partial
+/// replica. Used for a joining device's validated welcome and peer metadata.
+pub fn init_with_setup(
+    dir: &Path,
+    passphrase: &[u8],
+    device_secret: [u8; 32],
+    params: KdfParams,
+    setup: impl FnOnce(&Unlocked) -> Result<()>,
+) -> Result<Unlocked> {
     let device_secret = Zeroizing::new(device_secret);
     let db_path = dir.join(DB_FILE);
     params.validate()?;
@@ -50,13 +63,20 @@ pub fn init_with_params(
     let keys = Keys::new(keyset);
 
     let tmp = TempFile(dir.join(format!(".{DB_FILE}.init-{}", hex(&crypto::random::<8>()?))));
-    {
+    let keys = {
         let db = redb::Builder::new()
             .set_cache_size(CACHE_BYTES)
             .create_file(create_private_file(&tmp.0)?)?;
         initialize_db(&db, &keys, &kdf, &wrapped)?;
+        let pending = Unlocked {
+            db,
+            dir: dir.to_path_buf(),
+            keys,
+        };
+        setup(&pending)?;
         File::open(&tmp.0)?.sync_all()?;
-    }
+        pending.keys
+    };
 
     link_no_clobber(&tmp.0, &db_path).map_err(|e| match e.kind() {
         io::ErrorKind::AlreadyExists => Error::AlreadyExists(dir.to_path_buf()),

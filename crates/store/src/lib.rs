@@ -136,8 +136,8 @@ pub use error::{Error, Result};
 pub use kdf::KdfParams;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub use store::native::{
-    biometric_token, clear_biometric, init, init_with_params, is_initialized, unlock,
-    unlock_biometric,
+    biometric_token, clear_biometric, init, init_with_params, init_with_setup, is_initialized,
+    unlock, unlock_biometric,
 };
 pub use store::{
     ActivityPage, ActivityRow, Budget, DB_FILE, Dropped, FORMAT_VERSION, LogIter, PassphraseCheck,

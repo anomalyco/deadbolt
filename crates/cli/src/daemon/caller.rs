@@ -475,7 +475,7 @@ fn host_name(name: &str) -> Option<&'static str> {
 }
 
 /// The AI host among the parents ("OpenCode"), if any.
-fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
+pub(super) fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
     ancestry.iter().find_map(|a| {
         host_name(&a.name).or_else(|| {
             a.path

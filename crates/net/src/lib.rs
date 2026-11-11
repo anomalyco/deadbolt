@@ -21,6 +21,7 @@
 #[cfg(feature = "application")]
 pub mod application;
 
+pub mod approval;
 mod code;
 mod error;
 mod frame;

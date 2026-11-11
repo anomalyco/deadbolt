@@ -1,47 +1,13 @@
 //! Reload the standalone browser's single persisted vault without rewriting it.
 //! Kept outside the wasm adapter so the production storage seam is host-tested.
-use deadbolt_core::{Entry, Vault, VaultId};
-use deadbolt_store::Unlocked;
-use std::collections::BTreeMap;
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum Error {
-    #[error(transparent)]
-    Store(#[from] deadbolt_store::Error),
-    #[error(transparent)]
-    Decode(#[from] deadbolt_core::DecodeError),
-    #[error(
-        "Vault {id} is unavailable: {reason}. Its encrypted entries are retained. Do not reset browser storage."
-    )]
-    Unavailable {
-        id: VaultId,
-        reason: deadbolt_core::Error,
-    },
-    #[error(
-        "This browser expects one vault, but storage contains {0}. No vault was selected or replaced; encrypted entries are retained."
-    )]
-    VaultCount(usize),
-}
-
-pub(crate) fn load(store: &Unlocked) -> Result<Vault, Error> {
-    let mut grouped: BTreeMap<VaultId, Vec<Entry>> = BTreeMap::new();
-    for bytes in store.iter_all()? {
-        let entry = Entry::decode(&bytes?)?;
-        grouped.entry(entry.vault()).or_default().push(entry);
-    }
-    // Unlike the CLI, this browser's UI and wire adapter only support a single
-    // vault. Never silently select a different one when a history fails.
-    if grouped.len() != 1 {
-        return Err(Error::VaultCount(grouped.len()));
-    }
-    let (id, entries) = grouped.pop_first().ok_or(Error::VaultCount(0))?;
-    Vault::load(entries).map_err(|reason| Error::Unavailable { id, reason })
-}
+pub(crate) use deadbolt_net::application::storage::{Error, load};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deadbolt_core::{DeviceSecret, MAX_MEMBERSHIP_ENTRIES, MembershipOp, Payload};
+    use deadbolt_core::{
+        DeviceSecret, Entry, MAX_MEMBERSHIP_ENTRIES, MembershipOp, Payload, Vault,
+    };
     use deadbolt_store::KdfParams;
 
     #[test]
