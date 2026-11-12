@@ -210,8 +210,13 @@ impl<'a> Reader<'a> {
             return Err(Error::Corrupt("groups nested too deep".into()));
         }
         let count = self.len()?;
-        // Every node takes at least 2 bytes, so a lying count can't over-allocate.
-        let mut list = Vec::with_capacity(count.min(self.0.len() / 2));
+        // No capacity from `count`: it is the sender's word, and the smallest
+        // node a group can be is 6 bytes while one `Node` is 80, so a lying
+        // count could reserve hundreds of megabytes for a few bytes of input.
+        // Groups nest, so those reservations would stack up to `MAX_DEPTH`
+        // times. Growing as nodes are parsed keeps the list bounded by the
+        // bytes that are really there.
+        let mut list = Vec::new();
         for _ in 0..count {
             list.push(match self.u8()? {
                 ENTRY => Node::Entry(Entry {
@@ -272,6 +277,19 @@ mod tests {
     }
 
     #[test]
+    fn many_nodes_round_trip() {
+        let entries = (0..1000)
+            .map(|i| Node::Entry(Entry::text(format!("field-{i}"), "x", false)))
+            .collect();
+        let many = Bundle {
+            title: Some("Many".into()),
+            entries,
+            ..Bundle::default()
+        };
+        assert_eq!(Bundle::decode(&many.encode()).unwrap(), many);
+    }
+
+    #[test]
     fn debug_hides_entry_data() {
         let debug = format!("{:?}", bundle());
         assert!(!debug.contains("s3cret"), "{debug}");
@@ -288,6 +306,22 @@ mod tests {
         assert!(Bundle::decode(&extra).is_err());
         // A huge count with nothing behind it.
         assert!(Bundle::decode(&[1, 0, 0, 255, 255, 255, 255]).is_err());
+        // A huge count with a body behind it: the count is only a claim, so
+        // decoding must not reserve memory for it before reading the nodes.
+        let mut lying = vec![1, 0, 0];
+        lying.extend_from_slice(&u32::MAX.to_be_bytes());
+        lying.extend_from_slice(&[0u8; 64 * 1024]);
+        assert!(Bundle::decode(&lying).is_err());
+        // The same at every level a group can nest: the reservations must not
+        // stack up to `MAX_DEPTH` times.
+        let mut deep = vec![1, 0, 0];
+        for _ in 0..MAX_DEPTH + 2 {
+            deep.push(2); // a group
+            deep.push(0); // with no name
+            deep.extend_from_slice(&u32::MAX.to_be_bytes());
+        }
+        deep.extend_from_slice(&[0u8; 64 * 1024]);
+        assert!(Bundle::decode(&deep).is_err());
     }
 
     #[test]
