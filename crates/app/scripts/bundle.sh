@@ -58,6 +58,10 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>pw.deadbolt.app</string>
+<key>CFBundleURLSchemes</key><array><string>deadbolt</string></array>
+</dict></array>
 </dict></plist>
 PLIST
 swift crates/app/scripts/icon.swift "$scratch/icon.png"
