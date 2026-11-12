@@ -220,6 +220,20 @@ Users only ever type or click `deadbolt`, one file with the app built in. From a
 - **Focus:** on Wayland the token is what lets the compositor focus the window (Rune activates the open window through `xdg_activation_v1`); without one it can only ask for attention, which most compositors show as urgent. On X11 Rune focuses the window directly (`_NET_ACTIVE_WINDOW`), and the window manager's focus-stealing rules decide; the startup id isn't used for an open window (see Rune gaps).
 - **Linux launchers:** the first time `deadbolt app` (or bare `deadbolt` from a launcher) starts the app and there's no entry yet, it writes one as `deadbolt desktop install` does (`desktop::ensure`), and says so on stderr; an entry already there, for whichever binary, is left alone. `deadbolt desktop install` writes `~/.local/share/applications/pw.deadbolt.Deadbolt.desktop` (under `$XDG_DATA_HOME` when set) with `Exec=<this deadbolt> app` (for an npm install, npm's own link to it, `<prefix>/bin/deadbolt`, which stays put when an update moves the platform package; `desktop::launcher_program`) and `StartupNotify=true` (GLib launchers, GNOME's included, hand out an activation token only to entries that ask for startup notification), and the red keyhole as `icons/hicolor/scalable/apps/pw.deadbolt.Deadbolt.svg`. The UI reports `pw.deadbolt.Deadbolt` as its Wayland app id and X11 `WM_CLASS` (`rune::set_app_id`), matching `StartupWMClass`, so its window groups under the entry. Running it again rewrites both (after moving `deadbolt`, say); `deadbolt desktop uninstall` removes them. On macOS both say Deadbolt.app is the launcher.
 
+## Links
+
+On macOS, the app accepts `deadbolt://<id>` links for the default vault. The ID must be 4–32 lowercase hexadecimal characters and uniquely match an item ID prefix. A complete item ID has 32 characters. The app resolves the prefix against the unlocked item list, then selects the complete ID. A missing or ambiguous ID produces a notice without selecting another item.
+
+The bundle declares the `deadbolt` scheme (`CFBundleURLTypes` in `crates/app/scripts/bundle.sh`). Rune's live `on_open_url` hook brings the main window forward. The newest link waits through connection and unlock until the item list is ready. Navigation closes other item views and clears a search that hides the target, but does not interrupt a changed or saving form or a confirmed import. Links do not copy or reveal secret fields.
+
+From a terminal:
+
+```bash
+open 'deadbolt://5aa2'
+```
+
+The entire text after `deadbolt://` must be the ID. Paths, queries, fragments, credentials and ports are rejected, not removed. Secret references require an item and field separated by `/`, so they are not app links. Invalid links do not change selection. Headless, scene and script runs do not register the hook. Windows and Linux do not register the scheme; use `deadbolt app` there.
+
 ## One bundle, one daemon
 
 ```text

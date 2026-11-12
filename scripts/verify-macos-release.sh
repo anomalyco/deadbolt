@@ -45,6 +45,7 @@ check_app() {
   local plist="$app/Contents/Info.plist"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$DEADBOLT_APP_ID" ] || die "$app has the wrong identifier."
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$v" ] || die "$app is not version $v."
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$plist")" = "deadbolt" ] || die "$app doesn't declare the deadbolt:// scheme."
   xcrun stapler validate "$app"
   codesign --verify --deep --strict --verbose=2 -R="$(cat "$root/crates/app/update-requirement.txt")" "$app"
   spctl --assess --type execute --verbose=2 "$app"

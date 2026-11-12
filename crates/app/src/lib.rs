@@ -12,6 +12,7 @@ pub mod health;
 pub mod import;
 pub mod install;
 pub mod keys;
+mod links;
 pub mod mirror;
 pub mod model;
 pub mod onboarding;
@@ -100,6 +101,9 @@ pub fn run(argv: Vec<String>, host: Host) {
         let mut main = rune::App::new(spec())
             .chrome(view::CHROME)
             .gpu_backend(rune::GpuBackend::Metal);
+        if live {
+            main = main.on_open_url(App::open_item_url);
+        }
         let mut quick = rune::App::new(panel::spec()).windowless();
         // Native menus are macOS's; headless scripts reach them everywhere.
         if cfg!(target_os = "macos") || headless {
