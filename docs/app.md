@@ -222,7 +222,17 @@ Users only ever type or click `deadbolt`, one file with the app built in. From a
 
 ## Links
 
-The app answers `deadbolt://item/<short id>` links (macOS): the bundle declares the `deadbolt` scheme (`CFBundleURLTypes` in `crates/app/scripts/bundle.sh`), and Rune's `on_open_url` hook (`crates/app/src/lib.rs`) selects that item the way a click in the list does and brings the main window forward — including the link that launched the app, which arrives before its first frame. `open 'deadbolt://item/5aa2'` from anything (Raycast, a browser, the shell) shows the item. A link this doesn't understand changes nothing: the open still brings the app forward, showing what it was showing. Only a short id (lower-case hex, at most 16 characters) leaves the link, and the `item/` segment is required, so a link can't be mistaken for a secret reference (`deadbolt://vault/item/field`, whose first segment is a vault name). Headless runs ignore links. Windows and Linux pass links to a new process as arguments (a Rune limitation); there the scheme isn't registered and `deadbolt app` stays the way in.
+On macOS, the app accepts `deadbolt://<id>` links for the default vault. The ID must be 4–32 lowercase hexadecimal characters and uniquely match an item ID prefix. A complete item ID has 32 characters. The app resolves the prefix against the unlocked item list, then selects the complete ID. A missing or ambiguous ID produces a notice without selecting another item.
+
+The bundle declares the `deadbolt` scheme (`CFBundleURLTypes` in `crates/app/scripts/bundle.sh`). Rune's live `on_open_url` hook brings the main window forward. The newest link waits through connection and unlock until the item list is ready. Navigation closes other item views and clears a search that hides the target, but does not interrupt a changed or saving form or a confirmed import. Links do not copy or reveal secret fields.
+
+From a terminal:
+
+```bash
+open 'deadbolt://5aa2'
+```
+
+The entire text after `deadbolt://` must be the ID. Paths, queries, fragments, credentials and ports are rejected, not removed. Secret references require an item and field separated by `/`, so they are not app links. Invalid links do not change selection. Headless, scene and script runs do not register the hook. Windows and Linux do not register the scheme; use `deadbolt app` there.
 
 ## One bundle, one daemon
 

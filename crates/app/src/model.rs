@@ -70,6 +70,8 @@ pub struct App {
     pub items: Vec<ItemInfo>,
     pub loaded: bool,
     pub selected: Option<String>,
+    /// The newest item-link ID prefix, waiting for the unlocked item list.
+    pub(crate) pending_link: Option<String>,
     /// The selected item with its values.
     pub detail: Option<ItemInfo>,
     /// Pages ready before their values land (`cache`).
@@ -144,6 +146,7 @@ impl App {
             items: Vec::new(),
             loaded: false,
             selected: None,
+            pending_link: None,
             detail: None,
             cache: crate::cache::Cache::default(),
             held: None,
@@ -398,6 +401,7 @@ impl App {
         }
         self.edit_items_landed();
         self.keep_selection_visible();
+        self.follow_item_link(tx);
         if before.is_some() && self.selected != before {
             tx.instant();
         }
@@ -477,6 +481,9 @@ impl App {
     /// was left: an unlock from the other window or the CLI, the daemon
     /// stopping, onboarding.
     pub(crate) fn show(&mut self, screen: Screen) {
+        if matches!(screen, Screen::Failed(_)) {
+            self.pending_link = None;
+        }
         if screen != Screen::Locked {
             self.passphrase.clear();
             self.passphrase.focused = false;
@@ -533,6 +540,7 @@ impl App {
     /// The window is closing: clear our clipboard copies, wipe what we read
     /// and typed, and hang up a join.
     pub fn close(&mut self, tx: &mut Tx) {
+        self.pending_link = None;
         self.forget_vault(tx);
         self.passphrase.clear();
         self.forget_onboarding();

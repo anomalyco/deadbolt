@@ -205,6 +205,14 @@ fn page(s: &App, k: &Kit, item: &ItemInfo, full: Option<&ItemInfo>) -> Vec<El> {
     }
     let mut fields = col().key("fields").w_full().gap(2.0);
     if let Some(full) = full {
+        if full.fields.is_empty() {
+            fields = fields.child(
+                text("This item has no fields.")
+                    .key("no-fields")
+                    .font(k.ty.text_small)
+                    .color(k.c.text_faint),
+            );
+        }
         for (at, (field, is_code)) in item_fields(full).enumerate() {
             let on = s.nav.field == Some(at);
             let el = if is_code {

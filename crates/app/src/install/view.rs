@@ -106,12 +106,12 @@ pub fn page(s: &App, k: &Kit) -> Paged {
         Some(scan) => match &scan.found {
             Some((path, Existing::Moved(target))) => {
                 body = body
-                    .child(title(k, "title", "Repair the deadbolt command"))
+                    .child(title(k, "title", "Choose the app for the deadbolt command"))
                     .child(muted(
                         k,
                         "about",
                         format!(
-                            "{} links to a Deadbolt that moved or was deleted ({}).",
+                            "{} points to another Deadbolt bundle ({}).",
                             path.display(),
                             target.display()
                         ),
@@ -126,7 +126,7 @@ pub fn page(s: &App, k: &Kit) -> Paged {
                         .child(command(i, k, s.clock, Copied::Command));
                 } else {
                     let label = if i.busy {
-                        "Repairing…"
+                        "Updating…"
                     } else {
                         "Point it at this app"
                     };
@@ -245,9 +245,9 @@ pub fn offer(s: &App, k: &Kit) -> Option<El> {
     );
     let (head, about, label) = if moved {
         (
-            "Your deadbolt command needs repair",
-            "It links to a Deadbolt that moved or was deleted.",
-            "Repair…",
+            "Your deadbolt command points to another app",
+            "It does not use this copy of Deadbolt.",
+            "Review…",
         )
     } else {
         (

@@ -2613,9 +2613,10 @@ Pushes carry no id and no values. Refetch what's on screen.
 - **Unlocking from the browser:** the extension can say Deadbolt is locked but
   can't unlock it. Use the app or `deadbolt unlock`.
 - **Choosing the vault for a new login:** new logins go to the default vault.
-- **Opening the app from the browser:** Deadbolt registers no URL scheme and
-  the host has no message for it, so the popup says where to find the app
-  instead.
+- **Opening the app from the browser:** macOS bundles register
+  `deadbolt://<item-id>` links (see [App links](app.md#links)), but the extension
+  does not use them and the host has no message to open the app. The popup
+  still says where to find the app.
 
 ## Prior art
 

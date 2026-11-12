@@ -345,7 +345,9 @@ fn list_row(
                 .font(k.ty.small)
                 .color(k.c.text_faint)
         }))
-        .on_press_tx(move |s: &mut App, tx| s.press_row(&id, tx))
+        .on_press_tx(move |s: &mut App, tx| {
+            s.open_item(&id, tx);
+        })
         .role("option")
         // A search replaces the list at once (an edit is instant: no
         // `animate_edit_layout`). Rows a daemon change adds or removes fade
@@ -362,19 +364,27 @@ fn list_row(
 }
 
 impl App {
-    /// A row pressed: the item replaces at once, unless the import view
-    /// swaps back to it or a form gives way with its exit.
-    fn press_row(&mut self, id: &str, tx: &mut rune::Tx) {
-        if self.panel_inert() {
-            return;
+    /// Opens an item from a row or link. Changed or saving forms and a
+    /// confirmed import keep the current page and selection.
+    pub(crate) fn open_item(&mut self, id: &str, tx: &mut rune::Tx) -> bool {
+        if self.panel_inert() || self.import.preview().is_some_and(|(_, running)| running) {
+            return false;
         }
         // The item being edited stays as it is, focus and all.
         if self.edit.form.as_ref().and_then(|f| f.id.as_deref()) == Some(id) {
-            return;
+            return true;
         }
         let was_editing = self.editing();
         if !self.leave_edit() {
-            return;
+            return false;
+        }
+        if !self.visible().iter().any(|i| i.id == id) {
+            self.search.clear();
+        }
+        self.close_palette();
+        self.nav.sheet = false;
+        if let Some(installer) = self.installer.as_mut().filter(|i| i.open) {
+            installer.close();
         }
         if self.settings_open {
             self.close_settings();
@@ -390,6 +400,8 @@ impl App {
         }
         self.cancel_import();
         self.select_by_hand(id.to_owned(), 0);
+        tx.scroll_into_view(format!("item-{id}"));
+        true
     }
 }
 

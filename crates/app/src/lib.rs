@@ -12,6 +12,7 @@ pub mod health;
 pub mod import;
 pub mod install;
 pub mod keys;
+mod links;
 pub mod mirror;
 pub mod model;
 pub mod onboarding;
@@ -99,8 +100,10 @@ pub fn run(argv: Vec<String>, host: Host) {
         // Process-wide, so it covers the panel too; `RUNE_GPU_BACKEND=wgpu` overrides it.
         let mut main = rune::App::new(spec())
             .chrome(view::CHROME)
-            .gpu_backend(rune::GpuBackend::Metal)
-            .on_open_url(on_open_url);
+            .gpu_backend(rune::GpuBackend::Metal);
+        if live {
+            main = main.on_open_url(App::open_item_url);
+        }
         let mut quick = rune::App::new(panel::spec()).windowless();
         // Native menus are macOS's; headless scripts reach them everywhere.
         if cfg!(target_os = "macos") || headless {
@@ -184,41 +187,6 @@ pub fn run(argv: Vec<String>, host: Host) {
 /// True for a plain windowed run: no headless output, no scene, no script.
 pub fn is_live(args: &rune::tooling::Args) -> bool {
     !args.headless() && args.scene.is_none() && args.script.is_none()
-}
-
-/// The link the system opened with the app (`deadbolt://item/<short id>`,
-/// macOS only): selects that item the way a click in the list does, and
-/// brings the main window forward. The bundle declares the scheme
-/// (`crates/app/scripts/bundle.sh`); `on_open_url` runs on the main window's
-/// app, including for the link that launched it, before its first frame, so
-/// `select` asks the daemon and the page lands like any other reply. Headless
-/// runs (`windows` unset) ignore links. Anything this doesn't understand
-/// changes nothing: the open still brings the app forward, showing what it
-/// was showing.
-fn on_open_url(s: &mut App, url: &str, _tx: &mut Tx) {
-    let Some(id) = item_id(url) else {
-        return;
-    };
-    if let Some(windows) = &s.windows {
-        windows.open_main();
-    }
-    s.select_by_hand(id, 0);
-}
-
-/// The item short id in `deadbolt://item/<id>`: lower-case hex, at most a
-/// full id long. The `item/` segment is required, so a link can't be mistaken
-/// for a secret reference (`deadbolt://vault/item/field`, whose first segment
-/// is a vault name). The id is all that leaves the link: nothing else in it
-/// reaches the app.
-fn item_id(url: &str) -> Option<String> {
-    let id = url.strip_prefix("deadbolt://item/")?;
-    let id = id.split(['/', '?', '#']).next()?;
-    (!id.is_empty()
-        && id.len() <= 16
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
-    .then(|| id.to_owned())
 }
 
 fn setup(s: &mut App, waker: Waker) {
