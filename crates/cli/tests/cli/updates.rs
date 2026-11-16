@@ -217,7 +217,6 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
             .env("PATH", &empty)
             .env("HOME", &root)
             .env_remove("BUN_INSTALL");
-        // Not detached: that scaffolding needs a PATH, and this one is empty.
         let out = cmd.output().unwrap();
         eprintln!(
             "$ {args:?}\n{}{}",

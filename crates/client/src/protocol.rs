@@ -35,16 +35,15 @@
 //! `status` and `stop` are answered whatever `v` says, so a client can always
 //! find and replace a daemon of an older protocol. They are the only messages
 //! exchanged between different builds, so `Request` and `Status` must stay
-//! readable by older and newer ones. `claimed` is left out when empty, so a
-//! status request reads the same to every daemon.
+//! readable by older and newer ones.
 
-mod agent;
 mod caller;
 mod command;
 mod health;
 mod items;
 mod reference;
 mod reports;
+mod resolve;
 mod send;
 mod site;
 mod status;
@@ -53,13 +52,9 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-pub use agent::{
-    AgentClientInfo, AgentGrantInfo, AgentLogin, AgentPasskey, ClientAuth, NotGranted, Purpose,
-    ResolvedSecret, SecretGrantInfo,
-};
 pub use caller::{
-    ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Claim,
-    Outcome, Signature, Tier, UNVERIFIED_LINUX,
+    ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Outcome,
+    Signature, Tier, UNVERIFIED_LINUX,
 };
 pub use command::{Command, Request};
 pub use health::{
@@ -75,6 +70,7 @@ pub use reference::{Reference, SCHEME};
 pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
+pub use resolve::{Purpose, ResolvedSecret};
 pub use send::{SendInfo, SendState, SenderInfo};
 pub use site::{
     AutofillService, AutofillServiceKind, Fill, LoginRef, OneTimeCodeIdentity, PagePassword,
@@ -90,7 +86,7 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// The longest line the daemon reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;

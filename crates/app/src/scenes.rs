@@ -4,10 +4,7 @@ mod fixtures;
 
 pub use fixtures::{LOOPBACK_COST, MANY};
 
-use deadbolt_client::protocol::{
-    AgentClientInfo, AgentGrantInfo, Fill, ImportReport, MirrorAction, MirrorItem, MirrorReport,
-    Status,
-};
+use deadbolt_client::protocol::{ImportReport, MirrorAction, MirrorItem, MirrorReport, Status};
 use rune::{SecretCopy, Tx};
 
 use crate::daemon;
@@ -15,7 +12,7 @@ use crate::model::{App, Screen};
 use crate::onboarding::worker::{Progress, Stage, Worker};
 use crate::onboarding::{Flow, Step};
 use crate::view::{Notice, Severity};
-use crate::{import, install, settings, shortcut};
+use crate::{import, install, shortcut};
 use fixtures::{
     FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault,
     fixture_pairing_code, form, generated, import_preview, import_report, inviter, join_notice,
@@ -521,69 +518,6 @@ pub(crate) const SCENES: &[Scene] = &[
             generated(s);
             s.copy = None;
         }
-    }),
-    // Settings' Agents open: Browse paired, with a site-wide grant and one
-    // for a single login, its passkey included.
-    ("settings-agents", |s| {
-        vault(s);
-        s.open_settings();
-        s.toggle_agents();
-        let grant =
-            |id: &str, site: Option<&str>, login: Option<&str>, fields, passkeys| AgentGrantInfo {
-                id: id.into(),
-                client_id: "1b48513abb66721c".into(),
-                client_name: Some("browse".into()),
-                site: site.map(Into::into),
-                login: None,
-                login_label: login.map(Into::into),
-                fields,
-                passkeys,
-                created: 0,
-                expires_at: None,
-                expired: false,
-            };
-        let listing = (
-            vec![AgentClientInfo {
-                id: "1b48513abb66721c".into(),
-                name: "browse".into(),
-                created: 0,
-                last_used: None,
-            }],
-            vec![
-                grant(
-                    "a0",
-                    None,
-                    None,
-                    vec![Fill::Username, Fill::Password, Fill::Totp],
-                    true,
-                ),
-                grant(
-                    "a1",
-                    Some("github.com"),
-                    None,
-                    vec![Fill::Username, Fill::Password],
-                    false,
-                ),
-                grant(
-                    "a2",
-                    Some("vercel.com"),
-                    Some("kit@example.com"),
-                    vec![Fill::Totp],
-                    true,
-                ),
-            ],
-        );
-        s.apply(
-            daemon::Done::Agents {
-                seq: 1,
-                result: Ok(listing),
-            },
-            &mut Tx::default(),
-        );
-        s.nav.row = settings::rows(s)
-            .iter()
-            .position(|r| *r == settings::Row::Agents)
-            .unwrap_or(0);
     }),
     // ⌘, on a Mac with Touch ID, the keys on its second row.
     ("settings-page", |s| {

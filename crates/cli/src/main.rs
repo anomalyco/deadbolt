@@ -1,7 +1,6 @@
 #[cfg(not(unix))]
 compile_error!("deadbolt currently supports Unix platforms only");
 
-mod agents;
 mod app;
 mod browser;
 mod caller;
@@ -60,7 +59,7 @@ struct Cli {
 
 /// Exit code when the store is locked.
 const EXIT_LOCKED: u8 = 3;
-/// Exit code when the daemon refused the request (not granted, forbidden).
+/// Exit code when the daemon refused the request (forbidden).
 const EXIT_DENIED: u8 = 4;
 
 #[derive(Subcommand)]
@@ -126,12 +125,6 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Let AI agents sign in to sites without asking: pair an agent client
-    /// (such as Browse) and allow it logins, site by site; or let them use
-    /// secrets in `deadbolt run` and `inject` (`allow-secrets`). Every use
-    /// is in `deadbolt activity`.
-    #[command(subcommand)]
-    Agents(agents::AgentsCommand),
     /// Run Deadbolt's background daemon in the foreground. Clients start it.
     #[command(hide = true)]
     Daemon,
@@ -164,9 +157,6 @@ enum Commands {
     /// output held back as a possible value goes out after 100 ms of quiet.
     /// --no-mask keeps the terminal. Masking stops accidents, not a
     /// command that means to show a value.
-    ///
-    /// AI agents need `deadbolt agents allow-secrets` first; refused,
-    /// deadbolt exits 4.
     #[command(verbatim_doc_comment)]
     Run(secrets::RunArgs),
     /// Fill a template's {{ deadbolt://… }} references and write it 0600.
@@ -174,14 +164,12 @@ enum Commands {
     ///   deadbolt inject -i config.tpl -o config.json
     ///
     /// Replaces an existing output file only if `deadbolt inject` wrote it
-    /// and it hasn't changed since, or with --force. AI agents need
-    /// `deadbolt agents allow-secrets --purpose inject` first, and Touch ID
-    /// each time to write to stdout, which is reading the values.
+    /// and it hasn't changed since, or with --force.
     #[command(verbatim_doc_comment)]
     Inject(secrets::InjectArgs),
     /// Print the value a reference names (deadbolt://[vault/]item/field).
-    /// Prefer `deadbolt run` or `inject`: an AI agent reading a value needs
-    /// Touch ID every time, and is refused without it.
+    /// Prefer `deadbolt run` or `inject`, which keep values out of your
+    /// terminal and scrollback.
     Read(secrets::ReadArgs),
     /// Import logins, cards, secure notes, SSH keys, identities, API
     /// credentials, documents and the rest from 1Password, Apple Passwords,
@@ -302,8 +290,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DebugCommand {
-    /// Show how the daemon sees this process: its verified program, terminal
-    /// and parents, and what it claims (DEADBOLT_CALLER, OPENCODE_SESSION_ID).
+    /// Show how the daemon sees this process: its class (the app, the
+    /// browser host, macOS AutoFill or a caller), verified program, terminal
+    /// and parents.
     Whoami {
         #[arg(long)]
         json: bool,
@@ -511,7 +500,7 @@ fn main() -> ExitCode {
             eprintln!("error: {error:#}");
             match client::code(&error) {
                 Some(ErrorCode::Locked) => ExitCode::from(EXIT_LOCKED),
-                Some(ErrorCode::Forbidden | ErrorCode::NotGranted) => ExitCode::from(EXIT_DENIED),
+                Some(ErrorCode::Forbidden) => ExitCode::from(EXIT_DENIED),
                 _ => ExitCode::FAILURE,
             }
         }
@@ -618,7 +607,6 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Commands::Daemon => daemon::serve(paths, false).await?,
         Commands::OldDaemon => daemon::serve(paths, true).await?,
-        Commands::Agents(command) => agents::run(&paths, command, vault, from_stdin).await?,
         Commands::Run(args) => return secrets::run(&paths, args, from_stdin).await,
         Commands::Inject(args) => secrets::inject(&paths, args, from_stdin).await?,
         Commands::Read(args) => secrets::read(&paths, args, from_stdin).await?,

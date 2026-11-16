@@ -1,7 +1,6 @@
 //! Who this CLI is to the daemon (`deadbolt debug whoami`), what callers did
-//! (`deadbolt activity`), and the checks every command starts with: what
-//! this process claims to be, and that the daemon is this binary before a
-//! passphrase goes to it.
+//! (`deadbolt activity`), and the check every command starts with: that the
+//! daemon is this binary before a passphrase goes to it.
 
 use std::path::PathBuf;
 
@@ -10,18 +9,10 @@ use deadbolt_client::peer;
 
 use crate::config;
 use crate::paths::Paths;
-use crate::protocol::{
-    ActivityEntry, CallerInfo, Check, Claim, Command, Outcome, Reply, Signature,
-};
+use crate::protocol::{ActivityEntry, CallerInfo, Check, Command, Outcome, Reply, Signature};
 
-/// Claims `DEADBOLT_CALLER` and `OPENCODE_SESSION_ID` for every request, and
-/// checks the daemon before sending it a passphrase.
+/// Checks the daemon before sending it a passphrase.
 pub fn install() {
-    let var = |name| config::env(name).ok().filter(|v: &String| !v.is_empty());
-    deadbolt_client::set_claim(Claim {
-        caller: var("DEADBOLT_CALLER"),
-        opencode_session: var("OPENCODE_SESSION_ID"),
-    });
     deadbolt_client::set_daemon_check(Box::new(|socket| {
         let exe = own_exe().map_err(|e| format!("locating this binary: {e}"))?;
         peer::check(&socket, &helper()?, &exe)
@@ -66,7 +57,7 @@ fn whoami_lines(caller: &CallerInfo) -> Vec<(&'static str, String)> {
             "reason",
             caller.reason.clone().unwrap_or_else(|| {
                 if caller.identified {
-                    "live peer; no AI marker"
+                    "live peer"
                 } else {
                     "no identification recorded"
                 }
@@ -88,9 +79,6 @@ fn whoami_lines(caller: &CallerInfo) -> Vec<(&'static str, String)> {
     if !caller.ancestry.is_empty() {
         let names: Vec<&str> = caller.ancestry.iter().map(|a| a.name.as_str()).collect();
         lines.push(("parents", names.join(" ‹ ")));
-    }
-    if let Some(claim) = &caller.claimed {
-        lines.push(("claimed", claimed(claim)));
     }
     lines
 }
@@ -119,17 +107,6 @@ fn signed(signature: &Signature) -> String {
         parts.push(format!("cdhash {}", cdhash.get(..12).unwrap_or(cdhash)));
     }
     parts.join(", ")
-}
-
-fn claimed(claim: &Claim) -> String {
-    let mut parts = Vec::new();
-    if let Some(caller) = &claim.caller {
-        parts.push(format!("\"{caller}\""));
-    }
-    if let Some(session) = &claim.opencode_session {
-        parts.push(format!("OpenCode session {session}"));
-    }
-    format!("{} (unverified)", parts.join(", "))
 }
 
 /// A serde enum's name, as the protocol spells it.
@@ -208,13 +185,10 @@ fn activity_line(entry: &ActivityEntry) -> String {
         0 => String::new(),
         n => format!("\t{n} more"),
     };
-    let who = match &entry.client {
-        Some(client) => format!("agent client {client} · {}", entry.caller.label),
-        None => entry.caller.label.clone(),
-    };
     format!(
-        "{}\t{who}\t{}\t{}\t{}{outcome}{more}",
+        "{}\t{}\t{}\t{}\t{}{outcome}{more}",
         crate::ago(entry.time),
+        entry.caller.label,
         entry.command,
         items.join(", "),
         entry.fields.join(",")
@@ -229,7 +203,6 @@ mod tests {
     fn caller() -> CallerInfo {
         CallerInfo {
             identified: true,
-            browser_host_mode: false,
             reason: None,
             class: CallerClass::Caller,
             check: Check::Signature,
@@ -242,20 +215,16 @@ mod tests {
             started: None,
             session_started: None,
             ancestry: Vec::new(),
-            label: "OpenCode › zsh › deadbolt".into(),
-            claimed: Some(Claim {
-                caller: Some("Deadbolt".into()),
-                opencode_session: None,
-            }),
+            label: "Ghostty › zsh › deadbolt".into(),
         }
     }
 
     #[test]
-    fn whoami_sets_the_claim_apart() {
+    fn whoami_names_the_caller_and_its_class() {
         let lines = whoami_lines(&caller());
-        assert_eq!(lines[0], ("caller", "OpenCode › zsh › deadbolt".into()));
+        assert_eq!(lines[0], ("caller", "Ghostty › zsh › deadbolt".into()));
         assert_eq!(lines[1], ("class", "caller".into()));
-        assert!(lines.contains(&("claimed", "\"Deadbolt\" (unverified)".into())));
+        assert!(lines.contains(&("reason", "live peer".into())));
     }
 
     #[test]
@@ -274,11 +243,10 @@ mod tests {
             fields: vec!["username".into(), "password".into()],
             outcome: Outcome::Locked,
             more: 0,
-            client: None,
         };
         assert_eq!(
             activity_line(&entry),
-            "0s ago\tOpenCode › zsh › deadbolt\titem-get\tpersonal/GitHub\tusername,password\tlocked"
+            "0s ago\tGhostty › zsh › deadbolt\titem-get\tpersonal/GitHub\tusername,password\tlocked"
         );
         let folded = ActivityEntry {
             command: "more-past-limit".into(),
@@ -290,7 +258,7 @@ mod tests {
         };
         assert_eq!(
             activity_line(&folded),
-            "0s ago\tOpenCode › zsh › deadbolt\tmore-past-limit\t\t\t25 more"
+            "0s ago\tGhostty › zsh › deadbolt\tmore-past-limit\t\t\t25 more"
         );
     }
 }

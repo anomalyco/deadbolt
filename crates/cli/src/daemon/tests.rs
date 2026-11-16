@@ -43,7 +43,6 @@ async fn stop_reply_precedes_shutdown_even_with_backpressure() {
     }
     let mut request = serde_json::to_vec(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::Stop,
     })
     .unwrap();
@@ -79,7 +78,6 @@ async fn a_locked_daemon_generates_passwords() {
             let (server, mut client) = UnixStream::pair().unwrap();
             let mut request = serde_json::to_vec(&Request {
                 v: PROTOCOL_VERSION,
-                claimed: None,
                 command: Command::Generate {
                     length,
                     symbols,
@@ -165,7 +163,6 @@ async fn stop_notifies_shutdown_when_the_client_cannot_receive_its_reply() {
     let (server, mut client) = UnixStream::pair().unwrap();
     let mut request = serde_json::to_vec(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::Stop,
     })
     .unwrap();
@@ -662,13 +659,6 @@ fn sync_op() -> Command {
     }
 }
 
-fn person() -> CallerInfo {
-    CallerInfo {
-        identified: true,
-        ..CallerInfo::unverified("test terminal")
-    }
-}
-
 async fn started(pid: &std::path::Path) -> String {
     for _ in 0..200 {
         if let Ok(pid) = fs::read_to_string(pid)
@@ -688,17 +678,13 @@ async fn the_idle_lock_stops_a_stuck_sync_from_1password() {
     let (conv, _client, _closed) = conversation();
     let syncing = {
         let daemon = daemon.clone();
-        tokio::spawn(async move { daemon.dispatch(&person(), sync_op(), &conv).await })
+        tokio::spawn(async move { daemon.dispatch(sync_op(), &conv).await })
     };
     let pid = started(&pid).await;
 
     // One at a time.
     let (conv, _client, _closed) = conversation();
-    let error = daemon
-        .clone()
-        .dispatch(&person(), sync_op(), &conv)
-        .await
-        .unwrap_err();
+    let error = daemon.clone().dispatch(sync_op(), &conv).await.unwrap_err();
     assert_eq!(
         error.to_string(),
         "already syncing from 1Password: try again when it finishes"
@@ -726,7 +712,7 @@ async fn a_client_that_goes_away_stops_its_sync_from_1password() {
     let (conv, _client, closed) = conversation();
     let syncing = {
         let daemon = daemon.clone();
-        tokio::spawn(async move { daemon.dispatch(&person(), sync_op(), &conv).await })
+        tokio::spawn(async move { daemon.dispatch(sync_op(), &conv).await })
     };
     let pid = started(&pid).await;
     closed.send_replace(true);

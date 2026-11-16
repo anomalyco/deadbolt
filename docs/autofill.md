@@ -132,8 +132,7 @@ login on every host of its site, so on any other host (a forgotten subdomain
 someone else now serves) the pick only fills, and each later step fills only
 after the person's own submit. The corner offer, which may click the site's
 own sign-in link, and a provider's button keep requiring a saved URL naming
-the exact origin;
-Browse-agent fills keep manual submit. A top page asks the service worker
+the exact origin. A top page asks the service worker
 about an offer or a provider chain only when it shows something of a
 sign-in (a login form, a sign-in path, a provider, “Sign in” or “Sign out”
 button), and
@@ -1567,19 +1566,6 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
     popup says when Touch ID will be asked.
   Clicking Deadbolt's prompt is presence, not verification, so it never sets
   UV on its own.
-- **Agent sign-ins** (`agent-passkey-get`, `docs/agent-control.md`,
-  "Standing grants") sign for a paired agent client, such as Browse's relay,
-  under a grant with `passkeys` for the site. Nobody is at the Mac, so UP is
-  set because the grant is the user's standing consent to sign in there, and
-  UV is never set: no finger touched anything. A `required` request fails
-  before anything is signed; sites that demand verification don't get
-  agents in, which is correct. Client data comes from the frame origin the
-  relay read over CDP, and the relying party id is checked as below. The
-  passkey is the one the client names by ref (`agent-logins` lists each
-  with its user name and display name), else the only one the grant covers
-  among `allowCredentials` (all of the site's when empty); with several the
-  daemon replies `choose-passkey` listing them, never their keys. A grant for
-  one login covers the passkeys with that login's username.
 - **Client data** is built by the daemon from the origin the browser reported
   for the frame (`sender.origin`): `type`, the challenge, that origin, and
   `crossOrigin: false`. Nothing the page says goes into it except the
@@ -2047,7 +2033,6 @@ login's; only their words change.
 - Comparing a typed card's whole number in the native daemon, which needs a
   daemon command of its own; the browser-only vault does it already
   (`match`), and the native build compares last four digits and brand.
-- Agent grants for forms: Browse and other agent clients fill logins only.
 - A billing address picker in the app (the field is an item id today).
 - Filling forms from the toolbar popup: only the in-page menu fills them.
 
@@ -2594,7 +2579,8 @@ Pushes carry no id and no values. Refetch what's on screen.
 - `weak`: the field's rules allow only passwords under 60 bits.
 - `cancelled`: a passkey request stopped by `passkey-cancel`.
 - `exists`: a passkey the registration excluded is already saved.
-- `forbidden`: the daemon's AI caller gate refused the request.
+- `forbidden`: the daemon doesn't take that request from the browser host
+  (`resolve`, say).
 - `failed`: anything else.
 
 `message` is for people and never holds a secret.

@@ -23,7 +23,6 @@ pub enum Row {
     Shortcut,
     Command,
     Sync,
-    Agents,
     Activity,
 }
 
@@ -36,7 +35,6 @@ impl Row {
             Row::Shortcut => "shortcut",
             Row::Command => "command",
             Row::Sync => "op-sync",
-            Row::Agents => "agents-row",
             Row::Activity => "activity-row",
         }
     }
@@ -54,7 +52,7 @@ pub fn rows(s: &App) -> Vec<Row> {
     if s.installer.is_some() {
         rows.push(Row::Command);
     }
-    rows.extend([Row::Sync, Row::Agents, Row::Activity]);
+    rows.extend([Row::Sync, Row::Activity]);
     rows
 }
 
@@ -118,7 +116,6 @@ impl App {
                 self.show_installer();
             }
             Some(Row::Sync) => self.sync_one_password(),
-            Some(Row::Agents) => self.toggle_agents(),
             Some(Row::Activity) => self.toggle_activity(),
             _ => {}
         }
@@ -229,17 +226,6 @@ pub fn page(s: &App, k: &Kit) -> El {
     }
     let (synced, sync) = crate::mirror::setting(s, k);
     let sync = row_el(Row::Sync, "Sync from 1Password", synced, sync);
-    let (show_agents, agent_list) = crate::agents::setting(s, k);
-    let mut agents = vec![row_el(
-        Row::Agents,
-        "Agent sign-ins",
-        about(
-            k,
-            "Apps that sign AI agents in to sites you allowed, without asking",
-        ),
-        show_agents,
-    )];
-    agents.extend(agent_list);
     let (show, entries) = crate::activity::setting(s, k);
     let mut activity = vec![row_el(
         Row::Activity,
@@ -264,7 +250,6 @@ pub fn page(s: &App, k: &Kit) -> El {
         .child(group(k, "Devices", vec![devices(s, k)]))
         .children(update(s, k).map(|row| group(k, "Updates", vec![row])))
         .child(group(k, "1Password", vec![sync]))
-        .child(group(k, "Agents", agents))
         .child(group(k, "Activity", activity))
         .child(el().key("kb-rule").w_full().h(0.5).fill(k.c.border_weak))
         .child(

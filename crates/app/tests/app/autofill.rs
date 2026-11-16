@@ -167,8 +167,6 @@ impl AutofillDaemonHarness {
             .args(["daemon"])
             .envs(&self.vars)
             .env_remove("RUST_LOG")
-            .env_remove("OPENCODE_SESSION_ID")
-            .env_remove("DEADBOLT_CALLER")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -192,7 +190,6 @@ impl AutofillDaemonHarness {
     fn send_as_app(&self, command: DaemonCommand) -> Message {
         let mut payload = serde_json::to_string(&Request {
             v: PROTOCOL_VERSION,
-            claimed: None,
             command,
         })
         .unwrap();
@@ -223,7 +220,6 @@ impl Drop for AutofillDaemonHarness {
         if self.control_socket.exists() {
             let mut payload = serde_json::to_string(&Request {
                 v: PROTOCOL_VERSION,
-                claimed: None,
                 command: DaemonCommand::Stop,
             })
             .unwrap();

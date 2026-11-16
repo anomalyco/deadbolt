@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::protocol::{ActivityEntry, CallerInfo, Claim, Tier};
+use crate::protocol::{ActivityEntry, CallerInfo, Tier};
 
 /// The longest string an entry keeps, in bytes, cut marker included.
 pub const MAX_TEXT: usize = 256;
@@ -25,9 +25,9 @@ pub const PER_ANCHOR: u32 = 60;
 pub const WINDOW_SECS: u64 = 60;
 /// Anchors tracked at once; past it new ones share one window.
 const MAX_ANCHORS: usize = 256;
-/// Entries all anchors together may add per window; past it they fold, so a
-/// caller that makes up a new anchor (a claimed session) for each request
-/// can't push the rest of the table out of the store's budget.
+/// Entries all anchors together may add per window; past it they fold, so
+/// many callers at once (a new process for each request) can't push the
+/// rest of the table out of the store's budget.
 pub const ALL_ANCHORS: u32 = 300;
 /// Kinds of sensitive request whose repeats are folded at once; past it
 /// each is an entry of its own.
@@ -60,12 +60,7 @@ fn cut_opt(text: &mut Option<String>) {
     }
 }
 
-pub fn bound_claim(claim: &mut Claim) {
-    cut_opt(&mut claim.caller);
-    cut_opt(&mut claim.opencode_session);
-}
-
-/// Caps every string and list of `caller`, its claim included.
+/// Caps every string and list of `caller`.
 pub fn bound_caller(caller: &mut CallerInfo) {
     cut(&mut caller.label);
     cut_opt(&mut caller.reason);
@@ -80,9 +75,6 @@ pub fn bound_caller(caller: &mut CallerInfo) {
     for parent in &mut caller.ancestry {
         cut(&mut parent.name);
         cut_opt(&mut parent.path);
-    }
-    if let Some(claim) = &mut caller.claimed {
-        bound_claim(claim);
     }
 }
 
@@ -100,20 +92,14 @@ pub fn bound(entry: &mut ActivityEntry) {
     for field in &mut entry.fields {
         cut(field);
     }
-    cut_opt(&mut entry.client);
 }
 
-/// What a grant would be tied to (`docs/agent-control.md`): the terminal
-/// and its session's start, else who it looks like and the session it
-/// claims. Only for limits: nothing here is trusted.
-pub fn anchor(caller: &CallerInfo) -> String {
+/// Whose limit an entry counts against: the terminal and its session's
+/// start, else who it looks like. Only for limits: nothing here is trusted.
+fn anchor(caller: &CallerInfo) -> String {
     match &caller.tty {
         Some(tty) => format!("tty {tty} {:?}", caller.session_started),
-        None => {
-            let claimed = caller.claimed.as_ref();
-            let session = claimed.and_then(|c| c.opencode_session.as_deref());
-            format!("{} {session:?}", caller.label)
-        }
+        None => caller.label.clone(),
     }
 }
 
@@ -162,9 +148,9 @@ impl Fold {
 }
 
 /// Whether requests of `tier` read, change or remove something, so their
-/// entries always say what. Agent sign-ins hand values to a client.
+/// entries always say what.
 fn sensitive(tier: Tier) -> bool {
-    matches!(tier, Tier::Read | Tier::Write | Tier::Never | Tier::Agent)
+    matches!(tier, Tier::Read | Tier::Write | Tier::Never)
 }
 
 /// What makes two entries repeats of one request: everything they name.
@@ -176,7 +162,6 @@ fn kind(entry: &ActivityEntry) -> String {
         entry.outcome,
         &entry.items,
         &entry.fields,
-        &entry.client,
     ))
     .unwrap_or_default()
 }
@@ -348,21 +333,15 @@ mod tests {
             fields: vec!["password".into()],
             outcome: Outcome::Allowed,
             more: 0,
-            client: None,
         }
     }
 
-    /// Whatever a caller claims or names, an entry keeps at most
-    /// `MAX_TEXT` bytes of each string, marked as cut, and `MAX_LIST` of
-    /// each list.
+    /// Whatever a caller names, an entry keeps at most `MAX_TEXT` bytes of
+    /// each string, marked as cut, and `MAX_LIST` of each list.
     #[test]
     fn entries_have_bounded_strings_and_lists() {
         let long = "é".repeat(10_000);
         let mut e = entry(1, &long);
-        e.caller.claimed = Some(Claim {
-            caller: Some(long.clone()),
-            opencode_session: Some(long.clone()),
-        });
         e.caller.program = Some(long.clone());
         e.caller.ancestry = (0..100)
             .map(|pid| Ancestor {
@@ -381,11 +360,8 @@ mod tests {
         e.fields = vec![long.clone(); 100];
         bound(&mut e);
 
-        let claim = e.caller.claimed.as_ref().unwrap();
         let mut texts = vec![
             &e.caller.label,
-            claim.caller.as_ref().unwrap(),
-            claim.opencode_session.as_ref().unwrap(),
             e.caller.program.as_ref().unwrap(),
             &e.items[0].title,
             e.items[0].vault.as_ref().unwrap(),
@@ -446,36 +422,6 @@ mod tests {
     /// each kind's first is an entry of its own, at once, and only exact
     /// repeats fold, into an entry naming the same items and fields.
     #[test]
-    fn agent_fills_past_the_limit_keep_their_login_and_client() {
-        let mut ledger = Ledger::default();
-        for _ in 0..PER_ANCHOR {
-            assert_eq!(ledger.admit(look(100, "node")).len(), 1);
-        }
-        let fill = |client: &str| ActivityEntry {
-            tier: Tier::Agent,
-            command: "agent-fill".into(),
-            items: vec![ActivityItem {
-                vault: Some("v1".into()),
-                id: Some("i1".into()),
-                title: "GitHub (https://github.com)".into(),
-            }],
-            client: Some(client.into()),
-            ..entry(101, "node")
-        };
-        let due = ledger.admit(fill("browse"));
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].client.as_deref(), Some("browse"));
-        assert_eq!(due[0].items[0].id.as_deref(), Some("i1"));
-        assert!(ledger.admit(fill("browse")).is_empty());
-        // Another client's fill of the same login is no repeat of it.
-        assert_eq!(ledger.admit(fill("other")).len(), 1);
-        let folded = ledger.due(101 + WINDOW_SECS, false);
-        let repeat = folded.iter().find(|e| e.command == "agent-fill").unwrap();
-        assert_eq!((repeat.more, repeat.client.as_deref()), (1, Some("browse")));
-        assert_eq!(repeat.items[0].id.as_deref(), Some("i1"));
-    }
-
-    #[test]
     fn sensitive_entries_past_the_limit_keep_their_items() {
         let mut ledger = Ledger::default();
         for _ in 0..PER_ANCHOR {
@@ -525,20 +471,16 @@ mod tests {
         assert!(folded.iter().all(|e| e.command != PAST_LIMIT));
     }
 
-    /// A caller making up a new anchor for each request (a new claimed
-    /// session) still fills only `ALL_ANCHORS` entries a window: the rest
-    /// fold into one, so it can't push older entries out of the store.
+    /// Callers with a new anchor for each request (a new terminal, say)
+    /// still fill only `ALL_ANCHORS` entries a window: the rest fold into
+    /// one, so they can't push older entries out of the store.
     #[test]
     fn new_anchors_share_one_limit() {
         let mut ledger = Ledger::default();
         let mut due = Vec::new();
         for n in 0..ALL_ANCHORS + 1_000 {
-            let mut entry = look(100, "OpenCode › zsh › deadbolt");
-            entry.caller.tty = None;
-            entry.caller.claimed = Some(Claim {
-                caller: None,
-                opencode_session: Some(format!("ses_{n}")),
-            });
+            let mut entry = look(100, "zsh › deadbolt");
+            entry.caller.tty = Some(format!("/dev/ttys{n}"));
             due.extend(ledger.admit(entry));
         }
         assert_eq!(due.len(), ALL_ANCHORS as usize);

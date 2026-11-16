@@ -47,7 +47,6 @@ async fn send_on(
     };
     let mut raw = serde_json::to_vec(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command,
     })
     .unwrap();
@@ -108,7 +107,6 @@ async fn app_group_socket_checks_permissions_and_rejects_other_callers() {
     let mut client = UnixStream::connect(&sock_path).await.unwrap();
     let mut req = serde_json::to_vec(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::Status,
     })
     .unwrap();
@@ -772,7 +770,6 @@ async fn passkey_hash_ceremonies_verify_signatures_coalesce_locked_touch_id_and_
     mark_peer_as(&f.daemon, &server, CallerClass::AutoFill, "macOS AutoFill");
     let mut raw = serde_json::to_vec(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::AutofillPasskeyGet {
             rp_id: "example.com".into(),
             passkey,
@@ -826,7 +823,6 @@ async fn passkey_hash_ceremonies_verify_signatures_coalesce_locked_touch_id_and_
     mark_peer_as(&f.daemon, &server, CallerClass::AutoFill, "macOS AutoFill");
     let mut raw = serde_json::to_vec(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::UnlockBiometric { timeout_secs: None },
     })
     .unwrap();

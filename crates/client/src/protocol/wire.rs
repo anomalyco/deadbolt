@@ -8,10 +8,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::{
-    ActivityEntry, AgentClientInfo, AgentGrantInfo, AgentLogin, AgentPasskey, Code, DeviceInfo,
-    FormCard, FormIdentity, HealthReport, ImportReport, ItemInfo, LoginRef, MirrorReport,
-    NotGranted, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync, ResolvedSecret,
-    SecretGrantInfo, SendInfo, SenderInfo, SiteLogin, SitePasskey, SiteStatus, SiteValues, Status,
+    ActivityEntry, Code, DeviceInfo, FormCard, FormIdentity, HealthReport, ImportReport, ItemInfo,
+    LoginRef, MirrorReport, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync,
+    ResolvedSecret, SendInfo, SenderInfo, SiteLogin, SitePasskey, SiteStatus, SiteValues, Status,
     TagCount, VaultInfo,
 };
 
@@ -52,12 +51,6 @@ pub enum Message {
     Error {
         code: ErrorCode,
         message: String,
-        /// With `not-granted`: what the user would have to allow.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        grant: Option<NotGranted>,
-        /// With `choose-passkey`: the passkeys to choose from, no secrets.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        passkeys: Option<Vec<AgentPasskey>>,
     },
 }
 
@@ -114,16 +107,11 @@ pub enum ErrorCode {
     Version,
     /// A site's rules allow only weak generated passwords.
     Weak,
-    /// The agent client isn't paired (unknown or removed id, wrong token),
-    /// or the caller may not do this (an AI pairing a client or granting).
+    /// The caller may not do this here: a command the socket or the
+    /// caller's class doesn't allow.
     Forbidden,
-    /// No live grant covers this client, site, login and field.
-    NotGranted,
     /// Too many requests from this client; try again shortly.
     RateLimited,
-    /// Several passkeys could sign: the error lists them, and the client
-    /// asks again naming one.
-    ChoosePasskey,
     /// Silent AutoFill (`interactive: false`) needs user interaction (Touch ID
     /// for passkey `UV`, or confirmation on an unassociated app).
     InteractionRequired,
@@ -302,38 +290,12 @@ pub enum Reply {
     Activity {
         entries: Vec<ActivityEntry>,
     },
-    /// A new agent client and its token, shown only now.
-    AgentClientAdded {
-        client: AgentClientInfo,
-        token: Secret,
-    },
-    AgentClients {
-        clients: Vec<AgentClientInfo>,
-    },
-    AgentGrant {
-        grant: AgentGrantInfo,
-    },
-    AgentGrants {
-        grants: Vec<AgentGrantInfo>,
-    },
     /// What `resolve` found, in reference order.
     Secrets {
         secrets: Vec<ResolvedSecret>,
     },
-    SecretGrants {
-        grants: Vec<SecretGrantInfo>,
-    },
     Health {
         report: HealthReport,
-    },
-    AgentLogins {
-        /// The page's site: its registrable domain.
-        site: String,
-        /// Whether any live grant of the client covers the site.
-        granted: bool,
-        logins: Vec<AgentLogin>,
-        /// The passkeys for the page its grants let it sign in with.
-        passkeys: Vec<AgentPasskey>,
     },
     AutofillStatus {
         initialized: bool,

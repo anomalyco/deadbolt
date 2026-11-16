@@ -1,5 +1,5 @@
-//! Activity, as the native daemon keeps it (`docs/agent-control.md`, "Lock,
-//! limits, activity"): an entry for what a page had Deadbolt fill, save, make
+//! Activity, as the native daemon keeps it (`docs/design.md`, "Callers"):
+//! an entry for what a page had Deadbolt fill, save, make
 //! or sign, and for what the vault page showed or copied, naming items and
 //! fields, never values. Entries are sealed in the store's Activity table on
 //! this device only, never in the signed log, for 90 days and within the

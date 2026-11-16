@@ -1,6 +1,8 @@
-//! Who is asking (`docs/agent-control.md`): each connection's peer as the
-//! kernel names it, its code signature (macOS) or executable (Linux), and the
-//! class that rests on them. A client's claim can never establish trust.
+//! Who is asking (`docs/design.md`, "Callers"): each connection's peer as
+//! the kernel names it, its code signature (macOS) or executable (Linux), and
+//! the class that rests on them, for Activity and the app's, the browser
+//! host's and macOS AutoFill's own commands. Any other process running as
+//! this user is a caller, with what a person in a terminal gets.
 
 #[cfg(any(test, target_os = "macos"))]
 use std::collections::HashMap;
@@ -14,18 +16,8 @@ use std::sync::Mutex;
 use deadbolt_client::peer::{APP_ID, AUTOFILL_ID, CodeSignature, DAEMON_ID, Peer, Process};
 use tracing::warn;
 
-use crate::protocol::{Ancestor, CallerClass, CallerInfo, Check, Claim, Signature};
+use crate::protocol::{Ancestor, CallerClass, CallerInfo, Check, Signature};
 
-/// AI hosts whose process names make a better label than their path.
-const HOSTS: [(&str, &str); 7] = [
-    ("opencode", "OpenCode"),
-    ("opencode-cli", "OpenCode"),
-    ("claude", "Claude Code"),
-    ("codex", "Codex"),
-    ("cursor-agent", "Cursor"),
-    ("gemini", "Gemini CLI"),
-    ("aider", "Aider"),
-];
 const SHELLS: [&str; 7] = ["zsh", "bash", "fish", "sh", "dash", "nu", "tcsh"];
 
 /// The daemon's own binary and its bundle's app and AutoFill extension, which
@@ -147,33 +139,16 @@ impl Callers {
             .insert(peer, info);
     }
 
-    /// How the daemon sees `peer`, claiming `claimed`. Blocking: on macOS it
-    /// runs `deadbolt-enclave identify` against the connecting audit token.
-    pub fn identify(&self, peer: io::Result<Peer>, claimed: Option<Claim>) -> CallerInfo {
-        let mut info = match peer {
+    /// How the daemon sees `peer`. Blocking: on macOS it runs
+    /// `deadbolt-enclave identify` against the connecting audit token.
+    pub fn identify(&self, peer: io::Result<Peer>) -> CallerInfo {
+        match peer {
             Ok(peer) => self.lookup(peer),
             Err(error) => {
                 warn!("reading a peer's credentials: {error}");
                 unverified(None, "unknown process")
             }
-        };
-        info.claimed = claimed.filter(|c| !c.is_empty());
-        if info.identified {
-            info.reason = ai_host(&info.ancestry)
-                .map(|host| format!("AI ancestor: {host}"))
-                .or_else(|| {
-                    info.claimed
-                        .as_ref()?
-                        .opencode_session
-                        .as_ref()
-                        .map(|_| "claimed OPENCODE_SESSION_ID".into())
-                });
         }
-        // A claim can remove browser-host standing, never confer it.
-        if info.class == CallerClass::BrowserHost && is_ai(&info) {
-            info.class = CallerClass::Caller;
-        }
-        info
     }
 
     fn lookup(&self, peer: Peer) -> CallerInfo {
@@ -280,8 +255,7 @@ impl Callers {
     /// nothing a Linux peer does is taken on its word.
     #[cfg(target_os = "linux")]
     fn read(&self, peer: Peer) -> CallerInfo {
-        let process = deadbolt_client::peer::linux::process(peer, |name| host_name(name).is_some());
-        from_proc(peer, process)
+        from_proc(peer, deadbolt_client::peer::linux::process(peer))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -379,7 +353,6 @@ fn classify(evidence: &Evidence, args: &[String], ancestry: &[Ancestor]) -> (Cal
             } else if is(exe, DAEMON_ID)
                 && browser_host_args(args)
                 && ancestry.iter().any(browser_ancestor)
-                && ai_host(ancestry).is_none()
             {
                 CallerClass::BrowserHost
             } else {
@@ -407,12 +380,11 @@ pub fn info(peer: Peer, evidence: &Evidence, process: Process) -> CallerInfo {
     let label = label(class, program.as_deref(), &process);
     CallerInfo {
         identified,
-        browser_host_mode: browser_host_args(&process.args),
         reason: (!identified).then(|| {
             if process.ppid.is_none() {
                 "missing live process facts"
             } else if !process.ancestry_complete {
-                process.ancestry_error.unwrap_or("incomplete parent chain")
+                "incomplete parent chain"
             } else {
                 "missing executable identity"
             }
@@ -430,7 +402,6 @@ pub fn info(peer: Peer, evidence: &Evidence, process: Process) -> CallerInfo {
         session_started: process.session_started,
         ancestry: process.ancestry,
         label,
-        claimed: None,
     }
 }
 
@@ -442,64 +413,6 @@ fn from_proc(peer: Peer, process: Process) -> CallerInfo {
     info.check = Check::Unverified;
     info.label = format!("{} · {}", info.label, crate::protocol::UNVERIFIED_LINUX);
     info
-}
-
-/// Whether the caller needs the AI gate: missing peer facts, an AI host
-/// among its parents, or a claim to be an OpenCode session. A hint, never
-/// proof: an AI can start a terminal outside its own tree. So it only ever
-/// refuses (pairing agent clients, granting sign-ins), never allows.
-pub fn is_ai(info: &CallerInfo) -> bool {
-    !info.identified
-        || ai_host(&info.ancestry).is_some()
-        || info
-            .claimed
-            .as_ref()
-            .is_some_and(|c| c.opencode_session.is_some())
-}
-
-/// For messages only: inability to identify a caller is not evidence of AI.
-pub fn gate_subject(info: &CallerInfo) -> &'static str {
-    if info.identified {
-        "an AI agent"
-    } else {
-        "an unidentified caller"
-    }
-}
-
-fn host_name(name: &str) -> Option<&'static str> {
-    let name = name.trim_start_matches('-');
-    HOSTS
-        .iter()
-        .find(|(host, _)| host.eq_ignore_ascii_case(name))
-        .map(|(_, label)| *label)
-}
-
-/// The AI host among the parents ("OpenCode"), if any.
-fn ai_host(ancestry: &[Ancestor]) -> Option<&'static str> {
-    ancestry.iter().find_map(|a| {
-        host_name(&a.name).or_else(|| {
-            a.path
-                .as_deref()
-                .and_then(|p| Path::new(p).file_name())
-                .and_then(|n| host_name(&n.to_string_lossy()))
-        })
-    })
-}
-
-/// Why the daemon takes `info` for an AI, and where to go instead: for a
-/// refusal, so a person in a terminal inside an AI host knows what to do.
-pub fn not_from_here(info: &CallerInfo) -> String {
-    if !info.identified {
-        return format!(
-            "Deadbolt couldn't identify this caller ({}); see `deadbolt debug whoami`",
-            info.reason.as_deref().unwrap_or("missing process facts")
-        );
-    }
-    let why = match ai_host(&info.ancestry) {
-        Some(host) => format!("This shell runs under {host} ({})", info.label),
-        None => format!("This shell has OPENCODE_SESSION_ID set ({})", info.label),
-    };
-    format!("{why}; run it from a terminal outside it, or in the app (see `deadbolt debug whoami`)")
 }
 
 /// Nobody in particular: a status asked for without a connection.
@@ -517,8 +430,8 @@ fn unverified(peer: Option<Peer>, label: &str) -> CallerInfo {
     info
 }
 
-/// "OpenCode › zsh › deadbolt": the nearest AI host or app, the nearest
-/// shell, then the program.
+/// "Ghostty › zsh › deadbolt": the nearest app, the nearest shell, then the
+/// program.
 fn label(class: CallerClass, program: Option<&str>, process: &Process) -> String {
     let base = |path: &str| {
         Path::new(path)
@@ -529,13 +442,10 @@ fn label(class: CallerClass, program: Option<&str>, process: &Process) -> String
         let (before, _) = path.split_once(".app/")?;
         Some(base(before))
     };
-    let host = process.ancestry.iter().find_map(|a| {
-        HOSTS
-            .iter()
-            .find(|(name, _)| a.name == *name)
-            .map(|(_, label)| (*label).to_string())
-            .or_else(|| a.path.as_deref().and_then(bundle))
-    });
+    let host = process
+        .ancestry
+        .iter()
+        .find_map(|a| a.path.as_deref().and_then(bundle));
     match class {
         CallerClass::App => return "Deadbolt".into(),
         CallerClass::AutoFill => return "macOS AutoFill".into(),
@@ -636,7 +546,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn browser_host_standing_needs_a_browser_and_yields_to_ai() {
+    fn browser_host_standing_needs_a_browser() {
         let (_, incomplete) = signed(
             DAEMON_ID,
             Process {
@@ -647,7 +557,6 @@ pub(super) mod tests {
         );
         assert!(!incomplete.identified);
         assert_eq!(incomplete.class, CallerClass::Caller);
-        assert!(is_ai(&incomplete));
         for name in [
             "Google Chrome",
             "Google Chrome for Testing",
@@ -662,78 +571,13 @@ pub(super) mod tests {
                 signed_host(vec![ancestor(4, "sh", "/bin/sh"), ancestor(3, name, &path)]);
             assert_eq!(info.class, CallerClass::BrowserHost, "{name}");
         }
-        for parents in [
-            vec![],
-            vec![ancestor(3, "Google Chrome", "/bin/sh")],
-            vec![chrome(), ancestor(2, "node", "/bin/opencode-cli")],
-        ] {
+        for parents in [vec![], vec![ancestor(3, "Google Chrome", "/bin/sh")]] {
             assert_eq!(signed_host(parents).1.class, CallerClass::Caller);
         }
         let callers = Callers::new();
         let (peer, host) = signed_host(vec![chrome()]);
         callers.cache_for_test(peer, host);
-        let claim = Claim {
-            opencode_session: Some("ses_1".into()),
-            caller: None,
-        };
-        assert_eq!(
-            callers.identify(Ok(peer), Some(claim)).class,
-            CallerClass::Caller
-        );
-        assert_eq!(
-            callers.identify(Ok(peer), None).class,
-            CallerClass::BrowserHost
-        );
-    }
-
-    /// Whatever a client claims, its class comes from its code alone.
-    #[test]
-    fn an_ai_host_among_the_parents_or_an_opencode_claim_is_an_ai() {
-        let mut info = CallerInfo::unverified("zsh › deadbolt");
-        assert!(is_ai(&info));
-        info.identified = true;
-        info.ancestry = vec![ancestor(10, "zsh", "/bin/zsh")];
-        assert!(!is_ai(&info));
-        info.ancestry.push(ancestor(
-            9,
-            "opencode-cli",
-            "/Users/k/.opencode/bin/opencode-cli",
-        ));
-        assert!(is_ai(&info));
-        info.ancestry = vec![ancestor(9, "node", "/opt/homebrew/bin/claude")];
-        assert!(is_ai(&info));
-        info.ancestry = vec![ancestor(10, "-zsh", "/bin/zsh")];
-        info.claimed = Some(Claim {
-            caller: Some("me".into()),
-            opencode_session: None,
-        });
-        assert!(!is_ai(&info));
-        info.claimed = Some(Claim {
-            caller: None,
-            opencode_session: Some("ses_1".into()),
-        });
-        assert!(is_ai(&info));
-    }
-
-    #[test]
-    fn a_claim_never_upgrades_the_class() {
-        let callers = Callers::new();
-        let someone = peer(4343, 1);
-        callers
-            .fixtures
-            .lock()
-            .unwrap()
-            .insert(someone, unverified(Some(someone), "zsh › deadbolt"));
-        for name in ["Deadbolt", "Deadbolt.app", "app", "browser-host"] {
-            let claim = Claim {
-                caller: Some(name.into()),
-                opencode_session: Some("ses_1".into()),
-            };
-            let info = callers.identify(Ok(someone), Some(claim.clone()));
-            assert_eq!(info.class, CallerClass::Caller);
-            assert_eq!(info.label, "zsh › deadbolt");
-            assert_eq!(info.claimed, Some(claim));
-        }
+        assert_eq!(callers.identify(Ok(peer)).class, CallerClass::BrowserHost);
     }
 
     fn at(path: &Path, cdhash: &str, team: Option<&str>, id: &str) -> CodeSignature {
@@ -958,17 +802,6 @@ pub(super) mod tests {
             label(CallerClass::Caller, &process),
             "Ghostty › zsh › deadbolt"
         );
-        let opencode = Process {
-            ancestry: vec![
-                ancestor(20, "zsh", "/bin/zsh"),
-                ancestor(19, "opencode-cli", "/Users/k/opencode-cli"),
-            ],
-            ..Process::default()
-        };
-        assert_eq!(
-            label(CallerClass::Caller, &opencode),
-            "OpenCode › zsh › deadbolt"
-        );
         let brave = Process {
             ancestry: vec![ancestor(
                 30,
@@ -1074,12 +907,12 @@ pub(super) mod tests {
         let (stream, _) = timeout(limit, listener.accept()).await.unwrap().unwrap();
         let peer = Peer::of(&stream).unwrap();
         let callers = Callers::new();
-        let first = callers.identify(Ok(peer), None);
+        let first = callers.identify(Ok(peer));
         assert!(first.identified);
         assert!(first.ancestry.iter().any(|a| Some(a.pid) == parent.id()));
         drop(parent.stdin.take());
         timeout(limit, parent.wait()).await.unwrap().unwrap();
-        assert_eq!(callers.identify(Ok(peer), None), first);
+        assert_eq!(callers.identify(Ok(peer)), first);
     }
 
     #[cfg(target_os = "macos")]
@@ -1099,7 +932,6 @@ pub(super) mod tests {
         let other = peer(100, 1).token.unwrap();
         let result = cache.remember(other, person.clone());
         assert_eq!(result, person);
-        assert!(!is_ai(&result));
         assert!(cache.entries.contains_key(&token) && !cache.entries.contains_key(&other));
 
         cache.entries.clear();

@@ -176,7 +176,7 @@ Put health wire types in `crates/client/src/protocol/health.rs` (since protocol 
 - `Command::Generate { length, symbols, url: Option<String> }`: when `url` is supplied, honors `password-rules.json` site quirks with a 60-bit minimum floor (`site_password::generate_for_url`).
 - `Change::Health` on the `watch` stream whenever the memo, breach cache, or ignore state changes.
 
-Under `docs/agent-control.md`, `Health`, `HealthIgnore`, and `BreachChecksSet` are allowed for `Deadbolt.app` and human CLI callers, and **refused (`forbidden`) to AI callers**, so an AI session cannot ask Deadbolt which accounts have weak or reused passwords. None of them count toward `unlock_timeout` activity.
+`Health`, `HealthIgnore`, and `BreachChecksSet` answer any caller while unlocked, as every command does (`docs/design.md`, "Callers"). None of them count toward `unlock_timeout` activity.
 
 ### Cost and incremental rerun on 3,000 items
 

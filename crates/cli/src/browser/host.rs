@@ -494,11 +494,9 @@ impl From<anyhow::Error> for Refusal {
             Some(ErrorCode::Exists) => Code::Exists,
             Some(ErrorCode::Weak) => Code::Weak,
             Some(ErrorCode::RateLimited) => Code::RateLimited,
-            // Agent sign-ins and macOS AutoFill only; the browser host never asks for them.
+            // macOS AutoFill only; the browser host never asks for them.
             Some(
                 ErrorCode::Version
-                | ErrorCode::NotGranted
-                | ErrorCode::ChoosePasskey
                 | ErrorCode::InteractionRequired
                 | ErrorCode::Cancelled
                 | ErrorCode::Failed,

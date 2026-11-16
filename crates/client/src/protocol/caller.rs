@@ -1,22 +1,7 @@
-//! Who is on the other end of the daemon's socket (`docs/agent-control.md`,
-//! "Who is asking"), and the Activity list of what callers did. Never values.
+//! Who is on the other end of the daemon's socket (`docs/design.md`,
+//! "Callers"), and the Activity list of what callers did. Never values.
 
 use serde::{Deserialize, Serialize};
-
-/// What a client says about who is driving it, from `DEADBOLT_CALLER` and
-/// `OPENCODE_SESSION_ID`. Shown as claimed and never trusted: it labels an
-/// entry; an OpenCode session claim can remove browser-host standing, never grant it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Claim {
-    pub caller: Option<String>,
-    pub opencode_session: Option<String>,
-}
-
-impl Claim {
-    pub fn is_empty(&self) -> bool {
-        self.caller.is_none() && self.opencode_session.is_none()
-    }
-}
 
 /// How the daemon sorts a connection, from what it verified about the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +47,7 @@ pub struct Signature {
 }
 
 /// One of the peer's parents, nearest first. Kernel-reported names and
-/// paths inform the AI gate and browser-host label, not signature checks.
+/// paths inform labels and browser-host standing, not signature checks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ancestor {
     pub pid: u32,
@@ -77,12 +62,7 @@ pub struct CallerInfo {
     /// Not a signature check. Historical Activity entries may lack this.
     #[serde(default)]
     pub identified: bool,
-    /// Native-host argv selects browser-facing refusal wording only. Not
-    /// browser-host standing and not supplied by clients or persisted in Activity.
-    #[serde(skip)]
-    pub browser_host_mode: bool,
-    /// Why identification failed or the AI gate applies, before Activity's
-    /// display limit truncates the ancestry. Absent for ordinary callers.
+    /// Why identification failed. Absent for ordinary callers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub class: CallerClass,
@@ -101,10 +81,9 @@ pub struct CallerInfo {
     /// When its session (its terminal tab, for a shell) started, Unix seconds.
     pub session_started: Option<u64>,
     pub ancestry: Vec<Ancestor>,
-    /// Who it is in a few words ("OpenCode › zsh"), from verified facts and
-    /// ancestry, never from the claim.
+    /// Who it is in a few words ("Ghostty › zsh › deadbolt"), from verified
+    /// facts and ancestry.
     pub label: String,
-    pub claimed: Option<Claim>,
 }
 
 impl CallerInfo {
@@ -112,7 +91,6 @@ impl CallerInfo {
     pub fn unverified(label: &str) -> CallerInfo {
         CallerInfo {
             identified: false,
-            browser_host_mode: false,
             reason: Some(label.into()),
             class: CallerClass::Caller,
             check: Check::None,
@@ -126,12 +104,13 @@ impl CallerInfo {
             session_started: None,
             ancestry: Vec::new(),
             label: label.into(),
-            claimed: None,
         }
     }
 }
 
-/// What a command could expose (`docs/agent-control.md`, "Tiers").
+/// What a command could expose, for Activity: whether an entry reads,
+/// changes or removes something (`Read`, `Write`, `Never`) decides how it
+/// folds past a rate limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Tier {
@@ -140,18 +119,17 @@ pub enum Tier {
     Read,
     Add,
     Write,
+    /// Setup, unlocking, vaults, devices, deleting and importing.
     Never,
     /// `status`, `stop`, `lock`, `generate`, `sync`.
     Always,
     /// Site commands, for the browser host.
     Browser,
-    /// Agent sign-ins: a paired client using its standing grants.
-    Agent,
 }
 
-/// How a request ended. Only agent sign-ins are refused so far: a client
-/// that isn't paired, a grant that doesn't cover the request, a client past
-/// its rate limit, or an AI pairing or granting.
+/// How a request ended. Refused: a command the socket or the caller's
+/// class doesn't allow (the macOS AutoFill socket, say), or one past a
+/// rate limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Outcome {
@@ -198,8 +176,4 @@ pub struct ActivityEntry {
     /// (`more-past-budget`). 0 for an ordinary entry.
     #[serde(default)]
     pub more: u64,
-    /// The paired agent client the request came from (its name, else its
-    /// id), for agent sign-ins: the token proved it, unlike a claim.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client: Option<String>,
 }

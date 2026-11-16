@@ -90,7 +90,6 @@ pub struct App {
     pub import: crate::import::Import,
     pub mirror: crate::mirror::Mirror,
     pub activity: crate::activity::Activity,
-    pub agents: crate::agents::Agents,
     /// Recently Deleted, in the item's place (⇧⌘⌫).
     pub trash: crate::trash::Trash,
     pub health: crate::health::Health,
@@ -156,7 +155,6 @@ impl App {
             import: crate::import::Import::default(),
             mirror: crate::mirror::Mirror::default(),
             activity: crate::activity::Activity::default(),
-            agents: crate::agents::Agents::default(),
             trash: crate::trash::Trash::default(),
             health: crate::health::Health::default(),
             ssh: crate::ssh::Ssh::default(),
@@ -276,7 +274,6 @@ impl App {
                 Err(failure) => self.notice = Some(crate::onboarding::sentence(&failure.message)),
             },
             Done::Activity { seq, result } => self.on_activity(seq, result, tx),
-            Done::Agents { seq, result } => self.on_agents(seq, result, tx),
             Done::Trash { seq, result } => self.on_trash(seq, result, tx),
             Done::TrashItem { seq, result } => self.on_trash_item(seq, result, tx),
             Done::Health { seq, result } => self.on_health(seq, result, tx),
@@ -318,10 +315,7 @@ impl App {
                 self.refresh();
             }
             Change::Devices { .. } => self.daemon.send(Job::Status),
-            Change::Activity => {
-                self.on_activity_changed();
-                self.on_agents_changed();
-            }
+            Change::Activity => self.on_activity_changed(),
             Change::Health => self.request_health(false),
             Change::Update => self.daemon.send(Job::Status),
             Change::Items { vault } if self.shows(&vault) => {
@@ -567,7 +561,6 @@ impl App {
         self.forget_edit();
         self.mirror.forget();
         self.activity.forget();
-        self.agents.forget();
         self.trash.forget();
         self.health.forget();
     }
@@ -612,7 +605,6 @@ impl App {
         self.touch_id_error = None;
         self.mirror.result = None;
         self.activity.forget();
-        self.agents.forget();
     }
 }
 

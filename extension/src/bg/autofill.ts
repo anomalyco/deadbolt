@@ -880,8 +880,8 @@ export class Autofill {
    * extension-owned surface (the corner offer's opaque `entry` action, or
    * the inline menu's pick on the form it opened on, `entry.form`) or the
    * toolbar popup's Fill. A pick on a form fills it as any pick does, then
-   * submits it and follows the next steps (see submitStep). Browse-agent
-   * fills never come here, and nothing a page does can call it.
+   * submits it and follows the next steps (see submitStep). Nothing a page
+   * does can call it.
    */
   async startAutomatic(target: FrameTarget, account: Account, entry: string | { form: number; roles: FieldRole[] }, provider = false): Promise<PickReply> {
     // The corner offer's entry (it may click the site's own sign-in link first) keeps its exact-origin rule, as does a provider's button.

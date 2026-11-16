@@ -538,9 +538,7 @@ public enum DaemonErrorCode: String, Equatable, Sendable {
     case version
     case weak
     case forbidden
-    case notGranted = "not-granted"
     case rateLimited = "rate-limited"
-    case choosePasskey = "choose-passkey"
     case interactionRequired = "interaction-required"
     case cancelled
     case failed

@@ -163,12 +163,6 @@ pub enum Job {
     Activity {
         seq: u64,
     },
-    /// The agent clients and grants, after revoking one if asked
-    /// (`agents::Agents`).
-    Agents {
-        seq: u64,
-        revoke: Option<crate::agents::Revoke>,
-    },
     /// Recently Deleted: restores `restore` if asked, then lists the
     /// deleted items (`trash::Trash`).
     Trash {
@@ -257,10 +251,6 @@ pub enum Done {
     Activity {
         seq: u64,
         result: Result<Vec<ActivityEntry>, Failure>,
-    },
-    Agents {
-        seq: u64,
-        result: Result<crate::agents::Listing, Failure>,
     },
     Trash {
         seq: u64,

@@ -24,8 +24,8 @@ use zeroize::Zeroizing;
 
 pub use paths::Paths;
 use protocol::{
-    Answer, Change, Claim, Command, ErrorCode, Event, MAX_LINE, Message, PROTOCOL_VERSION, Reply,
-    Request, Status,
+    Answer, Change, Command, ErrorCode, Event, MAX_LINE, Message, PROTOCOL_VERSION, Reply, Request,
+    Status,
 };
 
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
@@ -35,7 +35,6 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 pub type DaemonCheck = Box<dyn Fn(OwnedFd) -> Result<(), String> + Send + Sync>;
 
 static DAEMON_CHECK: OnceLock<DaemonCheck> = OnceLock::new();
-static CLAIM: OnceLock<Claim> = OnceLock::new();
 /// The daemon process that last passed the [`DaemonCheck`], as the kernel
 /// names it (on macOS its audit token, pid version included), so each
 /// connection to it doesn't run the check again.
@@ -48,18 +47,9 @@ pub fn set_daemon_check(check: DaemonCheck) {
     drop(DAEMON_CHECK.set(check));
 }
 
-/// Sets what this client says about who drives it, sent with every request.
-/// The daemon shows it as claimed and never trusts it. The first call wins.
-pub fn set_claim(claim: Claim) {
-    if !claim.is_empty() {
-        drop(CLAIM.set(claim));
-    }
-}
-
 fn request(command: Command) -> Request {
     Request {
         v: PROTOCOL_VERSION,
-        claimed: CLAIM.get().cloned(),
         command,
     }
 }
@@ -119,10 +109,6 @@ async fn check_for(stream: &UnixStream, command: &Command) -> Result<(), Error> 
 pub struct DaemonError {
     pub code: ErrorCode,
     pub message: String,
-    /// With `not-granted`: what the user would have to allow.
-    pub grant: Option<protocol::NotGranted>,
-    /// With `choose-passkey`: the passkeys to choose from.
-    pub passkeys: Option<Vec<protocol::AgentPasskey>>,
 }
 
 impl fmt::Display for DaemonError {
@@ -271,8 +257,8 @@ where
                         answer = &mut answer => break answer,
                         message = read_message(&mut lines) => match message? {
                             Message::Ok { reply } => return Ok(reply),
-                            Message::Error { code, message, grant, passkeys } => {
-                                return Err(DaemonError { code, message, grant, passkeys }.into());
+                            Message::Error { code, message } => {
+                                return Err(DaemonError { code, message }.into());
                             }
                             event => queued.push_back(event),
                         },
@@ -284,19 +270,8 @@ where
             }
             Message::Change { change } => return Err(Error::UnexpectedChange(change)),
             Message::Ok { reply } => return Ok(reply),
-            Message::Error {
-                code,
-                message,
-                grant,
-                passkeys,
-            } => {
-                return Err(DaemonError {
-                    code,
-                    message,
-                    grant,
-                    passkeys,
-                }
-                .into());
+            Message::Error { code, message } => {
+                return Err(DaemonError { code, message }.into());
             }
         }
     }
@@ -447,18 +422,7 @@ impl Watch {
         match serde_json::from_slice::<Message>(&line).map_err(Error::InvalidReply)? {
             Message::Change { change } => Ok(Some(change)),
             Message::Ok { .. } => Ok(None),
-            Message::Error {
-                code,
-                message,
-                grant,
-                passkeys,
-            } => Err(DaemonError {
-                code,
-                message,
-                grant,
-                passkeys,
-            }
-            .into()),
+            Message::Error { code, message } => Err(DaemonError { code, message }.into()),
             Message::Event { event } => Err(Error::UnexpectedEvent(event)),
         }
     }
@@ -1100,8 +1064,6 @@ mod tests {
                 let declined = Message::Error {
                     code: ErrorCode::Failed,
                     message: "the daemon stopped".into(),
-                    grant: None,
-                    passkeys: None,
                 };
                 write
                     .write_all(&encode_line(&declined).unwrap())

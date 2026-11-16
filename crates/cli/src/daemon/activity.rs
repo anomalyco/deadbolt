@@ -1,5 +1,5 @@
-//! The Activity list (`docs/agent-control.md`, "Lock, limits, activity"): an
-//! entry for each caller request and for the app's own reveals and copies,
+//! The Activity list (`docs/design.md`, "Callers"): an entry for each
+//! caller request and for the app's own reveals and copies,
 //! naming items and fields, never values. Entries are sealed in `store.redb`
 //! on this device; those made while locked wait in memory until an unlock.
 //! [`ledger`] keeps all of it in budget.
@@ -13,7 +13,7 @@ use deadbolt_client::peer::Peer;
 use deadbolt_store::{Budget, Dropped};
 use tracing::warn;
 
-pub use ledger::{Ledger, anchor};
+pub use ledger::Ledger;
 
 use super::{Conversation, Daemon, caller, fail, session};
 use crate::client::code;
@@ -93,24 +93,11 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::SendWait { .. } => (T::Always, "send-wait"),
         C::ActivityList { .. } => (T::Look, "activity-list"),
         C::ActivityReport { .. } => (T::Always, "activity-report"),
-        // Pairing and granting need the user, and are refused to AIs;
-        // removing only narrows what agents may do.
-        C::AgentClientAdd { .. } => (T::Never, "agent-client-add"),
-        C::AgentClientList => (T::Look, "agent-client-list"),
-        C::AgentClientRemove { .. } => (T::Always, "agent-client-remove"),
-        C::AgentGrantSet { .. } => (T::Never, "agent-grant-set"),
-        C::AgentGrantList => (T::Look, "agent-grant-list"),
-        C::AgentGrantRemove { .. } => (T::Always, "agent-grant-remove"),
-        C::AgentLogins { .. } => (T::Agent, "agent-logins"),
-        C::AgentFill { .. } => (T::Agent, "agent-fill"),
-        C::AgentPasskeyGet { .. } => (T::Agent, "agent-passkey-get"),
         C::Resolve { purpose, .. } => match purpose {
             Purpose::Run => (T::Use, "resolve-run"),
             Purpose::Inject => (T::Use, "resolve-inject"),
             Purpose::Read => (T::Read, "resolve-read"),
         },
-        C::SecretGrantSet { .. } => (T::Never, "secret-grant-set"),
-        C::SecretGrantList => (T::Look, "secret-grant-list"),
         C::AutofillStatus => (T::Browser, "autofill-status"),
         C::AutofillIdentities => (T::Browser, "autofill-identities"),
         C::AutofillList { .. } => (T::Browser, "autofill-list"),
@@ -131,8 +118,6 @@ pub struct Draft {
     command: &'static str,
     items: Vec<ActivityItem>,
     fields: Vec<String>,
-    /// The agent client's id, for agent sign-ins.
-    client: Option<String>,
     /// The browser filling a form: an entry only for a card, not for an
     /// identity's address and contact details.
     cards_only: bool,
@@ -198,19 +183,8 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
     if matches!(command, Command::ActivityList { .. }) {
         return None;
     }
-    // Agent sign-ins, and what changes them, are entries from anyone.
-    let daemon = matches!(
-        command,
-        Command::AgentClientAdd { .. }
-            | Command::AgentClientRemove { .. }
-            | Command::AgentGrantSet { .. }
-            | Command::AgentGrantRemove { .. }
-            | Command::AgentLogins { .. }
-            | Command::AgentFill { .. }
-            | Command::AgentPasskeyGet { .. }
-            | Command::Resolve { .. }
-            | Command::SecretGrantSet { .. }
-    );
+    // Secrets for commands are entries from anyone.
+    let daemon = matches!(command, Command::Resolve { .. });
     // What a class asks without it being a request of its own.
     let quiet = match class {
         CallerClass::App => true,
@@ -291,17 +265,11 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             vault, query, kind, ..
         } => (named(vault, query), vec![kind.as_str().into()]),
         // The page or app the browser host looked at, and the login it filled:
-        // the login's, under that page. An agent's fill is the same.
+        // the login's, under that page.
         Command::SiteFill {
             origin,
             login: target,
             want,
-        }
-        | Command::AgentFill {
-            origin,
-            login: target,
-            want,
-            ..
         } => (
             login(&target.vault, &target.item, origin),
             want.iter().map(fill_name).collect(),
@@ -333,9 +301,9 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::PasskeyGet {
             origin, passkey, ..
         } => (login(&passkey.vault, &passkey.item, origin), Vec::new()),
-        Command::FormItems { origin, .. }
-        | Command::PasskeyCreate { origin, .. }
-        | Command::AgentLogins { origin, .. } => (titled(origin), Vec::new()),
+        Command::FormItems { origin, .. } | Command::PasskeyCreate { origin, .. } => {
+            (titled(origin), Vec::new())
+        }
         Command::FormFill {
             origin,
             item,
@@ -360,38 +328,6 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             vec!["passkey".into()],
         ),
         Command::AutofillPasskeyCreate { rp_id, .. } => (titled(rp_id), vec!["passkey".into()]),
-        Command::AgentClientAdd { name, .. } => (titled(name), Vec::new()),
-        Command::AgentClientRemove { id } | Command::AgentGrantRemove { id } => {
-            (titled(id), Vec::new())
-        }
-        Command::AgentGrantSet {
-            site,
-            login,
-            fields,
-            passkeys,
-            ..
-        } => {
-            let site = site.as_deref().unwrap_or("every site");
-            let what = match login {
-                Some(login) => format!("{login} on {site}"),
-                None => site.to_string(),
-            };
-            let mut names: Vec<String> = fields.iter().map(fill_name).collect();
-            if *passkeys {
-                names.push("passkey".into());
-            }
-            (titled(&what), names)
-        }
-        Command::AgentPasskeyGet {
-            origin,
-            login: target,
-            ..
-        } => (
-            target
-                .as_ref()
-                .map_or_else(|| titled(origin), |t| login(&t.vault, &t.item, origin)),
-            vec!["passkey".into()],
-        ),
         // The items and fields named, as given; the reply names what was
         // found. Never a value.
         Command::Resolve { refs, .. } => {
@@ -411,22 +347,6 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             }
             (items, fields)
         }
-        Command::SecretGrantSet {
-            vault,
-            items,
-            fields,
-            ..
-        } => (
-            items
-                .iter()
-                .map(|item| ActivityItem {
-                    vault: vault.clone(),
-                    id: None,
-                    title: item.clone(),
-                })
-                .collect(),
-            fields.clone(),
-        ),
         // The page, and that a password was made for it: never the password
         // or its id.
         Command::SiteGenerate { origin, .. }
@@ -435,18 +355,11 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         | Command::SiteGenerateDrop { origin, .. } => (titled(origin), vec!["password".into()]),
         _ => (Vec::new(), Vec::new()),
     };
-    let client = match command {
-        Command::AgentLogins { client, .. }
-        | Command::AgentFill { client, .. }
-        | Command::AgentPasskeyGet { client, .. } => Some(client.id.clone()),
-        _ => None,
-    };
     Some(Draft {
         tier,
         command: name,
         items,
         fields,
-        client,
         cards_only: class == CallerClass::BrowserHost
             && matches!(command, Command::FormFill { .. }),
     })
@@ -473,16 +386,10 @@ impl Draft {
             }
             Err(error) => match code(error) {
                 Some(ErrorCode::Locked) => Outcome::Locked,
-                Some(ErrorCode::Forbidden | ErrorCode::NotGranted | ErrorCode::RateLimited) => {
-                    Outcome::Refused
-                }
+                Some(ErrorCode::Forbidden | ErrorCode::RateLimited) => Outcome::Refused,
                 _ => Outcome::Failed,
             },
         };
-        // An id the token didn't prove names no client.
-        if matches!(result, Err(error) if code(error) == Some(ErrorCode::Forbidden)) {
-            self.client = None;
-        }
         ActivityEntry {
             id: 0,
             time,
@@ -493,7 +400,6 @@ impl Draft {
             fields: self.fields,
             outcome,
             more: 0,
-            client: self.client,
         }
     }
 
@@ -545,16 +451,6 @@ impl Draft {
                     push_once(&mut self.fields, secret.field.clone());
                 }
             }
-            Reply::SecretGrants { grants } => {
-                self.items = grants
-                    .iter()
-                    .map(|g| ActivityItem {
-                        vault: Some(g.vault.clone()),
-                        id: Some(g.item.clone()),
-                        title: g.title.clone(),
-                    })
-                    .collect();
-            }
             Reply::PasskeyCreated { passkey, .. }
             | Reply::AutofillPasskeyCreated { passkey, .. } => {
                 let title = self
@@ -597,7 +493,6 @@ pub fn reported(
         fields: vec![field],
         outcome: Outcome::Allowed,
         more: 0,
-        client: None,
     }
 }
 
@@ -613,7 +508,6 @@ fn past_budget(dropped: Dropped) -> ActivityEntry {
         fields: Vec::new(),
         outcome: Outcome::Allowed,
         more: dropped.count,
-        client: None,
     }
 }
 
@@ -628,52 +522,36 @@ impl Daemon {
         conv: &Conversation,
     ) -> (Result<Reply>, Option<ActivityEntry>) {
         let daemon = self.clone();
-        let mut claimed = request.claimed;
-        if let Some(claim) = &mut claimed {
-            ledger::bound_claim(claim);
-        }
-        let mut caller =
-            tokio::task::spawn_blocking(move || daemon.callers.identify(peer, claimed))
-                .await
-                .unwrap_or_else(|_| caller::nobody());
+        let mut caller = tokio::task::spawn_blocking(move || daemon.callers.identify(peer))
+            .await
+            .unwrap_or_else(|_| caller::nobody());
         let draft = draft(&request.command, caller.class);
         let command = request.command;
         let mut result = match super::macos_autofill::check_access(socket, &caller, &command) {
             Err(error) => Err(error),
             Ok(()) => match command {
                 command @ Command::ActivityReport { .. } => self.report(&caller, command),
-                command @ (Command::AgentClientAdd { .. }
-                | Command::AgentGrantSet { .. }
-                | Command::SecretGrantSet { .. }) => {
-                    self.agents_admin(&caller, command, conv).await
-                }
-                Command::Resolve { refs, purpose } => {
-                    self.resolve(&caller, &refs, purpose, conv).await
-                }
+                Command::Resolve { refs, purpose } => self.resolve(&caller, &refs, purpose),
                 command @ (Command::Health { .. }
                 | Command::HealthIgnore { .. }
-                | Command::BreachChecksSet { .. }) => self.health_command(&caller, command).await,
+                | Command::BreachChecksSet { .. }) => self.health_command(command).await,
                 // Exporting an SSH private key asks the user each time.
                 command @ Command::ItemGet { .. } => {
                     match self.verify_ssh_export(&caller, &command, conv).await {
-                        Ok(()) => self.clone().dispatch(&caller, command, conv).await,
+                        Ok(()) => self.clone().dispatch(command, conv).await,
                         Err(error) => Err(error),
                     }
                 }
-                command => self.clone().dispatch(&caller, command, conv).await,
+                command => self.clone().dispatch(command, conv).await,
             },
         };
-        // Display limits must not hide an AI ancestor from the gate.
         ledger::bound_caller(&mut caller);
         if let Ok(Reply::Status(status)) = &mut result {
             status.caller = caller.clone();
         }
-        let mut entry = draft
+        let entry = draft
             .filter(|draft| draft.recorded(&result))
             .map(|draft| draft.finish(caller, session::now(), &result));
-        if let Some(entry) = &mut entry {
-            self.name_agent_entry(entry);
-        }
         (result, entry)
     }
 
@@ -741,15 +619,17 @@ impl Daemon {
         let limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
         let since = since.unwrap_or(0);
         let page = self.with(|s| Ok(s.store.activity_list(since, before, limit)?))?;
-        let mut entries = page
+        // Entries of commands since removed (agent sign-ins) no longer read;
+        // they're left out, and go as entries age past `KEEP_SECS`.
+        let mut entries: Vec<ActivityEntry> = page
             .rows
             .into_iter()
-            .map(|row| {
-                let mut entry: ActivityEntry = serde_json::from_slice(&row.bytes)?;
+            .filter_map(|row| {
+                let mut entry: ActivityEntry = serde_json::from_slice(&row.bytes).ok()?;
                 entry.id = row.id;
-                Ok(entry)
+                Some(entry)
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
         entries.extend(page.dropped.map(past_budget));
         Ok(Reply::Activity { entries })
     }
@@ -785,8 +665,8 @@ impl Daemon {
         Ok(Reply::Done)
     }
 
-    /// Exporting an SSH private key asks Touch ID each time, for anyone but
-    /// the app and an AI; anything else gets no further check here.
+    /// Exporting an SSH private key asks Touch ID each time, when it is on,
+    /// for anyone but the app; anything else gets no further check here.
     async fn verify_ssh_export(
         &self,
         caller: &CallerInfo,
@@ -803,7 +683,7 @@ impl Daemon {
         else {
             return Ok(());
         };
-        if !ssh_private || caller.class == CallerClass::App || caller::is_ai(caller) {
+        if !ssh_private || caller.class == CallerClass::App || !self.can_verify() {
             return Ok(());
         }
         let Some(title) = self.with(|s| {
@@ -815,24 +695,13 @@ impl Daemon {
         else {
             return Ok(());
         };
-        if caller::is_ai(caller) && !self.can_verify() {
-            return Err(fail(
-                ErrorCode::Forbidden,
-                format!(
-                    "{} can export an SSH private key only with Touch ID each time",
-                    caller::gate_subject(caller)
-                ),
-            ));
-        }
-        if self.can_verify() {
-            let reason = format!(
-                "export the SSH private key of {title} ({})",
-                clean_label(&caller.label)
-            );
-            let _busy = self.busy();
-            self.verify_user(conv, crate::protocol::Verify::Required, &reason)
-                .await?;
-        }
+        let reason = format!(
+            "export the SSH private key of {title} ({})",
+            clean_label(&caller.label)
+        );
+        let _busy = self.busy();
+        self.verify_user(conv, crate::protocol::Verify::Required, &reason)
+            .await?;
         Ok(())
     }
 }
@@ -864,23 +733,10 @@ mod tests {
 
     const SECRET: &str = "correct-horse-battery-staple";
 
-    /// Takes the peer on `server` (this test process) as a person's
-    /// terminal would be: the tests may run under an AI host such as
-    /// OpenCode, among the process's parents, which the daemon refuses
-    /// what these tests ask.
-    fn as_a_person(daemon: &Daemon, server: &UnixStream) {
-        let peer = deadbolt_client::peer::Peer::of(server).unwrap();
-        let mut info = daemon.callers.identify(Ok(peer), None);
-        info.ancestry.clear();
-        daemon.callers.cache_for_test(peer, info);
-    }
-
     async fn ask(daemon: &Arc<Daemon>, command: Command) -> Message {
         let (server, mut client) = UnixStream::pair().unwrap();
-        as_a_person(daemon, &server);
         let mut line = serde_json::to_vec(&Request {
             v: PROTOCOL_VERSION,
-            claimed: None,
             command,
         })
         .unwrap();
@@ -1118,7 +974,7 @@ mod tests {
         };
         let caller = daemon
             .callers
-            .identify(Err(std::io::ErrorKind::Other.into()), None);
+            .identify(Err(std::io::ErrorKind::Other.into()));
         assert!(daemon.report(&caller, report.clone()).is_err());
         let mut app = caller;
         app.class = CallerClass::App;
@@ -1265,7 +1121,6 @@ mod tests {
         let (server, mut client) = UnixStream::pair().unwrap();
         let mut line = serde_json::to_vec(&Request {
             v: PROTOCOL_VERSION,
-            claimed: None,
             command: Command::ItemNew {
                 vault: None,
                 kind: "note".into(),
@@ -1281,7 +1136,6 @@ mod tests {
         })
         .unwrap();
         line.push(b'\n');
-        as_a_person(&daemon, &server);
         let handled = tokio::spawn(daemon.clone().handle(server, MAX_LINE));
         client.write_all(&line).await.unwrap();
         let mut reply = String::new();
@@ -1292,7 +1146,6 @@ mod tests {
         let (server, client) = UnixStream::pair().unwrap();
         let mut line = serde_json::to_vec(&Request {
             v: PROTOCOL_VERSION,
-            claimed: None,
             command: Command::ItemGet {
                 vault: None,
                 query: vec!["big".into()],
@@ -1306,7 +1159,6 @@ mod tests {
         line.push(b'\n');
         let (mut read, mut write) = client.into_split();
         write.write_all(&line).await.unwrap();
-        as_a_person(&daemon, &server);
         let handled = tokio::spawn(daemon.clone().handle(server, MAX_LINE));
         // The reply has started, and stalls on a client that reads no more.
         let mut first = [0u8; 1];
