@@ -185,10 +185,12 @@ fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
     // Copy the production helper next to the compiled `deadbolt` binary in the
     // Cargo profile directory (`target/<triple?>/<profile>/deadbolt-enclave`)
     // so `bundle.sh` and release packaging reuse the exact signed binary that
-    // `build.rs` hashed.
+    // `build.rs` hashed. OUT_DIR is `<profile>/build/deadbolt-cli-<hash>/out`
+    // before Cargo 1.100 and `<profile>/build/deadbolt-cli/<hash>/out` since.
     let profile_dir = out_dir
         .ancestors()
-        .nth(3)
+        .find(|dir| dir.file_name().is_some_and(|name| name == "build"))
+        .and_then(Path::parent)
         .ok_or_else(|| format!("unexpected OUT_DIR layout: {}", out_dir.display()))?;
     let staged = profile_dir.join("deadbolt-enclave");
     std::fs::copy(&prod_bin, &staged)
