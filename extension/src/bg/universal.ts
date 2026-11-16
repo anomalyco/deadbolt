@@ -23,7 +23,7 @@ interface Memory { signedIn?: number; quietUntil?: number }
 /** An offer's authority lasts this long between renewals (see UniversalSignIn.token). */
 const OFFER_MS = 60_000
 
-/** The corner offer, with "Offer to sign in" on. Browse fills never enter this path. */
+/** The corner offer, with "Offer to sign in" on. */
 export class UniversalSignIn {
   private offers = new Map<string, Offer>()
   private checking = new Set<number>()

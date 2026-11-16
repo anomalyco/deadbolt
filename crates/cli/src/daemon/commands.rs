@@ -12,22 +12,20 @@ use tokio::io::AsyncWriteExt;
 use super::connection::Conversation;
 use super::session::Session;
 use super::{
-    Daemon, ErrorCode, INTERRUPTED, autofill, fail, generate, grants, items, macos_autofill,
-    mirror, pairing, secrets, session, sync, watchers,
+    Daemon, ErrorCode, INTERRUPTED, autofill, fail, generate, items, macos_autofill, mirror,
+    pairing, sync, watchers,
 };
-use crate::protocol::{CallerInfo, Change, Command, Message, Reply};
+use crate::protocol::{Change, Command, Message, Reply};
 
 impl Daemon {
     pub(super) async fn dispatch(
         self: Arc<Self>,
-        caller: &CallerInfo,
         command: Command,
         conv: &Conversation,
     ) -> Result<Reply> {
         if matches!(command, Command::Status | Command::Stop) {
             return self.run(command, conv).await;
         }
-        self.ai_gate(caller, &command, conv).await?;
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.
@@ -54,10 +52,6 @@ impl Daemon {
                     | Command::SiteGenerateCheck { .. }
                     | Command::SiteGenerateDrop { .. }
                     | Command::AppActivate { .. }
-                    // An AI signing in unattended mustn't hold the vault open.
-                    | Command::AgentLogins { .. }
-                    | Command::AgentFill { .. }
-                    | Command::AgentPasskeyGet { .. }
                     // macOS AutoFill lookups run in the background without use.
                     | Command::AutofillStatus
                     | Command::AutofillIdentities
@@ -515,48 +509,18 @@ impl Daemon {
             command @ (Command::PasskeyList { .. }
             | Command::PasskeyCreate { .. }
             | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,
-            Command::AgentClientAdd { .. }
-            | Command::AgentGrantSet { .. }
-            | Command::SecretGrantSet { .. }
-            | Command::Resolve { .. }
+            Command::Resolve { .. }
             | Command::Health { .. }
             | Command::HealthIgnore { .. }
             | Command::BreachChecksSet { .. } => {
-                bail!("pairing, grants, references and health are answered with the caller")
+                bail!("references and health are answered with the caller")
             }
-            Command::AgentClientList => Ok(Reply::AgentClients {
-                clients: self.with(|s| grants::list_clients(s))?,
-            }),
-            Command::AgentClientRemove { id } => {
-                let (id, _) = self.with(|s| grants::remove_client(s, &id))?;
-                self.forget_agent_client(&id);
-                Ok(Reply::Done)
-            }
-            Command::AgentGrantList => Ok(Reply::AgentGrants {
-                grants: self.with(|s| grants::list_grants(s, session::now()))?,
-            }),
-            Command::AgentGrantRemove { id } => {
-                // Either kind of grant: a sign-in grant, else a secret grant.
-                self.with(|s| match grants::remove_grant(s, &id) {
-                    Err(error) if crate::client::code(&error) == Some(ErrorCode::NotFound) => {
-                        secrets::remove_grant(s, &id)
-                    }
-                    removed => removed.map(drop),
-                })?;
-                Ok(Reply::Done)
-            }
-            Command::SecretGrantList => Ok(Reply::SecretGrants {
-                grants: self.with(|s| secrets::list_grants(s, session::now()))?,
-            }),
             Command::SshGenerate { kind, comment } => self.ssh_generate(kind, comment.as_deref()),
             Command::SshInspect {
                 private_key,
                 passphrase,
                 comment,
             } => self.ssh_inspect(&private_key, passphrase.as_ref(), comment.as_deref()),
-            command @ (Command::AgentLogins { .. }
-            | Command::AgentFill { .. }
-            | Command::AgentPasskeyGet { .. }) => self.agent_client(command),
             command @ (Command::AutofillStatus
             | Command::AutofillIdentities
             | Command::AutofillList { .. }

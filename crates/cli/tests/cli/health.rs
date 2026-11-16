@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 
 fn human_health(device: &Device, args: &[&str]) -> String {
-    let (ok, out, err) = detached(device, args, "");
+    let (ok, out, err) = piped(device, args, "");
     assert!(ok, "deadbolt {args:?} failed: {err}");
     out
 }
 
 #[test]
-fn offline_health_flags_risks_skips_pins_syncs_ignores_and_refuses_ai() {
+fn offline_health_flags_risks_skips_pins_syncs_and_ignores() {
     let a = Device::new();
     a.run(&["init", "--device-name", "alpha"]);
 
@@ -67,12 +67,6 @@ fn offline_health_flags_risks_skips_pins_syncs_ignores_and_refuses_ai() {
     assert_eq!(report.counts.reused, 2);
     assert_eq!(report.counts.missing_two_factor, 1);
     assert_eq!(report.counts.passkeys_available, 1);
-
-    // AI callers (`OPENCODE_SESSION_ID`) are refused with exit code 4.
-    let mut ai = a.cmd(&["health"]);
-    ai.env("OPENCODE_SESSION_ID", "ses_test_123");
-    let refused = a.output(&mut ai);
-    assert_eq!(refused.status.code(), Some(4));
 
     // Ignore Weak on GitHub and sync to peer device `b`: `b` sees the ignore,
     // and changing GitHub's password on `b` lapses the ignore automatically.

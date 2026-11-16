@@ -117,13 +117,9 @@ deadbolt inject -i config.tpl -o config.json          # {{ deadbolt://… }}, wr
 deadbolt read deadbolt://personal/GitHub/password     # prints one value
 ```
 
-`run` conceals the values in the command's output (so the command's output is a pipe, not your terminal: `--no-mask` keeps the terminal), passes stdin and signals through and exits with the command's code. AI agents (OpenCode, Claude Code and the like) are refused until you allow them, item by item. Allowing an AI to use a value lets it learn the value (it chooses the command, and masking only stops accidents), so allow only what you would hand it. Printing a value, with `read` or `inject` to stdout, needs Touch ID every time:
+`run` conceals the values in the command's output (so the command's output is a pipe, not your terminal: `--no-mask` keeps the terminal), passes stdin and signals through and exits with the command's code. Masking stops accidents, not a command that means to show a value. `deadbolt activity` lists every resolve, never a value.
 
-```sh
-deadbolt agents allow-secrets GitHub --fields token --purpose run --expires 8h
-deadbolt agents grants                     # deadbolt agents revoke <id>
-deadbolt activity                          # every resolve, never a value
-```
+While the vault is unlocked, any program running as you can read it, with no prompt, as with an unlocked `op` session or `pass` with gpg-agent: lock it (`deadbolt lock`, or let the idle lock do it) when you're away. See "Callers" in [`docs/design.md`](docs/design.md).
 
 ## Send
 
@@ -150,7 +146,7 @@ A short text value prints alone on stdout, an item's fields as `field<TAB>value`
 - [`docs/app.md`](docs/app.md) — the desktop app (Rune, in `crates/app`): plan, keyboard, motion, and the first slice.
 - [`docs/proposals/send.md`](docs/proposals/send.md) — Deadbolt Send: one-time links to files, secrets and vault items, served live peer to peer and opened in any browser or with `deadbolt receive`.
 - [`docs/autofill.md`](docs/autofill.md) — browser autofill: the native messaging host, its message set, domain rules and threat model.
-- [`docs/agent-control.md`](docs/agent-control.md) — design: how AI agents may use Deadbolt (tiers, Touch ID approvals, caller identity), what is built of it: `deadbolt run`, `inject` and `read` with grants for AI agents, and standing grants for sign-ins: `deadbolt agents` pairs a browser relay such as Browse and allows it to sign AI agents in to chosen sites unattended, without the AI ever seeing a value.
+- [`docs/secrets.md`](docs/secrets.md) — `deadbolt run`, `inject` and `read`: references, masking and Activity.
 - `docs/research/` — prior art
   - [`01-inkandswitch.md`](docs/research/01-inkandswitch.md) — Keyhive, BeeKEM, Beelay/Subduction, Automerge
   - [`02-rust-sync-stacks.md`](docs/research/02-rust-sync-stacks.md) — iroh, p2panda, Willow, Loro/Automerge/yrs

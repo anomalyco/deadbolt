@@ -103,7 +103,7 @@ how 1Password detects signed-out state, uses cookies or suppresses Gmail prompts
 | Offer and local memory | `extension/src/bg/universal.ts`, `extension/src/background.ts`: exact-origin accounts, suppression, offer tokens, callbacks and message routing. |
 | Fill and continuation | `extension/src/bg/autofill.ts`, `extension/src/content.ts`, `extension/src/content/approvals.ts`, `extension/src/bg/frames.ts`: bounded automatic sessions, approved fields, effective submit destination and browser-derived document identity. |
 | Surface and setting | `extension/src/content/inline.ts`, `extension/src/menu.ts`, `extension/src/ui/dom.ts`, `extension/src/vault/settings.ts`: compact corner surface, trusted entry, visibility guard and default-off toggle. |
-| Existing integrations | `extension/src/bg/save.ts`, `extension/src/bg/signinwith.ts`, `extension/src/signin.ts`, `extension/src/bg/backend.ts`: save outcomes, manual provider guidance and shared native/standalone backend boundary. Browse's separate authority is described in `docs/agent-control.md`. |
+| Existing integrations | `extension/src/bg/save.ts`, `extension/src/bg/signinwith.ts`, `extension/src/signin.ts`, `extension/src/bg/backend.ts`: save outcomes, manual provider guidance and shared native/standalone backend boundary. |
 
 The implementation reuses Deadbolt's existing menu frame, frame-token machinery,
 field approvals and session code rather than creating a second credential path.
@@ -232,8 +232,6 @@ not constitute a completed security review.
    hand typing and pending save work can keep the offer from opening. Dismiss/Not
    now uses the origin cooldown, independently of saving preferences. Provider
    guidance remains manual; passkeys retain their existing ceremony checks.
-   Browse's standing grants remain separate and gain no authority from this
-   setting. There is no authenticated Browse-activity coordination signal yet.
 
 No implicit provider-to-password fallback or arbitrary OAuth click is added.
 A failure to safely advance must not become a retry against another account.

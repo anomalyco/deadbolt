@@ -214,14 +214,10 @@ impl Daemon {
                 Ok(error) => Message::Error {
                     code: error.code,
                     message: error.message,
-                    grant: error.grant,
-                    passkeys: error.passkeys,
                 },
                 Err(error) => Message::Error {
                     code: ErrorCode::Failed,
                     message: format!("{error:#}"),
-                    grant: None,
-                    passkeys: None,
                 },
             },
         };

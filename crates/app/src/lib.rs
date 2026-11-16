@@ -2,7 +2,6 @@
 //! the same socket protocol as the CLI. See docs/app.md.
 
 pub mod activity;
-pub mod agents;
 pub mod binary;
 pub mod cache;
 pub mod daemon;

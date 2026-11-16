@@ -133,7 +133,7 @@ pub(crate) async fn report(
     Done::Reported
 }
 
-/// "2m ago  OpenCode › zsh › deadbolt  item-get GitHub (password)".
+/// "2m ago  Ghostty › zsh › deadbolt  item-get GitHub (password)".
 fn line(entry: &ActivityEntry, now: u64) -> String {
     let age = now.saturating_sub(entry.time);
     let ago = match age {
@@ -160,10 +160,7 @@ fn line(entry: &ActivityEntry, now: u64) -> String {
     if entry.more > 0 {
         what.push_str(&format!(", {} more", entry.more));
     }
-    match &entry.client {
-        Some(client) => format!("{ago} · agent client {client} · {what}"),
-        None => format!("{ago} · {} · {what}", entry.caller.label),
-    }
+    format!("{ago} · {} · {what}", entry.caller.label)
 }
 
 #[expect(
@@ -236,7 +233,7 @@ mod tests {
         let entry = ActivityEntry {
             id: 3,
             time: 1_000,
-            caller: CallerInfo::unverified("OpenCode › zsh › deadbolt"),
+            caller: CallerInfo::unverified("Ghostty › zsh › deadbolt"),
             tier: Tier::Read,
             command: "item-get".into(),
             items: vec![ActivityItem {
@@ -247,11 +244,10 @@ mod tests {
             fields: vec!["password".into()],
             outcome: Outcome::Allowed,
             more: 0,
-            client: None,
         };
         assert_eq!(
             line(&entry, 1_120),
-            "2m ago · OpenCode › zsh › deadbolt · item-get GitHub (password)"
+            "2m ago · Ghostty › zsh › deadbolt · item-get GitHub (password)"
         );
         let folded = ActivityEntry {
             command: "more-past-limit".into(),
@@ -262,7 +258,7 @@ mod tests {
         };
         assert_eq!(
             line(&folded, 1_120),
-            "2m ago · OpenCode › zsh › deadbolt · more-past-limit, 25 more"
+            "2m ago · Ghostty › zsh › deadbolt · more-past-limit, 25 more"
         );
     }
 }

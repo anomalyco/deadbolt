@@ -191,7 +191,6 @@ fn import_reports_read_as_lines() {
 fn app_activate_and_its_replies_are_flat_json_lines() {
     let request = serde_json::to_string(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::AppActivate {
             token: Some("launcher-token".into()),
         },
@@ -218,7 +217,6 @@ fn app_activate_and_its_replies_are_flat_json_lines() {
 fn watch_round_trips_as_flat_json_lines() {
     let request = serde_json::to_string(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::Watch { app: true },
     })
     .unwrap();
@@ -270,29 +268,24 @@ fn watch_round_trips_as_flat_json_lines() {
     }
 }
 
-/// A claim rides beside the command and is left out when there is none,
-/// so a status request reads the same to daemons of every protocol.
+/// A status request reads the same to daemons of every protocol, and an
+/// older client's extra fields are ignored.
 #[test]
-fn a_claim_rides_beside_the_command() {
-    let claimed = Request {
+fn a_status_request_is_just_its_version_and_command() {
+    let line = serde_json::to_string(&Request {
         v: PROTOCOL_VERSION,
-        claimed: Some(Claim {
-            caller: Some("deploy bot".into()),
-            opencode_session: None,
-        }),
         command: Command::Status,
-    };
-    let line = serde_json::to_string(&claimed).unwrap();
+    })
+    .unwrap();
     assert_eq!(
         line,
-        format!(
-            r#"{{"v":{PROTOCOL_VERSION},"claimed":{{"caller":"deploy bot","opencode_session":null}},"cmd":"status"}}"#
-        )
+        format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"status"}}"#)
     );
-    let back = serde_json::from_str::<Request>(&line).unwrap();
-    assert_eq!(back.claimed, claimed.claimed);
-    let old = serde_json::from_str::<Request>(r#"{"v":1,"cmd":"status"}"#).unwrap();
-    assert!(old.claimed.is_none() && matches!(old.command, Command::Status));
+    let old = serde_json::from_str::<Request>(
+        r#"{"v":27,"claimed":{"caller":"x","opencode_session":null},"cmd":"status"}"#,
+    )
+    .unwrap();
+    assert!(matches!(old.command, Command::Status));
 }
 
 #[test]
@@ -322,7 +315,6 @@ fn an_item_set_carries_its_unset_fields() {
 fn generate_round_trips() {
     let request = serde_json::to_string(&Request {
         v: PROTOCOL_VERSION,
-        claimed: None,
         command: Command::Generate {
             length: 20,
             symbols: false,

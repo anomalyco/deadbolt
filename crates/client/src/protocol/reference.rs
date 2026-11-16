@@ -1,4 +1,4 @@
-//! Secret references (`docs/agent-control.md`, "CLI"):
+//! Secret references (`docs/secrets.md`):
 //! `deadbolt://[vault/]item/field`, naming one field of one item, the item
 //! by its title or short id. Without a vault, the default vault. A `/` or
 //! `%` in a name is written `%2F` or `%25`.

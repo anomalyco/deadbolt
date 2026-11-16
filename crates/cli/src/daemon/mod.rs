@@ -9,7 +9,6 @@ mod commands;
 mod connection;
 mod forms;
 mod generate;
-mod grants;
 mod guesses;
 mod health;
 mod items;
@@ -36,7 +35,7 @@ mod updates;
 mod watch_tests;
 mod watchers;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -54,7 +53,7 @@ use crate::config::Config;
 use crate::paths::Paths;
 use crate::protocol::ErrorCode;
 #[cfg(test)]
-use crate::protocol::{CallerInfo, Command, Message, Reply};
+use crate::protocol::{Command, Message, Reply};
 use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
 #[cfg(test)]
@@ -147,10 +146,6 @@ pub struct Daemon {
     /// Activity not stored yet: entries recorded while locked, and each
     /// caller's count against its limit.
     activity: Mutex<activity::Ledger>,
-    /// Each paired agent client's rate limit, by client id.
-    agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
-    /// AI callers' `resolve` rate limits, by anchor, and one for them all.
-    resolve_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
     /// macOS AutoFill extension rate limits for fills and passkey ceremonies.
     autofill_fill_rate: Mutex<Option<crate::browser::host::Bucket>>,
     autofill_passkey_rate: Mutex<Option<crate::browser::host::Bucket>>,
@@ -197,8 +192,6 @@ impl Daemon {
             watchers: Watchers::default(),
             callers: caller::Callers::new(),
             activity: Mutex::default(),
-            agent_rates: Mutex::default(),
-            resolve_rates: Mutex::default(),
             autofill_fill_rate: Mutex::default(),
             autofill_passkey_rate: Mutex::default(),
             guesses: guesses::Guesses::default(),
@@ -287,8 +280,6 @@ fn fail(code: ErrorCode, message: impl Into<String>) -> anyhow::Error {
     DaemonError {
         code,
         message: message.into(),
-        grant: None,
-        passkeys: None,
     }
     .into()
 }

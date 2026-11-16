@@ -20,11 +20,11 @@ use zeroize::Zeroizing;
 
 use super::items::Listing;
 use super::session::{Loaded, now, set_json};
-use super::{Daemon, ErrorCode, caller, fail};
+use super::{Daemon, ErrorCode, fail};
 use crate::config::{Config, set_breach_checks};
 use crate::import::MirrorVersion;
 use crate::import::onepassword::date as op_date;
-use crate::protocol::{CallerInfo, Command, HealthReport, Reply};
+use crate::protocol::{Command, HealthReport, Reply};
 use hibp::{
     BREACHES_TTL_SECS, Candidate, HibpCache, HibpEntry, META_SITE_BREACHES, StoredBreaches,
     fetch_site_breaches, load_site_breaches, query_candidates,
@@ -78,26 +78,8 @@ struct PendingItem {
 }
 
 impl Daemon {
-    /// Handles `Health`, `HealthIgnore`, and `BreachChecksSet` after checking
-    /// that the caller is not an AI agent.
-    pub(super) async fn health_command(
-        self: &Arc<Self>,
-        caller: &CallerInfo,
-        command: Command,
-    ) -> Result<Reply> {
-        if caller::is_ai(caller) {
-            return Err(fail(
-                ErrorCode::Forbidden,
-                if caller.identified {
-                    "AI agents may not inspect or change password health".into()
-                } else {
-                    format!(
-                        "Can't share or change password health: {}",
-                        caller.reason.as_deref().unwrap_or("missing process facts")
-                    )
-                },
-            ));
-        }
+    /// Handles `Health`, `HealthIgnore`, and `BreachChecksSet`.
+    pub(super) async fn health_command(self: &Arc<Self>, command: Command) -> Result<Reply> {
         match command {
             Command::Health { vault, online } => {
                 let want_online = online

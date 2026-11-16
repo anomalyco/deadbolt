@@ -5,16 +5,13 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::{
-    AppAction, AutofillService, Claim, ClientAuth, ExportFile, FieldInput, Fill, FindingKind,
-    FormKind, LoginRef, PagePassword, Purpose, Secret, SiteField, SshKeyKind, Verify,
+    AppAction, AutofillService, ExportFile, FieldInput, Fill, FindingKind, FormKind, LoginRef,
+    PagePassword, Purpose, Secret, SiteField, SshKeyKind, Verify,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
     pub v: u32,
-    /// Who the client says it is acting for. Shown as claimed, never trusted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claimed: Option<Claim>,
     #[serde(flatten)]
     pub command: Command,
 }
@@ -415,114 +412,15 @@ pub enum Command {
         title: String,
         field: String,
     },
-    /// Agent sign-ins (`docs/agent-control.md`, "Standing grants"): pairs a
-    /// new agent client, such as Browse's relay, and replies
-    /// `agent-client-added` with its token, shown once. Needs the user:
-    /// Touch ID raised by the daemon, or `passphrase`, which the CLI reads
-    /// from the terminal or `--passphrase-stdin`, never the environment.
-    /// Refused (`forbidden`) to a caller Deadbolt takes for an AI.
-    AgentClientAdd {
-        name: String,
-        passphrase: Option<Zeroizing<String>>,
-    },
-    /// The paired agent clients; replies `agent-clients`.
-    AgentClientList,
-    /// Unpairs a client and drops its grants; replies `done`.
-    AgentClientRemove {
-        id: String,
-    },
-    /// Lets `client_id` fill `fields` of the logins on `site` (a
-    /// registrable domain, or an exact origin with its scheme; `None` for
-    /// every site), or only of `login` (a login's id, short id, title or
-    /// username on that site), and sign in with that site's passkeys if
-    /// `passkeys`, until `expires_at` (Unix seconds; `None` never). A login
-    /// still fills only on the site of one of its URLs. Needs the user as
-    /// `AgentClientAdd` does, and refuses AIs the same way. Replies
-    /// `agent-grant`.
-    AgentGrantSet {
-        client_id: String,
-        site: Option<String>,
-        login: Option<String>,
-        fields: Vec<Fill>,
-        passkeys: bool,
-        expires_at: Option<u64>,
-        passphrase: Option<Zeroizing<String>>,
-    },
-    /// Every grant, expired ones too; replies `agent-grants`.
-    AgentGrantList,
-    /// Removes a grant, a sign-in or a secret grant; replies `done`.
-    AgentGrantRemove {
-        id: String,
-    },
-    /// From a paired client: the logins on the site of the page at
-    /// `origin`, without values, and what its grants cover of each;
-    /// replies `agent-logins`. Empty, with `granted` false, when no live
-    /// grant of the client covers the site.
-    AgentLogins {
-        client: ClientAuth,
-        origin: String,
-    },
-    /// From a paired client: the values `want` names of `login` for the
-    /// frame at `origin`, only if live grants cover the client, the site,
-    /// the login and every wanted field (else `not-granted` naming the site
-    /// and login), and one of the login's URLs is on the site (else
-    /// `domain-mismatch`). A one-time password comes as its current code.
-    /// Replies `site-fill`.
-    AgentFill {
-        client: ClientAuth,
-        origin: String,
-        login: LoginRef,
-        want: Vec<Fill>,
-    },
-    /// From a paired client: signs `challenge` with a passkey for `rp_id`
-    /// (the host of `origin` when `None`) that a live grant with
-    /// `passkeys` covers: `login` (a passkey ref from `agent-logins`), else
-    /// the only covered one among `allow_credentials` (all of the site's
-    /// when empty); with several, fails `choose-passkey` listing them.
-    /// Client data is built from `origin`. User presence is set (the grant
-    /// is the user's standing consent), user verification never, so
-    /// `required` fails. Replies `passkey-assertion` with `verified` false.
-    AgentPasskeyGet {
-        client: ClientAuth,
-        origin: String,
-        rp_id: Option<String>,
-        #[serde(default)]
-        login: Option<LoginRef>,
-        challenge: String,
-        #[serde(default)]
-        allow_credentials: Vec<String>,
-        user_verification: Verify,
-    },
-    /// Secrets for commands (`docs/agent-control.md`, "Use, don't read"):
-    /// the values `refs` name (`deadbolt://[vault/]item/field`, see
-    /// [`crate::protocol::Reference`]), for `purpose`. Each item is a title or
-    /// short id that
-    /// must match exactly one item; a one-time password field gives its
-    /// current code. A caller Deadbolt takes for an AI needs a live
-    /// `secret-grant-set` grant covering every item, field and purpose for
-    /// `run` and `inject` (else `not-granted`), and Touch ID each time for
-    /// `read` (else `forbidden`). Replies `secrets`, in reference order.
+    /// Secrets for commands: the values `refs` name
+    /// (`deadbolt://[vault/]item/field`, see [`crate::protocol::Reference`]),
+    /// for `purpose`. Each item is a title or short id that must match
+    /// exactly one item; a one-time password field gives its current code.
+    /// Replies `secrets`, in reference order.
     Resolve {
         refs: Vec<String>,
         purpose: Purpose,
     },
-    /// Lets AI callers resolve `fields` (every field when empty) of the
-    /// items `items` (titles or short ids in `vault`) for `purposes` (run,
-    /// inject; never read) without asking, until `expires_at` (Unix seconds;
-    /// `None` never). Setting the same item again replaces its grant. Needs
-    /// the user as `AgentClientAdd` does, and refuses AIs the same way.
-    /// Replies `secret-grants` with the grants made.
-    SecretGrantSet {
-        vault: Option<String>,
-        items: Vec<String>,
-        fields: Vec<String>,
-        purposes: Vec<Purpose>,
-        expires_at: Option<u64>,
-        passphrase: Option<Zeroizing<String>>,
-    },
-    /// Every secret grant, expired ones too; replies `secret-grants`.
-    /// `agent-grant-remove` removes them.
-    SecretGrantList,
     /// macOS AutoFill (`docs/macos-autofill.md`): lock and Touch ID status
     /// plus `identities_hash` (when unlocked) so the extension knows whether
     /// `ASCredentialIdentityStore` needs a sync. Doesn't count as use for the
@@ -581,7 +479,7 @@ pub enum Command {
     /// Password health findings and summary counts for `vault` (`None` uses the
     /// default vault; `Some("*")` includes every unlocked vault), never values
     /// or hashes. With `online`, runs a Have I Been Pwned range check first.
-    /// Refused to AI callers. Replies `health`.
+    /// Replies `health`.
     Health {
         vault: Option<String>,
         #[serde(default)]
@@ -589,7 +487,7 @@ pub enum Command {
     },
     /// Ignores (`ignored = true`) or restores (`false`) `kind` on the item
     /// matching `query` in `vault`, syncing the dismissal across devices.
-    /// Refused to AI callers. Replies `health`.
+    /// Replies `health`.
     HealthIgnore {
         vault: Option<String>,
         query: Vec<String>,
@@ -597,7 +495,7 @@ pub enum Command {
         ignored: bool,
     },
     /// Enables or disables opt-in Have I Been Pwned breach checks in
-    /// `config.toml`. Refused to AI callers. Replies `done`.
+    /// `config.toml`. Replies `done`.
     BreachChecksSet {
         enabled: bool,
     },
@@ -623,13 +521,10 @@ impl Command {
     /// Whether the request carries the vault passphrase, so the client must
     /// check who it is talking to before sending it.
     pub fn carries_passphrase(&self) -> bool {
-        match self {
-            // A join asks for one if the device isn't set up.
-            Self::Setup { .. } | Self::Unlock { .. } | Self::Join { .. } => true,
-            Self::AgentClientAdd { passphrase, .. }
-            | Self::AgentGrantSet { passphrase, .. }
-            | Self::SecretGrantSet { passphrase, .. } => passphrase.is_some(),
-            _ => false,
-        }
+        // A join asks for one if the device isn't set up.
+        matches!(
+            self,
+            Self::Setup { .. } | Self::Unlock { .. } | Self::Join { .. }
+        )
     }
 }

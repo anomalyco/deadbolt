@@ -1,7 +1,6 @@
-//! `deadbolt run`, `inject` and `read` (`docs/agent-control.md`, "Use,
-//! don't read"): secret references (`deadbolt://[vault/]item/field`)
-//! resolved by the daemon, into a command's environment, a 0600 file, or
-//! printed. The daemon decides who may have them; this side never logs,
+//! `deadbolt run`, `inject` and `read` (`docs/secrets.md`): secret
+//! references (`deadbolt://[vault/]item/field`) resolved by the daemon, into
+//! a command's environment, a 0600 file, or printed. This side never logs,
 //! echoes or passes a value on argv.
 
 use std::collections::HashMap;
@@ -58,7 +57,7 @@ pub struct InjectArgs {
     #[arg(short = 'i', long = "in-file", value_name = "FILE")]
     input: Option<PathBuf>,
     /// Where to write (default: stdout, which counts as reading the values,
-    /// so AI agents need Touch ID). Written 0600, replacing it only if
+    /// in Activity). Written 0600, replacing it only if
     /// `deadbolt inject` wrote it and it hasn't changed since.
     #[arg(short = 'o', long = "out-file", value_name = "FILE")]
     output: Option<PathBuf>,
@@ -613,8 +612,7 @@ pub async fn inject(paths: &Paths, args: InjectArgs, from_stdin: bool) -> Result
             refs.push(r.clone());
         }
     }
-    // Written to stdout, the values go to whoever runs this: that's a read,
-    // which an AI can't do on an inject grant.
+    // Written to stdout, the values go to whoever runs this: that's a read.
     let to_stdout = args.output.as_ref().is_none_or(|f| f.as_os_str() == "-");
     let purpose = if to_stdout {
         Purpose::Read

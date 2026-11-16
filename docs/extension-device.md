@@ -740,7 +740,7 @@ lists the sites "Never for this site" turned off (the same
 ### Activity
 
 The standalone device keeps Activity as the native daemon does
-([agent-control.md](agent-control.md#lock-limits-activity)), and Settings ›
+([design.md](design.md#callers-threat-model)), and Settings ›
 Activity shows it as the native app's Settings does: closed until Show, then
 the newest 50, newest first, in plain words ("Filled username and password",
 "From browser · github.com · 4 min ago"). Show older reads the 50 before the

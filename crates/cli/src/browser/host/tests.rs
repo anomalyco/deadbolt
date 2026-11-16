@@ -229,8 +229,6 @@ async fn a_refused_watch_is_no_change() {
     let refused = Message::Error {
         code: ErrorCode::Version,
         message: "the daemon speaks protocol 6".into(),
-        grant: None,
-        passkeys: None,
     };
     fake_daemon(&paths, vec![vec![refused], vec![]], true);
     let (pushed, announce) = pushes(paths, false, Duration::from_millis(300)).await;

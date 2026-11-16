@@ -1,6 +1,6 @@
 //! Passphrase guesses: one backoff for every passphrase the daemon checks
-//! (unlock, unlock while unlocked, and the proof for pairing agent clients
-//! and granting), so no request is a faster way to guess it than another.
+//! (unlock, and unlock while unlocked), so no request is a faster way to
+//! guess it than another.
 //! One check runs at a time; after [`FREE_FAILURES`] wrong ones each check
 //! waits [`FIRST_WAIT`], doubling up to [`LONGEST_WAIT`], and a right one
 //! resets it. Either refusal is `rate-limited`.
