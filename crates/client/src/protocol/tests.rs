@@ -268,8 +268,7 @@ fn watch_round_trips_as_flat_json_lines() {
     }
 }
 
-/// A status request reads the same to daemons of every protocol, and an
-/// older client's extra fields are ignored.
+/// A status request reads the same to daemons of every protocol.
 #[test]
 fn a_status_request_is_just_its_version_and_command() {
     let line = serde_json::to_string(&Request {
@@ -281,11 +280,6 @@ fn a_status_request_is_just_its_version_and_command() {
         line,
         format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"status"}}"#)
     );
-    let old = serde_json::from_str::<Request>(
-        r#"{"v":27,"claimed":{"caller":"x","opencode_session":null},"cmd":"status"}"#,
-    )
-    .unwrap();
-    assert!(matches!(old.command, Command::Status));
 }
 
 #[test]

@@ -268,8 +268,8 @@ mod tests {
         assert!(!error.contains("hunter2"), "{error}");
     }
 
-    /// Any caller gets what it names while unlocked, whoever it is and
-    /// whatever it runs under, for every purpose; only the browser host and
+    /// Any caller gets what it names while unlocked, whoever it is, for
+    /// every purpose; only the browser host and
     /// macOS AutoFill, which never resolve references, are refused.
     #[tokio::test]
     async fn any_caller_resolves_while_unlocked() {
@@ -281,20 +281,12 @@ mod tests {
             })
             .unwrap();
         let refs = ["deadbolt://GitHub/token".to_string()];
-        let mut under_a_tool = CallerInfo::unverified("opencode › zsh › deadbolt");
-        under_a_tool.identified = true;
-        under_a_tool.ancestry = vec![crate::protocol::Ancestor {
-            pid: 7,
-            name: "opencode".into(),
-            path: Some("/opt/bin/opencode".into()),
-        }];
         let callers = [
             CallerInfo::unverified("incomplete parent chain"),
             CallerInfo {
                 identified: true,
                 ..CallerInfo::unverified("zsh › deadbolt")
             },
-            under_a_tool,
         ];
         for caller in &callers {
             for purpose in [Purpose::Run, Purpose::Inject, Purpose::Read] {

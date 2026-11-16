@@ -694,7 +694,7 @@ mod tests {
                     20 | 1 => Some((
                         super::Ancestor {
                             pid: p,
-                            name: if p == 20 { "opencode" } else { "init" }.into(),
+                            name: if p == 20 { "zsh" } else { "init" }.into(),
                             path: None,
                         },
                         1,
@@ -709,7 +709,7 @@ mod tests {
         assert!(complete);
         assert_eq!(
             parents.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["(hidden)", "opencode", "init"]
+            ["(hidden)", "zsh", "init"]
         );
         assert!(matches!(
             reverse_parent(root, 300).unwrap(),
