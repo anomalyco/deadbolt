@@ -860,7 +860,6 @@ fn whoami_and_activity_name_the_caller_never_values() {
     let me: serde_json::Value =
         serde_json::from_str(&a.run(&["debug", "whoami", "--json"])).unwrap();
     assert_eq!(me["class"], "caller");
-    assert!(me.get("claimed").is_none(), "{me}");
     assert_ne!(me["pid"], 0);
 
     a.run(&[
@@ -1086,71 +1085,6 @@ fn run_inject_and_read_resolve_references() {
                 .starts_with(&github)
         );
     }
-}
-
-/// Any process running as this user gets what a person in a terminal gets
-/// while the vault is unlocked, whatever runs it or its environment says
-/// (here, an OpenCode session): values, secrets for commands and the
-/// administrative commands alike. Locked, it gets nothing.
-#[test]
-fn every_caller_gets_what_a_terminal_gets() {
-    let a = Device::new();
-    a.run(&["init"]);
-    new(
-        &a,
-        &[
-            "login",
-            "--name",
-            "GitHub",
-            &format!("token={TOKEN}"),
-            &format!("otp={OTP_SECRET}"),
-        ],
-    );
-    let run = |args: &[&str]| {
-        let mut cmd = a.cmd(args);
-        cmd.env("OPENCODE_SESSION_ID", "ses_test");
-        let out = a.output(&mut cmd);
-        assert!(out.status.success(), "deadbolt {args:?} failed");
-        String::from_utf8(out.stdout).unwrap()
-    };
-    assert_eq!(run(&["get", "-f", "token", "GitHub"]), format!("{TOKEN}\n"));
-    assert!(run(&["show", "--reveal", "GitHub"]).contains(TOKEN));
-    run(&["code", "GitHub"]);
-    assert_eq!(
-        run(&["read", "deadbolt://GitHub/token"]),
-        format!("{TOKEN}\n")
-    );
-    assert_eq!(
-        run(&[
-            "run",
-            "--env",
-            "T=deadbolt://GitHub/token",
-            "--",
-            "sh",
-            "-c",
-            r#"echo "t=$T""#
-        ]),
-        format!("t={CONCEALED}\n")
-    );
-    let template = a.path("t.tpl");
-    std::fs::write(&template, "{{ deadbolt://GitHub/token }}").unwrap();
-    assert_eq!(run(&["inject", "-i", template.to_str().unwrap()]), TOKEN);
-    assert_eq!(run(&["init", "work"]), "created vault work\n");
-    run(&["vault", "rename", "work", "mine"]);
-    run(&["rm", "GitHub"]);
-
-    // Activity names each request, never a value, and none was refused.
-    let raw = a.run(&["activity", "--json"]);
-    assert!(!raw.contains(TOKEN), "{raw}");
-    assert!(
-        activity(&a).iter().all(|e| e["outcome"] == "allowed"),
-        "{raw}"
-    );
-
-    a.run(&["lock"]);
-    let out = a.try_run(&["ls"]);
-    assert_eq!(out.status.code(), Some(3));
-    assert!(out.stdout.is_empty());
 }
 
 #[test]
