@@ -36,6 +36,10 @@ See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 CLI integration tests use `DEADBOLT_NET=local` and `DEADBOLT_KDF=fast`, which
 only debug builds read (so they don't run under `--release`).
 
+Extension tests and investigations use throwaway browser profiles only. Never
+open, read or copy anything from a person's real browser profile (prefs,
+passkey settings, cookies, storage), even to check a setting; ask them instead.
+
 Each crate has at most one integration-test binary, since every binary links
 the whole crate and its dependencies. Add integration tests as modules of it
 (`tests/<crate>/`, declared in its `main.rs`; cli and send have a lone
