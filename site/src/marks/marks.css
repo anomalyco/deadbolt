@@ -1,0 +1,9 @@
+/* The marks gallery: every candidate in the real lockup, and one alone for captures. */
+.marks { width: min(100% - 48px, 900px); margin: 0 auto; padding: 64px 0 128px; font-size: 14px; }
+.marks-entry { margin: 0 0 96px; }
+.marks-title { display: flex; gap: 12px; align-items: baseline; margin-bottom: 20px; color: #fff; }
+.marks-title b { color: var(--red); font-weight: 500; }
+.marks-title span { opacity: .5; margin-left: 8px; }
+.marks-single { min-height: 100vh; display: grid; place-items: center; }
+.marks-capture { width: 1120px; padding: 24px; }
+.marks-missing { padding: 64px; }

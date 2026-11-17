@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react"
+import type { ComponentType, CSSProperties } from "react"
 import { LockSimple, Skull } from "@phosphor-icons/react"
 import { colorHex } from "knobs"
 import { Knobs, useControls } from "knobs/react"
@@ -9,7 +9,8 @@ import { header } from "./tuning"
 
 // The lockup: a square print the mark's height, the wordmark in Anton stretched to a 4.6:1 box, a splatter
 // knocking ink out of it, and under the square a two-line caption with dotted leaders. In development a chip on it
-// opens the header's knobs (tuning.ts).
+// opens the header's knobs (tuning.ts). The square's mark is a prop: the keyhole print by default, or any of the
+// candidates in marks/ (shown side by side at /marks/).
 
 const WIDTH = 1000, ASPECT = 4.6, CAP = .867
 const height = WIDTH / ASPECT
@@ -20,10 +21,13 @@ export function Wordmark({ className }: { className: string }) {
   </svg>
 }
 
-export function Masthead({ subtitle }: { subtitle?: string }) {
+/** What fills the square: absolutely positioned over it, given the class that does that. */
+export type Mark = ComponentType<{ className?: string }>
+
+export function Masthead({ subtitle, mark: Print = KeyholePrint, markLabel = "A keyhole" }: { subtitle?: string; mark?: Mark; markLabel?: string }) {
   const { ink } = useControls(header)
   return <Knobs controls={header}><header className="masthead" style={{ "--red": colorHex(ink) } as CSSProperties}>
-    <div className="masthead-print" role="img" aria-label="A keyhole"><KeyholePrint className="masthead-canvas" /></div>
+    <div className="masthead-print" role="img" aria-label={markLabel}><Print className="masthead-canvas" /></div>
     <Wordmark className="wordmark" />
     <Splatter />
     <h1 aria-label={subtitle ?? "deadbolt: secrets kept for ever"}>
