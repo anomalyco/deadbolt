@@ -36,6 +36,14 @@ brew install --cask anomalyco/tap/deadbolt   # Deadbolt.app for macOS, with its 
 
 Run `deadbolt` in a terminal for the CLI, or `deadbolt app` (or Deadbolt from Applications, Spotlight or your launcher) for the app. Bare `deadbolt` started outside a terminal opens the app too; set `DEADBOLT_NO_UI=1` in scripts that must never get a window. The app is built into `deadbolt`, and the same file still runs on a server with no display. On Linux the app's first opening adds Deadbolt to the app launcher (`deadbolt desktop install` does it again, `deadbolt desktop uninstall` takes it out). On Alpine and other musl systems the install script picks the static build, which has no app.
 
+### Store location
+
+The encrypted store defaults to `~/.local/share/deadbolt`. `XDG_DATA_HOME` selects its parent directory; `DEADBOLT_HOME` selects the directory directly and takes precedence. Clients selecting the same path use the same daemon when their runtime directories also match. Different store paths use separate daemons. Use the same path spelling; daemon selection does not resolve symlinks.
+
+Finder and Terminal can have different environments. Select the same store in both to see the same logins. Deadbolt does not move or merge stores when these variables change.
+
+Before updating with a non-default `XDG_DATA_HOME` and no `DEADBOLT_HOME`, quit the app. Run the old binary's `deadbolt debug daemon stop` in its original environment. Builds from before the daemon rename use `deadbolt agent stop` instead. Do the same if `DEADBOLT_HOME` explicitly selects `~/.local/share/deadbolt`. Those configurations now use a different daemon namespace; existing non-default `DEADBOLT_HOME` namespaces stay unchanged.
+
 ### First run
 
 On your first device, create a vault:
