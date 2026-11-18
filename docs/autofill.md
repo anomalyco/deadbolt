@@ -1598,16 +1598,27 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   never becomes "any algorithm". A page may pass any iterable, a generator
   say, which reads only once, so the hook reads each list into an array
   first and hands the browser's own flow that same copy of the options.
-- **Registration** (`create`) puts "Save a passkey for <rp id>?" in the
-  toolbar popup with Save, Cancel and Use another device. The popup opens by
-  itself where the browser allows it, and the toolbar button gets a badge.
-  If one of the site's `excludeCredentials` is already in the vault, the
-  popup says so and the page gets `InvalidStateError`, as it does when one
-  is saved while the user is asked (the daemon's `exists`).
+- **Where it asks.** A modal call from the top page is asked in the page:
+  the popup's card in Deadbolt's surface (the menu's frame, see One
+  surface), near the top centre where a site's own passkey sheet would be,
+  under a small "Deadbolt". Its buttons get a pick's checks (the visibility
+  guard and the dwell, see Inline menu), Escape is Cancel, and a click
+  elsewhere in the page leaves it be. Its token is bound to the surface
+  frame that first loads it (`menuFrameOf`), as the save offer's is. The
+  toolbar popup has the same prompt meanwhile and the button its badge;
+  answering either answers both and closes the other. The popup opens by
+  itself, where the browser allows it, when the page can't show the
+  surface (hidden), when the page closes it unanswered (covered too often,
+  a modal dialog or full screen it isn't in), and for a call from a frame
+  below the top page.
+- **Registration** (`create`) asks "Save a passkey for <rp id>?" with Save,
+  Cancel and Use another device. If one of the site's
+  `excludeCredentials` is already in the vault, the prompt says so and the
+  page gets `InvalidStateError`, as it does when one is saved while the
+  user is asked (the daemon's `exists`).
 - **Sign-in** (`get`) without `mediation` asks "Sign in to <rp id> with a
-  passkey?" in the popup, with the site's passkeys (those in
-  `allowCredentials`, or all for the relying party), Sign in, Use another
-  device and Cancel.
+  passkey?", with the site's passkeys (those in `allowCredentials`, or all
+  for the relying party), Sign in, Use another device and Cancel.
 - **Autofill sign-in** (`mediation: "conditional"`) is Deadbolt's wherever
   its inline menu opens on the page's login fields: the top page, or a frame
   whose every frame up to the top page is its site (`sameSiteTop`, see
@@ -2164,12 +2175,17 @@ login's; only their words change.
   turns WebAuthn off, never gets Deadbolt's passkeys. Both the
   extension and the daemon check, so a bug in either alone doesn't widen it.
 - **Passkeys: the user answers outside the page.** A registration or
-  sign-in needs a click in the toolbar popup, or a pick in the inline menu
-  under its visibility rules, never a page element. What the page learns
-  before that is whether Deadbolt took the call: a site with no passkey in
-  Deadbolt, or one Deadbolt can't serve, sees the browser's own dialog
-  instead. That reveals whether the vault holds a passkey for this site,
-  which the site's own `allowCredentials` already narrows to its accounts.
+  sign-in needs a click in the toolbar popup, or a press in Deadbolt's
+  surface in the page (the prompt near the top centre, or a pick in the
+  inline menu) under its visibility rules, never a page element. What the
+  page learns before that is whether Deadbolt took the call: a site with
+  no passkey in Deadbolt, or one Deadbolt can't serve, sees the browser's
+  own dialog instead, and a top page sees the surface appear. That reveals
+  whether the vault holds a passkey for this site, which the site's own
+  `allowCredentials` already narrows to its accounts. From the surface's
+  size and how it leaves, the page can tell roughly how long the user took
+  and whether they answered there, not what they answered: the call's own
+  result says that anyway.
 - **Passkeys: what crosses the channel.** The page↔extension port carries
   the page's own options and the credential it asked for, nothing else. The
   hook runs in the page's world, so the page can see or replace it; that only

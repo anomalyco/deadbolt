@@ -8,7 +8,7 @@ import type { Account } from "./protocol"
 import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
 import { offerCard } from "./ui/offer"
-import { passkeyCard } from "./ui/passkey"
+import { passkeyCard, popupAnswer } from "./ui/passkey"
 import { recordControl, savingOffLine } from "./ui/site-notes"
 import { mountVault } from "./vault/app"
 import { animateTo, reducedMotion, ROLL_CSS, timing } from "./ui/motion"
@@ -318,7 +318,7 @@ function paint(reply: PopupReply | null, changed: boolean) {
         : reply?.passkey
         ? [
             // Touch ID, or the page, takes it from here.
-            passkeyCard(reply.passkey, tabId, { chosen: () => window.close(), ended: () => void render(true) }),
+            passkeyCard(reply.passkey, popupAnswer(reply.passkey, tabId), { chosen: () => window.close(), ended: () => void render(true) }),
           ]
         : [
             reply?.offer ? offerCard(reply.offer, tabId, () => void render(true)) : null,

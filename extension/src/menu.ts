@@ -10,15 +10,16 @@
 // labels roll. Every pick and button waits for the visibility guard and the
 // dwell (see ui/dom.ts) before it does anything.
 
-import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, MenuUnlockReply, OfferChoice, PanelClosed, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
+import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, MenuUnlockReply, OfferChoice, PanelClosed, PasskeyPrompt, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
 import { provider as providerOf } from "./signin"
 import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
-import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, SHRINK_WAITS_MS, spring, Spring, timing } from "./ui/motion"
+import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, revealFrames, rollLabel, ROLL_CSS, SHRINK_WAITS_MS, spring, Spring, timing } from "./ui/motion"
 import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
 import { folding, host, MARK_ROOM, onFold, PILL_HEIGHT, placePill, riding, whenWide } from "./ui/pill-frame"
 import { ring } from "./ui/ring"
 import { offerTitle } from "./ui/offer"
+import { PASSKEY_COVERED, PASSKEY_WIDTH, showPasskeyPrompt } from "./ui/passkey-surface"
 import { brandBySlug, siteTile } from "./ui/site-icon"
 import { lockedRow, turnInFlight, turnIntoLogins, waitOnPanel } from "./ui/unlock"
 
@@ -195,6 +196,21 @@ const done = (travel = false) => port?.postMessage({ type: "db:surface-done", tr
  */
 const leaveLikeSave = () => done(true)
 
+/** A page's passkey call, asked here (ui/passkey-surface.ts). */
+function showPasskey(prompt: PasskeyPrompt) {
+  mode = "passkey"
+  showPasskeyPrompt(surface, prompt, token, { guard: guardPress, done: () => done() })
+  report()
+}
+
+/** A button's press gets a pick's checks (see pick): a real press (Enter or Space once the user came in, see Entry), on a surface visible and still before and after it. */
+async function guardPress(e: MouseEvent, el: HTMLElement): Promise<boolean> {
+  if (!e.isTrusted || (e.detail === 0 && !entry.entered)) return say("Click to answer here, or in Deadbolt's toolbar button."), false
+  if (!pressedScale || !dwell.settled(pressedAt)) return relax(), say(pressedScale && dwell.visible ? "Press again in a moment." : PASSKEY_COVERED), false
+  press(el)
+  return (await confirmScale(pressedAt)) ? (relax(), say(""), true) : (relax(), say(PASSKEY_COVERED), false)
+}
+
 // ---- Size --------------------------------------------------------------------
 
 let reported = ""
@@ -206,7 +222,7 @@ function report(grow = 0) {
   const pill = document.querySelector<HTMLElement>(".pill")
   // The pill hugs its content: it is the whole pill, padding included.
   const offer = mode === "save" ? offerSize() : null
-  const width = mode === "pill" && pill ? Math.ceil(pill.getBoundingClientRect().width + grow) : offer ? offer.width : universal ? 320 : undefined
+  const width = mode === "pill" && pill ? Math.ceil(pill.getBoundingClientRect().width + grow) : offer ? offer.width : universal ? 320 : mode === "passkey" ? PASSKEY_WIDTH : undefined
   const key = `${mode}:${height}:${width}`
   if (key === reported) return
   reported = key
@@ -903,7 +919,7 @@ document.addEventListener("keydown", (e) => {
     pressedScale = scaleMatches()
   }
   if (e.key === "Escape") return void send({ type: "db:menu-dismiss", token })
-  if (mode === "save") return
+  if (mode === "save" || mode === "passkey") return
   // Tab leaves the list as Escape does: focus goes back to the field, never on into the end of the page.
   if (e.key === "Tab" && mode === "accounts") {
     e.preventDefault()
@@ -937,6 +953,7 @@ document.addEventListener("keydown", (e) => {
 
 function show(reply: MenuLoadReply) {
   if (reply.kind === "offer") return showOffer(reply)
+  if (reply.kind === "passkey") return showPasskey(reply.prompt)
   if (reply.kind === "notice") return showNotice(reply)
   if (mode !== "accounts") return
   if (reply.kind === "status") return showStatus(reply.status)
@@ -1435,20 +1452,7 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
         for (const el of [surface, ...Array.from(document.querySelectorAll<HTMLElement>(".pill"))]) {
           if (!corner) el.style.transformOrigin = origin
           if (corner && mode === "save" && offerState === "compact") el.style.borderRadius = `${ROW / 2}px`
-          const anim = el.animate(
-            reducedMotion()
-              ? [{ opacity: 0 }, { opacity: 1 }]
-              : corner
-                ? [
-                    { opacity: 0, transform: "translate(17px, -17px)" },
-                    { opacity: 1, transform: "none" },
-                  ]
-                : [
-                    { opacity: 0, transform: "scale(0.96)" },
-                    { opacity: 1, transform: "none" },
-                  ],
-            timing(corner ? MENU_MOTION.openCorner : MENU_MOTION.open),
-          )
+          const anim = el.animate(revealFrames(corner), timing(corner ? MENU_MOTION.openCorner : MENU_MOTION.open))
           if (corner && mode === "save") {
             const clear = () => { el.style.borderRadius = "" }
             anim.finished.then(clear, clear)

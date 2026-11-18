@@ -6,14 +6,17 @@
 //
 // The page supplies only its options. The origin is the browser's record of
 // the sender, and the daemon builds the client data from it and checks the
-// rpId again (docs/autofill.md). The user answers in browser UI the page
-// can't reach: the toolbar popup for a modal call, the inline menu for an
-// autofill one.
+// rpId again (docs/autofill.md). The user answers in UI the page can't reach:
+// for a modal call, Deadbolt's surface near the top centre of the page (an
+// extension frame under the menu's visibility guard) or, where that can't
+// show, the toolbar popup, which has the prompt either way; the inline menu
+// for an autofill one.
 
-import type { FieldRole, HookReply, MenuPasskey, PasskeyChoice, PasskeyPrompt, PickReply, ToBackground } from "../messages"
+import type { FieldRole, HookReply, MenuLoadReply, MenuPasskey, PasskeyChoice, PasskeyPrompt, PickReply, ToBackground, ToContent } from "../messages"
 import { IDENTIFIER_ROLES } from "../messages"
 import { isB64url, isRef, type Passkey, type PasskeysReply, type UserVerification, type ReplyFor } from "../protocol"
-import { frameChain, fromExtensionPage, newToken, sameSiteTop, type FrameTarget } from "./frames"
+import { frameChain, fromExtensionPage, menuFrameOf, newToken, sameSiteTop, sendToFrame, type FrameTarget } from "./frames"
+import { resizeMessage } from "./autofill"
 import { HostError, type VaultBackend, type ReauthBody } from "./backend"
 import { openPopupFor } from "./save"
 import { fillableOrigin, senderOrigin, siteOf } from "./site"
@@ -144,7 +147,22 @@ export interface PasskeyOptions {
   keepBadge?: (tabId: number) => boolean
   /** Sets the tab's toolbar badge: "1" while a prompt waits, "" after. */
   badge?: (tabId: number, text: string) => void
+  /** Sends to one document's content script (sendToFrame). */
+  toFrame?: (target: FrameTarget, message: ToContent) => Promise<unknown>
+  /** Whether `sender` is Deadbolt's surface frame in `owner`'s document (menuFrameOf). */
+  menuFrame?: (sender: chrome.runtime.MessageSender, owner: FrameTarget, parent: string) => Promise<boolean>
   now?: () => number
+}
+
+/** A prompt shown in the page, by its surface token (see showInPage). */
+interface InPage {
+  /** The call it asks about (Pending.key), and which of its prompts. */
+  key: string
+  prompt: string
+  /** The top page's document that shows it. */
+  target: FrameTarget
+  /** The surface frame that first loaded the token; only it may use it after. */
+  menuDocumentId?: string
 }
 
 /** One document's listings: a token bucket, and the lists in flight by rpId (or its logins). */
@@ -163,6 +181,9 @@ export class Passkeys {
   private openPopup: NonNullable<PasskeyOptions["openPopup"]>
   private keepBadge: NonNullable<PasskeyOptions["keepBadge"]>
   private badge: NonNullable<PasskeyOptions["badge"]>
+  private toFrame: NonNullable<PasskeyOptions["toFrame"]>
+  private menuFrame: NonNullable<PasskeyOptions["menuFrame"]>
+  private inPage = new Map<string, InPage>()
   private now: () => number
 
   constructor(
@@ -172,6 +193,8 @@ export class Passkeys {
     this.openPopup = options.openPopup ?? openPopupFor
     this.keepBadge = options.keepBadge ?? (() => false)
     this.badge = options.badge ?? ((tabId, text) => void Promise.all([chrome.action.setBadgeBackgroundColor({ tabId, color: BADGE }), chrome.action.setBadgeText({ tabId, text })]).catch(() => {}))
+    this.toFrame = options.toFrame ?? sendToFrame
+    this.menuFrame = options.menuFrame ?? menuFrameOf
     this.now = options.now ?? Date.now
   }
 
@@ -197,6 +220,8 @@ export class Passkeys {
         return this.cancelFrom(sender, message.request)
       case "pk:popup-choose":
         return fromExtensionPage(sender, "popup.html") ? this.choose(message.tabId, String(message.id), message.choice) : { ok: false }
+      case "pk:surface-choose":
+        return this.surfaceChoose(String(message.token), sender, message.choice)
     }
   }
 
@@ -448,7 +473,10 @@ export class Passkeys {
 
   /**
    * Puts `prompt` in the toolbar popup for the tab and waits for the user's
-   * answer. One prompt per tab at a time, as the browser's own dialog.
+   * answer. One prompt per tab at a time, as the browser's own dialog. A call
+   * from the top page also gets the prompt in the page (showInPage), where
+   * the user is looking; the popup opens by itself only where that can't
+   * show, or once it's gone unanswered (surfaceClosed).
    */
   private async ask(p: Pending, prompt: PasskeyPrompt, ms: number): Promise<PasskeyChoice> {
     await this.ready(p)
@@ -459,12 +487,111 @@ export class Passkeys {
         p.prompt = undefined
         p.choose = undefined
         this.unbadge(p.tabId)
+        this.dropInPage(p.key)
         resolve(choice)
       }
       p.timer = setTimeout(() => this.finish(p, fail("NotAllowedError")), ms)
       this.badge(p.tabId, "1")
-      void this.openPopup(p.tabId, () => p.prompt?.id === prompt.id)
+      const current = () => p.prompt?.id === prompt.id
+      void this.showInPage(p, prompt.id).then((shown) => {
+        if (!shown && current()) return this.openPopup(p.tabId, current)
+      })
     })
+  }
+
+  /**
+   * Opens prompt `prompt` of `p` as Deadbolt's surface in the page, if the
+   * call came from the top page: false where the page didn't take it (hidden,
+   * say), and the popup asks instead.
+   */
+  private async showInPage(p: Pending, prompt: string): Promise<boolean> {
+    if (p.frameId !== 0) return false
+    const token = newToken()
+    const target = { tabId: p.tabId, frameId: p.frameId, documentId: p.documentId, origin: p.origin }
+    this.inPage.set(token, { key: p.key, prompt, target })
+    const shown = (await this.toFrame(target, { type: "db:surface", token, as: "passkey" })) === true
+    if (shown && p.prompt?.id === prompt && this.inPage.has(token)) return true
+    // It didn't open, or the prompt was answered or ended on the way: close it.
+    this.inPage.delete(token)
+    if (shown) void this.toFrame(target, { type: "db:close-menu", token })
+    return shown
+  }
+
+  ownsSurface(token: unknown): boolean {
+    return typeof token === "string" && this.inPage.has(token)
+  }
+
+  /**
+   * The surface frame claiming `token`: on its first load (with `parent`, see
+   * menuFrameOf) it binds the token to that frame's document, and after that
+   * only that document may use it.
+   */
+  private async surface(token: string, sender: chrome.runtime.MessageSender, parent?: string): Promise<InPage | undefined> {
+    const s = this.inPage.get(token)
+    if (!s || !sender.documentId || sender.tab?.id !== s.target.tabId) return undefined
+    if (s.menuDocumentId === undefined) {
+      if (parent === undefined || !(await this.menuFrame(sender, s.target, parent)) || this.inPage.get(token) !== s) return undefined
+      s.menuDocumentId = sender.documentId
+    }
+    return s.menuDocumentId === sender.documentId ? s : undefined
+  }
+
+  /** The call surface `s` asks about, while it still waits on that prompt. */
+  private asking(s: InPage | undefined): Pending | undefined {
+    const p = s && this.pending.get(s.key)
+    return p?.prompt?.id === s?.prompt ? p : undefined
+  }
+
+  /** What the surface shows: the prompt the popup would. */
+  async surfaceLoad(token: string, sender: chrome.runtime.MessageSender, parent: string): Promise<MenuLoadReply | null> {
+    const p = this.asking(await this.surface(token, sender, parent))
+    return p?.prompt && this.host.status.state === "ready" ? { kind: "passkey", prompt: p.prompt } : null
+  }
+
+  /** The surface's answer, after the menu's visibility guard passed it. The surface folds away by itself. */
+  async surfaceChoose(token: string, sender: chrome.runtime.MessageSender, choice: unknown): Promise<{ ok: boolean }> {
+    const s = await this.surface(token, sender)
+    const p = this.asking(s)
+    const clean = cleanChoice(choice)
+    if (!p?.choose || !clean) return { ok: false }
+    this.inPage.delete(token)
+    p.choose(clean)
+    return { ok: true }
+  }
+
+  async surfaceResize(token: string, sender: chrome.runtime.MessageSender, height: number, width?: unknown, mode?: unknown) {
+    const s = await this.surface(token, sender)
+    if (s) await this.toFrame(s.target, resizeMessage(token, height, width, mode))
+  }
+
+  /** Escape in the surface: no, as Cancel says. */
+  async surfaceDismiss(token: string, sender: chrome.runtime.MessageSender) {
+    const s = await this.surface(token, sender)
+    if (!s) return
+    this.inPage.delete(token)
+    void this.toFrame(s.target, { type: "db:close-menu", token })
+    this.asking(s)?.choose?.({ action: "cancel" })
+  }
+
+  /**
+   * The page's content script closed the surface unanswered (the page kept
+   * covering it, hid it, or went full screen): the popup asks instead.
+   */
+  surfaceClosed(token: string, sender: chrome.runtime.MessageSender) {
+    const s = this.inPage.get(token)
+    if (!s || sender.tab?.id !== s.target.tabId || sender.documentId !== s.target.documentId) return
+    this.inPage.delete(token)
+    const p = this.asking(s)
+    if (p) void this.openPopup(p.tabId, () => p.prompt?.id === s.prompt)
+  }
+
+  /** The call `key` was answered or ended: its surfaces in the page close. */
+  private dropInPage(key: string) {
+    for (const [token, s] of this.inPage) {
+      if (s.key !== key) continue
+      this.inPage.delete(token)
+      void this.toFrame(s.target, { type: "db:close-menu", token })
+    }
   }
 
   private unbadge(tabId: number) {

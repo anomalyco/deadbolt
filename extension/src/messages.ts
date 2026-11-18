@@ -10,8 +10,8 @@ import type { Account, CardField, Change, FieldRules, FormCard, FormField as Hos
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
-/** What Deadbolt's in-page surface shows: the account list, a pill on a field or at the top right, or the save offer. */
-export type SurfaceMode = "accounts" | "pill" | "save" | "signin"
+/** What Deadbolt's in-page surface shows: the account list, a pill on a field or at the top right, the save offer, or a page's passkey call. */
+export type SurfaceMode = "accounts" | "pill" | "save" | "signin" | "passkey"
 
 /** Roles the inline menu opens on; on a new-password box, only in sign-up and change-password forms. */
 export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password", "otp", "new-password"]
@@ -247,6 +247,8 @@ export type ToBackground =
   | { type: "pk:cancel"; request: number }
   /** The popup's answer to the passkey prompt `id`. */
   | { type: "pk:popup-choose"; tabId: number; id: string; choice: PasskeyChoice }
+  /** The in-page passkey prompt's answer, from the surface frame that loaded `token` (bg/passkeys.ts). */
+  | { type: "pk:surface-choose"; token: string; choice: PasskeyChoice }
 
 export type ToContent =
   /** `home`: a chain from a provider account on an unlinked site, held to these origins of its home's site (see ProviderChain). */
@@ -319,8 +321,8 @@ export type ToContent =
   | { type: "db:hold"; token: string; hold: boolean }
   /** To a frame: the menu the top page showed for its field went. */
   | { type: "db:menu-gone" }
-  /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
-  | { type: "db:surface"; token: string }
+  /** Open the save offer in the page, with this token for its frame (see bg/save.ts); `as` "passkey": a passkey prompt, near the top centre (bg/passkeys.ts). */
+  | { type: "db:surface"; token: string; as?: "passkey" }
   /** To a frame with identity or card fields, right after the user's own submit in the top page: what they hold (a Submitted). */
   | { type: "db:forms-read" }
   /** To the top page: a payment provider's frame below has card fields, so a submit here may carry a card typed there. */
@@ -471,6 +473,8 @@ export type MenuLoadReply =
    * identity typed into a form, with `username` its label ("Visa •••• 4242").
    */
   | { kind: "offer"; site: string; username: string; update: boolean; what?: SaveWhat; changes?: string; change?: string; saveNew?: boolean }
+  /** A page's passkey call, asked in the page near the top centre, as the popup would ask it (bg/passkeys.ts). */
+  | { kind: "passkey"; prompt: PasskeyPrompt }
 
 /** `submitted`: the pick signed in (see Autofill.startAutomatic) and its form went on, beyond a fill. */
 export type PickReply = { ok: true; submitted?: boolean } | { ok: false; message: string }

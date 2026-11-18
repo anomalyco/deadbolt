@@ -1,5 +1,7 @@
-// The popup's passkey prompt: a page's passkey call, asked here rather than in
-// the page. The native popup and the browser-only vault show it.
+// The passkey prompt: a page's passkey call, asked in Deadbolt's own UI rather
+// than by the page. The native popup and the browser-only vault show it, and
+// so does the in-page surface (ui/passkey-surface.ts), each with its own way
+// to send the answer.
 
 import type { PasskeyChoice, PasskeyPrompt } from "../messages"
 import { h, icon } from "./dom"
@@ -13,24 +15,43 @@ export interface PasskeyCardHooks {
   ended: () => void
 }
 
+/** Sends `choice` to the background: whether the prompt was still waiting for it. */
+export type PasskeyAnswer = (choice: PasskeyChoice) => Promise<boolean>
+
+/** The popup's (and the browser-only vault's) answer for the prompt waiting in tab `tabId`. */
+export const popupAnswer =
+  (prompt: PasskeyPrompt, tabId: number | undefined): PasskeyAnswer =>
+  async (choice) =>
+    tabId !== undefined && (await send<{ ok: boolean }>({ type: "pk:popup-choose", tabId, id: prompt.id, choice }))?.ok === true
+
+export interface PasskeyCardOptions {
+  /** The card's class names: the popup's offer card unless given. */
+  className?: string
+  /** Checks a press before it counts (the in-page surface's visibility guard); false leaves the card as it was. */
+  guard?: (event: MouseEvent, button: HTMLElement) => Promise<boolean>
+}
+
 /** "Sign in to acme.com with a passkey?" or "Save a passkey for acme.com?". */
-export function passkeyCard(prompt: PasskeyPrompt, tabId: number | undefined, hooks: PasskeyCardHooks): HTMLElement {
+export function passkeyCard(prompt: PasskeyPrompt, answer: PasskeyAnswer, hooks: PasskeyCardHooks, options: PasskeyCardOptions = {}): HTMLElement {
   const status = h("p", { class: "error", role: "status" })
   status.hidden = true
-  const card = h("section", { class: "offer passkey-prompt", "aria-label": prompt.kind === "get" ? "Sign in with a passkey" : "Save a passkey" })
-  const choose = async (choice: PasskeyChoice, button: HTMLElement) => {
-    if (tabId === undefined) return
+  const card = h("section", { class: options.className ?? "offer passkey-prompt", "aria-label": prompt.kind === "get" ? "Sign in with a passkey" : "Save a passkey" })
+  let busy = false
+  const choose = async (choice: PasskeyChoice, button: HTMLElement, event: MouseEvent) => {
+    if (busy) return
+    // One press at a time, its checks included.
+    busy = true
+    if (options.guard && !(await options.guard(event, button))) return void (busy = false)
     card.classList.add("busy")
     button.setAttribute("disabled", "")
-    const reply = await send<{ ok: boolean }>({ type: "pk:popup-choose", tabId, id: prompt.id, choice })
-    if (reply?.ok) return hooks.chosen(choice)
+    if (await answer(choice)) return hooks.chosen(choice)
     status.textContent = "This request has ended."
     status.hidden = false
     setTimeout(hooks.ended, 1200)
   }
   const button = (label: string, choice: PasskeyChoice, primary = false) => {
     const b = h("button", { class: `btn${primary ? " primary" : ""}`, type: "button" }, label)
-    b.addEventListener("click", () => void choose(choice, b))
+    b.addEventListener("click", (e) => void choose(choice, b, e))
     return b
   }
   const next = prompt.verify ? "Deadbolt asks for Touch ID next." : prompt.passphrase ? "Deadbolt asks for your passphrase next." : ""

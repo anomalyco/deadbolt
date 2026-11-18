@@ -7,7 +7,7 @@ import "../src/passkey-hook"
 import { serializeCreate, serializeGet } from "../src/passkey-options"
 import type { HookReply, PasskeyPrompt, ToBackground } from "../src/messages"
 import { parseHostMessage, PROTOCOL, type RequestBody as Request } from "../src/protocol"
-import { ID, installChrome, pageSender, POPUP_URL, type FakeChrome } from "./chrome"
+import { ID, installChrome, menuSender, pageSender, POPUP_URL, type FakeChrome } from "./chrome"
 
 const REF = `${"a".repeat(64)}:${"7".repeat(32)}`
 const OTHER = `${"a".repeat(64)}:${"8".repeat(32)}`
@@ -155,6 +155,14 @@ const call = (kind: "get" | "create", sender: chrome.runtime.MessageSender, requ
 const create = (over: Record<string, unknown> = {}) => ({ challenge: CHALLENGE, user: { id: "a2l0", name: "kit" }, algorithms: [-7, -257], exclude: [], ...over })
 const get = (over: Record<string, unknown> = {}) => ({ challenge: CHALLENGE, allow: [], ...over })
 const kinds = () => h.requests.map((r) => r.type)
+/** What went to the page's content scripts of `type` (db:surface, db:close-menu). */
+const toPage = (type: string) => fake.delivered.filter((d) => (d.message as { type: string }).type === type).map((d) => d.message as { type: string; token: string; as?: string })
+
+/** Waits for `ready` to hold. */
+async function until(ready: () => unknown) {
+  for (let i = 0; i < 50 && !ready(); i++) await tick()
+  if (!ready()) throw new Error("never ready")
+}
 
 /** Waits for the tab's popup prompt to show. */
 async function prompted(tabId = 1): Promise<PasskeyPrompt> {
@@ -258,11 +266,13 @@ describe("registration", () => {
     expect(h.requests).toEqual([])
   })
 
-  test("asks in the popup, and Cancel or Use another device store nothing", async () => {
+  test("asks in the page and the popup, and Cancel or Use another device store nothing", async () => {
     const first = call("create", pageSender(), 1, create())
     const prompt = await prompted()
     expect(prompt).toMatchObject({ kind: "create", rpId: "www.example.com", username: "kit", registered: false, verify: false })
-    expect(opened).toEqual([1])
+    await until(() => toPage("db:surface").length)
+    // The page took it, so the popup doesn't open by itself; the badge says it's there too.
+    expect(opened).toEqual([])
     expect(fake.badges[1]).toBe("1")
     passkeys.choose(1, prompt.id, { action: "cancel" })
     expect(await first).toEqual({ error: { name: "NotAllowedError", message: expect.any(String) } })
@@ -310,6 +320,126 @@ describe("registration", () => {
   test("required verification without Touch ID is the browser's", async () => {
     expect(await call("create", pageSender(), 1, create({ userVerification: "required" }))).toEqual({ fallback: true })
     expect(kinds()).toEqual(["passkey-list"])
+  })
+})
+
+describe("the prompt in the page", () => {
+  const PAGE = "https://www.example.com"
+  /** The surface the page was asked to open for the waiting prompt, once it was. */
+  async function shown() {
+    await until(() => toPage("db:surface").length)
+    const [surface] = toPage("db:surface")
+    expect(surface).toEqual({ type: "db:surface", token: expect.any(String), as: "passkey" })
+    return surface.token
+  }
+
+  test("the surface frame that loads it shows the popup's prompt, and its answer answers the call", async () => {
+    const reply = call("create", pageSender(), 1, create())
+    const prompt = await prompted()
+    const token = await shown()
+    expect(passkeys.ownsSurface(token)).toBe(true)
+    expect(await passkeys.surfaceLoad(token, menuSender(), PAGE)).toEqual({ kind: "passkey", prompt })
+    expect(await passkeys.handle({ type: "pk:surface-choose", token, choice: { action: "save" } }, menuSender())).toEqual({ ok: true })
+    expect(await reply).toMatchObject({ credential: { credentialId: "bmV3" } })
+    expect(opened).toEqual([])
+    expect(fake.badges[1]).toBe("")
+    // It folds away by itself; the token is spent.
+    expect(passkeys.ownsSurface(token)).toBe(false)
+    expect(toPage("db:close-menu")).toEqual([])
+  })
+
+  test("only the frame that loaded the token answers, and only after it loaded", async () => {
+    const reply = call("get", pageSender(), 1, get())
+    await prompted()
+    const token = await shown()
+    const use = { action: "use", ref: REF } as const
+    // Not loaded yet: nothing binds the token to a frame.
+    expect(await passkeys.surfaceChoose(token, menuSender(), use)).toEqual({ ok: false })
+    // The page itself, a frame of the page claiming another parent, and a menu in another tab.
+    expect(await passkeys.surfaceLoad(token, pageSender(), PAGE)).toBeNull()
+    expect(await passkeys.surfaceLoad(token, menuSender(), "https://evil.com")).toBeNull()
+    expect(await passkeys.surfaceLoad(token, menuSender({ tab: { id: 2, incognito: false } as chrome.tabs.Tab }), PAGE)).toBeNull()
+    expect(await passkeys.surfaceLoad(token, menuSender(), PAGE)).toMatchObject({ kind: "passkey", prompt: { kind: "get" } })
+    // Bound now: another menu document can't use it.
+    expect(await passkeys.surfaceChoose(token, menuSender({ documentId: "other-menu" }), use)).toEqual({ ok: false })
+    expect(await passkeys.surfaceChoose(token, menuSender(), { action: "use", ref: "junk" })).toEqual({ ok: false })
+    expect(await passkeys.surfaceChoose(token, menuSender(), use)).toEqual({ ok: true })
+    expect(await reply).toMatchObject({ credential: { credentialId: "Y3JlZA" } })
+    expect(await passkeys.surfaceChoose(token, menuSender(), use)).toEqual({ ok: false })
+  })
+
+  test("answered in the popup, the page's surface closes", async () => {
+    const reply = call("create", pageSender(), 1, create())
+    const prompt = await prompted()
+    const token = await shown()
+    passkeys.choose(1, prompt.id, { action: "cancel" })
+    expect(await reply).toMatchObject({ error: { name: "NotAllowedError" } })
+    expect(toPage("db:close-menu")).toEqual([{ type: "db:close-menu", token }])
+    expect(await passkeys.surfaceLoad(token, menuSender(), PAGE)).toBeNull()
+  })
+
+  test("Escape in the surface says no", async () => {
+    const reply = call("create", pageSender(), 1, create())
+    await prompted()
+    const token = await shown()
+    await passkeys.surfaceLoad(token, menuSender(), PAGE)
+    await passkeys.surfaceDismiss(token, menuSender())
+    expect(await reply).toMatchObject({ error: { name: "NotAllowedError" } })
+    expect(toPage("db:close-menu")).toEqual([{ type: "db:close-menu", token }])
+    expect(kinds()).toEqual(["passkey-list"])
+  })
+
+  test("where the page doesn't take it, or closes it unanswered, the popup asks", async () => {
+    const answer = fake.answer
+    fake.answer = (m, doc) => (m.type === "db:surface" ? null : answer(m, doc))
+    const first = call("create", pageSender(), 1, create())
+    const prompt = await prompted()
+    await until(() => opened.length)
+    expect(opened).toEqual([1])
+    passkeys.choose(1, prompt.id, { action: "cancel" })
+    await first
+
+    fake.answer = answer
+    opened = []
+    fake.delivered.length = 0
+    const second = call("create", pageSender(), 2, create())
+    const again = await prompted()
+    const token = await shown()
+    // Only the page's own document says it closed.
+    passkeys.surfaceClosed(token, pageSender({ documentId: "other-doc" }))
+    expect(passkeys.ownsSurface(token)).toBe(true)
+    passkeys.surfaceClosed(token, pageSender())
+    await until(() => opened.length)
+    expect(opened).toEqual([1])
+    expect(passkeys.prompt(1)).toEqual(again)
+    passkeys.choose(1, again.id, { action: "save" })
+    expect(await second).toMatchObject({ credential: { credentialId: "bmV3" } })
+  })
+
+  test("a call from a frame below the top page asks in the popup only", async () => {
+    const reply = call("create", pageSender({ frameId: 3, url: "https://www.example.com/frame", documentId: "frame-doc" }), 1, create())
+    const prompt = await prompted()
+    await until(() => opened.length)
+    expect(toPage("db:surface")).toEqual([])
+    passkeys.choose(1, prompt.id, { action: "save" })
+    expect(await reply).toMatchObject({ credential: { credentialId: "bmV3" } })
+  })
+
+  test("a call that ends while its surface opens closes it", async () => {
+    const answer = fake.answer
+    let shownToPage = () => {}
+    fake.answer = (m, doc) => (m.type === "db:surface" ? new Promise((resolve) => (shownToPage = () => resolve(true))) : answer(m, doc))
+    const reply = call("create", pageSender(), 1, create())
+    await prompted()
+    await until(() => toPage("db:surface").length)
+    const [{ token }] = toPage("db:surface")
+    passkeys.forgetTab(1)
+    expect(await reply).toMatchObject({ error: { name: "NotAllowedError" } })
+    shownToPage()
+    await until(() => toPage("db:close-menu").length)
+    expect(toPage("db:close-menu")).toEqual([{ type: "db:close-menu", token }])
+    expect(passkeys.ownsSurface(token)).toBe(false)
+    expect(opened).toEqual([])
   })
 })
 

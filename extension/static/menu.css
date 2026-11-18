@@ -655,3 +655,172 @@ body[data-offer="dot"] .offer {
 .universal .row .more { display: grid; place-items: center; margin-left: auto; flex: none; color: var(--text-faint); }
 .universal .signin-dismiss { position: absolute; right: 4px; top: 4px; width: 28px; height: 28px; border: 0; border-radius: 50%; background: transparent; color: inherit; font-size: 20px; cursor: pointer; }
 .universal .signin-dismiss:hover { background: light-dark(#00000012, #ffffff18); }
+
+/* ---- A page's passkey call (ui/passkey-surface.ts) ---- */
+
+/* The toolbar popup's passkey card, in the page near the top centre: the
+   same title, rows and buttons, under a small "Deadbolt" that says whose it is. */
+.pk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  transition: opacity 120ms ease-out;
+}
+
+.pk-card.busy {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.pk-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: var(--weight-medium);
+  color: var(--text-faint);
+}
+
+.pk-brand svg {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+}
+
+.pk-card h2 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: var(--weight-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pk-card .list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.pk-card .account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 0 6px 0 10px;
+  border-radius: var(--radius-lg);
+}
+
+.pk-card .account-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.pk-card .account-title,
+.pk-card .account-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pk-card .account-title {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text);
+}
+
+.pk-card .account-sub {
+  margin-top: 1px;
+  font-size: 11.5px;
+  line-height: 14px;
+  color: var(--text-faint);
+}
+
+.pk-card .box {
+  border-radius: var(--radius-xl);
+  background: var(--layer-01);
+  box-shadow: inset 0 0 0 1px var(--border-muted);
+}
+
+.pk-card .line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 34px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.pk-card .line + .line {
+  border-top: 1px solid var(--border-muted);
+}
+
+.pk-card .muted {
+  color: var(--muted);
+}
+
+.pk-card .value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+}
+
+.pk-card .note {
+  display: flex;
+  gap: 7px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--text-faint);
+}
+
+.pk-card .note svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.pk-card .error {
+  margin: 0;
+}
+
+.pk-card .error[hidden] {
+  display: none;
+}
+
+.pk-card .buttons {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Use another device: a way out, away from the answer. */
+.pk-card .buttons .btn:first-child {
+  margin-right: auto;
+}
+
+.pk-card .btn.pressed {
+  transform: scale(0.97);
+  background-image: linear-gradient(var(--pressed), var(--pressed));
+  transition: none;
+}
+
+.pk-card .btn.primary.pressed {
+  background-image: linear-gradient(var(--contrast-pressed), var(--contrast-pressed)), linear-gradient(#ffffff33, #ffffff00);
+}
+
+/* What the guard says ("Press again in a moment."), under the buttons. */
+body.passkey .foot {
+  margin: -6px 14px 12px;
+}

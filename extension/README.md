@@ -59,6 +59,7 @@ swaps builds in place ([installing and updating](../docs/extension-device.md#ins
 | `src/content/`           | Detection, Shadow DOM, filling, the menu frame, field rules, passkey channel |
 | `src/menu.ts`            | The in-page surface: account list, generated password, fill pill, save offer |
 | `src/popup.ts`           | Toolbar popup: logins, offers, passkeys, Record                              |
+| `src/ui/passkey-surface.ts` | A page's passkey call asked in the page, near the top centre (the popup's card) |
 | `src/ui/motion.ts`       | Springs (CSS `linear()` and retargeting), rolled labels                      |
 | `src/protocol.ts`        | Host message types and parsing                                               |
 | `src/signin.ts`          | "Sign in with" providers: names, hosts, button words                         |
