@@ -128,13 +128,15 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return learner.step(sender, String(message.session), message.step)
     case "db:learn-events":
       return learner.events(sender, String(message.session), message.events, message.words)
-    // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
+    // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts), and so does a passkey prompt in the page (bg/passkeys.ts).
     case "db:menu-close":
+      if (passkeys.ownsSurface(message.token)) return passkeys.surfaceClosed(String(message.token), sender)
       if (universal.owns(message.token)) return universal.closed(message.token, sender, message.dismissed === true)
       if (saver.ownsSurface(message.token)) return saver.surfaceClosed(String(message.token), sender)
       if (forms.owns(message.token)) return forms.menuClose(String(message.token), sender)
       return autofill.menuClose(String(message.token), message.dismissed === true, sender)
     case "db:menu-load":
+      if (passkeys.ownsSurface(message.token)) return passkeys.surfaceLoad(message.token, sender, String(message.parent))
       if (universal.owns(message.token)) return universal.load(message.token, sender, String(message.parent))
       if (saver.ownsSurface(message.token)) return saver.surfaceLoad(message.token, sender, String(message.parent))
       if (forms.owns(message.token)) return forms.menuLoad(message.token, sender, String(message.parent))
@@ -149,6 +151,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       if (universal.owns(message.token)) return universal.provider(message.token, String(message.ref), sender)
       return autofill.menuSignIn(message.token, String(message.ref), sender)
     case "db:menu-dismiss":
+      if (passkeys.ownsSurface(message.token)) return passkeys.surfaceDismiss(message.token, sender)
       if (universal.owns(message.token)) return universal.dismiss(message.token, sender)
       if (saver.ownsSurface(message.token)) return saver.surfaceDismiss(message.token, sender)
       if (forms.owns(message.token)) return forms.menuDismiss(message.token, sender)
@@ -158,6 +161,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
     case "db:menu-unlock-press":
       return panel.confirm(String(message.token), message.ok === true, sender.documentId)
     case "db:menu-resize":
+      if (passkeys.ownsSurface(message.token)) return passkeys.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
       if (universal.owns(message.token)) return universal.resize(message.token, sender, Number(message.height), message.width, message.mode)
       if (saver.ownsSurface(message.token)) return saver.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
       if (forms.owns(message.token)) return forms.menuResize(message.token, Number(message.height), sender, message.width, message.mode)

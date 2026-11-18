@@ -30,7 +30,7 @@
 // so no transparent area is left over the page to swallow its clicks.
 
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
-import { epochNow, gridBox, inFrame, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
+import { epochNow, gridBox, inFrame, MENU_MOTION, reducedMotion, revealFrames, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import { asksNewPassword, findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
@@ -381,7 +381,7 @@ interface Rect {
 
 /** Where the surface goes in its mode, in the viewport. */
 function targetRect(): Rect | null {
-  if (mode === "save" || mode === "signin") return corner(wanted.width || SAVE_GUESS.width, wanted.height || SAVE_GUESS.height)
+  if (mode === "save" || mode === "signin" || mode === "passkey") return corner(wanted.width || SAVE_GUESS.width, wanted.height || SAVE_GUESS.height)
   // The saved pill stays in the same corner. A pill for a frame's field sits
   // on where the field shows (anchorBox), out of sight while the frame's
   // fields are checked (see hold).
@@ -407,9 +407,12 @@ function targetRect(): Rect | null {
 
 /**
  * The save offer's place: the top right corner, 12 px in, whatever its size.
- * It grows from there, down and to the left, as it opens.
+ * It grows from there, down and to the left, as it opens. A passkey prompt
+ * sits at the top centre instead, a sixth of the way down, where a site's
+ * own passkey sheet would.
  */
 function corner(width: number, height: number): Rect {
+  if (mode === "passkey") return { left: Math.max(4, (innerWidth - width) / 2), top: Math.max(SAVE_INSET, Math.min(innerHeight / 6, innerHeight - height - SAVE_INSET)), width, height }
   return { left: Math.max(4, innerWidth - width - SAVE_INSET), top: SAVE_INSET, width, height }
 }
 
@@ -746,27 +749,14 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     // Entry runs inside the frame and on a temporary shadow layer so the
     // frame itself stays opaque and still while the visibility dwell runs.
     const r = anchor ? anchor.getBoundingClientRect() : boxNow()
-    const origin = !r || (lastTarget?.top ?? r.bottom) >= r.bottom ? "top left" : "bottom left"
+    const origin = mode === "passkey" ? "top center" : !r || (lastTarget?.top ?? r.bottom) >= r.bottom ? "top left" : "bottom left"
     port?.postMessage(cornerOffer ? { type: "db:reveal", corner: true } : { type: "db:reveal", origin })
     const radius = cornerOffer ? SAVE_GUESS.height / 2 : RADIUS
     const shadow = document.createElement("div")
     shadow.style.cssText = `all:initial;position:absolute;inset:0;border-radius:${radius}px;box-shadow:${SHADOW()};pointer-events:none;${cornerOffer ? "" : `transform-origin:${origin};`}`
     root.insertBefore(shadow, f)
     f.style.boxShadow = "none"
-    const anim = shadow.animate(
-      reducedMotion()
-        ? [{ opacity: 0 }, { opacity: 1 }]
-        : cornerOffer
-          ? [
-              { opacity: 0, transform: "translate(17px, -17px)" },
-              { opacity: 1, transform: "none" },
-            ]
-          : [
-              { opacity: 0, transform: "scale(0.96)" },
-              { opacity: 1, transform: "none" },
-            ],
-      timing(cornerOffer ? MENU_MOTION.openCorner : MENU_MOTION.open),
-    )
+    const anim = shadow.animate(revealFrames(cornerOffer), timing(cornerOffer ? MENU_MOTION.openCorner : MENU_MOTION.open))
     const restore = () => {
       revealAnim = null
       shadow.remove()
@@ -806,7 +796,7 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
   reveal?.()
   if (same || !lastTarget) return
   // The offer's first size isn't a change anyone made: it lands there.
-  if (first && (mode === "save" || mode === "signin")) return void (lastTarget = targetRect())
+  if (first && (mode === "save" || mode === "signin" || mode === "passkey")) return void (lastTarget = targetRect())
   retarget(changed ? MENU_MOTION.frameMode : MENU_MOTION.frameSize)
   // The pill inside keeps its place on the page while the frame moves around
   // it: hand the frame the springs, which it steps on its own clock.
@@ -933,16 +923,16 @@ export function closeMenu(refocus = false, dismissed = false) {
 }
 
 /** The save offer, opened by the background after a confirmed sign-in. Top page only. */
-export function openSaveSurface(t: string) {
+export function openSaveSurface(t: string, as: "save" | "passkey" = "save") {
   if (!isTop || document.hidden) return false
   closeMenu()
-  openMenu(null, t, 0, "save")
+  openMenu(null, t, 0, as)
   // A frame that never says its size never loaded the offer (it expired, or
   // the page got in the way): it doesn't stay. Nor does any offer for long,
   // even one whose bar is paused under the pointer.
   saveTimers = [
     setTimeout(() => token === t && wanted.height === 0 && leave(), SAVE_LOAD_MS),
-    setTimeout(() => token === t && leave(), SAVE_CAP_MS),
+    setTimeout(() => token === t && as === "save" && leave(), SAVE_CAP_MS),
   ]
   return true
 }
@@ -1011,8 +1001,8 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
   if (!(el instanceof HTMLInputElement) || !targetFor(el)) return maybeOpenForms(el, how)
   // While the tab learns its site, the user signs in by hand.
   if (querying || dismissedFor === el || !recentGesture() || learning()) return
-  // The save offer stays until it's answered or its time runs out.
-  if (host && mode === "save") return
+  // The save offer stays until it's answered or its time runs out; a passkey prompt until it's answered.
+  if (host && (mode === "save" || mode === "passkey")) return
   const explicit = how !== "focus"
   if (!explicit && (emptyUntil.get(el) ?? 0) > Date.now()) return
   // Out of the way while the user types for themselves (see onInput).
@@ -1086,7 +1076,7 @@ function pageAccount(field: HTMLInputElement, box?: HTMLInputElement): string | 
  */
 async function maybeOpenForms(el: FormControl, how: Asked) {
   if (querying || dismissedFor === el || !recentGesture() || learning()) return
-  if (host && mode === "save") return
+  if (host && (mode === "save" || mode === "passkey")) return
   const explicit = how !== "focus"
   if (!explicit && (emptyUntil.get(el) ?? 0) > Date.now()) return
   if (quiet.has(el) && how === "focus") return
@@ -1194,7 +1184,7 @@ function onPointerDown(event: PointerEvent) {
     return port ? void port.postMessage({ type: "db:tuck" }) : leave(true)
   }
   const path = event.composedPath()
-  if (path.includes(host) || path.includes(anchor as EventTarget) || target === anchor) return
+  if (mode === "passkey" || path.includes(host) || path.includes(anchor as EventTarget) || target === anchor) return
   if (mode === "pill") return leave()
   closeMenu()
 }
@@ -1410,7 +1400,7 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   // The frame's own word that its pill or offer is done, over the channel only it and this script hold.
   port.onmessage = onPortMessage
   tellGeometry()
-  if (!reveal) port.postMessage(mode === "save" || mode === "signin" ? { type: "db:reveal", corner: true } : { type: "db:reveal" })
+  if (!reveal) port.postMessage(mode === "save" || mode === "signin" ? { type: "db:reveal", corner: true } : { type: "db:reveal", ...(mode === "passkey" ? { origin: "top center" } : {}) })
   // Typed before the frame was ready: narrow it now.
   const typed = anchor && mode === "accounts" && anchor.value && typedSinceOpen ? anchor.value : ""
   if (typed) port.postMessage({ type: "db:filter", query: typed.slice(0, 200) })
@@ -1563,7 +1553,7 @@ export function initMenu(page: PageState) {
         if (message.token === token) resize(message.height, message.width, message.mode)
         return void respond(true)
       case "db:surface":
-        return void respond(openSaveSurface(String(message.token)))
+        return void respond(openSaveSurface(String(message.token), message.as === "passkey" ? "passkey" : "save"))
       case "db:signin-offer":
         return void respond(openSignInSurface(String(message.token)))
       case "db:point":
@@ -1619,7 +1609,7 @@ function pointAtTile(account: string) {
  * "pill", see Autofill.fill). `captioned` for an identity or card list. Top page only.
  */
 function openAt(t: string, rows: number, box: Box, as: "accounts" | "pill", captioned: boolean): boolean {
-  if (!isTop || document.hidden || (host && (mode === "save" || as === "pill"))) return false
+  if (!isTop || document.hidden || (host && (mode === "save" || mode === "passkey" || as === "pill"))) return false
   if (as === "accounts" && !(Number.isFinite(rows) && rows >= 1)) return false
   if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
   openMenu(null, t, as === "pill" ? 0 : rows, as, box, captioned)

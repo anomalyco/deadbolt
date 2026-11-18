@@ -15,7 +15,7 @@ import { ROLL_CSS } from "../ui/motion"
 import { swapText, UNLOCKED_BEAT } from "../ui/unlock"
 import { PANEL_PORT, PRESS_MS, type PanelAnswer, type PanelHello } from "../bg/panel-unlock"
 import { iconSettings, onIconSettings, type IconSettings } from "../ui/icon-store"
-import { passkeyCard } from "../ui/passkey"
+import { passkeyCard, popupAnswer } from "../ui/passkey"
 import { recordControl, type RecordControl } from "../ui/site-notes"
 import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from "./kit"
 import { itemDetailView, itemEditView, kindsView } from "./items"
@@ -319,7 +319,7 @@ export class App {
   }
 
   private passkeyView(tabId: number, prompt: PasskeyPrompt): View {
-    const card = passkeyCard(prompt, tabId, { chosen: (choice) => void this.passkeyChosen(prompt, choice), ended: () => void this.refresh() })
+    const card = passkeyCard(prompt, popupAnswer(prompt, tabId), { chosen: (choice) => void this.passkeyChosen(prompt, choice), ended: () => void this.refresh() })
     return { el: h("section", { class: "view" }, card), focus: () => card.querySelector<HTMLElement>(".btn.primary")?.focus() }
   }
 

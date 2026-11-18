@@ -80,6 +80,14 @@ export const reducedMotion = () => typeof matchMedia === "function" && matchMedi
 export const timing = (duration: number): { easing: string; duration: number } => (reducedMotion() ? REDUCED_FADE : spring(duration))
 
 /**
+ * A surface's entrance, inside its frame and on the shadow layer outside it
+ * alike: in from its corner (the save offer, a sign-in offer), else growing
+ * in place; a fade alone when motion is reduced.
+ */
+export const revealFrames = (corner: boolean): Keyframe[] =>
+  reducedMotion() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: corner ? "translate(17px, -17px)" : "scale(0.96)" }, { opacity: 1, transform: "none" }]
+
+/**
  * Animates `el` to `to` from wherever it is now: running animations are
  * read where they are (computed style), committed, and cancelled, so a
  * reversal carries on from the current state rather than jumping back. With
