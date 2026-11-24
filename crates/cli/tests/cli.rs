@@ -719,7 +719,7 @@ fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
     )
     .unwrap();
     std::fs::set_permissions(&ui, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let entry = a.path("data/applications/pw.deadbolt.Deadbolt.desktop");
+    let entry = a.path("data/applications/anomaly.deadbolt.desktop");
 
     // No display: nothing starts, and it says why.
     let mut cmd = a.cmd_of(&deadbolt, &["app"]);
@@ -2812,7 +2812,8 @@ fn browser_install_registers_the_host() {
             .map(|(name, path)| (*name, base.join(path).join(dir)))
             .collect()
     };
-    let manifests: Vec<(&str, PathBuf)> = browsers("NativeMessagingHosts/pw.deadbolt.browser.json");
+    let manifests: Vec<(&str, PathBuf)> =
+        browsers("NativeMessagingHosts/anomaly.deadbolt.browser.json");
     let run = |args: &[&str]| a.output(a.cmd(args).env("HOME", &home));
 
     // Nothing installed: say so rather than guess.
@@ -2832,7 +2833,7 @@ fn browser_install_registers_the_host() {
     );
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(chrome_manifest).unwrap()).unwrap();
-    assert_eq!(manifest["name"], "pw.deadbolt.browser");
+    assert_eq!(manifest["name"], "anomaly.deadbolt.browser");
     assert_eq!(manifest["type"], "stdio");
     assert_eq!(manifest["allowed_origins"], serde_json::json!([EXTENSION]));
     let path = PathBuf::from(manifest["path"].as_str().unwrap());

@@ -109,8 +109,8 @@ bytes change. `verify-macos` checks every architecture slice's pin.
 - `Contents/MacOS/Deadbolt` and `Contents/Helpers/deadbolt` are the same
   `deadbolt` (the app built in), built once and signed twice, so the daemon
   tells the app from the CLI ([app.md](app.md#one-bundle-one-daemon)).
-- Code identities: `pw.deadbolt.app` (the app), `pw.deadbolt.cli` (`deadbolt`,
-  in the app and the tarballs), `pw.deadbolt.app.enclave` (the helper), all
+- Code identities: `anomaly.deadbolt` (the app), `anomaly.deadbolt.cli` (`deadbolt`,
+  in the app and the tarballs), `anomaly.deadbolt.enclave` (the helper), all
   Developer ID team `5NZ4Q7NXJ4` with the hardened runtime and a secure
   timestamp. `sign-macos.sh` refuses any Mach-O in the app other than
   `Contents/MacOS/Deadbolt`, `Contents/Helpers/deadbolt` and
@@ -307,7 +307,7 @@ channel's current release isn't the build it runs, a rollback included.
     from a manifest.
 - **Signatures:** a release build (published on a channel) on macOS always
   requires its replacement to satisfy the update requirement with identifier
-  `pw.deadbolt.cli` (and `pw.deadbolt.app.enclave` for the helper), without
+  `anomaly.deadbolt.cli` (and `anomaly.deadbolt.enclave` for the helper), without
   `notarized`, as bare executables aren't stapled. That's fixed when it's
   built: nothing on disk turns it off, so an unsigned dev build can't update
   itself until dev builds are signed. Only builds from source rely on the
@@ -382,7 +382,7 @@ channel's current release isn't the build it runs, a rollback included.
   source, Nix, Cargo and system installs, and an app that can't be replaced
   where it is don't. `DEADBOLT_NO_UPDATE_CHECK=1` in the daemon's
   environment turns it off, as does macOS's `DisableUpdates` preference in
-  the `pw.deadbolt.app` or `pw.deadbolt.cli` domain (read with `defaults`,
+  the `anomaly.deadbolt` or `anomaly.deadbolt.cli` domain (read with `defaults`,
   so a managed Mac's administrator setting counts).
 - **Notifications:** what the check found is in the daemon's `status`
   reply, `deadbolt debug watch` emits `{"change":"update"}` when it changes, and the

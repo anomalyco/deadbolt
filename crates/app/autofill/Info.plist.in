@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Deadbolt</string>
     <key>CFBundleIdentifier</key>
-    <string>pw.deadbolt.app.autofill</string>
+    <string>anomaly.deadbolt.autofill</string>
     <key>CFBundleExecutable</key>
     <string>DeadboltAutoFill</string>
     <key>CFBundlePackageType</key>

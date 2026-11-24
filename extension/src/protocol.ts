@@ -2,7 +2,7 @@
 // specified in docs/autofill.md. The browser does the framing (a native-endian
 // u32 length, then UTF-8 JSON); this file is the JSON.
 
-export const NATIVE_HOST = "pw.deadbolt.browser"
+export const NATIVE_HOST = "anomaly.deadbolt.browser"
 export const PROTOCOL = 3
 
 export type Want = "username" | "password" | "totp"

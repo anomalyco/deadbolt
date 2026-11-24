@@ -136,7 +136,7 @@ fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
                  <dict>\n\
                  \x20   <key>com.apple.security.application-groups</key>\n\
                  \x20   <array>\n\
-                 \x20       <string>{team}.pw.deadbolt</string>\n\
+                 \x20       <string>{team}.anomaly.deadbolt</string>\n\
                  \x20   </array>\n\
                  </dict>\n\
                  </plist>\n"

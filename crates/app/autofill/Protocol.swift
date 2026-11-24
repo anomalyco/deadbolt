@@ -1,5 +1,5 @@
 // Wire protocol between `DeadboltAutoFill.appex` and `deadbolt daemon` over the
-// App Group Unix socket (`~/Library/Group Containers/<TEAM>.pw.deadbolt/s`).
+// App Group Unix socket (`~/Library/Group Containers/<TEAM>.anomaly.deadbolt/s`).
 // Mirrors `crates/client/src/protocol.rs` (`generatedProtocolVersion` is
 // stamped from `PROTOCOL_VERSION` at build time).
 
@@ -11,10 +11,10 @@ public enum AutofillWire {
     public static let maxLineBytes: Int = 64 * 1024
     public static let sunPathMax: Int = 103
     public static let socketName: String = "s"
-    public static let appGroupSuffix: String = "pw.deadbolt"
-    public static let appBundleID: String = "pw.deadbolt.app"
-    public static let autofillBundleID: String = "pw.deadbolt.app.autofill"
-    public static let daemonSigningIDs: Set<String> = ["pw.deadbolt.cli", "deadbolt"]
+    public static let appGroupSuffix: String = "anomaly.deadbolt"
+    public static let appBundleID: String = "anomaly.deadbolt"
+    public static let autofillBundleID: String = "anomaly.deadbolt.autofill"
+    public static let daemonSigningIDs: Set<String> = ["anomaly.deadbolt.cli", "deadbolt"]
 }
 
 public enum AutofillServiceKind: String, Codable, Equatable, Sendable {

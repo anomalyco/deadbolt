@@ -1,7 +1,7 @@
 // Secure Enclave helper for Deadbolt Touch ID unlock.
 //
 // Compiled by `crates/cli/build.rs` into `deadbolt-enclave` with an embedded
-// `__TEXT,__info_plist` section (`CFBundleIdentifier = "pw.deadbolt.app.enclave"`,
+// `__TEXT,__info_plist` section (`CFBundleIdentifier = "anomaly.deadbolt.enclave"`,
 // `CFBundleDisplayName = "Deadbolt"`), pinned by SHA-256 in the daemon binary,
 // and invoked over stdin/stdout pipes by `crates/cli/src/daemon/biometric.rs`.
 //

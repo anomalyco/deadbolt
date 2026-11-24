@@ -31,7 +31,7 @@ pub fn run(paths: &Paths) {
 
 #[cfg(target_os = "macos")]
 fn remove_login_unit(home: &Path) {
-    const LABEL: &str = "pw.deadbolt.agent";
+    const LABEL: &str = "anomaly.deadbolt.agent";
     let plist = home.join(format!("Library/LaunchAgents/{LABEL}.plist"));
     if !plist.exists() {
         return;

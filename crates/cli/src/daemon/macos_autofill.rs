@@ -1,8 +1,8 @@
 //! macOS AutoFill Credential Provider backend (`docs/macos-autofill.md`).
 //!
-//! Serves `DeadboltAutoFill.appex` (`pw.deadbolt.app.autofill`) over a
+//! Serves `DeadboltAutoFill.appex` (`anomaly.deadbolt.autofill`) over a
 //! dedicated Unix socket (`s`, mode 0600) in the shared Team-ID App Group
-//! container (`~/Library/Group Containers/<TEAM_ID>.pw.deadbolt`). The daemon
+//! container (`~/Library/Group Containers/<TEAM_ID>.anomaly.deadbolt`). The daemon
 //! remains the only process that opens `store.redb` or holds vault keys.
 
 mod identities;
@@ -35,7 +35,7 @@ use crate::protocol::{
 };
 use crate::webauthn;
 
-/// Short filename so `~/Library/Group Containers/<TEAM>.pw.deadbolt/s` stays
+/// Short filename so `~/Library/Group Containers/<TEAM>.anomaly.deadbolt/s` stays
 /// well within `sockaddr_un.sun_path`'s 104-byte limit on macOS.
 pub const SOCKET_NAME: &str = "s";
 

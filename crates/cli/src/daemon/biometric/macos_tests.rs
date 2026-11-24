@@ -21,7 +21,10 @@ fn staged_production_helper_matches_pinned_sha256() {
 
 #[test]
 fn adhoc_helper_refuses_app_group_without_touching_containermanager() {
-    assert_eq!(group_container("5NZ4Q7NXJ4.pw.deadbolt").unwrap(), None);
+    assert_eq!(
+        group_container("5NZ4Q7NXJ4.anomaly.deadbolt").unwrap(),
+        None
+    );
     assert!(group_container("not-a-team-group").is_err());
 }
 

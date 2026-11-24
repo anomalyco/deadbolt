@@ -10,7 +10,7 @@ use crate::browser::write_atomic;
 
 /// The entry's and icon's name, and the app's Wayland app id and X11
 /// `WM_CLASS` (`rune::set_app_id` in `crates/app`), which desktops match.
-pub const ID: &str = "pw.deadbolt.Deadbolt";
+pub const ID: &str = "anomaly.deadbolt";
 /// The red keyhole of `crates/app/scripts/icon.swift`.
 const ICON: &str = include_str!("../assets/deadbolt.svg");
 
@@ -212,12 +212,12 @@ mod tests {
              GenericName=Password Manager\n\
              Comment=A decentralized password manager\n\
              Exec=/home/alex/.local/bin/deadbolt app\n\
-             Icon=pw.deadbolt.Deadbolt\n\
+             Icon=anomaly.deadbolt\n\
              Terminal=false\n\
              Categories=Utility;Security;\n\
              Keywords=password;passwords;passkey;vault;\n\
              StartupNotify=true\n\
-             StartupWMClass=pw.deadbolt.Deadbolt\n"
+             StartupWMClass=anomaly.deadbolt\n"
         );
         assert!(entry(Path::new("/bin/dead\nbolt")).is_err());
     }
@@ -243,13 +243,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             files.entry,
-            Path::new("/home/alex/.local/share/applications/pw.deadbolt.Deadbolt.desktop")
+            Path::new("/home/alex/.local/share/applications/anomaly.deadbolt.desktop")
         );
         assert_eq!(
             files.icon,
-            Path::new(
-                "/home/alex/.local/share/icons/hicolor/scalable/apps/pw.deadbolt.Deadbolt.svg"
-            )
+            Path::new("/home/alex/.local/share/icons/hicolor/scalable/apps/anomaly.deadbolt.svg")
         );
         let xdg = Files::from_vars(|name| match name {
             "HOME" => Some("/home/alex".into()),
@@ -259,7 +257,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             xdg.entry,
-            Path::new("/data/applications/pw.deadbolt.Deadbolt.desktop")
+            Path::new("/data/applications/anomaly.deadbolt.desktop")
         );
     }
 

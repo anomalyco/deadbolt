@@ -23,7 +23,7 @@ use crate::protocol::Reply;
 /// detached; development and tests run it directly.
 pub const UI: &str = "ui";
 /// Deadbolt.app's bundle identifier.
-const BUNDLE_ID: &str = "pw.deadbolt.app";
+const BUNDLE_ID: &str = "anomaly.deadbolt";
 /// Keeps bare `deadbolt` from ever opening a window (scripts, agents).
 const NO_UI: &str = "DEADBOLT_NO_UI";
 /// The longest `app-activate` may take: the daemon holds it while an app

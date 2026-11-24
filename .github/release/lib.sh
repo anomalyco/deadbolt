@@ -28,11 +28,11 @@ posix() {
 # comes from its embedded Info.plist (crates/cli/src/daemon/enclave-Info.plist);
 # the app's from Deadbolt.app's Info.plist (crates/app/scripts/bundle.sh).
 # shellcheck disable=SC2034 # Used by the scripts that source this.
-DEADBOLT_APP_ID=pw.deadbolt.app
+DEADBOLT_APP_ID=anomaly.deadbolt
 # shellcheck disable=SC2034
-DEADBOLT_CLI_ID=pw.deadbolt.cli
+DEADBOLT_CLI_ID=anomaly.deadbolt.cli
 # shellcheck disable=SC2034
-DEADBOLT_ENCLAVE_ID=pw.deadbolt.app.enclave
+DEADBOLT_ENCLAVE_ID=anomaly.deadbolt.enclave
 
 # developer_id_requirement <identifier>: a code requirement for code signed by
 # Deadbolt's Developer ID Application certificate (team DEADBOLT_TEAM_ID) with

@@ -22,18 +22,18 @@ cask "deadbolt" do
   # formula anomalyco/tap/deadbolt both own bin/deadbolt, so brew installs one.
   binary "#{appdir}/Deadbolt.app/Contents/Helpers/deadbolt"
 
-  uninstall quit: "pw.deadbolt.app"
+  uninstall quit: "anomaly.deadbolt"
 
   zap trash: [
     "~/.config/deadbolt",
     "~/.local/share/deadbolt",
     "~/.local/state/deadbolt",
-    "~/Library/Application Support/Arc/User Data/NativeMessagingHosts/pw.deadbolt.browser.json",
-    "~/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/pw.deadbolt.browser.json",
-    "~/Library/Application Support/Chromium/NativeMessagingHosts/pw.deadbolt.browser.json",
-    "~/Library/Application Support/Google/Chrome/NativeMessagingHosts/pw.deadbolt.browser.json",
-    "~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/pw.deadbolt.browser.json",
-    "~/Library/Preferences/pw.deadbolt.app.plist",
-    "~/Library/Saved Application State/pw.deadbolt.app.savedState",
+    "~/Library/Application Support/Arc/User Data/NativeMessagingHosts/anomaly.deadbolt.browser.json",
+    "~/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/anomaly.deadbolt.browser.json",
+    "~/Library/Application Support/Chromium/NativeMessagingHosts/anomaly.deadbolt.browser.json",
+    "~/Library/Application Support/Google/Chrome/NativeMessagingHosts/anomaly.deadbolt.browser.json",
+    "~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/anomaly.deadbolt.browser.json",
+    "~/Library/Preferences/anomaly.deadbolt.plist",
+    "~/Library/Saved Application State/anomaly.deadbolt.savedState",
   ]
 end

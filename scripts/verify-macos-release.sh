@@ -8,7 +8,7 @@
 # - DMG and app: stapled, accepted by Gatekeeper, the zip's app identical to
 #   the DMG's, and the app meets crates/app/update-requirement.txt.
 # - Every Mach-O is Developer ID-signed with the hardened runtime as its
-#   identity (pw.deadbolt.app, pw.deadbolt.cli, pw.deadbolt.app.enclave).
+#   identity (anomaly.deadbolt, anomaly.deadbolt.cli, anomaly.deadbolt.enclave).
 # - Touch ID pin: each architecture slice of `deadbolt` embeds the SHA-256 of
 #   the same slice of the deadbolt-enclave beside it (docs/touch-id.md).
 # - The app's CLI, helper and app start; the CLI tarballs' `deadbolt` reports

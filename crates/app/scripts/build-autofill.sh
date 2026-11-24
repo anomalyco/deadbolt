@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compiles DeadboltAutoFill.appex (pw.deadbolt.app.autofill) from
+# Compiles DeadboltAutoFill.appex (anomaly.deadbolt.autofill) from
 # crates/app/autofill/*.swift, stamps Info.plist and the control protocol
 # version from crates/client/src/protocol.rs, and signs ad hoc (or with
 # DEADBOLT_APPLE_SIGNING_IDENTITY + DEADBOLT_AUTOFILL_PROVISION_PROFILE).
@@ -123,19 +123,19 @@ if [[ $sign_id != "-" ]]; then
     <true/>
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>${team_id}.pw.deadbolt</string>
+        <string>${team_id}.anomaly.deadbolt</string>
     </array>
 </dict>
 </plist>
 ENTITLEMENTS
   plutil -lint "$scratch/autofill.entitlements" >/dev/null
   codesign --force --options runtime --timestamp \
-    --identifier pw.deadbolt.app.autofill \
+    --identifier anomaly.deadbolt.autofill \
     --entitlements "$scratch/autofill.entitlements" \
     --sign "$sign_id" \
     "$appex"
 else
-  codesign --force --identifier pw.deadbolt.app.autofill --sign - "$appex"
+  codesign --force --identifier anomaly.deadbolt.autofill --sign - "$appex"
 fi
 
 codesign --verify --strict "$appex"
