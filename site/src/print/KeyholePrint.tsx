@@ -1,6 +1,6 @@
 import { useRef } from "react"
 import { colorHex, springMotion } from "knobs"
-import { createHeartbeat } from "../sound"
+import { createHeartbeat } from "../sound/heartbeat"
 import { ShaderCanvas, glslNoise } from "./ShaderCanvas"
 import { dithers, glides, header, type HeaderValues } from "./tuning"
 

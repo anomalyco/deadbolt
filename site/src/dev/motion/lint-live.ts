@@ -1,9 +1,9 @@
 import * as React from "react"
-import { emptyLight } from "../story/light"
-import type { StoryApi, StoryScene } from "../story/Story"
-import { cardCollector, createLightProbe, storyNameOf, type ChannelSample, type ElementSample } from "./light-channels"
+import { emptyLight } from "../../story/light"
+import type { StoryApi, StoryScene } from "../../story/Story"
+import { cardCollector, createLightProbe, storyNameOf, type ChannelSample, type ElementSample } from "../light-channels"
 
-// The stories' live recorder (development only; motion-lint.ts loads it for `?motion-lint`). motion-lint's DOM
+// The stories' live recorder (development only; lint.ts loads it for `?motion-lint`). motion-lint's DOM
 // recorder samples every shape and caption of each story on the page, every frame, by its DOM node; this adds what
 // the DOM can't show: the canvas's light (heads, floods, prints: light-channels.ts) and each card's border glow, in
 // page pixels, and the clock of the story being drawn on every frame. Needs motion-lint checked out beside deadbolt.
@@ -13,7 +13,7 @@ import { cardCollector, createLightProbe, storyNameOf, type ChannelSample, type 
 //   ?motion-lint=both       both (sampling layout every frame costs frames of its own)
 //
 // Stop with the button in the corner (or `__motionLint.stop()`), move the files into a folder, then:
-//   motion-lint analyze <folder> --config site/src/dev/motion-lint.config.json
+//   motion-lint analyze <folder> --config site/src/dev/motion/lint.config.json
 //   motion-lint hitches <folder>
 
 type Recorder = {
@@ -27,8 +27,8 @@ type Recorder = {
 type LiveModule = { startLiveRecorder(options: Record<string, unknown>): Recorder }
 type WalkModule = { walkReactSvg(root: unknown, options: Record<string, unknown>): { channels: Map<string, ChannelSample> } }
 
-const motionLint = import.meta.glob(["../../../../motion-lint/src/web/live.ts", "../../../../motion-lint/src/web/react-svg.ts"])
-const stories = import.meta.glob<Record<string, unknown>>("../architecture/stories/*Story.tsx", { eager: true })
+const motionLint = import.meta.glob(["../../../../../motion-lint/src/web/live.ts", "../../../../../motion-lint/src/web/react-svg.ts"])
+const stories = import.meta.glob<Record<string, unknown>>("../../architecture/stories/*Story.tsx", { eager: true })
 
 async function load<T>(file: string): Promise<T> {
   const entry = Object.entries(motionLint).find(([path]) => path.endsWith(file))

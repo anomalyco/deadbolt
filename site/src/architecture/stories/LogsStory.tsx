@@ -1,5 +1,5 @@
 import type { Light, Tone } from "../../story/light"
-import type { SceneCue } from "../../sound"
+import type { SceneCue } from "../../sound/useCues"
 import { between, bridge, drawOn, drawProgress, flood, panX, send, soundOfSend, spark, timing, travelled, type Path, type Send } from "../../story/beats"
 import { BorderLight, Carried, DeviceGlyph, type DeviceKind } from "../../story/devices"
 import { clamp01, flashes, inkFlash, shade, span, springAt, springs, working, type Box } from "../../story/motion"

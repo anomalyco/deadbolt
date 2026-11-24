@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react"
 import { Knobs } from "knobs/react"
-import { useCues, type Flight, type SceneCue } from "../sound"
+import { useCues, type Flight, type SceneCue } from "../sound/useCues"
 import { createRenderer, emptyLight, pack, packedLength, toneColor, type Light, type Renderer } from "./light"
 import { clamp01, ease, smoothstep, span, springAt, springs, type Point } from "./motion"
 import { onFrame } from "./ticker"
 import { lightParams, lightTuning } from "./tuning"
 import "./story.css"
-import "../dev/motion-lint"
+import "../dev/motion/lint"
 
 // A story: one diagram that tells itself. Each step plays one action and puts one short caption beside the thing
 // it's about, joined by a leader line. Under the stage there's a thin step bar with no text: one tick per step.
