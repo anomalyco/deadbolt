@@ -1,0 +1,37 @@
+# Deadbolt
+
+> A local-first, decentralized password manager written in Rust. Your devices hold the vault and sync directly with each other over iroh, end-to-end encrypted, with no accounts and no servers.
+
+Status: alpha (dev builds ship on every push to `dev`).
+
+## Pages
+
+- [Home](https://deadbolt.pw/): Overview, install commands, CLI examples, and trade-offs.
+- [Architecture](https://deadbolt.pw/architecture/): Interactive walkthrough of device keys, signed per-device logs, peer-to-peer sync over iroh, pairing, and device removal.
+- [Install script](https://deadbolt.pw/install): Shell installer for macOS and Linux (x64 and arm64; glibc and static musl).
+
+## Components
+
+- **CLI & daemon (`deadbolt`):** Local vault management, background sync daemon, secret injection (`deadbolt run`, `deadbolt inject`, `deadbolt read`), one-time peer-to-peer sharing (`deadbolt send` / `deadbolt receive`), and self-updating (`deadbolt update`).
+- **Desktop app (`Deadbolt.app` / `deadbolt app`):** Native desktop UI built into the `deadbolt` binary (macOS universal app bundle and Linux desktop build).
+- **Browser extension (Chromium MV3):** Available as a native-host build paired with the local app/CLI, or a standalone WebAssembly vault device that syncs directly with your other devices.
+
+## Install (dev channel)
+
+```sh
+curl -fsSL https://deadbolt.pw/install | DEADBOLT_CHANNEL=dev sh
+```
+
+Or via bun or npm:
+
+```sh
+bun add -g @deadbolt/cli@dev
+npm i -g @deadbolt/cli@dev
+```
+
+## Source & Docs
+
+- [GitHub repository](https://github.com/anomalyco/deadbolt)
+- [Design doc](https://github.com/anomalyco/deadbolt/blob/dev/docs/design.md)
+- [Releasing & updater](https://github.com/anomalyco/deadbolt/blob/dev/docs/releasing.md)
+- [Secrets for commands](https://github.com/anomalyco/deadbolt/blob/dev/docs/secrets.md)

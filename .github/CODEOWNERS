@@ -1,0 +1,4 @@
+# Release and deploy workflows and their locked scripts (.github/release/) hold
+# the release secrets and deploy tokens; changing them needs Dax. See
+# docs/releasing.md.
+/.github/ @thdxr

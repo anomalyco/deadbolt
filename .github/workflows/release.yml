@@ -10,8 +10,12 @@ name: Release
 # - sign and publish jobs run in the release environment. They check out only
 #   .github/release/ and run only those scripts and SHA-pinned actions, on
 #   artifacts they treat as data: they never build, install dependencies, or
-#   execute repository code or the artifacts. Their credentials are fetched
-#   from AWS Secrets Manager with the job's GitHub OIDC token.
+#   execute repository code or the artifacts. Their credentials come from AWS
+#   Secrets Manager through GitHub OIDC, not repository secrets, and are
+#   step-scoped: the AWS session is only a step output of
+#   configure-aws-credentials, passed to the one step that reads secrets
+#   (.github/release/with-secrets.sh), so neither it nor a secret is ever in
+#   the job's environment or $GITHUB_ENV.
 # - every artifact carries a SHA256SUMS whose digest the job that made it
 #   reports as an output; every job that downloads it checks that digest
 #   (.github/release/verify-artifacts.sh), so nothing swapped in between jobs
@@ -384,30 +388,41 @@ jobs:
           sparse-checkout: /.github/release/
           sparse-checkout-cone-mode: false
           persist-credentials: false
-      - name: Configure AWS credentials
+      # AWS credentials only as this action's step outputs (never in the job's
+      # environment), for the steps below that read Secrets Manager.
+      - &aws-credentials
+        id: aws
+        name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::604439173067:role/github/deadbolt-release
           role-session-name: deadbolt-${{ github.run_id }}
+          role-duration-seconds: 900
           aws-region: us-east-1
-      - name: Fetch the release secrets
-        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
-        with:
-          secret-ids: |
-            APPLE_SIGNING_CERTIFICATE,shared/APPLE_SIGNING_CERTIFICATE
-            APPLE_NOTARY_KEY,shared/APPLE_NOTARY_KEY
-          parse-json-secrets: false
+          output-env-credentials: false
+          output-credentials: true
       - id: credentials
         name: Require the Apple values
         env:
-          CERTIFICATE: ${{ env.APPLE_SIGNING_CERTIFICATE }}
-          KEY: ${{ env.APPLE_NOTARY_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
           KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
           ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
         run: |
           missing=
-          [ -n "$CERTIFICATE" ] || missing="$missing shared/APPLE_SIGNING_CERTIFICATE"
-          [ -n "$KEY" ] || missing="$missing shared/APPLE_NOTARY_KEY"
+          for id in shared/APPLE_SIGNING_CERTIFICATE shared/APPLE_NOTARY_KEY; do
+            val=$(aws secretsmanager get-secret-value --region us-east-1 --secret-id "$id" \
+              --query SecretString --output text 2>/dev/null || true)
+            if [ -n "$val" ] && [ "$val" != None ]; then
+              while IFS= read -r line; do
+                [ -z "$line" ] || echo "::add-mask::$line"
+              done <<< "$val"
+            else
+              missing="$missing $id"
+            fi
+            unset val
+          done
           [ -n "$KEY_ID" ] || missing="$missing var APPLE_NOTARY_KEY_ID"
           [ -n "$ISSUER" ] || missing="$missing var APPLE_NOTARY_ISSUER_ID"
           if [ -z "$missing" ]; then
@@ -428,7 +443,15 @@ jobs:
       - &import-credentials
         name: Import the certificate and notary key
         if: steps.credentials.outputs.available == 'true'
-        run: bash .github/release/macos-credentials.sh "$RUNNER_TEMP/credentials"
+        env: &aws-env
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+        run: |
+          bash .github/release/with-secrets.sh \
+            APPLE_SIGNING_CERTIFICATE=shared/APPLE_SIGNING_CERTIFICATE \
+            APPLE_NOTARY_KEY=shared/APPLE_NOTARY_KEY \
+            -- bash .github/release/macos-credentials.sh "$RUNNER_TEMP/credentials"
       - name: Sign
         if: steps.credentials.outputs.available == 'true'
         run: bash .github/release/sign-enclave.sh "$RUNNER_TEMP/in/build-enclave" "$RUNNER_TEMP/out"
@@ -497,6 +520,25 @@ jobs:
         with:
           name: build-macos-cli
           path: ${{ runner.temp }}/dist-cli
+      - name: Collect dSYMs
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsym"
+          for pair in darwin-arm64=aarch64 darwin-x64=x86_64; do
+            platform=${pair%%=*} arch=${pair#*=}
+            dsym="target/$arch-apple-darwin/release/deadbolt.dSYM"
+            if [ -d "$dsym" ]; then
+              /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$dsym" \
+                "$RUNNER_TEMP/dsym/deadbolt-$DEADBOLT_VERSION-$platform.dSYM.zip"
+            fi
+          done
+      # Named macos-dsym (not build-macos-*) so sign-macos's build-macos-*
+      # download pattern never pulls debug symbols into the signing job.
+      - name: Upload dSYMs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: macos-dsym
+          path: ${{ runner.temp }}/dsym/*.dSYM.zip
+          if-no-files-found: ignore
 
   # ---- Sign: release environment; only .github/release/ is checked out -------
 
@@ -527,19 +569,7 @@ jobs:
         with:
           pattern: build-macos-*
           digests: build-macos-app=${{ needs.build-macos.outputs.app-digest }} build-macos-cli=${{ needs.build-macos.outputs.cli-digest }}
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: arn:aws:iam::604439173067:role/github/deadbolt-release
-          role-session-name: deadbolt-${{ github.run_id }}
-          aws-region: us-east-1
-      - name: Fetch the release secrets
-        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
-        with:
-          secret-ids: |
-            APPLE_SIGNING_CERTIFICATE,shared/APPLE_SIGNING_CERTIFICATE
-            APPLE_NOTARY_KEY,shared/APPLE_NOTARY_KEY
-          parse-json-secrets: false
+      - *aws-credentials
       - *import-credentials
       - name: Sign, notarize, and staple
         run: bash .github/release/sign-macos.sh "$RUNNER_TEMP/in/build-macos-app/Deadbolt.app.zip" "$RUNNER_TEMP/in/build-macos-cli" "$RUNNER_TEMP/out"
@@ -842,20 +872,13 @@ jobs:
         with:
           pattern: build-homebrew
           digests: build-homebrew=${{ needs.homebrew-stage.outputs.digest }}
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: arn:aws:iam::604439173067:role/github/deadbolt-release
-          role-session-name: deadbolt-${{ github.run_id }}
-          aws-region: us-east-1
-      - name: Fetch the release secrets
-        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
-        with:
-          secret-ids: |
-            HOMEBREW_TAP_KEY,shared/HOMEBREW_TAP_DEPLOY_KEY
-          parse-json-secrets: false
+      - *aws-credentials
       - name: Push to anomalyco/homebrew-tap
-        run: bash .github/release/push-homebrew.sh "$RUNNER_TEMP/in/build-homebrew" "$DEADBOLT_VERSION"
+        env: *aws-env
+        run: |
+          bash .github/release/with-secrets.sh \
+            HOMEBREW_TAP_KEY=shared/HOMEBREW_TAP_DEPLOY_KEY \
+            -- bash .github/release/push-homebrew.sh "$RUNNER_TEMP/in/build-homebrew" "$DEADBOLT_VERSION"
 
   # Tells Homebrew installs about the version only once the tap serves it.
   record-brew:

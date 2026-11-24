@@ -13,5 +13,19 @@
       "pattern": "deadbolt.pw",
       "custom_domain": true
     }
-  ]
+  ],
+  "env": {
+    "dev": {
+      "name": "deadbolt-dev-site",
+      "account_id": "d8e944f537ceef3f06a5bd3aec1d7a53",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [
+        {
+          "pattern": "dev.deadbolt.pw",
+          "custom_domain": true
+        }
+      ]
+    }
+  }
 }

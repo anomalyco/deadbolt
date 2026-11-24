@@ -1,0 +1,144 @@
+name: Deploy site (dev)
+
+# Builds site/ (including the crates/send-web wasm receiver) and deploys the
+# dev site (deadbolt-dev-site at https://dev.deadbolt.pw on anomaly-dev).
+# Production deploys (deadbolt.pw) stay manual until ready.
+#
+# Split like Release (docs/releasing.md):
+# - build runs repository code (cargo, wasm-bindgen, bun, vite) with no
+#   environment, no secrets, and no id-token, and uploads dist/ with a
+#   SHA256SUMS whose digest it reports.
+# - deploy runs in the dev environment (admitting only refs/heads/dev),
+#   sparse-checkouts only .github/release/, verifies the artifact digest,
+#   assumes arn:aws:iam::604439173067:role/github/deadbolt-dev with
+#   output-env-credentials: false, mints a short-lived Cloudflare token via
+#   .github/release/cloudflare-token.sh, and deploys the pinned target
+#   .github/release/targets/site-dev.json with the locked wrangler CLI in
+#   .github/release/wrangler/.
+#
+# Guarded on push by repo variable SITE_DEV_DEPLOY == 'true' so dev pushes stay
+# green until the AWS OIDC role, dev environment, and token-issuer grant are
+# wired; workflow_dispatch from dev always runs deploy to test the wiring.
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "site/**"
+      - "crates/send/**"
+      - "crates/send-web/**"
+      - ".github/workflows/deploy-site.yml"
+      - ".github/release/deploy-site.sh"
+      - ".github/release/cloudflare-token.sh"
+      - ".github/release/targets/site-dev.json"
+      - ".github/release/wrangler/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      # The exact wasm-bindgen crates/send-web pins (scripts/wasm.sh checks it).
+      - run: cargo install wasm-bindgen-cli --version "$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' crates/send-web/Cargo.toml)" --locked
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: Build
+        working-directory: site
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          rm -rf "$RUNNER_TEMP/site"
+          mkdir -p "$RUNNER_TEMP/site"
+          cp -R dist "$RUNNER_TEMP/site/dist"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: site-dev
+          path: ${{ runner.temp }}/site
+          retention-days: 7
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/dev' && (github.event_name == 'workflow_dispatch' || vars.SITE_DEV_DEPLOY == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: site-deploy-dev
+      cancel-in-progress: false
+    steps:
+      - name: Require dev branch
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/dev" ]; then
+            echo "::error::The dev site deploys only from refs/heads/dev, not $REF."
+            exit 1
+          fi
+      - name: Check out the release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          # Nothing from the Actions cache, which jobs running repository code share.
+          package-manager-cache: false
+      - name: Install the pinned wrangler CLI
+        working-directory: .github/release/wrangler
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: site-dev
+          digests: site-dev=${{ needs.build.outputs.digest }}
+      # Step outputs only: the token step gets the AWS session, and wrangler in
+      # the Deploy step never does.
+      - id: aws
+        name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/deadbolt-dev
+          role-session-name: deadbolt-${{ github.run_id }}
+          role-duration-seconds: 900
+          aws-region: us-east-1
+          output-env-credentials: false
+          output-credentials: true
+      - name: Cloudflare token
+        id: cloudflare-token
+        env:
+          CLOUDFLARE_TOKEN_URL: ${{ vars.CLOUDFLARE_TOKEN_URL }}
+          CLOUDFLARE_ACCOUNT_ID: d8e944f537ceef3f06a5bd3aec1d7a53
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+        run: bash .github/release/cloudflare-token.sh
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare-token.outputs.token }}
+        run: bash .github/release/deploy-site.sh dev "$RUNNER_TEMP/in/site-dev"

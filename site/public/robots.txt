@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /r
+Disallow: /r.html
+Disallow: /mock.html
+
+Sitemap: https://deadbolt.pw/sitemap.xml
