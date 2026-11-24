@@ -27,7 +27,10 @@
 # Publishing the channel's current version again succeeds only when the
 # service already has exactly these files, so a rerun is safe. An artifact
 # with none of its files in <dist> (an unsigned dev build has no app) is
-# skipped.
+# skipped. DEADBOLT_UPDATE_SIGNATURES is the directory sign-update.sh wrote:
+# each artifact's release signature is published as its `release-signature`
+# target, and once update-keys.txt pins a key an artifact without one isn't
+# published.
 set -eu
 
 : "${RELEASE:?Set RELEASE to the release service origin}"
@@ -45,34 +48,8 @@ trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 curl -fsSL --retry 5 --retry-all-errors "$RELEASE/client.sh" -o "$temporary/client.sh"
 client() { RELEASE=$RELEASE bash "$temporary/client.sh" "$@"; }
 
-# targets <artifact>: target=file pairs, the names docs/releasing.md pins.
-targets() {
-  v=$release_version
-  case "$1" in
-    cli)
-      echo "macos-arm64=deadbolt-$v-darwin-arm64.tar.gz"
-      echo "macos-x64=deadbolt-$v-darwin-x64.tar.gz"
-      echo "linux-x64=deadbolt-$v-linux-x64.tar.gz"
-      echo "linux-arm64=deadbolt-$v-linux-arm64.tar.gz"
-      echo "linux-x64-musl=deadbolt-$v-linux-x64-musl.tar.gz"
-      echo "linux-arm64-musl=deadbolt-$v-linux-arm64-musl.tar.gz"
-      ;;
-    desktop)
-      echo "macos-arm64=Deadbolt-$v-macos-universal.zip"
-      echo "macos-x64=Deadbolt-$v-macos-universal.zip"
-      echo "macos-arm64-dmg=Deadbolt-$v-macos-universal.dmg"
-      echo "macos-x64-dmg=Deadbolt-$v-macos-universal.dmg"
-      ;;
-    extension)
-      echo "chromium=deadbolt-extension-$v.zip"
-      echo "chromium-standalone=deadbolt-extension-standalone-$v.zip"
-      ;;
-    *)
-      echo "Unknown artifact $1." >&2
-      exit 1
-      ;;
-  esac
-}
+# shellcheck source=.github/release/targets.sh
+. "$(dirname "$0")/targets.sh"
 
 # distributions <artifact>: the package managers that mirror it, each as the
 # service lists it.
@@ -89,7 +66,7 @@ publish() {
   dist=$2
   notes_url=$3
   set --
-  for pair in $(targets "$artifact"); do
+  for pair in $(release_targets "$artifact" "$release_version"); do
     target=${pair%%=*}
     name=${pair#*=}
     [ -f "$dist/$name" ] || continue
@@ -98,6 +75,13 @@ publish() {
   if [ $# -eq 0 ]; then
     echo "No $artifact files for $release_version; not publishing $artifact." >&2
     return 0
+  fi
+  signature="${DEADBOLT_UPDATE_SIGNATURES:-}/$(signature_name "$artifact" "$release_version")"
+  if [ -n "${DEADBOLT_UPDATE_SIGNATURES:-}" ] && [ -f "$signature" ]; then
+    set -- "$@" --target "release-signature=$signature"
+  elif update_keys_pinned; then
+    echo "update-keys.txt pins a release key, but $artifact has no release signature." >&2
+    exit 1
   fi
   jq -n --arg channel "$channel" --arg version "$release_version" --arg notes_url "$notes_url" \
     --argjson distributions "$(distributions "$artifact")" \

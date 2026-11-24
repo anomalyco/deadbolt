@@ -144,7 +144,29 @@ impl Service {
         target: &Target,
         file: &Path,
     ) -> Result<()> {
-        use std::io::Write;
+        let mut out =
+            std::fs::File::create(file).with_context(|| format!("creating {}", file.display()))?;
+        self.receive(manifest, target, &mut out).await?;
+        out.sync_all()?;
+        Ok(())
+    }
+
+    /// `target`'s bytes, as [`Service::download`] checks them, for a small
+    /// file.
+    pub(super) async fn fetch(&self, manifest: &Url, target: &Target) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.receive(manifest, target, &mut bytes).await?;
+        Ok(bytes)
+    }
+
+    /// Writes `target` to `out`, failing unless its size and SHA-256 are the
+    /// manifest's.
+    async fn receive(
+        &self,
+        manifest: &Url,
+        target: &Target,
+        out: &mut impl std::io::Write,
+    ) -> Result<()> {
         let url = file_url(manifest, &target.url)?;
         let fetch = async {
             let mut response = self.client.get(url.clone()).send().await?;
@@ -154,8 +176,6 @@ impl Service {
             if response.content_length().is_some_and(|n| n != target.size) {
                 bail!("it is not the size the manifest says");
             }
-            let mut out = std::fs::File::create(file)
-                .with_context(|| format!("creating {}", file.display()))?;
             let mut hash = Sha256::new();
             let mut size = 0u64;
             while let Some(chunk) = response.chunk().await? {
@@ -166,7 +186,6 @@ impl Service {
                 hash.update(&chunk);
                 out.write_all(&chunk)?;
             }
-            out.sync_all()?;
             if size != target.size {
                 bail!(
                     "it is {size} bytes, not the {} the manifest says",

@@ -11,9 +11,11 @@
 //! The daemon checks in the background ([`available`]) and only ever says
 //! so: nothing is installed unless the user runs `deadbolt update`.
 //!
-//! Nothing downloaded runs or replaces anything before its size and SHA-256
-//! match the manifest and, on macOS, its code signature satisfies what the
-//! running install would ([`APP_REQUIREMENT`]). Each replacement is staged
+//! Nothing in a manifest is trusted before its release signature checks
+//! out against a pinned key ([`signature`]), and nothing downloaded runs or
+//! replaces anything before its size and SHA-256 match the manifest and, on
+//! macOS, its code signature satisfies what the running install would
+//! ([`APP_REQUIREMENT`]). Each replacement is staged
 //! beside its destination and renamed into place.
 
 mod extension;
@@ -23,6 +25,7 @@ mod notice;
 mod protocol;
 mod replace;
 mod service;
+mod signature;
 
 pub use self::extension::{extension_dir_ok, switch_extension};
 pub use self::install::{UpdateArgs, available, run};

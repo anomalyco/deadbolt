@@ -10,6 +10,7 @@ use super::install::{UpdateState, check_sequence, state_dir};
 use super::protocol::{Decision, Running, Target, build_channel, decide, rollout_bucket};
 use super::replace::{refuse_foreign_root, stage_beside};
 use super::service::{SERVICE, Service};
+use super::signature::authenticate;
 use crate::config::{ExtensionBuild, ExtensionDir};
 use crate::paths::Paths;
 
@@ -159,6 +160,7 @@ pub(super) async fn extension(
         println!("Browser extension: no {channel} release yet");
         return Ok(false);
     };
+    authenticate(service, &url, &text, "extension", channel).await?;
     check_sequence(state, "extension", channel, &text, allow_rollback)?;
     let mut available = false;
     let mut failed = None;

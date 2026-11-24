@@ -46,7 +46,10 @@ Release (push dev | production | v*, or workflow_dispatch: channel)
 ├─ verify-macos       Gatekeeper, staple, update requirement, Touch ID pin, launch            [build]
 ├─ build-npm          signed only: @deadbolt/cli + 6 platform packages (scripts/package-npm.sh),
 │                     the app's signature and an install checked                            [build]
-├─ publish            OIDC: cli, desktop, extension to the release service; provenance      [release]
+├─ sign-update        Ed25519-signs each artifact's files for the updater (once a key
+│                     is pinned; see Signed releases)                                        [release]
+├─ publish            OIDC: cli, desktop, extension (+ release-signature) to the release
+│                     service; provenance                                                    [release]
 ├─ publish-attestations  build provenance for the npm tarballs                             [id-token]
 ├─ publish-npm        OIDC trusted publishing: npm, dist-tag dev / latest                   [release]
 ├─ github             stable: tag v<v>, GitHub release with every file + SHA256SUMS        [contents: write]
@@ -358,6 +361,14 @@ channel's current release isn't the build it runs, a rollback included.
   release build knows its channel; a build from source checks nothing) and
   say when a newer build is out, with this command and the download link.
   Deadbolt.app doesn't update extensions.
+- **Release signatures:** once `.github/release/update-keys.txt` pins a key,
+  `update` (and `browser switch`) refuses a manifest before trusting anything
+  in it, its sequence included, unless its `release-signature` target is a
+  signature by a pinned key over this artifact, channel and version and
+  exactly the manifest's other targets, each with its file name, size and
+  SHA-256 ([Signed releases](#signed-releases)). On macOS the code signature
+  checks stay as a second layer. The daemon's background check doesn't
+  fetch signatures; it only ever announces a version.
 - **Checks:** manifests come only from `https://anoma.ly/release` (no
   redirects, 30 s, at most 1 MiB); file URLs are resolved against the manifest
   URL and must stay under its origin's `/release/deadbolt/files/`; a download
@@ -393,6 +404,65 @@ channel's current release isn't the build it runs, a rollback included.
 - It doesn't require the protocol's `install.json` receipt: `update` is a
   command the user runs on the install in front of them, and package-manager
   paths are refused instead.
+
+## Signed releases
+
+The release service writes the manifests, so HTTPS to `anoma.ly` alone would
+let whoever controls the service (or a job that can publish to it) point an
+install at any file. The release workflow therefore signs what it built
+(`sign-update`, `.github/release/sign-update.sh`) with an Ed25519 key that
+only that job reads, and `publish` uploads each signature as its artifact's
+`release-signature` target (`deadbolt-<v>-<artifact>.update-signature.json`):
+
+```json
+{"schema": 1, "key": "<base64 public key>", "statement": "<base64>", "signature": "<base64 Ed25519>"}
+```
+
+The statement is the exact bytes signed:
+`{"schema":1,"app":"deadbolt","artifact","channel","version","targets":{"<target>":{"file","size","sha256"}}}`,
+the targets `publish` uploads (`.github/release/targets.sh`). It doesn't
+cover `sequence`, rollout, `required` or distributions, which the service
+changes after publishing; those can't introduce a file the release didn't
+sign.
+
+- **Pinned keys:** `.github/release/update-keys.txt`, one base64 raw public
+  key per line, compiled into `deadbolt` (`crates/cli/src/update/signature.rs`).
+  With no key listed, releases are unsigned and `update` checks nothing (the
+  state before the key exists). Once a key is listed, `sign-update` fails
+  unless the secret's public half is listed, and `publish` refuses an
+  artifact without a signature, so every build that pins a key is itself
+  published signed.
+- **Rotation:** list the next key beside the current one, release, switch the
+  secret to the next key, and drop the old line once supported builds pin the
+  next.
+- **Tests** sign with a throwaway key through `DEADBOLT_UPDATE_KEYS` (comma-
+  or newline-separated), which only debug builds read.
+- **Not covered yet:** replaying an older *signed* release of the same channel
+  at a higher sequence (the statement has no counter the client remembers),
+  `site/public/install` (first installs still trust HTTPS and the manifest's
+  digest), the npm and Homebrew paths (their managers verify what they
+  install), and signatures on the GitHub release for offline checks.
+
+### Creating the signing key (once, by a maintainer)
+
+On a trusted machine, never in CI or a repository:
+
+```sh
+openssl genpkey -algorithm ed25519 -out deadbolt-update.pem
+openssl pkey -in deadbolt-update.pem -pubout -outform DER | tail -c 32 | base64   # the public key
+```
+
+1. Store the private key as the release secret, from
+   [anomalyco/secrets](https://github.com/anomalyco/secrets):
+   `bun set deadbolt release UPDATE_SIGNING_KEY`, with the PEM file's contents as the value
+   (AWS Secrets Manager `deadbolt/release/UPDATE_SIGNING_KEY`, which
+   `role/github/deadbolt-release` can already read). Keep an offline backup
+   (a password manager item outside Deadbolt, or a hardware-backed store),
+   then delete the local file.
+2. Open a PR adding the public key's line to `.github/release/update-keys.txt`.
+   Its dev release is the first signed one; check the `sign-update` job's
+   summary and that `https://anoma.ly/release/deadbolt/cli/dev.json` lists a
+   `release-signature`, then `deadbolt update --check` from that build.
 
 ## Homebrew
 
@@ -431,6 +501,8 @@ stored in GitHub.
   deploy key on `anomalyco/homebrew-tap`, shared by every Anomaly app.
 - The environment has no required reviewer (every push to `dev` publishes);
   its deployment policy admits `dev`, `production` and `v*` tags.
+- Updater signing: `deadbolt/release/UPDATE_SIGNING_KEY`, the PEM (PKCS#8)
+  Ed25519 private key `sign-update` signs with ([Signed releases](#signed-releases)).
 - Publishing needs no secret: the service authorizes the `publish` and
   `record-brew` jobs by their OIDC token, and npm authorizes `publish-npm`
   by its OIDC token (trusted publishing, see npm).

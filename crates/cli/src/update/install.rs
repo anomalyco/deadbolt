@@ -22,6 +22,7 @@ use super::protocol::{
 };
 use super::replace::{refuse_foreign_root, update_app, update_cli};
 use super::service::Service;
+use super::signature::authenticate;
 use crate::paths::Paths;
 use crate::protocol::UpdateInfo;
 
@@ -274,6 +275,7 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
     if let Decision::Reject(reason) = decision {
         bail!("{url} is not a usable {artifact} manifest ({reason})");
     }
+    authenticate(&service, &url, &text, artifact, channel).await?;
     check_sequence(&state, artifact, channel, &text, args.allow_rollback)?;
     match decision {
         Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),

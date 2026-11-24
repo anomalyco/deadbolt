@@ -50,6 +50,23 @@ pub(super) struct Manifest {
     release: Release,
 }
 
+impl Manifest {
+    /// The release's version.
+    pub(super) fn version(&self) -> &str {
+        &self.release.version
+    }
+
+    /// The release's files, by target.
+    pub(super) fn targets(&self) -> &BTreeMap<String, Target> {
+        &self.release.targets
+    }
+
+    /// The release's file for `target`.
+    pub(super) fn target(&self, target: &str) -> Option<&Target> {
+        self.release.targets.get(target)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Release {
     version: String,

@@ -329,3 +329,132 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
             .contains("0.0.0-dev-9999")
     );
 }
+
+/// A release signature over `manifest`'s version and targets, as
+/// `.github/release/sign-update.sh` writes it, by a throwaway key.
+fn signature(key: &ed25519_dalek::SigningKey, manifest: &[u8]) -> Vec<u8> {
+    use data_encoding::BASE64;
+    use ed25519_dalek::Signer;
+    let manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+    let release = &manifest["release"];
+    let targets: serde_json::Map<String, serde_json::Value> = release["targets"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| *name != "release-signature")
+        .map(|(name, t)| {
+            let file = t["url"].as_str().unwrap().rsplit('/').next().unwrap();
+            let signed = serde_json::json!({
+                "file": file, "size": t["size"], "sha256": t["sha256"]
+            });
+            (name.clone(), signed)
+        })
+        .collect();
+    let statement = serde_json::json!({
+        "schema": 1, "app": "deadbolt", "artifact": manifest["artifact"],
+        "channel": manifest["channel"], "version": release["version"], "targets": targets,
+    })
+    .to_string();
+    serde_json::json!({
+        "schema": 1,
+        "key": BASE64.encode(key.verifying_key().as_bytes()),
+        "statement": BASE64.encode(statement.as_bytes()),
+        "signature": BASE64.encode(&key.sign(statement.as_bytes()).to_bytes()),
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// `manifest` with `signature` as its `release-signature` target, served
+/// from `files`.
+fn signed(files: &Mutex<HashMap<String, Vec<u8>>>, manifest: &[u8], signature: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    let sha = data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(signature));
+    let path = format!("/release/deadbolt/files/{sha}/deadbolt-cli.update-signature.json");
+    files
+        .lock()
+        .unwrap()
+        .insert(path.clone(), signature.to_vec());
+    let mut manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+    manifest["release"]["targets"]["release-signature"] =
+        serde_json::json!({ "url": path, "size": signature.len(), "sha256": sha });
+    manifest.to_string().into_bytes()
+}
+
+#[test]
+fn update_installs_only_releases_signed_by_a_pinned_key() {
+    let a = Device::new();
+    let files = Arc::new(Mutex::new(HashMap::new()));
+    let base = release_service(files.clone());
+    let exe = a.path("bin").join("deadbolt");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    copy_deadbolt(&exe);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let pinned = data_encoding::BASE64.encode(key.verifying_key().as_bytes());
+    let check = |keys: Option<&str>| {
+        let mut cmd = a.cmd_of(&exe, &["update", "--check", "--channel", "dev"]);
+        cmd.env("DEADBOLT_RELEASE_URL", &base);
+        match keys {
+            Some(keys) => cmd.env("DEADBOLT_UPDATE_KEYS", keys),
+            None => cmd.env_remove("DEADBOLT_UPDATE_KEYS"),
+        };
+        let out = cmd.output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.code(), text)
+    };
+    // The sequence floors `update` keeps, in this device's state directory.
+    let floors = || {
+        std::fs::read_dir(a.path("state"))
+            .into_iter()
+            .flatten()
+            .any(|dir| dir.unwrap().path().join("release-sequences.json").exists())
+    };
+    let serve = |manifest: Vec<u8>| files.lock().unwrap().insert(DEV.to_string(), manifest);
+    let release = manifest("0.0.0-dev-9999", 1);
+
+    // An unsigned manifest: refused once a key is pinned, before its
+    // sequence is remembered.
+    serve(release.clone());
+    let (code, text) = check(Some(&pinned));
+    assert_eq!(code, Some(1), "{text}");
+    assert!(text.contains("is not signed"), "{text}");
+    assert!(!floors());
+
+    // Signed by the release's key: offered.
+    let good = signed(&files, &release, &signature(&key, &release));
+    serve(good.clone());
+    let (code, text) = check(Some(&pinned));
+    assert_eq!(code, Some(10), "{text}");
+    assert!(text.contains("0.0.0-dev-9999 is available"), "{text}");
+    assert!(floors());
+
+    // The host swaps a file (its digest changed to match) under the same
+    // signature: refused.
+    let mut tampered: serde_json::Value = serde_json::from_slice(&good).unwrap();
+    let other = "b".repeat(64);
+    tampered["release"]["targets"]["linux-x64"]["sha256"] = other.clone().into();
+    tampered["release"]["targets"]["linux-x64"]["url"] =
+        format!("/release/deadbolt/files/{other}/cli.bin").into();
+    tampered["release"]["targets"]["macos-arm64"] =
+        tampered["release"]["targets"]["linux-x64"].clone();
+    tampered["sequence"] = 2.into();
+    serve(tampered.to_string().into_bytes());
+    let (code, text) = check(Some(&pinned));
+    assert_eq!(code, Some(1), "{text}");
+    assert!(
+        text.contains("aren't the ones the release signed"),
+        "{text}"
+    );
+
+    // Signed, but by a key this build doesn't pin.
+    let stranger = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+    let release = manifest("0.0.0-dev-9999", 3);
+    serve(signed(&files, &release, &signature(&stranger, &release)));
+    let (code, text) = check(Some(&pinned));
+    assert_eq!(code, Some(1), "{text}");
+    assert!(text.contains("doesn't trust"), "{text}");
+}

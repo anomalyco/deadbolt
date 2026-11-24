@@ -1,0 +1,11 @@
+# The Ed25519 public keys Deadbolt's release signatures are checked against
+# (docs/releasing.md, "Signed releases"): one base64 key per line, the raw
+# 32 bytes. `deadbolt update` compiles this file in and, once it lists a key,
+# refuses any manifest that isn't signed by one of them. The `sign-update`
+# job signs with UPDATE_SIGNING_KEY and fails unless that key's public half
+# is listed here.
+#
+# List two during a rotation (current and next), and drop the old one once
+# every supported build pins the next.
+#
+# No key is pinned yet, so releases are unsigned and nothing is checked.
