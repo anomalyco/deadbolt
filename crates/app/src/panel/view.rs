@@ -121,6 +121,7 @@ fn card(s: &App, k: &Kit) -> El {
                 .pr(16.0)
                 .pb(FOOTER_H + 8.0)
                 .transition(instant())
+                .instant_changes()
                 .on_press_tx(|s: &mut App, tx| {
                     tx.instant();
                     s.close_palette();

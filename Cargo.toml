@@ -57,3 +57,15 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Cargo does not inherit `[patch.crates-io]` from a git dependency; keep these
+# at the same rev as `crates/app/Cargo.toml` (see Rune's root `Cargo.toml`).
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }

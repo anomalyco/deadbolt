@@ -1,6 +1,6 @@
 //! Shared typography, geometry, motion presets and icons across views.
 
-use rune::{Chrome, El, Icon, Spring, SpringPair, TextStyle, Transition, icon, row};
+use rune::{Chrome, El, Icon, TextStyle, Transition, icon, row};
 use rune_kit::Kit;
 
 use crate::model::BAR_W;
@@ -32,11 +32,9 @@ pub(crate) fn tnum(style: TextStyle) -> TextStyle {
     style.features("'tnum' 1")
 }
 
-const INSTANT_SPRING: Spring = Spring::new(0.001, 0.0);
-
 /// Enters and leaves at once, with no fade.
 pub(crate) fn instant() -> Transition {
-    Transition::identity().springs(SpringPair::new(INSTANT_SPRING, INSTANT_SPRING))
+    Transition::none()
 }
 
 /// Whole-state replacement (blur σ 1.5, scale .96, fade; `.3/0` in, `.24/0` out).
