@@ -1,12 +1,6 @@
 /install
   Content-Type: text/plain; charset=utf-8
 
-/llms.txt
-  Content-Type: text/plain; charset=utf-8
-
-/skill.md
-  Content-Type: text/markdown; charset=utf-8
-
 /r
   Referrer-Policy: no-referrer
   X-Robots-Tag: noindex, nofollow

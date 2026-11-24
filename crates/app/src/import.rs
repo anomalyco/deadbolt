@@ -346,16 +346,11 @@ impl App {
     }
 
     /// Ends "Imported 12 from 1Password" once its time is up. True when it went.
-    pub(crate) fn tick_import(&mut self, now: f64, tx: &mut Tx) -> bool {
-        let cleared = self
-            .import
+    pub(crate) fn tick_import(&mut self, now: f64) -> bool {
+        self.import
             .imported
             .take_if(|(_, at)| now - *at >= IMPORTED_FOR - 1e-3)
-            .is_some();
-        if cleared {
-            tx.animated();
-        }
-        cleared
+            .is_some()
     }
 
     /// Keys while the import view shows: Return imports from a preview and
