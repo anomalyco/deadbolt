@@ -210,9 +210,25 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
-  # The site depends on `knobs` via `file:../../knobs`, a checkout outside this
-  # repository, so `bun install` cannot succeed in CI. Add a site job once knobs
-  # is published or vendored.
+  site:
+    name: Site
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: rustup target add wasm32-unknown-unknown --toolchain stable
+      # The exact wasm-bindgen crates/send-web pins (scripts/wasm.sh checks it).
+      - run: cargo install wasm-bindgen-cli --version "$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' ../crates/send-web/Cargo.toml)" --locked
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
 
   nightly:
     name: Nightly property and simulation runs
