@@ -32,6 +32,13 @@ use crate::paths::Paths;
 use crate::protocol::{
     Answer, Command, DeviceInfo, ErrorCode, Event, Reply, Secret, Status, VaultInfo,
 };
+use deadbolt_client::telemetry;
+
+/// Counts the heap in dev builds, so `procwatch`'s lines say how much of
+/// the footprint is Rust's own.
+#[cfg(debug_assertions)]
+#[global_allocator]
+static ALLOC: procwatch::alloc::Counting = procwatch::alloc::Counting::system();
 
 #[derive(Parser)]
 #[command(
@@ -435,6 +442,21 @@ enum TouchIdCommand {
 }
 
 fn main() -> ExitCode {
+    let code = run_main();
+    telemetry::flush();
+    code
+}
+
+fn run_main() -> ExitCode {
+    // Traces to a local OpenTelemetry collector, only when asked for.
+    telemetry::start(
+        "deadbolt",
+        &client::version(),
+        config::env("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .as_deref()
+            .and_then(telemetry::endpoint),
+    );
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     // Deadbolt.app's own executable and `deadbolt ui` are the app itself.
     let exe = app::this_binary().ok();

@@ -64,6 +64,12 @@ pub async fn serve(paths: Paths, old_name: bool) -> Result<()> {
     );
     ssh_cleanup::run(&paths);
     let daemon = Daemon::new(paths, local_net, env.kdf);
+    // Its own memory and CPU, with a line in the log when either runs away.
+    procwatch::watch(if cfg!(debug_assertions) {
+        procwatch::Config::dev("deadbolt daemon")
+    } else {
+        procwatch::Config::release("deadbolt daemon")
+    });
     let mut autofill = macos_autofill::bind_default().await;
     info!(
         pid = std::process::id(),

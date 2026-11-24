@@ -30,6 +30,7 @@ pub use scenes::{LOOPBACK_COST, MANY};
 pub(crate) use scenes::{PANEL_SCENES, SCENES};
 
 use deadbolt_client::Paths;
+use deadbolt_client::telemetry::Span;
 use rune::{AppSpec, KeyEvent, Tx, Waker};
 
 use daemon::{Daemon, Job};
@@ -76,6 +77,8 @@ pub struct Host {
 /// shortcut on the panel virtually, so a script's `{"shortcut": …}` and
 /// `{"menu": …}` steps reach it without touching the desktop.
 pub fn run(argv: Vec<String>, host: Host) {
+    // From here until the windows are built.
+    let mut launch = Span::root("app.launch");
     enclave::pin(host.enclave_sha256);
     rune::set_app_id(APP_ID);
     let args = rune::tooling::Args::parse_from(argv.clone());
@@ -83,6 +86,18 @@ pub fn run(argv: Vec<String>, host: Host) {
     let extra = rune::extra_args();
     let reduced_motion = extra.iter().any(|a| a == "--reduced-motion");
     let panel_first = extra.iter().any(|a| a == panel::window::FLAG);
+    launch.set("live", live);
+    launch.set("headless", headless);
+    launch.set("panel_first", panel_first);
+    // Its own memory and CPU, in a real run only: tooling runs are short
+    // and their output is the point.
+    if live {
+        procwatch::watch(if cfg!(debug_assertions) {
+            procwatch::Config::dev("deadbolt app")
+        } else {
+            procwatch::Config::release("deadbolt app")
+        });
+    }
     // A headless `--desktop` run drives every window, so they can reach each
     // other as in a live run (the menus' items act on the main window).
     let wired = live || argv.iter().any(|a| a == "--desktop");
@@ -172,10 +187,13 @@ pub fn run(argv: Vec<String>, host: Host) {
         if panel_first {
             main = windows.start_with_panel(main);
         }
-        vec![
+        let specs = vec![
             rune::WindowSpec::from_app("main", main),
             rune::WindowSpec::from_app("panel", quick).configured_options(panel::window::options()),
-        ]
+        ];
+        launch.ok();
+        launch.end();
+        specs
     });
 }
 
