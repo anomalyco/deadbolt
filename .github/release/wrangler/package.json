@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "The pinned wrangler CLI that deploy-site.sh runs; npm ci --ignore-scripts installs exactly package-lock.json.",
+  "dependencies": {
+    "wrangler": "4.166.0"
+  }
+}

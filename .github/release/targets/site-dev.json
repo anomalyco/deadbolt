@@ -1,0 +1,16 @@
+{
+  "name": "deadbolt-dev-site",
+  "account_id": "d8e944f537ceef3f06a5bd3aec1d7a53",
+  "compatibility_date": "2026-10-15",
+  "assets": {
+    "directory": "./dist"
+  },
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "dev.deadbolt.pw",
+      "custom_domain": true
+    }
+  ]
+}
