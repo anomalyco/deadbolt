@@ -127,7 +127,7 @@ test("options the hook can't read are the browser's to refuse", async () => {
   for (const allowCredentials of [{ length: 1, 0: { type: "public-key", id: id(1) } }, "AQID", 5]) expect(await credentials.get({ publicKey: { challenge: CHALLENGE, allowCredentials } }).catch((e: unknown) => e)).toBeInstanceOf(TypeError)
 })
 
-test("a page can assign over a Deadbolt credential's members, as over a browser's", async () => {
+test("a page can assign over a Deadbolt credential's methods, not its fields, as on a browser's", async () => {
   const { credentials, native, offer } = await hooked()
   const port = offer()
   port.onmessage = (e) => {
@@ -153,4 +153,12 @@ test("a page can assign over a Deadbolt credential's members, as over a browser'
   }
   made.response.getTransports = page
   expect(made.response.getTransports()).toBe(page())
+  // Its fields are getter-only accessors on a browser's: assigning to them throws in strict mode, and nothing changes.
+  for (const [target, key] of [[made, "id"], [made, "rawId"], [made, "type"], [made, "response"], [used, "authenticatorAttachment"], [made.response, "clientDataJSON"], [made.response, "attestationObject"], [used.response, "signature"]] as const) {
+    const before = target[key]
+    expect(() => {
+      target[key] = "the page's"
+    }).toThrow(TypeError)
+    expect(target[key]).toBe(before)
+  }
 })

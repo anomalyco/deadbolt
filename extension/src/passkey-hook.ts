@@ -72,11 +72,13 @@ function fromB64url(s: string): ArrayBuffer {
 
 // ---- Credential objects ---------------------------------------------------------
 
-// Writable, as a browser's credential is: its methods live on the prototype,
-// so a page may assign over them (GitHub's sign-up replaces `toJSON`), and in
-// strict mode a read-only own property makes that assignment throw.
+// As a browser's credential is: its methods live on the prototype, where a
+// page may assign over them (GitHub's sign-up replaces `toJSON`; in strict
+// mode a read-only own property makes that throw), so they're writable here.
+// Its fields (`id`, `rawId`, `response`, ...) are getter-only accessors, which
+// an assignment can't change, so they stay read-only.
 const define = (target: object, props: Record<string, unknown>) => {
-  for (const [key, value] of Object.entries(props)) Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true })
+  for (const [key, value] of Object.entries(props)) Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: typeof value === "function" })
   return target
 }
 
