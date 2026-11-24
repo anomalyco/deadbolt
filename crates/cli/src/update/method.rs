@@ -51,11 +51,14 @@ pub enum Manager {
 }
 
 impl Manager {
-    /// The release service's distribution kind. npm's packages follow
-    /// what the registry serves instead ([`served_by_npm`]).
+    /// The release service's distribution kind. npm's package is `npm`
+    /// once the release lists it; a release written before it did carries
+    /// no entry, and its build then follows what the registry serves
+    /// ([`served_by_npm`]).
     pub(super) fn distribution(self) -> &'static str {
         match self {
             Self::Brew | Self::BrewCask => "brew",
+            Self::Npm | Self::Pnpm | Self::Bun | Self::Yarn | Self::Package => "npm",
             _ => "unknown",
         }
     }

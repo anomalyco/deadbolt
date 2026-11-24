@@ -270,11 +270,14 @@ channel's current release isn't the build it runs, a rollback included.
     `yarn global list` at once (15 s each; a missing manager or a failure is
     a no), those named in the path first (bun's `install/global/node_modules`
     counts as bun), and takes the first that lists `@deadbolt/cli`. The
-    version is what the registry serves for the channel
+    version is the manifest's `npm` distribution when Release carries one
+    (Release is the source of truth, so the registry isn't asked), else what
+    the registry serves for the channel
     (`registry.npmjs.org/-/package/@deadbolt/cli/dist-tags`, `latest` for
-    stable), which trails the release service by minutes, and the
-    registry must also have the platform package this system's postinstall
-    links (`registry.npmjs.org/@deadbolt/cli-<platform>/<v>`: `darwin-<arch>`,
+    stable), which trails the release service by minutes; without a
+    distribution entry the registry must also have the platform package this
+    system's postinstall links
+    (`registry.npmjs.org/@deadbolt/cli-<platform>/<v>`: `darwin-<arch>`,
     `linux-<arch>`, or `linux-<arch>-musl` on musl or glibc older than 2.28),
     which can trail the wrapper by minutes more: until both equal the
     manifest's release (under the manifest's rollout rules), the update is
@@ -359,22 +362,28 @@ channel's current release isn't the build it runs, a rollback included.
   say when a newer build is out, with this command and the download link.
   Deadbolt.app doesn't update extensions.
 - **Checks:** manifests come only from `https://anoma.ly/release` (no
-  redirects, 30 s, at most 1 MiB); file URLs are resolved against the manifest
+  redirects, 30 s, at most 1 MiB, polled with `If-None-Match` so an unchanged
+  one costs a 304); file URLs are resolved against the manifest
   URL and must stay under its origin's `/release/deadbolt/files/`; a download
   stops past the manifest's size and must match its size and SHA-256 before
   it's unpacked, run or moved. Nothing needs the vault, so it works locked.
   `--check` prints what's available and exits 10 if anything is, else 0.
   Requests send `User-Agent: deadbolt/<build channel or source>/<version>/cli`.
-- **Background checks:** the daemon checks when it starts, then every hour,
-  whether `update` would install
-  something, with the same manifest rules, limits and User-Agent, npm's
-  version for npm's package and Homebrew's for Homebrew. It never downloads
-  or installs anything, nor writes the sequence floors, and ignores a
-  manifest older than them; it works locked. Release builds that know their
-  channel check; builds from source, Nix, Cargo and system installs, and an
-  app that can't be replaced where it is don't. A failure is logged and
-  tried again next time. `DEADBOLT_NO_UPDATE_CHECK=1` in the daemon's
-  environment turns it off.
+- **Background checks:** the daemon checks ten seconds after it starts,
+  then every ten minutes on `dev` and every hour on `stable` and `beta`,
+  whether `update` would install something, with the same manifest rules,
+  limits and User-Agent, npm's version for npm's package and Homebrew's for
+  Homebrew; each manifest's `ETag` is sent as `If-None-Match` next time. It
+  never downloads or installs anything, nor writes the sequence floors, and
+  ignores a manifest older than them; it works locked. A failed check is
+  logged and retried in a minute on `dev` or five on `stable` and `beta`,
+  doubling each time but never waiting more than an hour, and a success
+  resets it. Release builds that know their channel check; builds from
+  source, Nix, Cargo and system installs, and an app that can't be replaced
+  where it is don't. `DEADBOLT_NO_UPDATE_CHECK=1` in the daemon's
+  environment turns it off, as does macOS's `DisableUpdates` preference in
+  the `pw.deadbolt.app` or `pw.deadbolt.cli` domain (read with `defaults`,
+  so a managed Mac's administrator setting counts).
 - **Notifications:** what the check found is in the daemon's `status`
   reply, `deadbolt debug watch` emits `{"change":"update"}` when it changes, and the
   desktop app's Settings show a quiet "Deadbolt <version> is out" row.

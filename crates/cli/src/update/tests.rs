@@ -1025,3 +1025,126 @@ fn unpacks_only_the_cli_from_its_tarball() {
     tar("long.tar.gz", &[&long, "deadbolt"]).unwrap();
     assert!(pax_path(b"19 path=deadbolt-x\n").is_some_and(|p| p == "deadbolt-x"));
 }
+
+#[test]
+fn polls_a_manifest_with_its_etag() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::service::{Manifest, Service};
+
+    const BODY: &str = r#"{"schema":1}"#;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).ok();
+            line.clear();
+            let mut none_match = false;
+            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                if line.to_ascii_lowercase().starts_with("if-none-match:") {
+                    none_match = line.contains("\"v1\"");
+                }
+                line.clear();
+            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            let response = if none_match {
+                "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n".to_string()
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"v1\"\r\n\
+                     Connection: close\r\n\r\n{BODY}",
+                    BODY.len()
+                )
+            };
+            stream.write_all(response.as_bytes()).ok();
+        }
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let service = Service::at(Url::parse(&format!("http://{address}/release/")).unwrap());
+    let etag = runtime.block_on(async {
+        match service.manifest("cli", "dev", None).await.unwrap() {
+            Some(Manifest::Found(read)) => {
+                assert_eq!(read.text, BODY);
+                assert_eq!(read.etag.as_deref(), Some("\"v1\""));
+                read.etag
+            }
+            _ => panic!("no first read"),
+        }
+    });
+    let etag = etag.expect("an ETag");
+    assert!(matches!(
+        runtime
+            .block_on(service.manifest("cli", "dev", Some(&etag)))
+            .unwrap(),
+        Some(Manifest::Unchanged)
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    // An old ETag gets the manifest again, with its new one.
+    let other = runtime
+        .block_on(service.manifest("cli", "dev", Some("\"v0\"")))
+        .unwrap();
+    assert!(matches!(other, Some(Manifest::Found(_))));
+}
+
+#[test]
+fn takes_npm_from_the_release_once_it_lists_it() {
+    let without = manifest(100, false);
+    assert_eq!(npm_from_release("cli", "stable", &without), None);
+    let mut listed: serde_json::Value = serde_json::from_str(&without).unwrap();
+    listed["release"]["distributions"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "kind": "npm",
+            "package": "@deadbolt/cli",
+            "version": "2.4.0",
+            "command": "npm install -g @deadbolt/cli@2.4.0"
+        }));
+    let listed = listed.to_string();
+    assert_eq!(
+        npm_from_release("cli", "stable", &listed).as_deref(),
+        Some("2.4.0")
+    );
+    // Identity still decides: another channel or artifact isn't npm's.
+    assert_eq!(npm_from_release("cli", "dev", &listed), None);
+    assert_eq!(npm_from_release("desktop", "stable", &listed), None);
+    // The client rules take the distribution's version and command, so no
+    // registry request is needed.
+    assert_eq!(
+        decide("cli", "stable", &listed, &running("2.3.8", "npm", 0)),
+        Decision::Notify {
+            reason: Reason::Update,
+            version: "2.4.0".into(),
+            command: Some("npm install -g @deadbolt/cli@2.4.0".into()),
+            notes_url: None,
+        }
+    );
+    // A release from before npm is recorded still follows the registry:
+    // the candidate is its release version, with no command.
+    assert_eq!(
+        decide("cli", "stable", &without, &running("2.3.8", "npm", 0)),
+        Decision::Notify {
+            reason: Reason::Update,
+            version: "2.4.0".into(),
+            command: None,
+            notes_url: None,
+        }
+    );
+    // A listed npm entry the registry hasn't caught up with is pending.
+    let pending = without.replace(
+        "\"kind\":\"direct\"",
+        "\"kind\":\"npm\",\"package\":\"@deadbolt/cli\"",
+    );
+    assert_eq!(
+        decide("cli", "stable", &pending, &running("2.3.8", "npm", 0)),
+        Decision::None("distribution_pending")
+    );
+}
