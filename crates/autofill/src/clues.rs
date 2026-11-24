@@ -198,10 +198,7 @@ pub const FILES: &[(&str, &str)] = &[
         "fields/new-password.toml",
         include_str!("../rules/fields/new-password.toml"),
     ),
-    (
-        "fields/otp.toml",
-        include_str!("../rules/fields/otp.toml"),
-    ),
+    ("fields/otp.toml", include_str!("../rules/fields/otp.toml")),
     (
         "fields/captcha.toml",
         include_str!("../rules/fields/captcha.toml"),
