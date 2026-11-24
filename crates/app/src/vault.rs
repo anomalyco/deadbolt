@@ -76,6 +76,7 @@ fn over(key: &str, card: El, top: f32) -> El {
         .items_center()
         .pt(top)
         .transition(instant())
+        .instant_changes()
         .on_press_tx(|s: &mut App, tx| {
             tx.instant();
             s.close_palette();

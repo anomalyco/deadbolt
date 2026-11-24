@@ -8,6 +8,7 @@ Status: alpha (dev builds ship on every push to `dev`).
 
 - [Home](https://deadbolt.pw/): Overview, install commands, CLI examples, and trade-offs.
 - [Architecture](https://deadbolt.pw/architecture/): Interactive walkthrough of device keys, signed per-device logs, peer-to-peer sync over iroh, pairing, and device removal.
+- [Agent skill & CLI reference](https://deadbolt.pw/skill.md): Non-interactive agent usage, flags, environment variables, exit codes, `deadbolt://` secret references, and full CLI reference.
 - [Install script](https://deadbolt.pw/install): Shell installer for macOS and Linux (x64 and arm64; glibc and static musl).
 
 ## Components
