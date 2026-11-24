@@ -4206,7 +4206,7 @@ async function narrowing() {
     const shown = () => menu.locator("button.row:not([hidden]):not(.leaving)")
     const height = async () => (await (await menu.frameElement()).boundingBox())?.height ?? 0
     const tall = await height()
-    await page.keyboard.type("k")
+    await page.keyboard.type("x")
     check(!!(await until("typing narrows the list", async () => (await shown().count()) === 1)), "typing in the field narrows the menu to the logins that match")
     check(((await shown().locator(".sub").textContent()) ?? "") === "alex@acme.test", "to the one that matches")
     check(!!(await until("the menu shrinks to fit", async () => (await height()) < tall - 30)), "and the menu shrinks to fit")
