@@ -53,7 +53,7 @@ let statuses: Status[]
 beforeEach(() => {
   ports = []
   host = new Host((name) => {
-    expect(name).toBe("pw.deadbolt.browser")
+    expect(name).toBe("anomaly.deadbolt.browser")
     const port = new FakePort()
     ports.push(port)
     return port as unknown as chrome.runtime.Port

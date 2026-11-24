@@ -20,11 +20,11 @@ use crate::update::{Checked, Etags};
 pub const OPT_OUT: &str = "DEADBOLT_NO_UPDATE_CHECK";
 /// macOS's administrator or user preference that turns the check off for
 /// this app, as a Mac fleet sets it:
-/// `defaults write pw.deadbolt.app DisableUpdates 1`.
+/// `defaults write anomaly.deadbolt DisableUpdates 1`.
 const DISABLE_UPDATES: &str = "DisableUpdates";
 /// The preference domains read for it: Deadbolt.app's and the CLI's, since
 /// the daemon may run from either.
-const PREFERENCE_DOMAINS: [&str; 2] = ["pw.deadbolt.app", "pw.deadbolt.cli"];
+const PREFERENCE_DOMAINS: [&str; 2] = [deadbolt_client::peer::APP_ID, "anomaly.deadbolt.cli"];
 /// Debug builds only: check this channel (a build from source follows
 /// none), at once and every second, for tests.
 const TEST_CHANNEL: &str = "DEADBOLT_UPDATE_CHECK_CHANNEL";

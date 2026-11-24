@@ -34,7 +34,7 @@ deadbolt browser install --browser brave      # or name them: chrome brave arc e
 deadbolt browser uninstall                    # every browser, or --browser
 ```
 
-`install` writes `pw.deadbolt.browser.json` to each browser's
+`install` writes `anomaly.deadbolt.browser.json` to each browser's
 `NativeMessagingHosts` directory:
 
 | Browser  | macOS (`~/Library/Application Support/…`) | Linux (`$XDG_CONFIG_HOME` or `~/.config/…`) |
@@ -48,7 +48,7 @@ deadbolt browser uninstall                    # every browser, or --browser
 
 ```json
 {
-  "name": "pw.deadbolt.browser",
+  "name": "anomaly.deadbolt.browser",
   "description": "Deadbolt password manager",
   "path": "/absolute/path/to/deadbolt",
   "type": "stdio",
@@ -389,7 +389,7 @@ never gets such rows.
 ### Host connection
 
 One service worker owns the extension's only port to the host
-(`chrome.runtime.connectNative("pw.deadbolt.browser")`). It sends hello on
+(`chrome.runtime.connectNative("anomaly.deadbolt.browser")`). It sends hello on
 connect, reconnects with backoff (1s up to 60s) when the host goes away, and
 follows `changed`. It never asks for the passphrase: a locked vault shows
 "Unlock Deadbolt" and waits for `unlocked`. A `stopped` push shows Deadbolt as
@@ -2213,7 +2213,7 @@ login's; only their words change.
 
 Every message is a frame: a 32-bit length in native byte order, then that
 many bytes of UTF-8 JSON. The extension connects with
-`chrome.runtime.connectNative("pw.deadbolt.browser")` and keeps the port open.
+`chrome.runtime.connectNative("anomaly.deadbolt.browser")` and keeps the port open.
 Requests are answered in order, except passkey registrations and sign-ins,
 which wait on the user and answer when done, and `passkey-cancel`, which is
 answered at once, even while a request ahead of it waits on the daemon.

@@ -39,7 +39,7 @@ use onboarding::worker::Worker;
 
 /// The Wayland app id and X11 `WM_CLASS`, which the desktop matches to
 /// `deadbolt desktop install`'s entry of the same name.
-pub const APP_ID: &str = "pw.deadbolt.Deadbolt";
+pub const APP_ID: &str = "anomaly.deadbolt";
 
 pub fn spec() -> AppSpec<App> {
     AppSpec {

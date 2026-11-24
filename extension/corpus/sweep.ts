@@ -125,8 +125,8 @@ async function launch(dist: string, ua: string): Promise<Browser> {
   if (!standalone) {
     await mkdir(join(dir, "NativeMessagingHosts"))
     await writeFile(
-      join(dir, "NativeMessagingHosts", "pw.deadbolt.browser.json"),
-      JSON.stringify({ name: "pw.deadbolt.browser", description: "fake", path: join(root, "e2e", "fake-host.py"), type: "stdio", allowed_origins: [`chrome-extension://${ID}/`] }),
+      join(dir, "NativeMessagingHosts", "anomaly.deadbolt.browser.json"),
+      JSON.stringify({ name: "anomaly.deadbolt.browser", description: "fake", path: join(root, "e2e", "fake-host.py"), type: "stdio", allowed_origins: [`chrome-extension://${ID}/`] }),
     )
   }
   const context = await chromium.launchPersistentContext(dir, {

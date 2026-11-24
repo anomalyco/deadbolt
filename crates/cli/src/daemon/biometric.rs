@@ -339,7 +339,7 @@ pub fn helper() -> anyhow::Result<std::path::PathBuf> {
     macos::verified_helper_path()
 }
 
-/// Resolves the shared macOS App Group container directory (`<TEAM_ID>.pw.deadbolt`)
+/// Resolves the shared macOS App Group container directory (`<TEAM_ID>.anomaly.deadbolt`)
 /// through `deadbolt-enclave group-container`. Returns `Ok(None)` when the
 /// running daemon or helper is not signed with that App Group entitlement (e.g.
 /// local ad-hoc builds) or off macOS.

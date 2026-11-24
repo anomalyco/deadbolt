@@ -282,12 +282,12 @@ pub fn team() -> Option<&'static str> {
 /// and the CLI), as `bundle.sh` signs it.
 pub const DAEMON_ID: &str = "deadbolt";
 /// The signing identifier of Deadbolt.app, its bundle identifier.
-pub const APP_ID: &str = "pw.deadbolt.app";
+pub const APP_ID: &str = "anomaly.deadbolt";
 /// The signing identifier of Deadbolt's macOS AutoFill extension
 /// (`Contents/PlugIns/DeadboltAutoFill.appex`), its bundle identifier.
-pub const AUTOFILL_ID: &str = "pw.deadbolt.app.autofill";
-/// The suffix of Deadbolt's macOS App Group (`<TEAM_ID>.pw.deadbolt`).
-pub const APP_GROUP_SUFFIX: &str = "pw.deadbolt";
+pub const AUTOFILL_ID: &str = "anomaly.deadbolt.autofill";
+/// The suffix of Deadbolt's macOS App Group (`<TEAM_ID>.anomaly.deadbolt`).
+pub const APP_GROUP_SUFFIX: &str = "anomaly.deadbolt";
 
 /// The macOS App Group shared with `DeadboltAutoFill.appex`, when this build
 /// knows its Apple team (`DEADBOLT_TEAM_ID`).
@@ -730,18 +730,26 @@ mod tests {
         assert!(!sig("aa", None, "deadbolt", true).signed_as(Some(&unsigned), None, "deadbolt"));
 
         let team = Some("T");
-        assert!(sig("bb", team, "pw.deadbolt.app", true).signed_as(None, team, "pw.deadbolt.app"));
-        assert!(!sig("bb", team, "pw.deadbolt.cli", true).signed_as(None, team, "pw.deadbolt.app"));
-        assert!(!sig("bb", Some("U"), "pw.deadbolt.app", true).signed_as(
+        assert!(sig("bb", team, "anomaly.deadbolt", true).signed_as(
             None,
             team,
-            "pw.deadbolt.app"
+            "anomaly.deadbolt"
+        ));
+        assert!(!sig("bb", team, "anomaly.deadbolt.cli", true).signed_as(
+            None,
+            team,
+            "anomaly.deadbolt"
+        ));
+        assert!(!sig("bb", Some("U"), "anomaly.deadbolt", true).signed_as(
+            None,
+            team,
+            "anomaly.deadbolt"
         ));
         // A build that knows its team takes no ad-hoc code, even the file's.
-        assert!(!sig("aa", None, "pw.deadbolt.app", true).signed_as(
+        assert!(!sig("aa", None, "anomaly.deadbolt", true).signed_as(
             Some(&file),
             team,
-            "pw.deadbolt.app"
+            "anomaly.deadbolt"
         ));
     }
 
@@ -798,7 +806,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(daemon_is(&running(&real, team, "pw.deadbolt.app"), None, &real, team).is_err());
+        assert!(daemon_is(&running(&real, team, "anomaly.deadbolt"), None, &real, team).is_err());
         assert!(daemon_is(&running(&real, None, DAEMON_ID), Some(&file), &real, team).is_err());
         assert!(daemon_is(&running(&copy, team, DAEMON_ID), None, &real, team).is_err());
     }

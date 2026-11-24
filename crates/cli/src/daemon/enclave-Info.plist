@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>pw.deadbolt.app.enclave</string>
+    <string>anomaly.deadbolt.enclave</string>
     <key>CFBundleName</key>
     <string>Deadbolt</string>
     <key>CFBundleDisplayName</key>

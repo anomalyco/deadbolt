@@ -1319,9 +1319,9 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
   if (options.host !== false && !standalone) {
     await mkdir(join(dir, "NativeMessagingHosts"))
     await writeFile(
-      join(dir, "NativeMessagingHosts", "pw.deadbolt.browser.json"),
+      join(dir, "NativeMessagingHosts", "anomaly.deadbolt.browser.json"),
       JSON.stringify({
-        name: "pw.deadbolt.browser",
+        name: "anomaly.deadbolt.browser",
         description: options.realHost ? "deadbolt" : "fake",
         path: options.realHost ? deadbolt : join(import.meta.dir, "fake-host.py"),
         type: "stdio",

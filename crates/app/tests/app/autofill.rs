@@ -123,7 +123,7 @@ impl AutofillDaemonHarness {
         let runner = compile_swift_test_appex(&appex_dir, home_dir.path());
 
         let sign_app = ProcessCommand::new("codesign")
-            .args(["--force", "--identifier", "pw.deadbolt.app", "--sign", "-"])
+            .args(["--force", "--identifier", "anomaly.deadbolt", "--sign", "-"])
             .arg(&app_dir)
             .output()
             .expect("sign staged Deadbolt.app bundle");
@@ -245,7 +245,7 @@ fn compile_app_socket_helper(app_dir: &Path, scratch: &Path) -> PathBuf {
     let app_plist = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>pw.deadbolt.app</string>
+<key>CFBundleIdentifier</key><string>anomaly.deadbolt</string>
 <key>CFBundleExecutable</key><string>Deadbolt</string>
 <key>CFBundleName</key><string>Deadbolt</string>
 <key>CFBundlePackageType</key><string>APPL</string>
@@ -385,7 +385,7 @@ fn compile_swift_test_appex(appex_dir: &Path, scratch: &Path) -> PathBuf {
         .args([
             "--force",
             "--identifier",
-            "pw.deadbolt.app.autofill",
+            "anomaly.deadbolt.autofill",
             "--sign",
             "-",
         ])
@@ -425,7 +425,7 @@ fn autofill_appex_bundle_is_valid() {
     let plist = appex.join("Contents/Info.plist");
     assert_eq!(
         plist_value(&plist, "CFBundleIdentifier"),
-        "pw.deadbolt.app.autofill"
+        "anomaly.deadbolt.autofill"
     );
     assert_eq!(plist_value(&plist, "CFBundlePackageType"), "XPC!");
     assert_eq!(plist_value(&plist, "CFBundleShortVersionString"), "0.2.3");

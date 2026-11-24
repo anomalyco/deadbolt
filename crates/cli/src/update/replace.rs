@@ -30,7 +30,7 @@ pub(super) fn requirement(identifier: &str) -> String {
     APP_REQUIREMENT
         .trim()
         .replace(
-            "identifier \"pw.deadbolt.app\"",
+            "identifier \"anomaly.deadbolt\"",
             &format!("identifier \"{identifier}\""),
         )
         .trim_end_matches(" and notarized")
@@ -303,14 +303,14 @@ pub(super) async fn update_cli(
         );
     }
     if signature_required(macos, built) {
-        if !satisfies(CODESIGN, &new, &requirement("pw.deadbolt.cli"), false)? {
+        if !satisfies(CODESIGN, &new, &requirement("anomaly.deadbolt.cli"), false)? {
             bail!("the new deadbolt is not signed by Deadbolt's Developer ID; nothing was changed");
         }
         if let Some(enclave) = &enclave
             && !satisfies(
                 CODESIGN,
                 enclave,
-                &requirement("pw.deadbolt.app.enclave"),
+                &requirement("anomaly.deadbolt.enclave"),
                 false,
             )?
         {
@@ -522,14 +522,14 @@ pub(super) async fn update_app(
 /// Quits Deadbolt.app if it runs, and says whether it did.
 fn quit_app() -> Result<bool> {
     let running = Command::new(OSASCRIPT)
-        .args(["-e", "application id \"pw.deadbolt.app\" is running"])
+        .args(["-e", "application id \"anomaly.deadbolt\" is running"])
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("running {OSASCRIPT}"))?;
     let running = String::from_utf8_lossy(&running.stdout).trim() == "true";
     if running {
         Command::new(OSASCRIPT)
-            .args(["-e", "tell application id \"pw.deadbolt.app\" to quit"])
+            .args(["-e", "tell application id \"anomaly.deadbolt\" to quit"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -51,8 +51,8 @@ const cli = (...args: string[]) => {
 if (native) {
   cli("init", "--device-name", "universal-providers")
   await mkdir(join(root, "profile", "NativeMessagingHosts"), { recursive: true })
-  await writeFile(join(root, "profile", "NativeMessagingHosts", "pw.deadbolt.browser.json"), JSON.stringify({
-    name: "pw.deadbolt.browser", description: "deadbolt", path: deadbolt, type: "stdio", allowed_origins: ["chrome-extension://jhocodkhpifjndffenppfmdkmiolngal/"],
+  await writeFile(join(root, "profile", "NativeMessagingHosts", "anomaly.deadbolt.browser.json"), JSON.stringify({
+    name: "anomaly.deadbolt.browser", description: "deadbolt", path: deadbolt, type: "stdio", allowed_origins: ["chrome-extension://jhocodkhpifjndffenppfmdkmiolngal/"],
   }))
 }
 // idleTimeout 0: the lifetime case holds one response open for two minutes.
@@ -280,7 +280,7 @@ async function learnGoogle() {
 /** One request to the real host, on its own native port (the extension's protocol: hello, then the request). */
 async function hostRequest(body: Record<string, unknown>) {
   return worker.evaluate((body) => new Promise<unknown>((resolve, reject) => {
-    const port = chrome.runtime.connectNative("pw.deadbolt.browser")
+    const port = chrome.runtime.connectNative("anomaly.deadbolt.browser")
     const timer = setTimeout(() => { port.disconnect(); reject(new Error("the host didn't answer")) }, 10_000)
     port.onMessage.addListener((m: { id?: number }) => {
       if (m.id === 1) port.postMessage({ ...body, id: 2 })

@@ -639,16 +639,16 @@ fn only_trusts_the_service_and_its_files() {
 
 #[test]
 fn requirements_follow_the_apps() {
-    assert!(APP_REQUIREMENT.contains("identifier \"pw.deadbolt.app\""));
+    assert!(APP_REQUIREMENT.contains("identifier \"anomaly.deadbolt\""));
     assert!(APP_REQUIREMENT.trim().ends_with(" and notarized"));
-    let cli = requirement("pw.deadbolt.cli");
-    assert!(cli.contains("identifier \"pw.deadbolt.cli\""), "{cli}");
+    let cli = requirement("anomaly.deadbolt.cli");
+    assert!(cli.contains("identifier \"anomaly.deadbolt.cli\""), "{cli}");
     assert!(
         cli.contains("certificate leaf[subject.OU] = \"5NZ4Q7NXJ4\""),
         "{cli}"
     );
     assert!(
-        !cli.contains("pw.deadbolt.app") && !cli.contains("notarized"),
+        !cli.contains("identifier \"anomaly.deadbolt\"") && !cli.contains("notarized"),
         "{cli}"
     );
 }
@@ -787,7 +787,7 @@ fn signature_checks_are_decided_by_the_build_and_fail_closed() {
     assert!(satisfies("/nonexistent/codesign", &exe, "anchor apple", false).is_err());
     if cfg!(target_os = "macos") {
         // This test binary is signed ad hoc, not by Deadbolt's Developer ID.
-        assert!(!satisfies(CODESIGN, &exe, &requirement("pw.deadbolt.cli"), false).unwrap());
+        assert!(!satisfies(CODESIGN, &exe, &requirement("anomaly.deadbolt.cli"), false).unwrap());
     }
 }
 

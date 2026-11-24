@@ -682,7 +682,7 @@ pub(super) mod tests {
     }
 
     /// A Developer ID build's app is the app its own team signed as
-    /// `pw.deadbolt.app`, and nothing ad-hoc, run from the daemon's bundle:
+    /// `anomaly.deadbolt`, and nothing ad-hoc, run from the daemon's bundle:
     /// that executable is the whole `deadbolt`, so a copy elsewhere could run
     /// CLI commands under the app's signature.
     #[test]

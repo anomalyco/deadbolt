@@ -20,7 +20,7 @@ use clap::ValueEnum;
 use crate::config::ExtensionBuild;
 
 /// The native messaging host's name, which the extension connects to.
-pub const HOST_NAME: &str = "pw.deadbolt.browser";
+pub const HOST_NAME: &str = "anomaly.deadbolt.browser";
 
 /// The extension's id, fixed by the public key in
 /// `extension/manifest-key.txt` (the manifest's `key`): the first 128 bits
@@ -443,7 +443,7 @@ mod tests {
             dirs.manifest(browser)
                 .map(|p| p.to_str().unwrap().to_string())
         };
-        let file = "NativeMessagingHosts/pw.deadbolt.browser.json";
+        let file = "NativeMessagingHosts/anomaly.deadbolt.browser.json";
         for xdg in [None, Some("")] {
             let linux = Dirs::from_vars(false, |name| match name {
                 "HOME" => Some("/home/alex".into()),
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "name": "pw.deadbolt.browser",
+                "name": "anomaly.deadbolt.browser",
                 "description": "Deadbolt password manager",
                 "path": "/opt/deadbolt/bin/deadbolt",
                 "type": "stdio",

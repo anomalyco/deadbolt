@@ -23,7 +23,7 @@ esac
 target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 # One program: `deadbolt` with the app built in. Contents/MacOS/Deadbolt and
 # Contents/Helpers/deadbolt are two copies of it, signed apart (the app as
-# pw.deadbolt.app, the CLI and daemon as deadbolt), so the daemon tells the app
+# anomaly.deadbolt, the CLI and daemon as deadbolt), so the daemon tells the app
 # from the CLI by signature and path; run as MacOS/Deadbolt it is only ever
 # the app.
 if $universal; then
@@ -49,7 +49,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
 <key>CFBundleName</key><string>Deadbolt</string>
 <key>CFBundleDisplayName</key><string>Deadbolt</string>
-<key>CFBundleIdentifier</key><string>pw.deadbolt.app</string>
+<key>CFBundleIdentifier</key><string>anomaly.deadbolt</string>
 <key>CFBundleExecutable</key><string>Deadbolt</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
@@ -111,7 +111,7 @@ if [[ $sign_id != "-" ]]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>com.apple.security.application-groups</key>
-<array><string>${team_id}.pw.deadbolt</string></array>
+<array><string>${team_id}.anomaly.deadbolt</string></array>
 </dict></plist>
 ENTITLEMENTS
     plutil -lint "$scratch/app.entitlements" >/dev/null
