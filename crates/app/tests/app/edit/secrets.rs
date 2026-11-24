@@ -223,11 +223,11 @@ fn an_ssh_keys_private_key_is_edited_in_place() {
     assert_eq!(r.value("private-key"), "", "kept, not loaded");
     assert!(r.input("private-key").keeps() && r.input("private-key").edit.is_secure());
     assert!(!r.rt.state.edit.form.as_ref().unwrap().changed());
-    r.fill("comment", "ci@anoma.ly");
+    r.fill("comment", "ci@example.com");
     r.sent();
     r.command('s');
     let (_, _, _, fields, unset) = r.take_save();
-    assert_eq!(pairs(&fields), [("comment", "ci@anoma.ly")]);
+    assert_eq!(pairs(&fields), [("comment", "ci@example.com")]);
     assert!(unset.is_empty(), "{unset:?}");
 
     let mut r = rig("ssh");
@@ -345,14 +345,14 @@ fn a_public_key_wraps_in_the_form_and_enter_saves() {
         r.height("field-public-key") > r.height("field-comment") + 10.0,
         "the public key wraps"
     );
-    r.fill("public-key", "ssh-ed25519 AAAAnew ci@anoma.ly");
+    r.fill("public-key", "ssh-ed25519 AAAAnew ci@example.com");
     r.focus("public-key");
     r.sent();
     r.tap(Key::Enter);
-    assert_eq!(r.value("public-key"), "ssh-ed25519 AAAAnew ci@anoma.ly");
+    assert_eq!(r.value("public-key"), "ssh-ed25519 AAAAnew ci@example.com");
     assert_eq!(
         pairs(&r.take_save().3),
-        [("public-key", "ssh-ed25519 AAAAnew ci@anoma.ly")]
+        [("public-key", "ssh-ed25519 AAAAnew ci@example.com")]
     );
 }
 
@@ -454,7 +454,7 @@ fn show_loads_a_kept_key_and_hide_keeps_an_edit() {
     r.settle(0.1);
     assert_eq!(r.value("private-key"), "", "unchanged, kept again");
     assert!(r.input("private-key").keeps());
-    r.fill("comment", "ci@anoma.ly");
+    r.fill("comment", "ci@example.com");
     r.sent();
     r.command('s');
     assert_eq!(r.take_save().3.len(), 1, "the key isn't sent");
@@ -614,7 +614,7 @@ fn show_and_hide_focus_the_field_alone() {
 #[test]
 fn a_public_key_left_alone_is_kept_as_it_came() {
     let mut r = rig("ssh");
-    let came = "ssh-ed25519 AAAAC3Nz\naC1lZDI1 ci@anoma.ly\n";
+    let came = "ssh-ed25519 AAAAC3Nz\naC1lZDI1 ci@example.com\n";
     r.rt.update(move |s, _| {
         s.detail
             .as_mut()
@@ -628,10 +628,10 @@ fn a_public_key_left_alone_is_kept_as_it_came() {
     r.command('e');
     assert_eq!(r.value("public-key"), came);
     assert!(!r.rt.state.edit.form.as_ref().unwrap().changed());
-    r.fill("comment", "ci@anoma.ly");
+    r.fill("comment", "ci@example.com");
     r.sent();
     r.command('s');
-    assert_eq!(pairs(&r.take_save().3), [("comment", "ci@anoma.ly")]);
+    assert_eq!(pairs(&r.take_save().3), [("comment", "ci@example.com")]);
     assert_eq!(r.value("public-key"), came);
 }
 
@@ -644,14 +644,14 @@ fn a_pasted_public_key_keeps_to_one_line() {
     r.command('e');
     r.focus("public-key");
     r.command('a');
-    r.rt.paste("ssh-ed25519 AAAAC3Nz\r\naC1lZDI1\nNTE5 ci@anoma.ly\n");
+    r.rt.paste("ssh-ed25519 AAAAC3Nz\r\naC1lZDI1\nNTE5 ci@example.com\n");
     r.settle(0.05);
     assert_eq!(
         r.value("public-key"),
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 ci@anoma.ly"
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 ci@example.com"
     );
     r.type_text("!");
-    assert!(r.value("public-key").ends_with("ci@anoma.ly!"));
+    assert!(r.value("public-key").ends_with("ci@example.com!"));
     r.focus("fingerprint");
     r.command('a');
     r.type_text(&"SHA256:Fx7tQ2mVb9yLr4cWkP0sN8hJd3aZe6uGo1iTq5XwYnE".repeat(2));
@@ -665,7 +665,7 @@ fn a_pasted_public_key_keeps_to_one_line() {
         .iter()
         .find(|(name, _)| name == "public-key")
         .unwrap();
-    assert_eq!(key, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 ci@anoma.ly!");
+    assert_eq!(key, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 ci@example.com!");
 }
 
 /// The daemon keeps a login's one-time password back, so the form never has

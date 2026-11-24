@@ -51,7 +51,7 @@ describe("auth state (suppression, not an authentication oracle)", () => {
     expect(authReport(state, true).providers).toBeUndefined()
   })
   test("vault usernames shown on the page are not consulted", () => {
-    document.body.innerHTML = '<p>kit@example.com</p><img alt="kit@example.com" title="kit@example.com"><button>Sign in</button>'
+    document.body.innerHTML = '<p>alex@example.com</p><img alt="alex@example.com" title="alex@example.com"><button>Sign in</button>'
     expect(authState(authReport(state, true))).toBe("signed-out")
   })
   test("a modal launcher can be an entry, but a cross-origin link cannot", () => {

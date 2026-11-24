@@ -53,7 +53,7 @@ fn replies_have_the_documented_shapes() {
                     urls: vec!["https://github.com".into()],
                     sign_in: Some(SignIn {
                         provider: "google".into(),
-                        account: Some("dax@example.com".into()),
+                        account: Some("sam@example.com".into()),
                     }),
                 },
             ],
@@ -66,7 +66,7 @@ fn replies_have_the_documented_shapes() {
              "hasTotp": false, "urls": ["https://github.com"]},
             {"ref": "a:c", "vault": "personal", "title": "GitHub", "hasPassword": false,
              "hasTotp": false, "urls": ["https://github.com"],
-             "signIn": {"provider": "google", "account": "dax@example.com"}}
+             "signIn": {"provider": "google", "account": "sam@example.com"}}
         ]})
     );
     let changed = Envelope {
@@ -597,7 +597,7 @@ async fn forms_and_fill_form_have_the_documented_shapes() {
                 item: at("cd"),
                 vault: "personal".into(),
                 title: "Home".into(),
-                summary: "Kit Langton · 123 Main St, Brooklyn".into(),
+                summary: "Alex Mercer · 123 Main St, Brooklyn".into(),
                 fields: vec!["given-name".into(), "city".into()],
             }],
             cards: vec![FormCard {
@@ -640,7 +640,7 @@ async fn forms_and_fill_form_have_the_documented_shapes() {
         .await,
         serde_json::json!({"id": 1, "type": "forms", "canVerify": true,
             "identities": [{"ref": home, "vault": "personal", "title": "Home",
-                "summary": "Kit Langton · 123 Main St, Brooklyn",
+                "summary": "Alex Mercer · 123 Main St, Brooklyn",
                 "fields": ["given-name", "city"]}],
             "cards": [{"ref": visa, "vault": "personal", "title": "Visa •••• 4242",
                 "brand": "Visa", "last4": "4242", "expiry": "2028-08", "billing": home,
@@ -754,20 +754,20 @@ async fn save_form_creates_or_changes_an_identity_or_card() {
         serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "card",
                            "fields": {"expiry": "2028-08"}}),
         serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "login",
-                           "fields": {"username": "kit"}}),
+                           "fields": {"username": "alex"}}),
         serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "card", "ref": visa,
                            "fields": {"number": "4242424242424242"}}),
         serde_json::json!({"id": 1, "type": "save-form", "origin": origin, "kind": "identity", "ref": "x",
-                           "fields": {"given-name": "Kit"}}),
+                           "fields": {"given-name": "Alex"}}),
         serde_json::json!({"id": 1, "type": "save-form", "origin": "null", "kind": "identity",
-                           "fields": {"given-name": "Kit"}}),
+                           "fields": {"given-name": "Alex"}}),
     ] {
         assert_eq!(ask(bad.clone()).await["code"], "bad_request", "{bad}");
     }
     assert!(asked.lock().unwrap().is_empty());
     assert_eq!(
         ask(serde_json::json!({"id": 2, "type": "save-form", "origin": origin, "kind": "card",
-            "fields": {"number": "4242 4242 4242 4242", "expiry": "08/28", "cardholder": "Kit Langton"}}))
+            "fields": {"number": "4242 4242 4242 4242", "expiry": "08/28", "cardholder": "Alex Mercer"}}))
         .await,
         serde_json::json!({"id": 2, "type": "save-form", "ref": visa, "created": true})
     );
@@ -789,7 +789,7 @@ async fn save_form_creates_or_changes_an_identity_or_card() {
     assert_eq!(
         asked[0]["fields"],
         serde_json::json!([
-            {"name": "cardholder", "kind": null, "value": "Kit Langton"},
+            {"name": "cardholder", "kind": null, "value": "Alex Mercer"},
             {"name": "expiry", "kind": null, "value": "2028-08"},
             {"name": "number", "kind": null, "value": "4242424242424242"},
         ])

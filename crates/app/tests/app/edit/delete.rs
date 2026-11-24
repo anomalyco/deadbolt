@@ -56,7 +56,7 @@ fn an_item_deleted_elsewhere_saves_back_as_new() {
     let mut r = rig("vault");
     let github = r.github();
     r.command('e');
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     let items: Vec<ItemInfo> =
         r.rt.state
             .items
@@ -133,7 +133,7 @@ fn a_passkey_shows_its_site_and_is_only_deleted() {
     assert_eq!(item.kind, "passkey");
     for (label, value) in [
         ("Site", "github.com"),
-        ("Username", "thdxr"),
+        ("Username", "samr"),
         ("Created", "2026-10-27"),
     ] {
         assert!(r.shows(label) && r.shows(value), "{label}");
@@ -274,7 +274,7 @@ fn a_mirrored_item_warns_on_edit_but_saves() {
     assert!(r.shows("Login · From 1Password"));
     r.command('e');
     assert!(r.shows("From 1Password"));
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.sent();
     r.command('s');
     assert_eq!(r.take_save().1, github.id, "the edit saves");

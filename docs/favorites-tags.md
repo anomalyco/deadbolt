@@ -218,7 +218,7 @@ Each raw tag or folder name passes through `deadbolt_core::tag::normalize_tag`. 
 
 ```sh
 # Create with favorite and tags
-deadbolt new login username=dax url=github.com --favorite --tag work/aws --tag prod
+deadbolt new login username=alex url=github.com --favorite --tag work/aws --tag prod
 
 # Star or unstar, add or remove tags (combines with field=value and --name in one entry)
 deadbolt set github --favorite

@@ -65,5 +65,5 @@ fast-forwarded from `dev` to release stable (`docs/releasing.md`). `.github/rele
 and `.github/workflows/release.yml` are the release security boundary. Coordinate
 shared-file changes with other active worktrees, and remove your worktree
 (`git worktree remove`) once your PR merges.
-Site deployment is `cd site && bun run deploy`. **Ask first:** it replaces Dax's
-live page. Rust changes do not require a site deploy.
+Site deployment is `cd site && bun run deploy`. **Ask first:** it replaces the
+live site. Rust changes do not require a site deploy.

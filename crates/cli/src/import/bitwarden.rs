@@ -254,7 +254,7 @@ mod tests {
           { "match": 3, "uri": "github.com" },
           { "match": null, "uri": "androidapp://com.github.android" }
         ],
-        "username": "dax",
+        "username": "sam",
         "password": "hunter2-github",
         "totp": "JBSWY3DPEHPK3PXP"
       },
@@ -290,7 +290,7 @@ mod tests {
       "notes": null,
       "favorite": false,
       "card": {
-        "cardholderName": "Dax Raad",
+        "cardholderName": "Sam Rivera",
         "brand": "Visa",
         "number": "4242 4242 4242 4242",
         "expMonth": "4",
@@ -335,11 +335,11 @@ mod tests {
       "favorite": false,
       "notes": "primary",
       "identity": {
-        "title": "Mr", "firstName": "Dax", "middleName": null, "lastName": "Raad",
+        "title": "Mr", "firstName": "Sam", "middleName": null, "lastName": "Rivera",
         "address1": "1 Main St", "address2": "Apt 2", "address3": null, "city": "Springfield",
         "state": "IL", "postalCode": "12345", "country": "US", "company": "Anomaly",
-        "email": "dax@example.com", "phone": "+1 555 0100", "ssn": "000-00-0000",
-        "username": "dax", "passportNumber": "X1234567", "licenseNumber": null
+        "email": "sam@example.com", "phone": "+1 555 0100", "ssn": "000-00-0000",
+        "username": "sam", "passportNumber": "X1234567", "licenseNumber": null
       }
     },
     {
@@ -391,7 +391,7 @@ mod tests {
                 ("url-2", "text", "not a url"),
                 ("url-3", "url", "https://github.com"),
                 ("url-4", "url", "androidapp://com.github.android"),
-                ("username", "text", "dax"),
+                ("username", "text", "sam"),
             ]
         );
         // A login needs no password.
@@ -402,7 +402,7 @@ mod tests {
             fields(&items[3]),
             [
                 ("brand", "text", "Visa"),
-                ("cardholder", "text", "Dax Raad"),
+                ("cardholder", "text", "Sam Rivera"),
                 ("cvv-2", "secret", "12x"),
                 ("expiry", "month", "2027-04"),
                 ("number", "secret", "4242424242424242"),
@@ -428,9 +428,9 @@ mod tests {
                 ("address-line2", "text", "Apt 2"),
                 ("city", "text", "Springfield"),
                 ("country", "text", "US"),
-                ("email", "email", "dax@example.com"),
-                ("family-name", "text", "Raad"),
-                ("given-name", "text", "Dax"),
+                ("email", "email", "sam@example.com"),
+                ("family-name", "text", "Rivera"),
+                ("given-name", "text", "Sam"),
                 ("honorific", "text", "Mr"),
                 ("national-id", "secret", "000-00-0000"),
                 ("notes", "note", "primary"),
@@ -439,7 +439,7 @@ mod tests {
                 ("phone", "text", "+15550100"),
                 ("postal-code", "text", "12345"),
                 ("region", "text", "IL"),
-                ("username", "text", "dax"),
+                ("username", "text", "sam"),
             ]
         );
         assert_eq!(
@@ -522,7 +522,7 @@ mod tests {
             {"type": 3, "name": "Visa", "card": {"number": "4242424242424242", "code": " ", "brand": "  "},
              "fields": [{"name": "pin", "value": "   ", "type": 1}]},
             {"type": 3, "name": "Dashes", "card": {"number": "--"}},
-            {"type": 1, "name": "Blank", "login": {"username": "dax", "password": "  "}}
+            {"type": 1, "name": "Blank", "login": {"username": "sam", "password": "  "}}
         ]}"#;
         let (items, summary) = bitwarden(export).unwrap();
         assert_eq!(items.len(), 2);
@@ -530,7 +530,7 @@ mod tests {
             fields(&items[0]),
             [("number", "secret", "4242424242424242")]
         );
-        assert_eq!(fields(&items[1]), [("username", "text", "dax")]);
+        assert_eq!(fields(&items[1]), [("username", "text", "sam")]);
         assert_eq!(
             lines(&summary),
             [
@@ -551,7 +551,7 @@ mod tests {
              "fields": [{"name": "pin", "value": "5678", "type": 0}, {"name": "cvv", "value": "abc", "type": 1}]},
             {"type": 5, "name": "Deploy", "sshKey": {"privateKey": "bw-key"},
              "fields": [{"name": "passphrase", "value": "bw-pass", "type": 1}, {"name": "comment", "value": "me@host", "type": 0}]},
-            {"type": 4, "name": "Me", "identity": {"firstName": "Dax"},
+            {"type": 4, "name": "Me", "identity": {"firstName": "Sam"},
              "fields": [{"name": "passport", "value": "bw-pp", "type": 1}, {"name": "license", "value": "bw-dl", "type": 0},
                         {"name": "email", "value": "not an email", "type": 0}, {"name": "phone", "value": "bw-phone", "type": 1}]}
         ]}"#;
@@ -585,7 +585,7 @@ mod tests {
             fields(&items[3]),
             [
                 ("email-2", "text", "not an email"),
-                ("given-name", "text", "Dax"),
+                ("given-name", "text", "Sam"),
                 ("license", "secret", "bw-dl"),
                 ("passport", "secret", "bw-pp"),
                 ("phone-2", "secret", "bw-phone"),

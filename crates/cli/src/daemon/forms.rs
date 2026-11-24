@@ -157,8 +157,8 @@ mod tests {
             "identity",
             Some("Home"),
             &[
-                ("given-name", "Kit"),
-                ("family-name", "Langton"),
+                ("given-name", "Alex"),
+                ("family-name", "Mercer"),
                 ("address-line1", "123 Main St"),
                 ("city", "Brooklyn"),
                 ("country", "us"),
@@ -217,7 +217,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(identities.len(), 1);
-        assert_eq!(identities[0].summary, "Kit Langton · 123 Main St, Brooklyn");
+        assert_eq!(identities[0].summary, "Alex Mercer · 123 Main St, Brooklyn");
         assert!(identities[0].fields.contains(&"country".to_string()));
         assert!(!identities[0].fields.contains(&"passport".to_string()));
         let c = &cards[0];
@@ -268,7 +268,7 @@ mod tests {
             values,
             [
                 ("country", "US"),
-                ("given-name", "Kit"),
+                ("given-name", "Alex"),
                 ("phone", "+17185550100")
             ]
         );

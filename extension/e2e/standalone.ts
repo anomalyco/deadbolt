@@ -556,9 +556,9 @@ async function demoFlows(device: Page, worker: Worker) {
 }
 
 /** The identity and card the CLI writes for the forms flows (synthetic; 4242… is a test number). */
-const IDENTITY = ["new", "identity", "--name", "Home", "given-name=Kit", "family-name=Proof", "email=kit@example.test",
+const IDENTITY = ["new", "identity", "--name", "Home", "given-name=Alex", "family-name=Proof", "email=alex@example.test",
   "phone=+14155550123", "address-line1=123 Main St", "city=Brooklyn", "region=NY", "postal-code=11201", "country=US"]
-const CARD = ["new", "card", "--name", "Visa", "number=4242424242424242", "expiry=2028-08", "cvv=123", "cardholder=Kit Proof", "brand=Visa"]
+const CARD = ["new", "card", "--name", "Visa", "number=4242424242424242", "expiry=2028-08", "cvv=123", "cardholder=Alex Proof", "brand=Visa"]
 const digits = (s: string) => s.replace(/\D/g, "")
 /** The re-auth prompt a card fill raises: "Fill <card>", a Passphrase box, Fill and Cancel. */
 const CARD_REAUTH = /^Fill /
@@ -759,11 +759,11 @@ async function formFlows(device: Page, worker: Worker, url: string) {
     await pick(identities, "Home")
     await filled(identities, "the identity's pill says Filled")
     const address = await Promise.all(["#ship-name", "#ship-line1", "#ship-city", "#ship-zip"].map((s) => page.inputValue(s)))
-    check(JSON.stringify(address) === JSON.stringify(["Kit Proof", "123 Main St", "Brooklyn", "11201"]), `the identity fills the address on ${host} (${address.join(" | ")})`)
+    check(JSON.stringify(address) === JSON.stringify(["Alex Proof", "123 Main St", "Brooklyn", "11201"]), `the identity fills the address on ${host} (${address.join(" | ")})`)
 
     await request(device, { type: "device-preset", preset: "relaxed" })
     const relaxed = await fillCard(page, device)
-    check(relaxed.number === "4242424242424242" && relaxed.expiry === "0828" && relaxed.code === "123" && relaxed.holder === "Kit Proof", `Relaxed fills the whole card on ${host} with no passphrase`)
+    check(relaxed.number === "4242424242424242" && relaxed.expiry === "0828" && relaxed.code === "123" && relaxed.holder === "Alex Proof", `Relaxed fills the whole card on ${host} with no passphrase`)
 
     await request(device, { type: "device-preset", preset: "strict" })
     const forms = (await vault(worker, { type: "forms", origin: new URL(url).origin, kinds: ["card"] })).reply
@@ -1109,27 +1109,27 @@ async function passkeyFlows(device: Page, worker: Worker) {
     check((await devicePasskeys(device)).length === 0, "the browser vault starts with no passkeys")
 
     // Registration and modal sign-in, under Comfortable.
-    const kit = await registerInPage(page, device, "register", "kit@acme.test", "browser registration")
+    const alex = await registerInPage(page, device, "register", "alex@acme.test", "browser registration")
     const listed = await devicePasskeys(device)
-    const saved = listed.find((k) => k.credentialId === kit.id)
+    const saved = listed.find((k) => k.credentialId === alex.id)
     check(true, "device-passkeys never holds a passkey's private key")
-    check(listed.length === 1 && saved?.rpId === "localhost" && saved.username === "kit@acme.test" && !!saved.ref && !!saved.vault, "device-passkeys lists the new passkey with its relying party and username")
-    const modal = await signInInPage(page, device, "modal", "kit@acme.test", "modal sign-in", { listed: ["kit@acme.test"] })
-    await verifyAssertion(modal.response, modal.challenge, kit, "modal sign-in")
+    check(listed.length === 1 && saved?.rpId === "localhost" && saved.username === "alex@acme.test" && !!saved.ref && !!saved.vault, "device-passkeys lists the new passkey with its relying party and username")
+    const modal = await signInInPage(page, device, "modal", "alex@acme.test", "modal sign-in", { listed: ["alex@acme.test"] })
+    await verifyAssertion(modal.response, modal.challenge, alex, "modal sign-in")
 
     // Autofill sign-in: the passkey waits in the inline menu, with no prompt.
     await page.reload()
     const auto = await generateAuthenticationOptions({ rpID: "localhost", userVerification: "preferred" })
     await startCall(page, "auto", "get", auto, { mediation: "conditional" })
     check(await noPasskeyPrompt(worker), "an autofill sign-in opens no prompt by itself")
-    const menu = await menuOn(page, "#email", "kit@acme.test")
+    const menu = await menuOn(page, "#email", "alex@acme.test")
     const row = menu.locator("button.row").filter({ has: menu.locator(".sub", { hasText: /^Passkey · \S/ }) })
-    check(await row.count() === 1 && (await row.locator(".title").textContent()) === "kit@acme.test", "the inline menu offers the passkey, with its vault")
+    check(await row.count() === 1 && (await row.locator(".title").textContent()) === "alex@acme.test", "the inline menu offers the passkey, with its vault")
     await row.click()
     const picked = await outcome(page, "auto", "autofill sign-in settles")
     if (!picked.ok) throw new Error(`autofill sign-in: ${picked.value}`)
     ownOrigin(picked.value, "autofill sign-in")
-    await verifyAssertion(picked.value, auto.challenge, kit, "autofill sign-in")
+    await verifyAssertion(picked.value, auto.challenge, alex, "autofill sign-in")
 
     // Required UV: no Touch ID here, so the browser's own WebAuthn takes it without asking.
     const required = await generateRegistrationOptions({
@@ -1154,14 +1154,14 @@ async function passkeyFlows(device: Page, worker: Worker) {
       const hello = await host.send({ type: "hello" })
       check((hello.capabilities as string[]).includes("passkeys"), "the CLI's browser-host takes passkeys")
       // Browser to CLI: the CLI lists the browser's passkey and signs with it.
-      const onCli = await until("the browser's passkey reaches the CLI", async () => (await cliPasskeys(host)).find((k) => k.credentialId === kit.id), 90_000)
-      check(onCli.username === "kit@acme.test", "the browser's passkey syncs to the CLI")
+      const onCli = await until("the browser's passkey reaches the CLI", async () => (await cliPasskeys(host)).find((k) => k.credentialId === alex.id), 90_000)
+      check(onCli.username === "alex@acme.test", "the browser's passkey syncs to the CLI")
       const challenge = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
       const signed = await host.send({ type: "passkey-get", origin, ref: onCli.ref, challenge, userVerification: "preferred" }, 60_000)
       await verifyAssertion({
         id: signed.credentialId, rawId: signed.credentialId, type: "public-key", clientExtensionResults: {},
         response: { clientDataJSON: signed.clientDataJSON, authenticatorData: signed.authenticatorData, signature: signed.signature, userHandle: signed.userHandle },
-      }, challenge, kit, "CLI browser-host (browser-made passkey)")
+      }, challenge, alex, "CLI browser-host (browser-made passkey)")
 
       // CLI to browser: browser-host makes one; the browser syncs it and signs in with it.
       const reg = await generateRegistrationOptions({ rpName: "Acme", rpID: "localhost", userName: "cli@acme.test", attestationType: "none", supportedAlgorithmIDs: [-7] })
@@ -1175,17 +1175,17 @@ async function passkeyFlows(device: Page, worker: Worker) {
         return (await devicePasskeys(device)).some((k) => k.credentialId === cliCredential!.id)
       }, 90_000)
       check(true, "the CLI's passkey syncs to the browser")
-      const fromCli = await signInInPage(page, device, "from-cli", "cli@acme.test", "sign-in with the CLI's passkey", { listed: ["kit@acme.test", "cli@acme.test"] })
+      const fromCli = await signInInPage(page, device, "from-cli", "cli@acme.test", "sign-in with the CLI's passkey", { listed: ["alex@acme.test", "cli@acme.test"] })
       await verifyAssertion(fromCli.response, fromCli.challenge, cliCredential, "sign-in with the CLI's passkey")
     }
 
     // Strict: preferred verification asks for the passphrase; discouraged doesn't; UV stays false.
     await request(device, { type: "device-preset", preset: "strict" })
-    const strict = await signInInPage(page, device, "strict-get", "kit@acme.test", "Strict preferred sign-in", { reauth: true })
-    await verifyAssertion(strict.response, strict.challenge, kit, "Strict preferred sign-in")
-    const quiet = await signInInPage(page, device, "strict-discouraged", "kit@acme.test", "Strict discouraged sign-in", { verification: "discouraged" })
+    const strict = await signInInPage(page, device, "strict-get", "alex@acme.test", "Strict preferred sign-in", { reauth: true })
+    await verifyAssertion(strict.response, strict.challenge, alex, "Strict preferred sign-in")
+    const quiet = await signInInPage(page, device, "strict-discouraged", "alex@acme.test", "Strict discouraged sign-in", { verification: "discouraged" })
     check((await request(device, { type: "device-reauth" })).reply.reauth === null, "Strict asks no passphrase when the site discourages verification")
-    await verifyAssertion(quiet.response, quiet.challenge, kit, "Strict discouraged sign-in")
+    await verifyAssertion(quiet.response, quiet.challenge, alex, "Strict discouraged sign-in")
     const strictMade = await registerInPage(page, device, "strict-register", "strict@acme.test", "Strict preferred registration", true)
     // Discoverable: Deadbolt has passkeys here, so only the required UV sends it to the browser.
     await page.bringToFront()
@@ -1196,7 +1196,7 @@ async function passkeyFlows(device: Page, worker: Worker) {
 
     // The offline CI run also chooses among several accounts, not only the
     // online run that adds a CLI key. Verify the chosen account's actual key.
-    const multiple = await signInInPage(page, device, "multiple", "strict@acme.test", "multiple-account sign-in", { listed: ["kit@acme.test", "strict@acme.test", ...(cliCredential ? ["cli@acme.test"] : [])] })
+    const multiple = await signInInPage(page, device, "multiple", "strict@acme.test", "multiple-account sign-in", { listed: ["alex@acme.test", "strict@acme.test", ...(cliCredential ? ["cli@acme.test"] : [])] })
     await verifyAssertion(multiple.response, multiple.challenge, strictMade, "multiple-account sign-in")
 
     // The RP might discard a new registration. Reusing the user handle must
@@ -1204,9 +1204,9 @@ async function passkeyFlows(device: Page, worker: Worker) {
     const again = await registerInPage(page, device, "same-user", "second@acme.test", "same-user registration", false, Uint8Array.from(Buffer.from(modal.response.response.userHandle, "base64url")))
     const kept = await devicePasskeys(device)
     const second = kept.find((k) => k.credentialId === again.id)!
-    check(again.id !== kit.id && second.ref !== saved!.ref && kept.some((k) => k.credentialId === kit.id), "same-user registration creates a separate item and preserves the old credential")
-    const original = await signInInPage(page, device, "original-again", "kit@acme.test", "original sign-in after same-user registration")
-    await verifyAssertion(original.response, original.challenge, kit, "original sign-in after same-user registration")
+    check(again.id !== alex.id && second.ref !== saved!.ref && kept.some((k) => k.credentialId === alex.id), "same-user registration creates a separate item and preserves the old credential")
+    const original = await signInInPage(page, device, "original-again", "alex@acme.test", "original sign-in after same-user registration")
+    await verifyAssertion(original.response, original.challenge, alex, "original sign-in after same-user registration")
     const repeated = await signInInPage(page, device, "second-sign-in", "second@acme.test", "new same-user sign-in")
     await verifyAssertion(repeated.response, repeated.challenge, again, "new same-user sign-in")
 
@@ -1252,18 +1252,18 @@ async function passkeyFlows(device: Page, worker: Worker) {
     await deletionAuth.getByLabel("Passphrase", { exact: true }).fill(passphrase)
     await deletionAuth.getByRole("button", { name: "Delete", exact: true }).click()
     await until("item detail deletes the selected passkey", async () => !(await devicePasskeys(device)).some((k) => k.credentialId === again.id))
-    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Strict item-detail deletion removes only the selected credential")
+    check((await devicePasskeys(device)).some((k) => k.credentialId === alex.id), "Strict item-detail deletion removes only the selected credential")
     // Delete through Settings under Strict, including confirmation and reauth,
     // not a worker shortcut. The page refreshes its preset from the service worker.
     await device.reload()
     await device.bringToFront()
     const settings = device.getByRole("button", { name: "Settings", exact: true })
     if (await settings.getAttribute("aria-pressed") !== "true") await settings.click()
-    const remove = device.getByRole("button", { name: "Delete passkey kit@acme.test for localhost", exact: true })
+    const remove = device.getByRole("button", { name: "Delete passkey alex@acme.test for localhost", exact: true })
     await remove.click()
     const confirmation = device.locator(".vrow.confirming").filter({ hasText: "Delete passkey for localhost?" })
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click()
-    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "cancelling deletion keeps the passkey")
+    check((await devicePasskeys(device)).some((k) => k.credentialId === alex.id), "cancelling deletion keeps the passkey")
     await remove.click()
     await confirmation.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
     // A sync/status refresh must not discard the confirmation or its input.
@@ -1288,26 +1288,26 @@ async function passkeyFlows(device: Page, worker: Worker) {
       console.error("Settings deletion controls:", await confirmation.locator("button").allTextContents())
       throw error
     })
-    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Settings keeps the passkey after a wrong Strict passphrase")
+    check((await devicePasskeys(device)).some((k) => k.credentialId === alex.id), "Settings keeps the passkey after a wrong Strict passphrase")
     await confirmation.getByLabel("Passphrase", { exact: true }).fill(passphrase)
     await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
-    await until("Settings deletes the passkey", async () => !(await devicePasskeys(device)).some((k) => k.credentialId === kit.id))
+    await until("Settings deletes the passkey", async () => !(await devicePasskeys(device)).some((k) => k.credentialId === alex.id))
     await request(device, { type: "device-preset", preset: "comfortable" })
     await settings.click()
     const left = (await devicePasskeys(device)).map((k) => k.credentialId)
-    check(!left.includes(kit.id) && left.includes(strictMade.id) && (!cliCredential || left.includes(cliCredential.id)), "device-delete removes the passkey, and only it")
+    check(!left.includes(alex.id) && left.includes(strictMade.id) && (!cliCredential || left.includes(cliCredential.id)), "device-delete removes the passkey, and only it")
     const auth = await generateAuthenticationOptions({ rpID: "localhost" })
     await page.bringToFront()
     await startCall(page, "after-delete", "get", auth)
     const after = await passkeyPopup("a sign-in after the deletion asks which passkey")
-    check(!after.accounts.includes("kit@acme.test") && after.accounts.includes("strict@acme.test"), `the deleted passkey isn't offered (${after.accounts.join(", ")})`)
+    check(!after.accounts.includes("alex@acme.test") && after.accounts.includes("strict@acme.test"), `the deleted passkey isn't offered (${after.accounts.join(", ")})`)
     await after.press("Cancel")
     const cancelled = await outcome(page, "after-delete", "cancelled sign-in settles")
     check(!cancelled.ok && String(cancelled.value).startsWith("NotAllowedError"), `Cancel rejects with NotAllowedError (${cancelled.value})`)
     if (host) {
       await until("the deletion reaches the CLI", async () => {
         const ids = (await cliPasskeys(host)).map((k) => k.credentialId)
-        return !ids.includes(kit.id) && ids.includes(cliCredential!.id) && ids.includes(strictMade.id)
+        return !ids.includes(alex.id) && ids.includes(cliCredential!.id) && ids.includes(strictMade.id)
       }, 90_000)
       check(true, "the deletion syncs to the CLI")
     }

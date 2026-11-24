@@ -287,22 +287,22 @@ describe("what the page shows after a sign-in", () => {
   }
 
   test("a signed-in page with the account and Sign out", () => {
-    const f = facts(`<header><span>kit@example.com</span><a href="/logout">Sign out</a></header><h1>Dashboard</h1>`, "kit@example.com", "/home")
+    const f = facts(`<header><span>alex@example.com</span><a href="/logout">Sign out</a></header><h1>Dashboard</h1>`, "alex@example.com", "/home")
     expect(f).toEqual({ loginForm: false, passwordEmpty: false, mfa: false, error: false, challenge: false, account: true, signOut: true, loginish: false })
   })
 
   test("an email's name before the @, in a label", () => {
     expect(facts(`<img alt="Avatar for kitsune" src="a.png">`, "kitsune@example.com").account).toBe(true)
-    expect(facts(`<p>Welcome</p>`, "kit@example.com").account).toBe(false)
+    expect(facts(`<p>Welcome</p>`, "alex@example.com").account).toBe(false)
     // Whole words, and four characters at least.
-    expect(facts(`<p>Your toolkit</p>`, "kit").account).toBe(false)
-    expect(facts(`<p>kit</p>`, "kit").account).toBe(false)
+    expect(facts(`<p>Your balsam</p>`, "sam").account).toBe(false)
+    expect(facts(`<p>sam</p>`, "sam").account).toBe(false)
     expect(facts(`<p>Administrator tools</p>`, "admin").account).toBe(false)
     expect(facts(`<p>Signed in as admin.</p>`, "admin").account).toBe(true)
     expect(facts(`<p>Hi kitsune!</p>`, "kitsune@example.com").account).toBe(true)
     expect(facts(`<p>kitsunes</p>`, "kitsune@example.com").account).toBe(false)
     // Not hidden text or a field's value.
-    expect(facts(`<p hidden>kit@example.com</p><input value="kit@example.com">`, "kit@example.com").account).toBe(false)
+    expect(facts(`<p hidden>alex@example.com</p><input value="alex@example.com">`, "alex@example.com").account).toBe(false)
   })
 
   test("an error, in an alert or an error box", () => {
@@ -323,7 +323,7 @@ describe("what the page shows after a sign-in", () => {
   })
 
   test("the form back with an empty password, and a field marked invalid", () => {
-    const f = facts(`<form><input name="username" autocomplete="username" aria-invalid="true"><input type="password" autocomplete="current-password"><button>Sign in</button></form>`, "kit", "/login")
+    const f = facts(`<form><input name="username" autocomplete="username" aria-invalid="true"><input type="password" autocomplete="current-password"><button>Sign in</button></form>`, "alex", "/login")
     expect(f).toMatchObject({ loginForm: true, passwordEmpty: true, error: true, loginish: true })
   })
 
@@ -341,7 +341,7 @@ describe("what the page shows after a sign-in", () => {
   })
 
   test("a code step", () => {
-    const f = facts(`<form><label for="c">Authentication code</label><input id="c" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`, "kit", "/mfa")
+    const f = facts(`<form><label for="c">Authentication code</label><input id="c" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`, "alex", "/mfa")
     expect(f).toMatchObject({ mfa: true, loginForm: false })
   })
 })
@@ -374,11 +374,11 @@ describe("sign in with a provider", () => {
 
   test("finds the chooser tile for the account", () => {
     page(`<ul><li><div role="link" id="a" data-identifier="other@gmail.com">Other<br>other@gmail.com</div></li>
-      <li><div role="link" id="b" data-identifier="Kit@Gmail.com">Kit<br>kit@gmail.com</div></li></ul>`, "/signin")
-    expect(findAccountTile("kit@gmail.com")?.id).toBe("b")
+      <li><div role="link" id="b" data-identifier="Alex@Gmail.com">Alex<br>alex@gmail.com</div></li></ul>`, "/signin")
+    expect(findAccountTile("alex@gmail.com")?.id).toBe("b")
     // Never by text alone: the page's own text could name anyone.
-    page(`<ul><li id="c"><button id="d">Kit Mercer kit@gmail.com</button></li></ul>`, "/signin")
-    expect(findAccountTile("kit@gmail.com")).toBeNull()
+    page(`<ul><li id="c"><button id="d">Alex Mercer alex@gmail.com</button></li></ul>`, "/signin")
+    expect(findAccountTile("alex@gmail.com")).toBeNull()
     expect(findAccountTile("someone@gmail.com")).toBeNull()
   })
 
@@ -399,8 +399,8 @@ describe("sign in with a provider", () => {
     expect(isAccountPage("http://accounts.google.com/")).toBe(false)
     expect(isAccountPage("https://github.com/login")).toBe(false)
     expect(isAccountPage("https://accounts.google.com.evil.example/")).toBe(false)
-    expect(pageAccountOf(" ryan@anoma.ly ")).toBe("ryan@anoma.ly")
-    expect(pageAccountOf("kit")).toBe("kit")
+    expect(pageAccountOf(" jordan@example.com ")).toBe("jordan@example.com")
+    expect(pageAccountOf("alex")).toBe("alex")
     expect(pageAccountOf("Ryan Vogel")).toBeUndefined()
     expect(pageAccountOf(`${"a".repeat(496)}@b.co`)).toBeUndefined()
     const g = globalThis as { DEADBOLT_E2E?: boolean }

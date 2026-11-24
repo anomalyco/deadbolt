@@ -487,7 +487,7 @@ const DETECT: Record<string, Detect> = {
   },
   // A code the site emailed is the user's to type: a code step, with nothing in it to fill.
   "sent-split-code": {
-    body: `<h1>Check your email</h1><p>We sent a code to k***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
+    body: `<h1>Check your email</h1><p>We sent a code to a***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
     expect: { kind: "mfa", not: ["otp"] },
   },
   // Sign-in buttons on a page with no form: it's still a sign-in page.
@@ -515,7 +515,7 @@ const DETECT: Record<string, Detect> = {
     expect: { quiet: true, signingIn: true },
   },
   spinner: { title: "Acme", body: `<div role="progressbar" aria-busy="true" style="width:32px;height:32px;border-radius:50%;border:3px solid #999"></div>`, expect: { quiet: true, signingIn: true } },
-  "company-dashboard": { host: "sso.localhost", title: "Dashboard", body: `<h1>Dashboard</h1><p>Welcome back, Kit. Three things need you today.</p>`, expect: { quiet: true, signingIn: false } },
+  "company-dashboard": { host: "sso.localhost", title: "Dashboard", body: `<h1>Dashboard</h1><p>Welcome back, Alex. Three things need you today.</p>`, expect: { quiet: true, signingIn: false } },
   "embedded-google-button": { body: `<h1>Acme blog</h1><p>Comments</p><iframe src="EMBED/detect-frame/google-button" style="width:300px;height:60px;border:0"></iframe>`, expect: { frameQuiet: "/detect-frame/google-button" } },
 }
 const DETECT_FRAMES: Record<string, string> = {
@@ -826,7 +826,7 @@ const server = Bun.serve({
       // code page for the login that has one, then the signed-in page.
       if (url.pathname === "/flow/nav/password") return html("Enter your password", FLOW_PASSWORD(email, url.search))
       if (url.pathname === "/flow/nav/next")
-        return email === "kit@acme.test"
+        return email === "alex@acme.test"
           ? html("Two-step verification", FLOW_CODE(email, url.searchParams.has("sms")))
           : html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
       if (url.pathname === "/flow/done") return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
@@ -834,7 +834,7 @@ const server = Bun.serve({
       // The Gmail-style sign-in's steps (see gmail-flow.ts), posted by fetch.
       if (url.pathname.startsWith("/flow/gmail/")) {
         const got = (k: string) => String(data?.get(k) ?? "")
-        const ok = { identifier: got("identifier") === "kit@acme.test", pwd: got("Passwd") === "correct horse", totp: isCode(got("totpPin").replace(/\s/g, "")), signup: true }[url.pathname.slice("/flow/gmail/".length)]
+        const ok = { identifier: got("identifier") === "alex@acme.test", pwd: got("Passwd") === "correct horse", totp: isCode(got("totpPin").replace(/\s/g, "")), signup: true }[url.pathname.slice("/flow/gmail/".length)]
         const errors: Record<string, string> = { identifier: "Couldn’t find your Google Account", pwd: "Wrong password. Try again or click Forgot password to reset it.", totp: "Wrong code. Try again." }
         return Response.json(ok ? { ok: true } : { error: errors[url.pathname.slice("/flow/gmail/".length)] ?? "Something went wrong" })
       }
@@ -933,7 +933,7 @@ const server = Bun.serve({
         const email = `<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">`
         const code = `<label for="code">Authenticator code</label><input id="code" name="code" autocomplete="one-time-code" inputmode="numeric">`
         const forms: Record<string, [string, string, string]> = {
-          sudo: ["Confirm access", `<p>Signed in as <strong>kit</strong></p>`, `${password}<button type="submit">Confirm</button>`],
+          sudo: ["Confirm access", `<p>Signed in as <strong>alex</strong></p>`, `${password}<button type="submit">Confirm</button>`],
           delete: ["Delete your account", "<p>This can't be undone. Enter your email and password to continue.</p>", `${email}${password}<button type="submit">Continue</button>`],
           withdraw: ["Withdraw BTC", "<p>Send to an external address.</p>", `<label for="amount">Amount</label><input id="amount" name="amount" inputmode="decimal">${email}${password}${code}<button type="submit">Confirm</button>`],
           "disable-2fa": ["Turn off two-factor authentication", "", `${email}${password}${code}<button type="submit">Continue</button>`],
@@ -979,7 +979,7 @@ const server = Bun.serve({
         const back = url.searchParams.get("return") ?? "/"
         const tile = (name: string, email: string) =>
           `<li style="list-style:none;border-top:1px solid #e4e4e7"><div role="link" tabindex="0" data-identifier="${email}" style="display:flex;gap:12px;align-items:center;padding:12px 8px;cursor:pointer"><span style="width:28px;height:28px;border-radius:50%;background:#e0e7ff;display:grid;place-items:center">${name[0]}</span><span><span style="display:block;font-weight:500">${name}</span><span style="color:#71717a;font-size:13px">${email}</span></span></div></li>`
-        return html("Sign in - Google Accounts", `<h1 style="font-weight:400">Choose an account</h1><p>to continue to Acme</p><ul style="padding:0">${tile("Other Person", "other@gmail.com")}${tile("Kit Mercer", "kit@gmail.com")}</ul>
+        return html("Sign in - Google Accounts", `<h1 style="font-weight:400">Choose an account</h1><p>to continue to Acme</p><ul style="padding:0">${tile("Other Person", "other@gmail.com")}${tile("Alex Mercer", "alex@gmail.com")}</ul>
           <script>for (const t of document.querySelectorAll("[data-identifier]")) t.addEventListener("click", () => location.assign(${JSON.stringify(back)} + "?as=" + encodeURIComponent(t.dataset.identifier)))</script>`)
       }
       // A form whose "button" is a plain div: a click on it submits by script
@@ -1113,7 +1113,7 @@ const server = Bun.serve({
         return html(
           "Log in or sign up to Acme",
           `<h1>Sign up for Acme</h1><form method="post" action="/home" novalidate>
-            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" value="kit@acme.test">
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" value="alex@acme.test">
             <label for="fname">First name</label><input id="fname" name="fname" autocomplete="given-name">
             <label for="lname">Last name</label><input id="lname" name="lname" autocomplete="family-name">
             <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password">
@@ -1465,20 +1465,20 @@ async function seedVault(run: Run, options: LaunchOptions) {
     const login = async (name: string, fields: Array<{ name: string; value: string; type?: string }>) => String((await ask({ type: "device-item-save", kind: "login", name, fields })).ref)
     if (options.google) {
       // Also for acme.test, where the same page must narrow nothing (googleAccount).
-      for (const u of ["ryan@gmail.com", "ryan@anoma.ly", "kit@gmail.com"]) await login("Google", [...urls([`http://accounts.google.test:${port}`, `http://www.acme.test:${port}`]), { name: "username", value: u }, { name: "password", value: "google password" }])
+      for (const u of ["jordan@gmail.com", "jordan@example.com", "alex@gmail.com"]) await login("Google", [...urls([`http://accounts.google.test:${port}`, `http://www.acme.test:${port}`]), { name: "username", value: u }, { name: "password", value: "google password" }])
     } else {
-      await login("Acme", [...urls(options.saved ? [options.saved] : sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
+      await login("Acme", [...urls(options.saved ? [options.saved] : sites), { name: "username", value: "alex@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
       await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
       if (options.keyLogin) await login("Acme API key", [...urls(sites), { name: "password", value: "acme api key" }])
       if (options.signIn) {
-        const google = await login("Google", [...urls([`http://accounts.google.test:${port}`]), { name: "username", value: "kit@gmail.com" }, { name: "password", value: "google password" }])
+        const google = await login("Google", [...urls([`http://accounts.google.test:${port}`]), { name: "username", value: "alex@gmail.com" }, { name: "password", value: "google password" }])
         await login("Acme", [...urls(sites), { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: google.split(":")[1] }])
       }
     }
     const item = (kind: string, name: string, values: Record<string, string>) => ask({ type: "device-item-save", kind, name, fields: Object.entries(values).map(([name, value]) => ({ name, value })) })
-    await item("identity", "Home", { "given-name": "Kit", "family-name": "Langton", email: "kit@acme.test", phone: "+14155550123", organization: "Acme", "address-line1": "123 Main St", "address-line2": "Apt 4", city: "Brooklyn", region: "NY", "postal-code": "11201", country: "US", birthday: "1990-07-04" })
-    await item("identity", "Work", { "given-name": "Kit", "family-name": "Langton", "address-line1": "1 Market St", city: "San Francisco", region: "CA", "postal-code": "94105", country: "US" })
-    await item("card", "Personal Visa", { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Kit Langton", brand: "Visa" })
+    await item("identity", "Home", { "given-name": "Alex", "family-name": "Mercer", email: "alex@acme.test", phone: "+14155550123", organization: "Acme", "address-line1": "123 Main St", "address-line2": "Apt 4", city: "Brooklyn", region: "NY", "postal-code": "11201", country: "US", birthday: "1990-07-04" })
+    await item("identity", "Work", { "given-name": "Alex", "family-name": "Mercer", "address-line1": "1 Market St", city: "San Francisco", region: "CA", "postal-code": "94105", country: "US" })
+    await item("card", "Personal Visa", { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Alex Mercer", brand: "Visa" })
     if (options.status === "locked") await ask({ type: "device-lock" })
   } finally {
     await page.close()
@@ -1636,7 +1636,7 @@ async function fillAndTotp(scheme: Scheme) {
     })
     if (menu) {
       check((await menu.locator(".row .title").allTextContents()).join(",") === "Acme,Acme admin", "menu lists the site's logins by title")
-      check((await menu.locator(".row .sub").first().textContent()) === "kit@acme.test", "menu rows show the username")
+      check((await menu.locator(".row .sub").first().textContent()) === "alex@acme.test", "menu rows show the username")
       const fonts = await menu.evaluate(async () => {
         await Promise.all([document.fonts.load('13px "Inter"'), document.fonts.load('12px "IBM Plex Mono"')]).catch(() => {})
         return [...document.fonts].map((f) => `${f.family}:${f.status}`).join(" ")
@@ -1656,10 +1656,10 @@ async function fillAndTotp(scheme: Scheme) {
       await Bun.sleep(150)
       await page.keyboard.press("Enter")
       await until("username and password fill", async () => (await page.inputValue("#password")) === "correct horse")
-      check((await page.inputValue("#email")) === "kit@acme.test", "username filled")
+      check((await page.inputValue("#email")) === "alex@acme.test", "username filled")
       check((await page.inputValue("#password")) === "correct horse", "password filled")
       // The menu folded into a pill on the field, named for the login, whose ring closes green; it goes by itself.
-      const filled = await until("the pill's ring closes", async () => (await menu.locator(".pill.ok:has(.ring.ok) .pill-label[data-text='kit@acme.test']").count().catch(() => 0)) > 0)
+      const filled = await until("the pill's ring closes", async () => (await menu.locator(".pill.ok:has(.ring.ok) .pill-label[data-text='alex@acme.test']").count().catch(() => 0)) > 0)
       check(!!filled, "the menu folds into a pill named for the login, whose ring closes green")
       await Bun.sleep(350)
       await shotAround(page, `surface-filled-${scheme}`, menu, "#email")
@@ -2426,7 +2426,7 @@ async function securityPage() {
         }
         if (menu) {
           await settled(menu)
-          await menu.locator("button.row", { hasText: "kit@acme.test" }).click({ timeout: 3000 }).catch(() => {})
+          await menu.locator("button.row", { hasText: "alex@acme.test" }).click({ timeout: 3000 }).catch(() => {})
           await until(`the pick on a frame made ${how} answers`, async () => !extensionFrame(page, "menu.html") || (await menu!.locator(".pill.failed").count().catch(() => 0)) > 0, 8000)
         }
         const values = [await inner.inputValue("#email"), await inner.inputValue("#password")]
@@ -2454,7 +2454,7 @@ async function securityPage() {
       if (how === "enabled-on-focus") {
         const last = (await hostLog(run)).filter((r) => r.type === "fill").at(-1)
         check(
-          password === "" && (await inner.inputValue("#email")) === "kit@acme.test" && JSON.stringify(last?.want) === JSON.stringify(["username"]),
+          password === "" && (await inner.inputValue("#email")) === "alex@acme.test" && JSON.stringify(last?.want) === JSON.stringify(["username"]),
           `the popup fills only the frame's fields that showed when checked, not a covered password the page enabled as it filled (${JSON.stringify(password)}, asked for ${JSON.stringify(last?.want)}${said ? `: ${said}` : ""})`,
         )
       } else if (how === "visible" || how === "nested") check(password === "correct horse", `the popup fills a same-site frame the user can see (${how}${said ? `: ${said}` : ""})`)
@@ -3461,8 +3461,8 @@ async function signUpStep() {
         await diagnose(run, page, `susi ${to}`)
         continue
       }
-      await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
-      await until("the address fills", async () => (await page.inputValue("#email")) === "kit@acme.test")
+      await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
+      await until("the address fills", async () => (await page.inputValue("#email")) === "alex@acme.test")
       await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
       const before = await fillCount(run)
       await page.click("button[type=submit]")
@@ -3511,7 +3511,7 @@ async function signInSessions() {
   try {
     // (a) The same document: the username box is replaced by the password box.
     await page.goto(`${site}/flow/spa`)
-    await pickLogin("kit@acme.test")
+    await pickLogin("alex@acme.test")
     await page.click("#go")
     check(!!(await until("the password fills in place", async () => (await page.inputValue("#password").catch(() => "")) === "correct horse")), "a same-document password step fills from the login picked on the first")
     check(!!(await pillSays("Password filled")), "and its pill says Password filled")
@@ -3519,7 +3519,7 @@ async function signInSessions() {
 
     // (b) + (d) Navigation to the password page, then a code page of split boxes.
     await page.goto(`${site}/flow/nav`)
-    await pickLogin("kit@acme.test")
+    await pickLogin("alex@acme.test")
     await page.click("#go")
     await page.waitForURL("**/flow/nav/password")
     check(!!(await until("the password page fills", async () => (await page.inputValue("#password")) === "correct horse")), "the password page after a navigation fills")
@@ -3536,7 +3536,7 @@ async function signInSessions() {
 
     // (c) The password step on another origin of the same site.
     await page.goto(`http://www.acme.test:${server.port}/flow/nav?accounts`)
-    await pickLogin("kit@acme.test")
+    await pickLogin("alex@acme.test")
     await page.click("#go")
     await page.waitForURL("http://accounts.acme.test:*/flow/nav/password")
     check(!!(await until("the other origin's password step fills", async () => (await page.inputValue("#password")) === "correct horse")), "a password step on another origin of the same site fills")
@@ -3594,7 +3594,7 @@ async function signInSessions() {
 
     // (h) A sibling host the daemon would list the login on, but no saved URL names: nothing.
     await page.goto(`http://www.acme.test:${server.port}/flow/nav?to=user-content`)
-    await pickLogin("kit@acme.test")
+    await pickLogin("alex@acme.test")
     await page.click("#go")
     await page.waitForURL("http://user-content.acme.test:*/flow/nav/password")
     await formFound(page)
@@ -3603,7 +3603,7 @@ async function signInSessions() {
 
     // (i) The page swaps the username box for a password box itself: no user submit, no step.
     await page.goto(`${site}/flow/sneaky-swap`)
-    await pickLogin("kit@acme.test")
+    await pickLogin("alex@acme.test")
     await until("the page swaps its own form", async () => (await page.locator("#password").count()) > 0)
     await Bun.sleep(2000)
     check((await page.inputValue("#password")) === "", "a page that swaps in a password box itself gets nothing")
@@ -3611,7 +3611,7 @@ async function signInSessions() {
     // (k) A div "button" the user clicks, which submits by script: not the
     // user's own submit to the step gate, so the next step isn't filled.
     await page.goto(`${site}/flow/divbutton?step`)
-    await pickLogin("kit@acme.test")
+    await pickLogin("alex@acme.test")
     await page.click("#lets-go")
     await page.waitForURL("**/flow/nav/password")
     await formFound(page)
@@ -3620,7 +3620,7 @@ async function signInSessions() {
 
     // (j) The page submits itself (form.requestSubmit()): no user submit, no step.
     await page.goto(`${site}/flow/sneaky-submit`)
-    await pickLogin("kit@acme.test")
+    await pickLogin("alex@acme.test")
     await page.waitForURL("**/flow/nav/password")
     await formFound(page)
     await Bun.sleep(2000)
@@ -3664,7 +3664,7 @@ async function pickSignsIn() {
   const pick = async (selector = "#email") => {
     const menu = await menuOn(page, selector)
     if (!menu) throw new Error(`no menu on ${page.url()}`)
-    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
   }
   const since = (n: number) => flowPosts.slice(n).map((p) => p.path)
   const code = async () => (await Promise.all([1, 2, 3, 4, 5, 6].map((i) => page.inputValue(`#d${i}`)))).join("")
@@ -3677,9 +3677,9 @@ async function pickSignsIn() {
     await pick()
     await page.waitForURL("**/flow/done", { timeout: 20_000 })
     const posted = flowPosts.slice(before)
-    check((await page.textContent("main"))?.includes("Signed in as kit@acme.test") === true, "one inline pick lands signed in")
+    check((await page.textContent("main"))?.includes("Signed in as alex@acme.test") === true, "one inline pick lands signed in")
     check(JSON.stringify(since(before)) === JSON.stringify(["/flow/nav/password", "/flow/nav/next", "/flow/done"]), `email, password and code are each submitted once (${JSON.stringify(since(before))})`)
-    check(posted[0]?.body.email === "kit@acme.test" && posted[1]?.body.password === "correct horse", "with the picked login's username and password")
+    check(posted[0]?.body.email === "alex@acme.test" && posted[1]?.body.password === "correct horse", "with the picked login's username and password")
     check(isCode([1, 2, 3, 4, 5, 6].map((i) => posted[2]?.body[`d${i}`] ?? "").join("")), "and the code submitted is the login's current one")
     check((await probe(page)).blurs === 0, "nothing of Deadbolt's took the page's focus")
     await Bun.sleep(1500)
@@ -3724,7 +3724,7 @@ async function pickSignsIn() {
       await open(path)
       await pick(path.includes("sudo") ? "#password" : "#email")
       const sudo = path.includes("sudo")
-      await until(`${path} fills`, async () => (await page.inputValue(sudo ? "#password" : "#email")) === (sudo ? "correct horse" : "kit@acme.test"), 6000)
+      await until(`${path} fills`, async () => (await page.inputValue(sudo ? "#password" : "#email")) === (sudo ? "correct horse" : "alex@acme.test"), 6000)
       await Bun.sleep(2000)
       const at = new URL(page.url())
       check(`${at.pathname}${at.search}` === path && !flowPosts.slice(before).length && run.context.pages().length === pages, `${path}: a pick fills and doesn't submit`)
@@ -3744,7 +3744,7 @@ async function pickSignsIn() {
     before = flowPosts.length
     await open("/flow/nav", "pick-fill-only")
     await pick()
-    await until("the email fills", async () => (await page.inputValue("#email")) === "kit@acme.test")
+    await until("the email fills", async () => (await page.inputValue("#email")) === "alex@acme.test")
     await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
     await Bun.sleep(1000)
     check(new URL(page.url()).pathname === "/flow/nav" && !flowPosts.slice(before).length, "with the setting off, a pick fills without submitting")
@@ -3786,7 +3786,7 @@ async function googleSignIn() {
   const pick = async () => {
     const menu = await menuOn(page, "#identifierId")
     if (!menu) throw new Error(`no menu on ${page.url()}`)
-    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
   }
   const since = (n: number) => flowPosts.slice(n).filter((p) => p.path.startsWith("/flow/gmail/"))
   const paths = (n: number) => JSON.stringify(since(n).map((p) => p.path.slice("/flow/gmail/".length)))
@@ -3794,7 +3794,7 @@ async function googleSignIn() {
     let before = flowPosts.length
     await open("/flow/gmail")
     await pick()
-    const signedIn = await until("signed in", async () => (await page.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
+    const signedIn = await until("signed in", async () => (await page.textContent("#signed-in").catch(() => null))?.includes("Signed in as alex@acme.test"), 25_000)
     check(!!signedIn, `one pick on Google's sign-in fills and submits each step and lands signed in (at ${new URL(page.url()).pathname}, posted ${paths(before)})`)
     if (!signedIn) {
       console.log(`  password box: ${JSON.stringify(await page.inputValue("input[name=Passwd]").catch(() => null))}`)
@@ -3803,7 +3803,7 @@ async function googleSignIn() {
     await Bun.sleep(1500)
     const posted = since(before)
     check(paths(before) === JSON.stringify(["identifier", "pwd", "totp"]), `email, password and code are each submitted once (${paths(before)})`)
-    check(posted[0]?.body.identifier === "kit@acme.test" && posted[1]?.body.Passwd === "correct horse" && isCode(posted[2]?.body.totpPin ?? ""), "with the picked login's username, password and current code")
+    check(posted[0]?.body.identifier === "alex@acme.test" && posted[1]?.body.Passwd === "correct horse" && isCode(posted[2]?.body.totpPin ?? ""), "with the picked login's username, password and current code")
     check((await probe(page)).blurs === 0, "nothing of Deadbolt's took the page's focus")
     await forgetSignIns(run)
 
@@ -3837,7 +3837,7 @@ async function googleSignIn() {
     before = flowPosts.length
     await open("/flow/gmail")
     await pick()
-    await until("the email fills", async () => (await page.inputValue("#identifierId")) === "kit@acme.test")
+    await until("the email fills", async () => (await page.inputValue("#identifierId")) === "alex@acme.test")
     await Bun.sleep(2000)
     check(new URL(page.url()).pathname === "/flow/gmail" && paths(before) === "[]", "with Offer to sign in off, a pick on Google's email step fills without submitting")
     await page.click("#next")
@@ -3862,8 +3862,8 @@ async function googleSignIn() {
     await tab.goto(`http://accounts.google.test:${server.port}/flow/gmail`)
     const menu = await menuOn(tab, "#identifierId")
     if (!menu) throw new Error(`no menu on ${tab.url()}`)
-    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
-    const signedIn = await until("signed in", async () => (await tab.textContent("#signed-in").catch(() => null))?.includes("Signed in as kit@acme.test"), 25_000)
+    await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
+    const signedIn = await until("signed in", async () => (await tab.textContent("#signed-in").catch(() => null))?.includes("Signed in as alex@acme.test"), 25_000)
     const posted = JSON.stringify(gmail().slice(before))
     check(!!signedIn && posted === JSON.stringify(["identifier", "pwd", "totp"]), `a login saved as "google.test" signs in on accounts.google.test with one pick (posted ${posted})`)
     if (!signedIn) await diagnose(google, tab, "Google sign-in, bare domain")
@@ -3883,8 +3883,8 @@ async function googleSignIn() {
     await other.goto(`http://accounts.acme.test:${server.port}/flow/gmail`)
     const menu = await menuOn(other, "#identifierId")
     if (!menu) throw new Error(`no menu on ${other.url()}`)
-    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
-    await until("the email fills", async () => (await other.inputValue("#identifierId")) === "kit@acme.test")
+    await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
+    await until("the email fills", async () => (await other.inputValue("#identifierId")) === "alex@acme.test")
     await Bun.sleep(2500)
     const posted = JSON.stringify(gmail().slice(before))
     check(new URL(other.url()).pathname === "/flow/gmail" && posted === "[]", `a login saved as "acme.test", picked on accounts.acme.test, fills without submitting (posted ${posted})`)
@@ -3990,10 +3990,10 @@ async function frameLogins() {
     check(!!box && !!field && box.y >= field.y + field.height && box.y < field.y + field.height + 24 && Math.abs(box.x - field.x) < 8, `under where the field shows (${JSON.stringify(box)} vs ${JSON.stringify(field)})`)
     await shotAround(page, "frame-login-menu", menu, "#aid-auth-widget-iFrame")
     await settled(menu)
-    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
-    check(!!(await until("the frame's username fills", async () => (await inner.inputValue("#account_name_text_field")) === "kit@acme.test")), "picking a login fills the frame's username box")
+    await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
+    check(!!(await until("the frame's username fills", async () => (await inner.inputValue("#account_name_text_field")) === "alex@acme.test")), "picking a login fills the frame's username box")
     check((await inner.inputValue("#password_text_field")) === "", "and not its collapsed password box")
-    const pill = await pillOn("kit@acme.test")
+    const pill = await pillOn("alex@acme.test")
     // Read once it's drawn: a pill is put away for a moment while a frame's field is checked (inline.ts hold).
     const pillBox = pill ? await until("the pill is drawn", async () => { const b = await (await pill.frameElement()).boundingBox(); return b && b.width > 0 ? b : null }) : null
     check(!!pillBox && !!field && pillBox.y >= field.y - 2 && pillBox.y + pillBox.height <= field.y + field.height + 2, `its pill sits on the frame's field in the top page (${JSON.stringify(pillBox)})`)
@@ -4079,7 +4079,7 @@ async function frameLogins() {
       const coveredMenu = await until("the menu opens over the sheet", menuNow, 15_000)
       if (coveredMenu) {
         await settled(coveredMenu)
-        await coveredMenu.locator("button.row", { hasText: "kit@acme.test" }).click()
+        await coveredMenu.locator("button.row", { hasText: "alex@acme.test" }).click()
         await until("the pill says it didn't fill", async () => (await coveredMenu.locator(".pill.failed").count().catch(() => 0)) > 0)
       }
       check((await covered.inputValue("#account_name_text_field")) === "" && (await wants()).length === before, "a frame under a sheet that lets clicks through gets nothing, and the host isn't asked")
@@ -4162,7 +4162,7 @@ async function signInWith(scheme: Scheme) {
     const menu = await menuOn(page)
     if (!menu) return void (await diagnose(run, page, "sign in with"))
     const row = menu.locator("button.row", { hasText: "Sign in with Google" })
-    check((await row.count()) === 1 && ((await row.locator(".sub").textContent()) ?? "") === "kit@gmail.com", "the menu shows the login as Sign in with Google · its account")
+    check((await row.count()) === 1 && ((await row.locator(".sub").textContent()) ?? "") === "alex@gmail.com", "the menu shows the login as Sign in with Google · its account")
     check((await menu.locator("button.row", { hasText: "Acme admin" }).count()) === 1, "beside the site's password logins")
     await shotAround(page, `signin-menu-${scheme}`, menu, "#email")
     await settled(menu)
@@ -4179,12 +4179,12 @@ async function signInWith(scheme: Scheme) {
     await page.waitForURL("http://accounts.google.test:*/o/oauth2/chooser*")
     check(!!(await until("the chooser's tile is ringed", async () => (await rings(page)) === 1, 6000)), "on Google's chooser, a ring shows")
     await Bun.sleep(600)
-    const tile = await page.locator('[data-identifier="kit@gmail.com"]').boundingBox()
+    const tile = await page.locator('[data-identifier="alex@gmail.com"]').boundingBox()
     if (stills && tile) await page.screenshot({ path: join(stills, `signin-chooser-${scheme}.png`), clip: { x: Math.max(0, tile.x - 40), y: Math.max(0, tile.y - 60), width: tile.width + 80, height: tile.height + 100 } })
     await Bun.sleep(1200)
     check(new URL(page.url()).pathname === "/o/oauth2/chooser", "and nothing picks the account for the user")
     check(!(await hostLog(run)).some((r) => r.type === "fill"), "no fill anywhere")
-    await page.click('[data-identifier="kit@gmail.com"]')
+    await page.click('[data-identifier="alex@gmail.com"]')
     await page.waitForURL("**/social/done**")
     check((await rings(page)) === 0, "back on the site, nothing is pointed at")
   } catch (err) {
@@ -4208,7 +4208,7 @@ async function narrowing() {
     const tall = await height()
     await page.keyboard.type("k")
     check(!!(await until("typing narrows the list", async () => (await shown().count()) === 1)), "typing in the field narrows the menu to the logins that match")
-    check(((await shown().locator(".sub").textContent()) ?? "") === "kit@acme.test", "to the one that matches")
+    check(((await shown().locator(".sub").textContent()) ?? "") === "alex@acme.test", "to the one that matches")
     check(!!(await until("the menu shrinks to fit", async () => (await height()) < tall - 30)), "and the menu shrinks to fit")
     await page.keyboard.type("z")
     check(!!(await until("nothing matches: the menu goes", () => !extensionFrame(page, "menu.html"), 5000)), "when nothing matches, the menu goes by itself")
@@ -4254,15 +4254,15 @@ async function googleAccount() {
   }
   try {
     const google = `http://accounts.google.test:${server.port}/v3/signin/challenge/pwd`
-    const chip = await rows(`${google}?as=ryan@anoma.ly&hidden=`)
-    check(JSON.stringify(chip) === JSON.stringify(["ryan@anoma.ly"]), `on Google's password step, the menu lists only the login for the account shown (${JSON.stringify(chip)})`)
-    const first = await rows(`${google}?as=ryan@anoma.ly&hidden=kit@gmail.com`)
-    check(JSON.stringify(first) === JSON.stringify(["ryan@anoma.ly"]), `the chip the user sees comes before the hidden box (${JSON.stringify(first)})`)
-    const hidden = await rows(`${google}?as=ryan@anoma.ly&hidden=kit@gmail.com&nochip`)
-    check(JSON.stringify(hidden) === JSON.stringify(["kit@gmail.com"]), `with no chip, the hidden username box names it, with no <form> around it (${JSON.stringify(hidden)})`)
-    const none = await rows(`${google}?as=nobody@anoma.ly`)
+    const chip = await rows(`${google}?as=jordan@example.com&hidden=`)
+    check(JSON.stringify(chip) === JSON.stringify(["jordan@example.com"]), `on Google's password step, the menu lists only the login for the account shown (${JSON.stringify(chip)})`)
+    const first = await rows(`${google}?as=jordan@example.com&hidden=alex@gmail.com`)
+    check(JSON.stringify(first) === JSON.stringify(["jordan@example.com"]), `the chip the user sees comes before the hidden box (${JSON.stringify(first)})`)
+    const hidden = await rows(`${google}?as=jordan@example.com&hidden=alex@gmail.com&nochip`)
+    check(JSON.stringify(hidden) === JSON.stringify(["alex@gmail.com"]), `with no chip, the hidden username box names it, with no <form> around it (${JSON.stringify(hidden)})`)
+    const none = await rows(`${google}?as=nobody@example.com`)
     check(none?.length === 3, `an account no login has shows the whole list (${JSON.stringify(none)})`)
-    const elsewhere = await rows(`http://www.acme.test:${server.port}/v3/signin/challenge/pwd?as=ryan@anoma.ly`)
+    const elsewhere = await rows(`http://www.acme.test:${server.port}/v3/signin/challenge/pwd?as=jordan@example.com`)
     check(elsewhere?.length === 3, `the same page on another host narrows nothing (${JSON.stringify(elsewhere)})`)
     check((await fillCount(run)) === 0, "and nothing was filled")
   } catch (err) {
@@ -4534,8 +4534,8 @@ async function conditionalHeld() {
     check(!!top, "a top page's conditional get leaves Deadbolt's menu to open on its webauthn field")
     check(spied.gets.length === 0, `and the browser's get is never called (${spied.gets})`)
     if (top) {
-      await top.locator("button.row", { hasText: "kit@acme.test" }).click()
-      check(!!(await until("the top page's field fills", async () => (await page.inputValue("#email")) === "kit@acme.test")), "picking a login fills it")
+      await top.locator("button.row", { hasText: "alex@acme.test" }).click()
+      check(!!(await until("the top page's field fills", async () => (await page.inputValue("#email")) === "alex@acme.test")), "picking a login fills it")
       await Bun.sleep(300)
       check((await conditionalState(page)) === "pending", `and leaves the conditional get waiting (${await conditionalState(page)})`)
     }
@@ -4559,8 +4559,8 @@ async function conditionalHeld() {
       check(((await menu?.locator(".row .sub").allTextContents()) ?? []).every((s) => !s.startsWith("Passkey")), "with logins only: the daemon's client data couldn't say cross-origin")
       if (menu) {
         await settled(menu)
-        await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
-        check(!!(await until("the frame's field fills", async () => (await widget.inputValue("#account_name_text_field")) === "kit@acme.test")), "picking a login fills the frame")
+        await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
+        check(!!(await until("the frame's field fills", async () => (await widget.inputValue("#account_name_text_field")) === "alex@acme.test")), "picking a login fills the frame")
         check((await conditionalState(widget)) === "pending", `and leaves its conditional get waiting (${await conditionalState(widget)})`)
       } else await diagnose(run, page, "conditionalHeld")
     }
@@ -4632,7 +4632,7 @@ async function passkeys() {
     const reg = await generateRegistrationOptions({
       rpName: "Acme",
       rpID,
-      userName: "kit@acme.test",
+      userName: "alex@acme.test",
       attestationType: "none",
       authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
       supportedAlgorithmIDs: [-7, -257],
@@ -4661,7 +4661,7 @@ async function passkeys() {
         }
       }
       const shown = store.cli("show", "--reveal", rpID)
-      check(shown.ok && shown.out.includes("kit@acme.test") && !shown.out.includes("private-key"), "the vault has the passkey, and never shows its private key")
+      check(shown.ok && shown.out.includes("alex@acme.test") && !shown.out.includes("private-key"), "the vault has the passkey, and never shows its private key")
     }
 
     // The same account again: the site excluded it, so it's already saved.
@@ -4682,7 +4682,7 @@ async function passkeys() {
       await startCall(page, "modal", "get", auth)
       const signIn = await prompt("passkey-sign-in")
       if (signIn) {
-        check((await signIn.locator(".passkey-prompt .account-title").allTextContents()).join(",") === "kit@acme.test", "the popup lists the passkey by username")
+        check((await signIn.locator(".passkey-prompt .account-title").allTextContents()).join(",") === "alex@acme.test", "the popup lists the passkey by username")
         await press(signIn, "Sign in")
         const r = await outcome(page, "modal", "modal sign-in settles")
         if (check(!!r?.ok, `modal sign-in returns an assertion (${r && !r.ok ? r.value : "ok"})`)) {
@@ -4702,7 +4702,7 @@ async function passkeys() {
       check((await badge(run)) === "", "an autofill sign-in opens no prompt by itself")
       const menu = await menuOn(page, "#email")
       if (menu) {
-        check((await menu.locator(".row .title").allTextContents()).join(",") === "kit@acme.test", "the inline menu offers the passkey")
+        check((await menu.locator(".row .title").allTextContents()).join(",") === "alex@acme.test", "the inline menu offers the passkey")
         const sub = (await menu.locator(".row .sub").first().textContent()) ?? ""
         check(/^Passkey · \S/.test(sub), `as a passkey, with its vault (${sub})`)
         await shot(page, "passkey-menu", { x: 250, y: 80, width: 420, height: 240 })
@@ -4890,7 +4890,7 @@ async function passkeys() {
     check(!!rsaDone && (rsaDone.ok ? rsaDone.value.response.publicKeyAlgorithm !== -7 : !String(rsaDone.value).includes("Deadbolt")), `and goes to the browser (${rsaDone?.ok ? "made by the browser" : rsaDone?.value})`)
 
     // Another site's rpId: refused before anyone is asked.
-    await startCall(page, "wrong", "create", { ...(await generateRegistrationOptions({ rpName: "Evil", rpID: "example.com", userName: "kit" })) })
+    await startCall(page, "wrong", "create", { ...(await generateRegistrationOptions({ rpName: "Evil", rpID: "example.com", userName: "alex" })) })
     const wrong = await outcome(page, "wrong", "wrong-rpId registration settles")
     check(!!wrong && !wrong.ok && wrong.value === "SecurityError: This relying party ID isn't this site's.", `a wrong rpId is Deadbolt's SecurityError (${wrong?.value})`)
     await startCall(page, "wrong-get", "get", await generateAuthenticationOptions({ rpID: "com" }))
@@ -5010,11 +5010,11 @@ async function formsSurface(scheme: Scheme) {
     if (menu) {
       check((await menu.locator(".row .title").allTextContents()).join(",") === "Home,Work", "an address field lists the identities")
       const sub = await menu.locator(".row .sub").first().textContent()
-      check(sub === "Fills name, phone, address · Kit Langton · 123 Main St, Brooklyn", `with what each fills and its summary (${sub})`)
+      check(sub === "Fills name, phone, address · Alex Mercer · 123 Main St, Brooklyn", `with what each fills and its summary (${sub})`)
       await shotAround(page, `forms-address-${scheme}`, menu, "#ship-name")
       check((await pickRow(menu, "Home")) === "ok", "picking an identity says Filled")
       const got = await values(page, ["ship-name", "ship-a1", "ship-a2", "ship-city", "ship-state", "ship-zip", "ship-country", "ship-tel"])
-      check(JSON.stringify(got) === JSON.stringify(["Kit Langton", "123 Main St", "Apt 4", "Brooklyn", "NY", "11201", "US", "+14155550123"]), `the whole address fills, selects included (${got.join(" | ")})`)
+      check(JSON.stringify(got) === JSON.stringify(["Alex Mercer", "123 Main St", "Apt 4", "Brooklyn", "NY", "11201", "US", "+14155550123"]), `the whole address fills, selects included (${got.join(" | ")})`)
       const skipped = await values(page, ["ship-org", "ship-a3", "ship-email"])
       check(skipped.every((v) => !v), `a tiny field, a covered one and one off screen get nothing (${skipped.join(" | ")})`)
       check((await page.evaluate(() => scrollY)) === 0, "and the page isn't scrolled to fill")
@@ -5032,7 +5032,7 @@ async function formsSurface(scheme: Scheme) {
       await shotAround(page, `forms-card-${scheme}`, cards, "#cc")
       check((await pickRow(cards, "Visa")) === "ok", "picking a card says Filled")
       const got = await values(page, ["cc", "exp", "cvc", "holder"])
-      check(JSON.stringify(got) === JSON.stringify(["4242 4242 4242 4242", "08 / 28", "123", "Kit Langton"]), `the card fills: spaced number, MM / YY, code, name (${got.join(" | ")})`)
+      check(JSON.stringify(got) === JSON.stringify(["4242 4242 4242 4242", "08 / 28", "123", "Alex Mercer"]), `the card fills: spaced number, MM / YY, code, name (${got.join(" | ")})`)
     }
 
     // What the user types by hand is offered once the submit went through,
@@ -5061,7 +5061,7 @@ async function formsSurface(scheme: Scheme) {
     await newTurn(run)
     await page.goto(`${site}/forms/pay`)
     await formsFound(run, page, "/forms/pay")
-    await typeIn(page, { holder: "Kit Langton", cc: "4242 4242 4242 4242", exp: "01 / 31", cvc: "123" })
+    await typeIn(page, { holder: "Alex Mercer", cc: "4242 4242 4242 4242", exp: "01 / 31", cvc: "123" })
     await page.press("#cvc", "Enter")
     await page.waitForURL("**/forms/thanks")
     offer = await formOffer(page, "the update offer shows")
@@ -5083,7 +5083,7 @@ async function formsSurface(scheme: Scheme) {
       await newTurn(run)
       await page.goto(`${site}/forms/pay`)
       await formsFound(run, page, "/forms/pay")
-      await typeIn(page, { holder: "Kit Langton", cc: "4000 0000 0002 4242", exp: "02 / 32", cvc: "123" })
+      await typeIn(page, { holder: "Alex Mercer", cc: "4000 0000 0002 4242", exp: "02 / 32", cvc: "123" })
       await page.press("#cvc", "Enter")
       await page.waitForURL("**/forms/thanks")
       offer = await formOffer(page, "the same last four digits are offered as an update first")
@@ -5125,7 +5125,7 @@ async function formsSurface(scheme: Scheme) {
     await newTurn(run)
     await page.goto(`${site}/forms/ship`)
     await formsFound(run, page, "/forms/ship")
-    await typeIn(page, { n: "Kit Langton", a1: "5 Oak Ave", city: "Brooklyn", zip: "11215" })
+    await typeIn(page, { n: "Alex Mercer", a1: "5 Oak Ave", city: "Brooklyn", zip: "11215" })
     await page.selectOption("#country", "US")
     await page.click("button[type=submit]")
     offer = await formOffer(page, "the address update shows")
@@ -5162,7 +5162,7 @@ async function formsShapes() {
     const menu = await formsMenu(run, page, "#vn", "/forms/labels")
     if (menu && (await pickRow(menu, "Home")) === "ok") {
       const got = await values(page, ["vn", "nn", "str", "plz", "ort", "bl", "land"])
-      check(JSON.stringify(got) === JSON.stringify(["Kit", "Langton", "123 Main St", "11201", "Berlin", "NY", "US"]), `a labels-only address fills, the name split, region and country selects matched, the typed city kept (${got.join(" | ")})`)
+      check(JSON.stringify(got) === JSON.stringify(["Alex", "Mercer", "123 Main St", "11201", "Berlin", "NY", "US"]), `a labels-only address fills, the name split, region and country selects matched, the typed city kept (${got.join(" | ")})`)
       await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
       // Another pick replaces what Deadbolt filled, never what was typed.
       const again = await formsMenu(run, page, "#vn", "/forms/labels")
@@ -5226,7 +5226,7 @@ async function formsShapes() {
     // A swapped email isn't written into the saved identity: only the phone the user typed is.
     await page.goto(`${site}/forms/contact`)
     await formsFound(run, page, "/forms/contact")
-    await typeIn(page, { n: "Kit Langton", em: "kit@acme.test", tel: "+1 415 555 0199" })
+    await typeIn(page, { n: "Alex Mercer", em: "alex@acme.test", tel: "+1 415 555 0199" })
     await page.click("button[type=submit]")
     const contact = await formOffer(page, "the contact update shows")
     if (contact) {
@@ -5292,7 +5292,7 @@ async function formsFrames() {
         if (own) {
           check(((await own.locator("#caption").textContent()) ?? "").trim() === "On localhost", "the page's own card menu names only the site")
           check((await pickRow(own, "Visa")) === "ok", "picking the card from the page's field fills")
-          check((await page.inputValue("#holder")) === "Kit Langton", "the page's name-on-card box")
+          check((await page.inputValue("#holder")) === "Alex Mercer", "the page's name-on-card box")
           check((await frame.inputValue("#cardnumber")) === "", "and nothing goes into the provider's frame from it")
           check(!(await formFills(run)).at(-1)?.fields.includes("number"), "nor is the number asked for")
         }
@@ -5311,7 +5311,7 @@ async function formsFrames() {
       const menu = await formsMenu(run, page, "#holder", "/forms/unknown")
       check(!!menu && !((await menu.locator("#caption").textContent()) ?? "").includes("Into"), "the page's own card menu names no provider")
       if (menu) check((await pickRow(menu, "Visa")) === "ok", "picking the card fills the page's own field")
-      check((await page.inputValue("#holder")) === "Kit Langton", "the page's name-on-card box fills")
+      check((await page.inputValue("#holder")) === "Alex Mercer", "the page's name-on-card box fills")
       const got = await values(evil, ["cardnumber", "exp-date", "cvc"])
       check(got.every((v) => !v), "nothing goes into the unknown frame")
       const last = (await formFills(run)).at(-1)
@@ -5758,7 +5758,7 @@ async function a11y(scheme: Scheme) {
     await audited(`the menu (${scheme})`, menu, true)
     // The page sees none of the menu's contents, ARIA included.
     const html = await page.evaluate(() => document.documentElement.outerHTML)
-    check(!html.includes("kit@acme.test") && !html.includes("Acme admin"), "nothing of the menu's logins is in the page's DOM")
+    check(!html.includes("alex@acme.test") && !html.includes("Acme admin"), "nothing of the menu's logins is in the page's DOM")
     if (!menu) return
     // ↓ from the field: the list has focus, as a listbox pointing at its active row.
     await page.focus("#email")
@@ -5775,7 +5775,7 @@ async function a11y(scheme: Scheme) {
     check(at.active.includes("Acme admin"), `↓ makes the next row the active one (${at.active})`)
     await page.keyboard.press("ArrowUp")
     at = await menuFocus(menu)
-    check(at.active.includes("kit@acme.test"), `↑ goes back (${at.active})`)
+    check(at.active.includes("alex@acme.test"), `↑ goes back (${at.active})`)
     // Tab leaves the menu for the field, never into the end of the page; so does Escape.
     await page.keyboard.press("Tab")
     check(!!(await until("Tab closes the menu", () => !extensionFrame(page, "menu.html"), 3000)) && (await focusedOn(page, "#email")), "Tab closes the menu and focus is back in the field")

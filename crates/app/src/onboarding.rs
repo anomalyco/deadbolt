@@ -305,7 +305,7 @@ pub fn strength(passphrase: &str) -> Strength {
 }
 
 /// What this computer calls itself: the name people gave it on macOS
-/// ("Kit's Mac Studio"), else the host name without `.local`. Runs
+/// ("Alex's MacBook Pro"), else the host name without `.local`. Runs
 /// `scutil`, so only off the main thread (`Worker::name_device`).
 pub fn default_device_name() -> String {
     #[cfg(target_os = "macos")]

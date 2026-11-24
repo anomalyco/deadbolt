@@ -2,7 +2,7 @@
 
 Status: draft for critique, 2026-10-15. Sources: `01-inkandswitch.md`, `02-rust-sync-stacks.md`, `03-mailbox-pairing-keys.md` in this directory. All Rust.
 
-## Goals (from dax)
+## Goals
 - Every device syncs the vault directly with every other device (iroh).
 - No accounts. A new device joins only by pairing from an existing device.
 - Later: a mailbox that stores ciphertext so devices can catch up / restore when all other devices are offline.

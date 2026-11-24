@@ -65,7 +65,7 @@ const schema = {
 
 export type HeaderValues = Values<typeof schema>
 
-// Keys whose last change came from Random, a preset or undo: the print glides to them. Kit's own drags apply 1:1.
+// Keys whose last change came from Random, a preset or undo: the print glides to them. User drags apply 1:1.
 const gliding = new Set<string>()
 export const glides = (key: string) => gliding.has(key)
 
@@ -91,7 +91,7 @@ export const header = defineControls("deadbolt-header", schema, {
       beat: 0.8, pulse: 1, pulseRate: 0.9, pulseWidth: 0.05, breathe: 0, flicker: 0.3, boil: 0.9, spin: 0.1,
     },
     // The original static canvas in mock.html: no motion, no turbulence, white-noise dither, a denser burst.
-    "dax mock": {
+    "original mock": {
       freeze: true, turbulence: 0, dither: "noise", strength: 1.15, centre: { x: 0, y: 0.11 },
       sparks: 0.05, sparkReach: 1, rimInk: 0.9, cell: 1.6,
     },

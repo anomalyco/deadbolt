@@ -137,7 +137,7 @@ await device.getByLabel("Passphrase", { exact: true }).fill(passphrase)
 await device.getByLabel("Passphrase again", { exact: true }).fill(passphrase)
 await device.getByRole("button", { name: "Create vault", exact: true }).click()
 await device.getByRole("searchbox", { name: "Search the vault" }).waitFor({ timeout: 120_000 })
-for (const [title, user] of [["Acme", "kit@example.test"], ["Acme (work)", "kit@work.example.test"]] as const) {
+for (const [title, user] of [["Acme", "alex@example.test"], ["Acme (work)", "alex@work.example.test"]] as const) {
   await device.getByRole("button", { name: "Add an item", exact: true }).click()
   await device.getByRole("button", { name: "Login", exact: true }).click()
   await device.getByLabel("Website", { exact: true }).fill(origin)

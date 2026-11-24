@@ -35,7 +35,7 @@ pub struct FormIdentity {
     /// The name of its vault.
     pub vault: String,
     pub title: String,
-    /// Who and where: "Kit Langton · 123 Main St, Brooklyn". May be empty.
+    /// Who and where: "Alex Mercer · 123 Main St, Brooklyn". May be empty.
     pub summary: String,
     /// The form fields it has a value for.
     pub fields: Vec<String>,

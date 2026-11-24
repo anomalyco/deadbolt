@@ -316,7 +316,7 @@ impl Installer {
             offered: false,
             source: "/Applications/Deadbolt.app/Contents/Helpers/deadbolt".into(),
             scan: Some(Scan {
-                destination: "/Users/dax/.local/bin/deadbolt".into(),
+                destination: "/Users/sam/.local/bin/deadbolt".into(),
                 on_path: true,
                 found: None,
                 manual: false,
@@ -575,7 +575,7 @@ mod tests {
         fs::create_dir_all(link.parent().unwrap()).unwrap();
         for old in [
             // Deleted, a disk image, App Translocation: all dangling now.
-            "/Users/dax/Downloads/Deadbolt.app/Contents/Helpers/deadbolt",
+            "/Users/sam/Downloads/Deadbolt.app/Contents/Helpers/deadbolt",
             "/Volumes/Deadbolt/Deadbolt.app/Contents/Helpers/deadbolt",
             "/private/var/folders/x/T/AppTranslocation/1/d/Deadbolt.app/Contents/Helpers/deadbolt",
         ] {
@@ -678,8 +678,8 @@ mod tests {
     #[test]
     fn shell_paths_are_quoted() {
         assert_eq!(
-            quote(Path::new("/Dax's Mac/Deadbolt.app")),
-            "'/Dax'\\''s Mac/Deadbolt.app'"
+            quote(Path::new("/Sam's Mac/Deadbolt.app")),
+            "'/Sam'\\''s Mac/Deadbolt.app'"
         );
     }
 

@@ -140,13 +140,13 @@ mod tests {
 
     #[test]
     fn a_finder_launch_still_searches_the_usual_places() {
-        let home = Path::new("/Users/dax");
+        let home = Path::new("/Users/sam");
         let dirs = search_dirs(OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin"), Some(home));
         for dir in [
             "/opt/homebrew/bin",
             "/usr/local/bin",
-            "/Users/dax/.cargo/bin",
-            "/Users/dax/.local/bin",
+            "/Users/sam/.cargo/bin",
+            "/Users/sam/.local/bin",
         ] {
             assert!(dirs.contains(&PathBuf::from(dir)), "{dir}");
         }
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn outside_a_bundle_the_daemon_is_this_binary_unless_overridden() {
-        let exe = Path::new("/home/kit/.local/bin/deadbolt");
+        let exe = Path::new("/home/alex/.local/bin/deadbolt");
         assert_eq!(discover(Some(exe), None), exe);
         assert_eq!(discover(Some(exe), Some(OsStr::new(""))), exe);
         assert_eq!(

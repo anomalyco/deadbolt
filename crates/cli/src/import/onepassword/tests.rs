@@ -10,10 +10,10 @@ pub const EXPORT: &str = r#"{
   "accounts": [
     {
       "attrs": {
-        "accountName": "Dax",
-        "name": "Dax Raad",
+        "accountName": "Sam",
+        "name": "Sam Rivera",
         "avatar": "",
-        "email": "dax@example.com",
+        "email": "sam@example.com",
         "uuid": "USERUSERUSERUSERUSERUSERUS",
         "domain": "https://my.1password.com/"
       },
@@ -30,7 +30,7 @@ pub const EXPORT: &str = r#"{
               "categoryUuid": "001",
               "details": {
                 "loginFields": [
-                  { "value": "dax@example.com", "id": "", "name": "email", "fieldType": "E", "designation": "username" },
+                  { "value": "sam@example.com", "id": "", "name": "email", "fieldType": "E", "designation": "username" },
                   { "value": "op-github-pw", "id": "", "name": "password", "fieldType": "P", "designation": "password" },
                   { "value": "✓", "id": "remember", "name": "remember_me", "fieldType": "C" },
                   { "value": "", "id": "", "name": "commit", "fieldType": "I" }
@@ -41,7 +41,7 @@ pub const EXPORT: &str = r#"{
                     "title": "Security",
                     "name": "add more",
                     "fields": [
-                      { "title": "one-time password", "id": "TOTP_abc123", "value": { "totp": "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub" }, "guarded": false, "multiline": false },
+                      { "title": "one-time password", "id": "TOTP_abc123", "value": { "totp": "otpauth://totp/GitHub:sam?secret=JBSWY3DPEHPK3PXP&issuer=GitHub" }, "guarded": false, "multiline": false },
                       { "title": "Recovery codes", "id": "f1", "value": { "concealed": "op-recovery-111" } },
                       { "title": "", "id": "f2", "value": { "string": "untitled value" } },
                       { "title": "member since", "id": "f3", "value": { "date": 1704067200 } },
@@ -60,7 +60,7 @@ pub const EXPORT: &str = r#"{
                 "passwordHistory": [ { "value": "op-old-pw", "time": 1690000000 } ]
               },
               "overview": {
-                "subtitle": "dax@example.com",
+                "subtitle": "sam@example.com",
                 "urls": [
                   { "label": "", "url": "https://github.com/login" },
                   { "label": "gist", "url": "gist.github.com" }
@@ -113,7 +113,7 @@ pub const EXPORT: &str = r#"{
                     "title": "",
                     "name": "",
                     "fields": [
-                      { "title": "cardholder name", "id": "cardholder", "value": { "string": "Dax Raad" } },
+                      { "title": "cardholder name", "id": "cardholder", "value": { "string": "Sam Rivera" } },
                       { "title": "type", "id": "type", "value": { "creditCardType": "visa" } },
                       { "title": "number", "id": "ccnum", "value": { "creditCardNumber": "4242 4242 4242 4242" } },
                       { "title": "verification number", "id": "cvv", "value": { "concealed": "321" } },
@@ -167,9 +167,9 @@ pub const EXPORT: &str = r#"{
                 "notesPlain": "",
                 "sections": [
                   { "title": "Identification", "name": "name", "fields": [
-                    { "title": "first name", "id": "firstname", "value": { "string": "Dax" } },
+                    { "title": "first name", "id": "firstname", "value": { "string": "Sam" } },
                     { "title": "initial", "id": "initial", "value": { "string": "" } },
-                    { "title": "last name", "id": "lastname", "value": { "string": "Raad" } },
+                    { "title": "last name", "id": "lastname", "value": { "string": "Rivera" } },
                     { "title": "birth date", "id": "birthdate", "value": { "date": 636246000 } },
                     { "title": "company", "id": "company", "value": { "string": "Anomaly" } }
                   ] },
@@ -262,7 +262,7 @@ pub const EXPORT: &str = r#"{
               "state": "active",
               "categoryUuid": "106",
               "details": { "sections": [ { "title": "", "name": "", "fields": [
-                { "title": "full name", "id": "fullname", "value": { "string": "Dax Raad" } },
+                { "title": "full name", "id": "fullname", "value": { "string": "Sam Rivera" } },
                 { "title": "number", "id": "number", "value": { "string": "op-passport-X123" } }
               ] } ] },
               "overview": { "title": "Passport" }
@@ -333,7 +333,7 @@ fn maps_a_1pux_export() {
             (
                 "otp",
                 "otp",
-                "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+                "otpauth://totp/GitHub:sam?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
             ),
             ("password", "secret", "op-github-pw"),
             ("recovery-codes", "secret", "op-recovery-111"),
@@ -343,7 +343,7 @@ fn maps_a_1pux_export() {
             ("url", "url", "https://github.com/login"),
             ("url-2", "url", "https://gist.github.com"),
             ("url-3", "url", "https://www.githubstatus.com"),
-            ("username", "text", "dax@example.com"),
+            ("username", "text", "sam@example.com"),
         ]
     );
     assert_eq!(fields(&items[1]), [("password", "secret", "op-wifi-pw")]);
@@ -354,7 +354,7 @@ fn maps_a_1pux_export() {
         [
             ("address", "note", "1 Main St\nSpringfield, 12345\nus"),
             ("brand", "text", "Visa"),
-            ("cardholder", "text", "Dax Raad"),
+            ("cardholder", "text", "Sam Rivera"),
             ("cvv", "secret", "321"),
             ("expiry", "month", "2027-04"),
             ("issuing-bank", "text", "Example Bank"),
@@ -385,8 +385,8 @@ fn maps_a_1pux_export() {
             ("city", "text", "Springfield"),
             ("country", "text", "US"),
             ("email-2", "text", "not an email"),
-            ("family-name", "text", "Raad"),
-            ("given-name", "text", "Dax"),
+            ("family-name", "text", "Rivera"),
+            ("given-name", "text", "Sam"),
             ("organization", "text", "Anomaly"),
             ("phone", "text", "+15550100"),
             ("postal-code", "text", "12345"),
@@ -448,7 +448,7 @@ fn maps_a_1pux_export() {
     assert_eq!(
         fields(&items[11]),
         [
-            ("full-name", "text", "Dax Raad"),
+            ("full-name", "text", "Sam Rivera"),
             ("number", "secret", "op-passport-X123"),
         ]
     );
@@ -482,13 +482,13 @@ const CATEGORIES: &str = r#"{"accounts": [{"attrs": {"uuid": "USER"}, "vaults": 
        "details": {"sections": [{"fields": [{"id": "ccnum", "value": {"creditCardNumber": "4242424242424242"}}]}]}},
       {"uuid": "c003", "categoryUuid": "003", "overview": {"title": "Note"}, "details": {"notesPlain": "body"}},
       {"uuid": "c004", "categoryUuid": "004", "overview": {"title": "Me"},
-       "details": {"sections": [{"fields": [{"id": "firstname", "value": {"string": "Dax"}}]}]}},
+       "details": {"sections": [{"fields": [{"id": "firstname", "value": {"string": "Sam"}}]}]}},
       {"uuid": "c005", "categoryUuid": "005", "overview": {"title": "Door"}, "details": {"password": "door-pw"}},
       {"uuid": "c006", "categoryUuid": "006", "overview": {"title": "Scan"},
        "details": {"notesPlain": "front page", "documentAttributes": {"fileName": "scan.pdf", "documentId": "doc2", "decryptedSize": 4}}},
       {"uuid": "c100", "categoryUuid": "100", "overview": {"title": "Editor"},
        "details": {"sections": [{"fields": [
-         {"id": "reg_code", "value": {"string": "KEY-1"}}, {"id": "reg_name", "value": {"string": "Dax"}},
+         {"id": "reg_code", "value": {"string": "KEY-1"}}, {"id": "reg_name", "value": {"string": "Sam"}},
          {"id": "order_date", "value": {"date": 1704067200}}]}]}},
       {"uuid": "c101", "categoryUuid": "101", "overview": {"title": "Checking"},
        "details": {"sections": [{"fields": [
@@ -502,10 +502,10 @@ const CATEGORIES: &str = r#"{"accounts": [{"attrs": {"uuid": "USER"}, "vaults": 
          {"id": "sid", "value": {"string": "ORCL"}}]}]}},
       {"uuid": "c103", "categoryUuid": "103", "overview": {"title": "License"},
        "details": {"sections": [{"fields": [
-         {"id": "fullname", "value": {"string": "Dax Raad"}}, {"id": "number", "value": {"string": "D123"}},
+         {"id": "fullname", "value": {"string": "Sam Rivera"}}, {"id": "number", "value": {"string": "D123"}},
          {"id": "state", "value": {"string": "IL"}}, {"id": "expiry_date", "value": {"monthYear": 203006}}]}]}},
       {"uuid": "c104", "categoryUuid": "104", "overview": {"title": "Fishing"},
-       "details": {"sections": [{"fields": [{"id": "name", "value": {"string": "Dax"}}]}]}},
+       "details": {"sections": [{"fields": [{"id": "name", "value": {"string": "Sam"}}]}]}},
       {"uuid": "c105", "categoryUuid": "105", "overview": {"title": "Gym"},
        "details": {"sections": [{"fields": [
          {"id": "org_name", "value": {"string": "Gym Co"}}, {"id": "membership_no", "value": {"string": "M-77"}},
@@ -518,7 +518,7 @@ const CATEGORIES: &str = r#"{"accounts": [{"attrs": {"uuid": "USER"}, "vaults": 
        "details": {"sections": [{"fields": [{"id": "membership_no", "value": {"string": "R-1"}}]}]}},
       {"uuid": "c108", "categoryUuid": "108", "overview": {"title": "SSN"},
        "details": {"sections": [{"fields": [
-         {"id": "name", "value": {"string": "Dax Raad"}}, {"id": "number", "value": {"concealed": "078-05-1120"}}]}]}},
+         {"id": "name", "value": {"string": "Sam Rivera"}}, {"id": "number", "value": {"concealed": "078-05-1120"}}]}]}},
       {"uuid": "c109", "categoryUuid": "109", "overview": {"title": "Home Wi-Fi"},
        "details": {"sections": [{"fields": [
          {"id": "network_name", "value": {"string": "Home"}}, {"id": "wireless_password", "value": {"concealed": "wifi-pw"}},
@@ -528,7 +528,7 @@ const CATEGORIES: &str = r#"{"accounts": [{"attrs": {"uuid": "USER"}, "vaults": 
          {"id": "url", "value": {"string": "box.example"}}, {"id": "username", "value": {"string": "root"}},
          {"id": "password", "value": {"concealed": "root-pw"}}]}]}},
       {"uuid": "c111", "categoryUuid": "111", "overview": {"title": "Mail"},
-       "details": {"sections": [{"fields": [{"id": "pop_username", "value": {"string": "dax"}}]}]}},
+       "details": {"sections": [{"fields": [{"id": "pop_username", "value": {"string": "sam"}}]}]}},
       {"uuid": "c112", "categoryUuid": "112", "overview": {"title": "Stripe"},
        "details": {"sections": [{"fields": [
          {"id": "credential", "value": {"concealed": "sk_live_1"}}, {"id": "type", "value": {"menu": "bearer"}},
@@ -627,7 +627,7 @@ fn maps_every_category_and_its_files() {
         fields(by("Editor")),
         [
             ("license-key", "secret", "KEY-1"),
-            ("licensed-to", "text", "Dax"),
+            ("licensed-to", "text", "Sam"),
             ("purchased", "date", "2024-01-01"),
         ]
     );
@@ -655,7 +655,7 @@ fn maps_every_category_and_its_files() {
         fields(by("License")),
         [
             ("expires", "month", "2030-06"),
-            ("full-name", "text", "Dax Raad"),
+            ("full-name", "text", "Sam Rivera"),
             ("number", "secret", "D123"),
             ("state", "text", "IL"),
         ]
@@ -680,7 +680,7 @@ fn maps_every_category_and_its_files() {
     assert_eq!(
         fields(by("SSN")),
         [
-            ("full-name", "text", "Dax Raad"),
+            ("full-name", "text", "Sam Rivera"),
             ("number", "secret", "078-05-1120"),
         ]
     );

@@ -450,7 +450,7 @@ stored in GitHub.
 
 A push to `production` that only changes `docs/`, `site/` or Markdown starts
 no release (`paths-ignore` applies to every branch). Deploy the site
-separately (`cd site && bun run deploy`, with Dax's approval).
+separately (`cd site && bun run deploy`, with explicit approval).
 
 ## Follow-ups
 

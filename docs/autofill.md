@@ -323,7 +323,7 @@ use renews it if the page still looks signed out with accounts to offer
 #### Choosing an account
 
 The corner offer is its top account's own row: the site's first login
-(“Sign in as kit@acme.test”, its icon or key), else the first provider
+(“Sign in as alex@acme.test”, its icon or key), else the first provider
 account (the provider's mark, “Sign in with Google” and the account). One
 click on it is a pick of that account, with every check a pick has. With
 more than one account, a quiet chevron sits at the row's end, and the
@@ -1361,7 +1361,7 @@ fill nothing, and nothing is added to the page or takes its focus.
   `<n>`, `<typed>`), since a step 2 often names the account: each typed
   value whole (its first 256 characters), then every word that is a typed
   word or the start of one (three letters or more, from all of the typed
-  text however long), so an echo cut short ("Send kit vogel secr…") is
+  text however long), so an echo cut short ("Send alex mercer secr…") is
   scrubbed too; then, as a batch is sent, words whose salted digest is one
   typed on an earlier page. A page that goes away (`pagehide`) sends what's
   left at once, without waiting on a digest: its words are checked against
@@ -1458,9 +1458,9 @@ your unlocked vaults, its username (or its title when it has none) as
 `signIn`. Nothing else of that login is ever read for it: a `fill` of the
 site's login fills only that login's own values, so one with only a provider
 fills nothing. The extension shows it as "Sign in with Google ·
-dax@gmail.com" in place of a password (see "In the extension" below).
+alex@gmail.com" in place of a password (see "In the extension" below).
 `deadbolt show` prints
-`sign-in-with  Google · dax@gmail.com`, and `ls` shows "Sign in with Google"
+`sign-in-with  Google · alex@gmail.com`, and `ls` shows "Sign in with Google"
 for one without a username.
 
 ### In the extension
@@ -1474,7 +1474,7 @@ uses the bounded [universal sign-in provider chain](#one-pick-through-a-provider
   third-party logos. One with a password too gets two rows: its fill row,
   then the sign-in row. One with only a provider never offers a fill, and the
   background refuses one if asked. The toolbar popup shows "Sign in with
-  Google · kit@gmail.com" on the login and no Fill button when there's no
+  Google · alex@gmail.com" on the login and no Fill button when there's no
   password.
 - **Picking it fills and clicks nothing.** The page's content script looks
   for the site's own button (a Google Identity Services or Sign in with Apple
@@ -1700,7 +1700,7 @@ Bitwarden's.
 ### The protocol
 
 The host's `forms` lists the identities and cards of every vault without
-values: an identity's title, a summary ("Kit Langton · 123 Main St,
+values: an identity's title, a summary ("Alex Mercer · 123 Main St,
 Brooklyn") and which form fields it has; a card's title, brand, last four
 digits, expiry, cardholder and billing identity. `fill-form` returns only the
 fields asked for, of one item. Both go to the daemon as `form-items` and
@@ -1759,7 +1759,7 @@ click or keypress, a token bound to the one menu document and the field's
 document, the half second of rest and the visibility checks before a pick
 counts, and Enter only after the user came into the menu themselves. An
 identity field lists identities, each with what it will fill of the
-section and its summary ("Home: Fills name, phone, address · Kit Langton ·
+section and its summary ("Home: Fills name, phone, address · Alex Mercer ·
 123 Main St, Brooklyn"); a card field lists cards ("Visa ••4242 · 08/28").
 The caption names where a pick goes: "On shop.com", or "Into Stripe on
 shop.com" from a provider's frame. A card field also says, when the
@@ -1961,7 +1961,7 @@ login's; only their words change.
   one group of fields (name, email, phone, address, company, birthday) and
   agrees on another is updated with what the user typed there, the most
   agreeing first, and the offer names it: "Update phone?", with the
-  identity's title inside, and "Update phone for Kit Langton?" in the popup;
+  identity's title inside, and "Update phone for Alex Mercer?" in the popup;
   else it's a new identity ("Save address?", "Save details?"). An identity
   is worth offering only with a street and a city or postal code, or a name
   with an email and a phone, so a contact form's name and email aren't. A
@@ -2383,11 +2383,11 @@ version 27 with it (`SiteLink`).
 { "id": "9", "type": "forms", "canVerify": true,
   "identities": [
     { "ref": "<64 hex>:<32 hex>", "vault": "personal", "title": "Home",
-      "summary": "Kit Langton · 123 Main St, Brooklyn",
+      "summary": "Alex Mercer · 123 Main St, Brooklyn",
       "fields": ["given-name", "family-name", "email", "phone", "address-line1", "city", "region", "postal-code", "country"] } ],
   "cards": [
     { "ref": "<64 hex>:<32 hex>", "vault": "personal", "title": "Visa •••• 4242",
-      "brand": "Visa", "last4": "4242", "expiry": "2028-08", "cardholder": "Kit Langton",
+      "brand": "Visa", "last4": "4242", "expiry": "2028-08", "cardholder": "Alex Mercer",
       "billing": "<64 hex>:<32 hex>", "fields": ["cardholder", "number", "expiry", "cvv", "brand"] } ] }
 ```
 
@@ -2405,7 +2405,7 @@ gets `bad_request`.
 { "id": "10", "type": "fill-form", "origin": "https://shop.com", "ref": "…",
   "fields": ["cardholder", "number", "expiry", "cvv"] }
 { "id": "10", "type": "fill-form", "verified": true,
-  "values": { "cardholder": "Kit Langton", "number": "4242424242424242", "expiry": "2028-08", "cvv": "737" } }
+  "values": { "cardholder": "Alex Mercer", "number": "4242424242424242", "expiry": "2028-08", "cvv": "737" } }
 ```
 
 `fields` names an identity's form fields (`honorific`, `given-name`,
@@ -2423,7 +2423,7 @@ whether it did. A cancelled or failed prompt is `failed`. Rate-limited with
 
 ```json
 { "id": "11", "type": "save-form", "origin": "https://shop.com", "kind": "card",
-  "fields": { "number": "4242424242424242", "expiry": "2028-08", "cardholder": "Kit Langton", "brand": "Visa" } }
+  "fields": { "number": "4242424242424242", "expiry": "2028-08", "cardholder": "Alex Mercer", "brand": "Visa" } }
 { "id": "11", "type": "save-form", "ref": "<64 hex>:<32 hex>", "created": true }
 { "id": "12", "type": "save-form", "origin": "https://shop.com", "kind": "identity", "ref": "<64 hex>:<32 hex>",
   "fields": { "address-line1": "5 Oak Ave", "postal-code": "11215" } }

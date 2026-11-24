@@ -443,8 +443,8 @@ export function worthKeeping(v: IdentityValues): boolean {
  * one identity already has them all; an update of the one that differs in
  * at most one group of fields (a new address, a new phone) and agrees on
  * another, the most agreeing first, writing only what the user typed there
- * (or Deadbolt filled from it) and naming it ("Update phone for Kit
- * Langton?"); else a new identity, with every value the content script
+ * (or Deadbolt filled from it) and naming it ("Update phone for Alex
+ * Mercer?"); else a new identity, with every value the content script
  * kept. An update can be saved as a new identity instead.
  */
 export function identityPlan(identity: IdentityValues, known: Array<{ ref: string; title?: string; values: IdentityValues }>, trust: Trust = TRUST_ALL): FormPlan | null {

@@ -1478,7 +1478,7 @@ describe("a fill waiting on the passphrase", () => {
 describe("rate limits, as the native host's", () => {
   const origin = "https://shop.test"
   const ref = `${"a".repeat(64)}:${"1".repeat(32)}`
-  const check = { type: "check" as const, origin, username: "kit", password: "pw" }
+  const check = { type: "check" as const, origin, username: "alex", password: "pw" }
   const generateCheck = { type: "generate-check" as const, origin }
   const fill = { type: "fill" as const, origin, ref, want: ["password" as const] }
   const generate = { type: "generate" as const, origin }
@@ -1497,7 +1497,7 @@ describe("rate limits, as the native host's", () => {
       if (m.type !== VAULT_REQUEST) return answered(message)
       if (m.body.type === "check") return { reply: { type: "check", status: "new", matches: [] } }
       if (m.body.type === "generate") return { reply: { type: "generate", password: "generated", generated: "g1" } }
-      if (m.body.type === "fill-form") return { reply: { type: "fill-form", values: { "given-name": "Kit" }, verified: false } }
+      if (m.body.type === "fill-form") return { reply: { type: "fill-form", values: { "given-name": "Alex" }, verified: false } }
       return answered(message)
     }
   })

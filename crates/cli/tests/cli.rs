@@ -1203,7 +1203,7 @@ fn items() {
         &a,
         &[
             "login",
-            "username=dax",
+            "username=sam",
             "url=github.com",
             "password=hunter2",
         ],
@@ -1212,13 +1212,13 @@ fn items() {
         &a,
         &[
             "login",
-            "username=dax@work.example",
+            "username=sam@work.example",
             "url=https://www.google.com/",
         ],
     );
     new(
         &a,
-        &["login", "username=dax.personal@gmail.com", "url=google.com"],
+        &["login", "username=sam.personal@gmail.com", "url=google.com"],
     );
 
     // Defaults and -f.
@@ -1227,14 +1227,14 @@ fn items() {
         a.run(&["get", "GitHub", "-f", "url"]),
         "https://github.com\n"
     );
-    assert_eq!(a.run(&["get", &github, "-f", "username"]), "dax\n");
+    assert_eq!(a.run(&["get", &github, "-f", "username"]), "sam\n");
 
     // Two Google logins: ambiguous until a username word tells them apart.
     let err = a.fail(&["get", "google"]);
     assert!(err.contains("matches 2 items"), "{err}");
-    assert!(err.contains("\tgoogle.com\tdax@work.example"), "{err}");
+    assert!(err.contains("\tgoogle.com\tsam@work.example"), "{err}");
     assert!(
-        err.contains("\tgoogle.com\tdax.personal@gmail.com"),
+        err.contains("\tgoogle.com\tsam.personal@gmail.com"),
         "{err}"
     );
     let generated = a.run(&["get", "google", "work"]);
@@ -1246,7 +1246,7 @@ fn items() {
     // Id prefixes match too.
     assert_eq!(
         a.run(&["get", &work, "-f", "username"]),
-        "dax@work.example\n"
+        "sam@work.example\n"
     );
     assert!(
         a.fail(&["get", "nothing-like-this"])
@@ -1286,7 +1286,7 @@ fn items() {
             "number=4242 4242-4242 4242",
             "expiry=04/27",
             "cvv=123",
-            "cardholder=Dax Raad",
+            "cardholder=Sam Rivera",
         ],
     );
     new(
@@ -1315,12 +1315,12 @@ fn items() {
     assert!(cards.contains("\tcard •••• 4242\t04/27\n"), "{cards}");
     assert_eq!(a.run(&["get", "mastercard", "-f", "brand"]), "Mastercard\n");
 
-    // Multi-word search: "dax" matches logins and the cardholder, "4242" the last four.
+    // Multi-word search: "sam" matches logins and the cardholder, "4242" the last four.
     assert_eq!(
-        a.run(&["get", "dax", "4242", "-f", "cardholder"]),
-        "Dax Raad\n"
+        a.run(&["get", "sam", "4242", "-f", "cardholder"]),
+        "Sam Rivera\n"
     );
-    assert!(a.fail(&["get", "dax"]).contains("matches 4 items"));
+    assert!(a.fail(&["get", "sam"]).contains("matches 4 items"));
     // Secret values are never searched.
     assert!(a.fail(&["get", "hunter2"]).contains("no item matches"));
 
@@ -1377,9 +1377,9 @@ fn items() {
         github
     );
     assert_eq!(a.run(&["get", "code"]), "new2\n");
-    assert!(a.run(&["ls", "code"]).contains("\tCode\tdax\n"));
+    assert!(a.run(&["ls", "code"]).contains("\tCode\tsam\n"));
     a.run(&["set", "code", "--name", ""]);
-    assert!(a.run(&["ls", "github"]).contains("\tgithub.com\tdax\n"));
+    assert!(a.run(&["ls", "github"]).contains("\tgithub.com\tsam\n"));
     a.run(&["set", "github", "pin:secret=1234", "url=gitlab.com"]);
     assert_eq!(a.run(&["get", "gitlab", "-f", "pin"]), "1234\n");
     assert!(
@@ -1441,7 +1441,7 @@ fn one_time_codes() {
             "login",
             "url=github.com",
             "password=pw",
-            "otp=otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
+            "otp=otpauth://totp/GitHub:sam?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
         ],
     );
     new(&a, &["login", "url=gitlab.com", "password=pw"]);
@@ -1463,7 +1463,7 @@ fn one_time_codes() {
     );
     assert!(left.starts_with('(') && left.ends_with("s left)"), "{line}");
     assert!(!show.contains("JBSWY3DPEHPK3PXP"));
-    let secret = "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub";
+    let secret = "otpauth://totp/GitHub:sam?secret=JBSWY3DPEHPK3PXP&issuer=GitHub";
     assert!(a.run(&["show", "--reveal", "github"]).contains(secret));
     assert_eq!(a.run(&["get", "-f", "otp", "github"]).trim_end(), secret);
     a.run(&["set", "github", "backup:otp=KRSXG5CTMVRXEZLU"]);
@@ -1568,7 +1568,7 @@ const BITWARDEN_EXPORT: &str = r#"{
       "login": {
         "fido2Credentials": [],
         "uris": [{ "match": null, "uri": "https://github.com/login" }, { "match": null, "uri": "gh.io" }],
-        "username": "dax",
+        "username": "sam",
         "password": "github-secret-444",
         "totp": "JBSWY3DPEHPK3PXP"
       },
@@ -1584,7 +1584,7 @@ const BITWARDEN_EXPORT: &str = r#"{
       "notes": null,
       "favorite": false,
       "card": {
-        "cardholderName": "Dax Raad",
+        "cardholderName": "Sam Rivera",
         "brand": "Visa",
         "number": "4242 4242 4242 4242",
         "expMonth": "4",
@@ -1646,7 +1646,7 @@ fn import() {
     let lines: Vec<&str> = ls.lines().map(|l| l.split_once('\t').unwrap().1).collect();
     assert_eq!(
         lines,
-        ["GitHub\tdax", "Nopass\tx", "Visa •••• 4242\t04/27", "Wifi"]
+        ["GitHub\tsam", "Nopass\tx", "Visa •••• 4242\t04/27", "Wifi"]
     );
     assert_eq!(a.run(&["get", "github"]), "github-secret-444\n");
     assert_eq!(a.run(&["get", "wifi"]), "wifi-secret-666\n");
@@ -1674,8 +1674,8 @@ fn import() {
         "{show}"
     );
     assert_eq!(a.run(&["tags"]), "Work\t1\n");
-    assert!(a.run(&["items", "--favorites"]).contains("\tGitHub\tdax\n"));
-    assert!(a.run(&["ls", "--tag", "work"]).contains("\tGitHub\tdax\n"));
+    assert!(a.run(&["items", "--favorites"]).contains("\tGitHub\tsam\n"));
+    assert!(a.run(&["ls", "--tag", "work"]).contains("\tGitHub\tsam\n"));
 
     // Importing again changes nothing.
     let output = a.try_run(&["import", file.to_str().unwrap()]);
@@ -1767,7 +1767,7 @@ fn sync_from_1password() {
     let op = a.path("op");
     std::fs::write(&op, FAKE_OP).unwrap();
     std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let account = r#"{"url": "https://my.1password.com/", "email": "dax@example.com", "user_uuid": "USERUSERUSERUSERUSERUSERUS", "account_uuid": "AAAABBBBCCCCDDDDEEEEFFFFGG", "shorthand": "my"}"#;
+    let account = r#"{"url": "https://my.1password.com/", "email": "sam@example.com", "user_uuid": "USERUSERUSERUSERUSERUSERUS", "account_uuid": "AAAABBBBCCCCDDDDEEEEFFFFGG", "shorthand": "my"}"#;
     std::fs::write(a.path("op-accounts.json"), format!("[{account}]")).unwrap();
     std::fs::write(a.path("op-items.json"), OP_ITEMS).unwrap();
     // `op item list` gives no fields, sections or files.
@@ -1882,7 +1882,7 @@ fn sync_from_1password() {
         "--op-vault",
         "private",
         "--account",
-        "dax@example.com",
+        "sam@example.com",
     ]);
     assert!(out.starts_with("Up to date (3 unchanged)\n"), "{out}");
     assert!(calls().contains("vault list --account AAAABBBBCCCCDDDDEEEEFFFFGG --format json\n"));
@@ -1890,14 +1890,14 @@ fn sync_from_1password() {
     assert!(err.contains("no 1Password vault named \"Nope\""), "{err}");
 
     // Two accounts: the one mirrored here, else which one must be said.
-    let other = r#"{"url": "team.1password.com", "email": "dax@team.example", "user_uuid": "YYYY", "account_uuid": "ZZZZ"}"#;
+    let other = r#"{"url": "team.1password.com", "email": "sam@team.example", "user_uuid": "YYYY", "account_uuid": "ZZZZ"}"#;
     std::fs::write(a.path("op-accounts.json"), format!("[{account}, {other}]")).unwrap();
     a.run(&sync);
     a.run(&["init", "work"]);
     let err = a.fail(&["sync", "op", "--vault", "work"]);
     assert!(
         err.contains(
-            "2 1Password accounts: choose one with --account (my, dax@team.example on team.1password.com)"
+            "2 1Password accounts: choose one with --account (my, sam@team.example on team.1password.com)"
         ),
         "{err}"
     );
@@ -1946,7 +1946,7 @@ fn watch_prints_changes_as_json_lines() {
 
     new(
         &a,
-        &["login", "username=dax", "url=github.com", "password=pw"],
+        &["login", "username=sam", "url=github.com", "password=pw"],
     );
     let items = next();
     assert_eq!(items["change"], "items");
@@ -2102,7 +2102,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
         &a,
         &[
             "login",
-            "username=dax",
+            "username=sam",
             "url=github.com",
             "password=hunter2",
             &format!("otp={OTP_SECRET}"),
@@ -2112,7 +2112,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
         &a,
         &[
             "login",
-            "username=kit",
+            "username=alex",
             "url=https://gitlab.com",
             "password=gl-pw",
         ],
@@ -2154,7 +2154,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     assert_eq!(github["site"], "github.com");
     let accounts = github["accounts"].as_array().unwrap();
     assert_eq!(accounts.len(), 1, "{github}");
-    assert_eq!(accounts[0]["username"], "dax");
+    assert_eq!(accounts[0]["username"], "sam");
     assert_eq!(accounts[0]["title"], "github.com");
     assert_eq!(accounts[0]["vault"], "personal");
     assert_eq!(accounts[0]["hasPassword"], true);
@@ -2184,7 +2184,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
         "want": ["username", "password", "totp"],
     }));
     assert_eq!(fill["type"], "fill", "{fill}");
-    assert_eq!(fill["username"], "dax");
+    assert_eq!(fill["username"], "sam");
     assert_eq!(fill["password"], "hunter2");
     let totp = fill["totp"].as_str().unwrap();
     assert!(
@@ -2255,7 +2255,7 @@ fn browser_host_checks_and_saves_logins() {
         &a,
         &[
             "login",
-            "username=Dax",
+            "username=Sam",
             "url=github.com",
             "password=hunter2",
         ],
@@ -2276,11 +2276,11 @@ fn browser_host_checks_and_saves_logins() {
     };
     let refs_of = |r: &str| serde_json::json!([r]);
     assert_eq!(
-        check(&mut host, "https://github.com", " dAX ", "hunter2"),
+        check(&mut host, "https://github.com", " sAM ", "hunter2"),
         ("same".into(), refs_of(&github_ref))
     );
     assert_eq!(
-        check(&mut host, "https://github.com", "dax", "hunter3"),
+        check(&mut host, "https://github.com", "sam", "hunter3"),
         ("update".into(), refs_of(&github_ref))
     );
     assert_eq!(
@@ -2289,11 +2289,11 @@ fn browser_host_checks_and_saves_logins() {
     );
     // The same login on another site is new there.
     assert_eq!(
-        check(&mut host, "https://gitlab.com", "dax", "hunter2"),
+        check(&mut host, "https://gitlab.com", "sam", "hunter2"),
         ("new".into(), serde_json::json!([]))
     );
     let reply = host.ask(serde_json::json!({
-        "type": "check", "origin": "https://github.com", "username": "dax", "password": "",
+        "type": "check", "origin": "https://github.com", "username": "sam", "password": "",
     }));
     assert_error(&reply, "bad_request");
 
@@ -2301,7 +2301,7 @@ fn browser_host_checks_and_saves_logins() {
     let saved = host.ask(serde_json::json!({
         "type": "save", "origin": "https://example.com",
         "entry": {"title": "example.com", "url": "https://example.com/login",
-                  "username": "kit", "password": "first-pw"},
+                  "username": "alex", "password": "first-pw"},
     }));
     assert_eq!(saved["type"], "save", "{saved}");
     assert_eq!(saved["created"], true);
@@ -2311,9 +2311,9 @@ fn browser_host_checks_and_saves_logins() {
         std::slice::from_ref(&example_ref)
     );
     assert_eq!(a.run(&["get", "example"]), "first-pw\n");
-    assert_eq!(a.run(&["get", "example", "-f", "username"]), "kit\n");
+    assert_eq!(a.run(&["get", "example", "-f", "username"]), "alex\n");
     assert_eq!(
-        check(&mut host, "https://example.com", "kit", "first-pw").0,
+        check(&mut host, "https://example.com", "alex", "first-pw").0,
         "same"
     );
 
@@ -2321,7 +2321,7 @@ fn browser_host_checks_and_saves_logins() {
     let updated = host.ask(serde_json::json!({
         "type": "save", "origin": "https://example.com", "ref": example_ref,
         "entry": {"title": "example.com", "url": "https://example.com",
-                  "username": "kit", "password": "second-pw"},
+                  "username": "alex", "password": "second-pw"},
     }));
     assert_eq!(
         updated,
@@ -2333,23 +2333,23 @@ fn browser_host_checks_and_saves_logins() {
     let reply = host.ask(serde_json::json!({
         "type": "save", "origin": "https://example.com", "ref": github_ref,
         "entry": {"title": "example.com", "url": "https://example.com",
-                  "username": "dax", "password": "stolen"},
+                  "username": "sam", "password": "stolen"},
     }));
     assert_error(&reply, "domain_mismatch");
     assert_eq!(a.run(&["get", "github"]), "hunter2\n");
     let reply = host.ask(serde_json::json!({
         "type": "save", "origin": "https://example.com",
         "entry": {"title": "github.com", "url": "https://github.com",
-                  "username": "dax", "password": "stolen"},
+                  "username": "sam", "password": "stolen"},
     }));
     assert_error(&reply, "domain_mismatch");
     assert!(
-        a.fail(&["get", "github", "dax", "stolen"])
+        a.fail(&["get", "github", "sam", "stolen"])
             .contains("no item")
     );
     let reply = host.ask(serde_json::json!({
         "type": "save", "origin": "https://example.com",
-        "entry": {"title": "", "url": "https://example.com", "username": "kit", "password": "pw"},
+        "entry": {"title": "", "url": "https://example.com", "username": "alex", "password": "pw"},
     }));
     assert_error(&reply, "bad_request");
 
@@ -2357,7 +2357,7 @@ fn browser_host_checks_and_saves_logins() {
     let saved = host.ask(serde_json::json!({
         "type": "save", "origin": "https://news.example.net",
         "entry": {"title": "News\t\u{7} —\n Sign in", "url": "https://news.example.net/login",
-                  "username": "kit", "password": "news-pw"},
+                  "username": "alex", "password": "news-pw"},
     }));
     assert_eq!(saved["created"], true, "{saved}");
     let news = list(&mut host, "https://news.example.net");
@@ -2365,12 +2365,12 @@ fn browser_host_checks_and_saves_logins() {
     let long = "t".repeat(128);
     let saved = host.ask(serde_json::json!({
         "type": "save", "origin": "https://long.example.dev",
-        "entry": {"title": long, "url": "https://long.example.dev", "username": "kit", "password": "pw"},
+        "entry": {"title": long, "url": "https://long.example.dev", "username": "alex", "password": "pw"},
     }));
     assert_eq!(saved["created"], true, "{saved}");
     let reply = host.ask(serde_json::json!({
         "type": "save", "origin": "https://long.example.dev",
-        "entry": {"title": format!("{long}t"), "url": "https://long.example.dev", "username": "kit", "password": "pw"},
+        "entry": {"title": format!("{long}t"), "url": "https://long.example.dev", "username": "alex", "password": "pw"},
     }));
     assert_error(&reply, "bad_request");
 
@@ -2392,7 +2392,7 @@ fn browser_host_checks_and_saves_logins() {
     let saved = host.ask(serde_json::json!({
         "type": "save", "origin": "https://trim.example.io",
         "entry": {"title": "Trim", "url": "  https://trim.example.io/login\n",
-                  "username": "kit", "password": "pw"},
+                  "username": "alex", "password": "pw"},
     }));
     assert_eq!(saved["created"], true, "{saved}");
     assert_eq!(
@@ -2453,7 +2453,7 @@ fn browser_host_generates_passwords_and_holds_them_until_saved() {
 
     // A candidate names nothing until it's in the page.
     let check = serde_json::json!({
-        "type": "check", "origin": origin, "username": "kit", "generated": id,
+        "type": "check", "origin": origin, "username": "alex", "generated": id,
     });
     assert_error(&host.ask(check.clone()), "not_found");
     let keep = |host: &mut Host, origin: &str, id: &serde_json::Value| {
@@ -2475,12 +2475,12 @@ fn browser_host_generates_passwords_and_holds_them_until_saved() {
     assert_eq!(reply["type"], "generate-drop", "{reply}");
     assert_error(&keep(&mut host, origin, &dropped["generated"]), "not_found");
     let reply = host.ask(serde_json::json!({
-        "type": "check", "origin": origin, "username": "kit", "generated": id, "password": "x",
+        "type": "check", "origin": origin, "username": "alex", "generated": id, "password": "x",
     }));
     assert_error(&reply, "bad_request");
     // Another origin, even on the same site, can't use it.
     let entry = serde_json::json!({"title": "Shop", "url": "https://shop.example.com/join",
-                                   "username": "kit", "generated": id});
+                                   "username": "alex", "generated": id});
     let reply = host.ask(serde_json::json!({
         "type": "save", "origin": "https://www.example.com", "entry": entry,
     }));
@@ -2497,7 +2497,7 @@ fn browser_host_generates_passwords_and_holds_them_until_saved() {
     a.run(&["lock"]);
     a.run(&["unlock"]);
     let reply = host.ask(serde_json::json!({
-        "type": "check", "origin": origin, "username": "kit", "generated": made["generated"],
+        "type": "check", "origin": origin, "username": "alex", "generated": made["generated"],
     }));
     assert_error(&reply, "not_found");
     host.close();
@@ -2513,7 +2513,7 @@ fn browser_host_rate_limits_checks_and_fills() {
         &a,
         &[
             "login",
-            "username=dax",
+            "username=sam",
             "url=github.com",
             "password=hunter2",
         ],
@@ -2521,7 +2521,7 @@ fn browser_host_rate_limits_checks_and_fills() {
     let mut host = Host::start(&a);
     let github_ref = refs(&list(&mut host, "https://github.com")).pop().unwrap();
     let check = serde_json::json!({
-        "type": "check", "origin": "https://github.com", "username": "dax", "password": "guess",
+        "type": "check", "origin": "https://github.com", "username": "sam", "password": "guess",
     });
     let fill = serde_json::json!({
         "type": "fill", "origin": "https://github.com", "ref": github_ref, "want": ["password"],
@@ -2637,7 +2637,7 @@ fn browser_host_when_locked_or_not_set_up() {
         &a,
         &[
             "login",
-            "username=dax",
+            "username=sam",
             "url=github.com",
             "password=hunter2",
         ],
@@ -2651,9 +2651,9 @@ fn browser_host_when_locked_or_not_set_up() {
     for request in [
         serde_json::json!({"type": "list", "origin": "https://github.com"}),
         serde_json::json!({"type": "fill", "origin": "https://github.com", "ref": github_ref, "want": ["password"]}),
-        serde_json::json!({"type": "check", "origin": "https://github.com", "username": "dax", "password": "x"}),
+        serde_json::json!({"type": "check", "origin": "https://github.com", "username": "sam", "password": "x"}),
         serde_json::json!({"type": "save", "origin": "https://github.com",
-            "entry": {"title": "github.com", "url": "https://github.com", "username": "dax", "password": "x"}}),
+            "entry": {"title": "github.com", "url": "https://github.com", "username": "sam", "password": "x"}}),
     ] {
         assert_error(&host.ask(request), "locked");
     }
@@ -2741,7 +2741,7 @@ fn browser_lookups_do_not_hold_off_the_idle_lock() {
         &a,
         &[
             "login",
-            "username=dax",
+            "username=sam",
             "url=github.com",
             "password=hunter2",
         ],
@@ -2758,7 +2758,7 @@ fn browser_lookups_do_not_hold_off_the_idle_lock() {
             break;
         }
         host.ask(serde_json::json!({
-            "type": "check", "origin": "https://github.com", "username": "dax", "password": "x",
+            "type": "check", "origin": "https://github.com", "username": "sam", "password": "x",
         }));
         assert!(
             start.elapsed() < Duration::from_secs(8),
@@ -2895,7 +2895,7 @@ fn browser_host_registers_and_signs_in_with_passkeys() {
     let create = |uv: &str| {
         serde_json::json!({
             "type": "passkey-create", "origin": origin, "rpId": "example.com",
-            "challenge": challenge, "user": {"id": "a2l0", "name": "kit"},
+            "challenge": challenge, "user": {"id": "YWxleA", "name": "alex"},
             "exclude": [], "userVerification": uv,
         })
     };
@@ -2925,7 +2925,7 @@ fn browser_host_registers_and_signs_in_with_passkeys() {
             .unwrap();
     let listed = passkeys(&mut host, "https://example.com", "example.com");
     assert_eq!(listed["passkeys"][0]["ref"], made["ref"]);
-    assert_eq!(listed["passkeys"][0]["username"], "kit");
+    assert_eq!(listed["passkeys"][0]["username"], "alex");
     assert_eq!(listed["passkeys"][0]["credentialId"], made["credentialId"]);
 
     let get = |origin: &str, rp: &str, uv: &str| {
@@ -2936,7 +2936,7 @@ fn browser_host_registers_and_signs_in_with_passkeys() {
     };
     let signed = host.ask(get("https://example.com", "example.com", "discouraged"));
     assert_eq!(signed["type"], "passkey-assertion", "{signed}");
-    assert_eq!(signed["userHandle"], "a2l0");
+    assert_eq!(signed["userHandle"], "YWxleA");
     assert_eq!(signed["credentialId"], made["credentialId"]);
     let client = unb64(signed["clientDataJSON"].as_str().unwrap());
     let mut message = unb64(signed["authenticatorData"].as_str().unwrap());
@@ -3007,7 +3007,7 @@ fn send_files_secrets_and_items() {
         &a,
         &[
             "login",
-            "username=dax",
+            "username=sam",
             "password=hunter22",
             "url=github.com",
         ],
@@ -4042,20 +4042,20 @@ const FORMS_1PUX: &str = r#"{"accounts": [{"attrs": {"uuid": "USERUSERUSERUSERUS
     {"uuid": "ident1ident1ident1ident1id", "state": "active", "categoryUuid": "004",
      "details": {"notesPlain": "", "sections": [
        {"title": "Identification", "name": "name", "fields": [
-         {"title": "first name", "id": "firstname", "value": {"string": "Kit"}},
+         {"title": "first name", "id": "firstname", "value": {"string": "Alex"}},
          {"title": "initial", "id": "initial", "value": {"string": "A"}},
-         {"title": "last name", "id": "lastname", "value": {"string": "Langton"}},
+         {"title": "last name", "id": "lastname", "value": {"string": "Mercer"}},
          {"title": "birth date", "id": "birthdate", "value": {"date": 636249600}},
          {"title": "company", "id": "company", "value": {"string": "Anomaly"}}]},
        {"title": "Address", "name": "address", "fields": [
          {"title": "address", "id": "address", "value": {"address": {"street": "123 Main St\nApt 4", "city": "Brooklyn", "state": "NY", "zip": "11201", "country": "us"}}},
          {"title": "default phone", "id": "defphone", "value": {"phone": "+1 (718) 555-0100"}}]},
        {"title": "Internet Details", "name": "internet", "fields": [
-         {"title": "email", "id": "email", "value": {"email": {"email_address": "kit@example.com"}}}]}]},
+         {"title": "email", "id": "email", "value": {"email": {"email_address": "alex@example.com"}}}]}]},
      "overview": {"title": "Home"}},
     {"uuid": "card1card1card1card1card1c", "state": "active", "categoryUuid": "002",
      "details": {"sections": [{"title": "", "name": "", "fields": [
-       {"title": "cardholder name", "id": "cardholder", "value": {"string": "Kit Langton"}},
+       {"title": "cardholder name", "id": "cardholder", "value": {"string": "Alex Mercer"}},
        {"title": "type", "id": "type", "value": {"creditCardType": "visa"}},
        {"title": "number", "id": "ccnum", "value": {"creditCardNumber": "4242 4242 4242 4242"}},
        {"title": "verification number", "id": "cvv", "value": {"concealed": "737"}},
@@ -4100,9 +4100,9 @@ fn forms_fill_from_an_imported_identity_and_card() {
     );
     let show = a.run(&["show", "home"]);
     for line in [
-        "given-name       Kit",
+        "given-name       Alex",
         "additional-name  A",
-        "family-name      Langton",
+        "family-name      Mercer",
         "organization     Anomaly",
         "phone            +17185550100",
         "address-line1    123 Main St",
@@ -4125,7 +4125,7 @@ fn forms_fill_from_an_imported_identity_and_card() {
     assert_eq!(forms["canVerify"], false, "no Touch ID here");
     let identity = &forms["identities"][0];
     assert_eq!(identity["title"], "Home");
-    assert_eq!(identity["summary"], "Kit Langton · 123 Main St, Brooklyn");
+    assert_eq!(identity["summary"], "Alex Mercer · 123 Main St, Brooklyn");
     let card = &forms["cards"][0];
     assert_eq!(
         (&card["brand"], &card["last4"], &card["expiry"]),
@@ -4145,7 +4145,7 @@ fn forms_fill_from_an_imported_identity_and_card() {
     );
     assert_eq!(
         filled["values"],
-        serde_json::json!({"given-name": "Kit", "postal-code": "11201", "country": "US"})
+        serde_json::json!({"given-name": "Alex", "postal-code": "11201", "country": "US"})
     );
     let filled = fill(&mut host, card, &["number", "cvv", "expiry"]);
     assert_eq!(
@@ -4347,30 +4347,30 @@ fn item_types() {
                 "license",
                 "product=Editor",
                 "license-key=KEY-1",
-                "licensed-to=Dax",
+                "licensed-to=Sam",
             ],
             "KEY-1",
-            "Editor\tDax",
+            "Editor\tSam",
         ),
         (
             &[
                 "bank",
                 "bank=Example Bank",
                 "account-number=12345678",
-                "account-holder=Dax",
+                "account-holder=Sam",
             ],
             "12345678",
-            "Example Bank\tDax",
+            "Example Bank\tSam",
         ),
         (
             &[
                 "passport",
-                "full-name=Dax Raad",
+                "full-name=Sam Rivera",
                 "number=X123",
                 "issuing-country=United States",
             ],
             "X123",
-            "Dax Raad\tUnited States",
+            "Sam Rivera\tUnited States",
         ),
         (
             &[
@@ -4408,10 +4408,10 @@ fn item_types() {
                 "id-document",
                 "type=SSN",
                 "number=078-05-1120",
-                "full-name=Kit",
+                "full-name=Alex",
             ],
             "078-05-1120",
-            "Kit\tSSN",
+            "Alex\tSSN",
         ),
         (
             &["note", "notes=alarm 4417", "--name", "Codes"],

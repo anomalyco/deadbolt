@@ -430,12 +430,12 @@ pub(super) mod tests {
             &mut s,
             "https://login.example.com",
             Some("example.com"),
-            "kit",
+            "alex",
         );
         let (rp, found) = list(&s, "https://example.com", None).unwrap();
         assert_eq!(rp, "example.com");
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].username.as_deref(), Some("kit"));
+        assert_eq!(found[0].username.as_deref(), Some("alex"));
         assert_eq!(found[0].created.as_deref(), Some("2026-12-23"));
         assert_eq!(found[0].credential_id, made.credential_id);
         // A subdomain page asking for the parent finds it; the subdomain's
@@ -456,7 +456,7 @@ pub(super) mod tests {
 
         let origin = "https://www.example.com";
         let signed = sign(&s, origin, "example.com", &made.passkey, &challenge(), true).unwrap();
-        assert_eq!(signed.user_handle, webauthn::b64(b"kit"));
+        assert_eq!(signed.user_handle, webauthn::b64(b"alex"));
         let client = webauthn::unb64(&signed.client_data_json).unwrap();
         let client: serde_json::Value = serde_json::from_slice(&client).unwrap();
         assert_eq!(client["origin"], origin);
@@ -488,7 +488,7 @@ pub(super) mod tests {
     fn the_private_key_is_never_listed() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = loaded(dir.path());
-        let made = register(&mut s, "https://example.com", None, "kit");
+        let made = register(&mut s, "https://example.com", None, "alex");
         let vault = s.resolve(None).unwrap();
         let listing = super::super::items::Listing::new(s.vault(&vault));
         let item = listing
@@ -516,19 +516,28 @@ pub(super) mod tests {
             ("http://example.com", None),
         ] {
             assert!(
-                check_create(&s, origin, rp, &challenge(), "a2l0", "kit", &[]).is_err(),
+                check_create(&s, origin, rp, &challenge(), "YWxleA", "alex", &[]).is_err(),
                 "{origin} {rp:?}"
             );
         }
         assert!(s.vault(&s.resolve(None).unwrap()).items().is_empty());
 
         // Bad challenges and user handles fail before anything is stored.
-        for (challenge, user) in [("AAAA", "a2l0"), (challenge().as_str(), "")] {
+        for (challenge, user) in [("AAAA", "YWxleA"), (challenge().as_str(), "")] {
             assert!(
-                check_create(&s, "https://example.com", None, challenge, user, "kit", &[]).is_err()
+                check_create(
+                    &s,
+                    "https://example.com",
+                    None,
+                    challenge,
+                    user,
+                    "alex",
+                    &[]
+                )
+                .is_err()
             );
         }
-        let made = register(&mut s, "https://example.com", None, "kit");
+        let made = register(&mut s, "https://example.com", None, "alex");
         let excluded = check_create(
             &s,
             "https://example.com",
@@ -547,18 +556,18 @@ pub(super) mod tests {
     fn an_excluded_passkey_is_never_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = loaded(dir.path());
-        let user = webauthn::b64(b"kit");
+        let user = webauthn::b64(b"alex");
         let new = check_create(
             &s,
             "https://example.com",
             None,
             &challenge(),
             &user,
-            "kit",
+            "alex",
             &[],
         )
         .unwrap();
-        let first = register(&mut s, "https://example.com", None, "kit");
+        let first = register(&mut s, "https://example.com", None, "alex");
         let again = NewPasskey {
             exclude: vec![first.credential_id.clone()],
             ..new
@@ -574,7 +583,10 @@ pub(super) mod tests {
 
     #[test]
     fn account_labels_strip_controls_and_bidi_and_bound_unicode_characters() {
-        assert_eq!(user_text(" \u{061c}ki\n\u{202e}t\u{2069}\u{200f} "), "kit");
+        assert_eq!(
+            user_text(" \u{061c}al\n\u{202e}ex\u{2069}\u{200f} "),
+            "alex"
+        );
         assert_eq!(
             user_text(&"🔑".repeat(300)),
             "🔑".repeat(shared::MAX_USER_NAME)
@@ -592,8 +604,8 @@ pub(super) mod tests {
     fn registering_the_same_user_again_preserves_both_passkeys() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = loaded(dir.path());
-        let first = register(&mut s, "https://example.com", None, "kit");
-        let second = register(&mut s, "https://example.com", None, "kit");
+        let first = register(&mut s, "https://example.com", None, "alex");
+        let second = register(&mut s, "https://example.com", None, "alex");
         assert_ne!(first.passkey, second.passkey);
         assert_ne!(first.credential_id, second.credential_id);
         let (_, found) = list(&s, "https://example.com", None).unwrap();
@@ -754,7 +766,7 @@ pub(super) mod tests {
             let made = f
                 .daemon
                 .clone()
-                .passkey(create(Verify::Preferred, "kit"), &conv)
+                .passkey(create(Verify::Preferred, "alex"), &conv)
                 .await
                 .unwrap();
             assert_eq!(flags(&made), (0x5d, true), "UV after Touch ID");
@@ -848,7 +860,7 @@ pub(super) mod tests {
             let (conv, _closed) = conversation();
             let made = f
                 .daemon
-                .with(|s| Ok(register(s, "https://example.com", None, "kit")))
+                .with(|s| Ok(register(s, "https://example.com", None, "alex")))
                 .unwrap();
             let remove = || Command::ItemRemove {
                 vault: Some(made.passkey.vault.clone()),
@@ -877,7 +889,7 @@ pub(super) mod tests {
                 let (conv, _closed) = conversation();
                 let made = f
                     .daemon
-                    .with(|s| Ok(register(s, "https://example.com", None, "kit")))
+                    .with(|s| Ok(register(s, "https://example.com", None, "alex")))
                     .unwrap();
                 let vault = VaultId::from_bytes(unhex(&made.passkey.vault).unwrap());
                 let id = ItemId::from_bytes(unhex(&made.passkey.item).unwrap());
@@ -947,7 +959,9 @@ pub(super) mod tests {
             }));
             let daemon = f.daemon.clone();
             let request = tokio::spawn(async move {
-                let result = daemon.passkey(create(Verify::Required, "kit"), &conv).await;
+                let result = daemon
+                    .passkey(create(Verify::Required, "alex"), &conv)
+                    .await;
                 result.map(drop)
             });
             tokio::time::sleep(Duration::from_millis(30)).await;

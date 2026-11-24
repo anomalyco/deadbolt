@@ -21,7 +21,7 @@ const delivered = (type: string) => fake.delivered.filter((d) => d.message.type 
 describe("automatic sign-in session", () => {
   const target = { tabId: 1, frameId: 0, documentId: "top-doc", origin: SITE }
   const account = { ...ACCOUNTS[0], urls: [SITE] }
-  const linked = { ...ACCOUNTS[1], hasPassword: false, urls: [SITE], signIn: { provider: "google", account: "kit@gmail.com" } }
+  const linked = { ...ACCOUNTS[1], hasPassword: false, urls: [SITE], signIn: { provider: "google", account: "alex@gmail.com" } }
   beforeEach(() => {
     const send = host.host.send.bind(host.host)
     host.host.send = (async (req) => req.type === "list" ? { type: "list", site: "example.com", accounts: [account, linked] } : send(req as never)) as typeof host.host.send
@@ -379,7 +379,7 @@ describe("menu tokens", () => {
     const token = await menu()
     expect((await autofill.menuLoad(token, menuSender(), SITE))?.kind).toBe("accounts")
     expect(await autofill.menuPick(token, ACCOUNTS[0].ref, menuSender())).toEqual({ ok: true })
-    expect(delivered("db:fill")[0].message).toEqual({ type: "db:fill", values: { username: "kit@example.com", password: "correct horse" }, form: 1, approval: "ok-1" })
+    expect(delivered("db:fill")[0].message).toEqual({ type: "db:fill", values: { username: "alex@example.com", password: "correct horse" }, form: 1, approval: "ok-1" })
   })
 
   test("once picked, a token only resizes its pill: no second pick, load or dismiss", async () => {
@@ -493,7 +493,7 @@ describe("filling only the fields approved before the host is asked", () => {
     expect(await autofill.menuPick(token, ACCOUNTS[1].ref, menuSender())).toEqual({ ok: true })
     expect(fills()).toMatchObject([{ want: ["username"] }])
     expect(delivered("db:approve")).toMatchObject([{ options: { documentId: "top-doc" }, message: { form: 1, measure: false } }])
-    expect(delivered("db:fill")).toMatchObject([{ message: { values: { username: "kit@example.com" }, approval: "fixed" } }])
+    expect(delivered("db:fill")).toMatchObject([{ message: { values: { username: "alex@example.com" }, approval: "fixed" } }])
     expect(delivered("db:fill")[0].message).not.toHaveProperty("values.password")
   })
 
@@ -693,7 +693,7 @@ describe("filling a frame's form", () => {
     expect(fills()).toMatchObject([{ want: ["username"] }])
     expect(asked("frame-doc").filter((m) => m.type === "db:approve")).toEqual([{ type: "db:approve", form: 2, measure: true }])
     expect(asked("frame-doc").filter((m) => m.type === "db:approved")).toEqual([{ type: "db:approved", approval: "framed" }])
-    expect(delivered("db:fill")).toMatchObject([{ message: { values: { username: "kit@example.com" }, approval: "framed" } }])
+    expect(delivered("db:fill")).toMatchObject([{ message: { values: { username: "alex@example.com" }, approval: "framed" } }])
     expect(delivered("db:fill")[0].message).not.toHaveProperty("values.password")
   })
 
@@ -1117,7 +1117,7 @@ describe("sign-in sessions", () => {
   })
 
   test("the next step's fill, cancelled while on its way, arms no further step", async () => {
-    // kit@example.com has a code too, so the password step would arm the code step.
+    // alex@example.com has a code too, so the password step would arm the code step.
     await fillEmail(["email"], ACCOUNTS[0])
     toPasswordPage()
     const acks = holdFills(["password"])
@@ -1379,9 +1379,9 @@ describe("surface sizes", () => {
 })
 
 describe("sign in with a provider", () => {
-  const google = { ref: `${"a".repeat(64)}:${"3".repeat(32)}`, vault: "Personal", title: "Example", hasPassword: false, hasTotp: false, urls: [], signIn: { provider: "google", account: "kit@gmail.com" } }
+  const google = { ref: `${"a".repeat(64)}:${"3".repeat(32)}`, vault: "Personal", title: "Example", hasPassword: false, hasTotp: false, urls: [], signIn: { provider: "google", account: "alex@gmail.com" } }
   const both = { ...ACCOUNTS[1], signIn: { provider: "github" } }
-  const providerLogin = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"4".repeat(32)}`, title: "Google", username: "kit@gmail.com" }
+  const providerLogin = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"4".repeat(32)}`, title: "Google", username: "alex@gmail.com" }
   let withs: SignInWith
 
   beforeEach(() => {
@@ -1393,7 +1393,7 @@ describe("sign in with a provider", () => {
   })
 
   test("one row per person: a site login of the account a provider row signs in with shows only as that row, except on the provider's own pages", () => {
-    const ramp = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"6".repeat(32)}`, title: "Ramp", username: "Kit@Gmail.com ", urls: ["https://app.ramp.com"] }
+    const ramp = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"6".repeat(32)}`, title: "Ramp", username: "Alex@Gmail.com ", urls: ["https://app.ramp.com"] }
     const viaGoogle = { ...google, urls: ["https://app.ramp.com"] }
     expect(oneRowEach([ramp, viaGoogle, ACCOUNTS[1]], "https://app.ramp.com")).toEqual([viaGoogle, ACCOUNTS[1]])
     expect(oneRowEach([ramp, viaGoogle], "https://accounts.google.com")).toEqual([ramp, viaGoogle])
@@ -1441,7 +1441,7 @@ describe("sign in with a provider", () => {
   })
 
   test("only Google's chooser, over https, gets the account; other providers' pages never do", async () => {
-    withs.start(1, { provider: "github", account: "kit" }, "example.com")
+    withs.start(1, { provider: "github", account: "alex" }, "example.com")
     await withs.loaded({ tabId: 1, frameId: 0, url: "https://github.com/login", documentId: "g-doc" })
     withs.start(1, google.signIn, "example.com")
     await withs.loaded({ tabId: 1, frameId: 0, url: "http://accounts.google.com/signin", documentId: "g-doc" })
@@ -1461,34 +1461,34 @@ describe("sign in with a provider", () => {
     const sender = pageSender({ url: `${GOOGLE}/v3/signin/challenge/pwd`, origin: GOOGLE, documentId: "g-doc" })
     fake.frames["1:0"] = { url: `${GOOGLE}/v3/signin/challenge/pwd`, documentId: "g-doc" }
     const ask = (pageAccount: unknown, s = sender, identifier?: string) => autofill.query(s, ["password"], "password", 1, false, identifier, false, undefined, undefined, pageAccount)
-    const named = await ask(" Kit@Gmail.com ")
+    const named = await ask(" Alex@Gmail.com ")
     expect(named.rows).toBe(1)
     const reply = await autofill.menuLoad(named.token!, menuSender(), GOOGLE)
     expect(reply?.kind === "accounts" && reply.accounts.map((a) => a.ref)).toEqual([providerLogin.ref])
     expect(await autofill.menuPick(named.token!, ACCOUNTS[0].ref, menuSender())).toMatchObject({ ok: false })
     // Naming no login, or not an account at all: the whole list, as if it weren't sent.
     expect((await ask("nobody@gmail.com")).rows).toBe(5)
-    expect((await ask("<b>kit@gmail.com</b>")).rows).toBe(5)
+    expect((await ask("<b>alex@gmail.com</b>")).rows).toBe(5)
     expect((await ask(`${"k".repeat(500)}@gmail.com`)).rows).toBe(5)
     // The username the user typed comes first.
-    expect((await ask("kit@gmail.com", sender, "admin")).rows).toBe(2)
+    expect((await ask("alex@gmail.com", sender, "admin")).rows).toBe(2)
     // Anywhere but Google's sign-in host, a page-set account is ignored.
-    expect((await ask("kit@gmail.com", pageSender())).rows).toBe(5)
-    expect((await ask("kit@gmail.com", pageSender({ url: "https://github.com/login", origin: "https://github.com" }))).rows).toBe(5)
+    expect((await ask("alex@gmail.com", pageSender())).rows).toBe(5)
+    expect((await ask("alex@gmail.com", pageSender({ url: "https://github.com/login", origin: "https://github.com" }))).rows).toBe(5)
     // Only on a later step's field.
-    expect((await autofill.query(sender, ["email", "password"], "email", 1, false, undefined, false, undefined, undefined, "kit@gmail.com")).rows).toBe(5)
+    expect((await autofill.query(sender, ["email", "password"], "email", 1, false, undefined, false, undefined, undefined, "alex@gmail.com")).rows).toBe(5)
   })
 
   test("on the provider's chooser, only its top page gets the account; the menu there narrows to its login", async () => {
     withs.start(1, google.signIn, "example.com")
     withs.navigated(1, "https://accounts.google.com/signin")
-    expect(withs.accountFor(1, "https://accounts.google.com")).toBe("kit@gmail.com")
+    expect(withs.accountFor(1, "https://accounts.google.com")).toBe("alex@gmail.com")
     expect(withs.accountFor(1, "https://evil.example.net")).toBeUndefined()
     fake.frames["1:0"] = { url: "https://accounts.google.com/signin", documentId: "g-doc" }
     await withs.loaded({ tabId: 1, frameId: 0, url: "https://accounts.google.com/signin", documentId: "g-doc" })
     await withs.loaded({ tabId: 1, frameId: 0, url: "https://evil.example.net/", documentId: "g-doc" })
     await withs.loaded({ tabId: 1, frameId: 2, url: "https://accounts.google.com/frame", documentId: "f-doc" })
-    expect(delivered("db:chooser").map((d) => [d.message, d.options])).toEqual([[{ type: "db:chooser", account: "kit@gmail.com" }, { documentId: "g-doc" }]])
+    expect(delivered("db:chooser").map((d) => [d.message, d.options])).toEqual([[{ type: "db:chooser", account: "alex@gmail.com" }, { documentId: "g-doc" }]])
     const sender = pageSender({ url: "https://accounts.google.com/signin", origin: "https://accounts.google.com", documentId: "g-doc" })
     const menu = await autofill.query(sender, ["email"], "email", 1)
     expect(menu.rows).toBe(1)
@@ -1497,7 +1497,7 @@ describe("sign in with a provider", () => {
   test("a popup follows the sign-in; coming back to the site, closing the tab or locking ends it", async () => {
     withs.start(1, google.signIn, "example.com")
     withs.opened(1, 2)
-    expect(withs.accountFor(2, "https://accounts.google.com")).toBe("kit@gmail.com")
+    expect(withs.accountFor(2, "https://accounts.google.com")).toBe("alex@gmail.com")
     withs.navigated(1, "https://accounts.google.com/x")
     withs.navigated(1, "https://www.example.com/home")
     expect(withs.accountFor(1, "https://accounts.google.com")).toBeUndefined()

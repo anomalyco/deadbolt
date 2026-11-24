@@ -80,7 +80,7 @@ describe("a learning frame", () => {
   })
 
   test("a submit records the typed field's shape, never its value", async () => {
-    type($("#account_name_text_field"), "kit@example.com")
+    type($("#account_name_text_field"), "alex@example.com")
     $("#continue").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
     await settle()
     const submit = steps().find((s) => s.trigger === "submit")!
@@ -88,13 +88,13 @@ describe("a learning frame", () => {
     const typed = submit.inputs.find((i) => i.id === "account_name_text_field")!.typed!
     expect(typed).toMatchObject({ order: 1, shape: "email", length: "9-16", truth: "email" })
     expect(typed.digest).toMatch(/^[0-9a-f]{64}$/)
-    expect(JSON.stringify(sent)).not.toContain("kit@example.com")
+    expect(JSON.stringify(sent)).not.toContain("alex@example.com")
   })
 
   test("the next step's text has the typed username taken out, and a password box gets no digest", async () => {
     document.body.innerHTML = `
-      <p>kit@example.com</p>
-      <label for="pw">Password for kit@example.com</label><input id="pw" type="password" autocomplete="current-password">
+      <p>alex@example.com</p>
+      <label for="pw">Password for alex@example.com</label><input id="pw" type="password" autocomplete="current-password">
       <label for="again">Confirm</label><input id="again" type="password">
       <button>Sign In</button>`
     learnScanned()
@@ -135,13 +135,13 @@ describe("a learning frame", () => {
   })
 
   test("page attributes and the address lose what may be the user's", async () => {
-    history.replaceState(null, "", "/u/kit@example.com/login?kit@example.com&token123456=1")
+    history.replaceState(null, "", "/u/alex@example.com/login?alex@example.com&token123456=1")
     // happy-dom loads no iframe pages, and says so on the console.
     const quiet = console.error
     console.error = () => {}
     document.body.innerHTML = `
-      <form action="https://kit@example.com/x"><input id="field-kit@example.com" name="otp-48151623" autocomplete="one-time-code" inputmode="numeric"></form>
-      <iframe src="https://chat.example.net/w/kit@example.com/9876543"></iframe>`
+      <form action="https://alex@example.com/x"><input id="field-alex@example.com" name="otp-48151623" autocomplete="one-time-code" inputmode="numeric"></form>
+      <iframe src="https://chat.example.net/w/alex@example.com/9876543"></iframe>`
     console.error = quiet
     for (const f of listeners) f({ type: "db:learn", session: { ...session, id: "2b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b" } })
     await settle()
@@ -149,7 +149,7 @@ describe("a learning frame", () => {
     expect(start.frame).toMatchObject({ path: "/u/<seg>/login", queryKeys: ["<email>", "token<n>"] })
     expect(start.inputs[0]).toMatchObject({ id: "<email>", name: "otp-<n>", autocomplete: "one-time-code", inputMode: "numeric" })
     expect(start.iframes[0]).toMatchObject({ host: "chat.example.net", path: "/w/<seg>/<seg>" })
-    expect(JSON.stringify(start)).not.toContain("kit@")
+    expect(JSON.stringify(start)).not.toContain("alex@")
   })
 
   test("the timeline: clicks, named keys and typing by shape, never a typed or pasted value", async () => {
@@ -162,8 +162,8 @@ describe("a learning frame", () => {
     const down = (el: Element, key: string, init: KeyboardEventInit = {}) => el.dispatchEvent(trusted(new KeyboardEvent("keydown", { key, bubbles: true, composed: true, ...init })))
     const focus = (el: Element) => el.dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))
     focus(email)
-    for (const c of "kit@example.com") down(email, c)
-    type(email, "kit@example.com")
+    for (const c of "alex@example.com") down(email, c)
+    type(email, "alex@example.com")
     down(email, "Tab")
     focus(pw)
     // A password box's capitals and length stay its own.
@@ -198,7 +198,7 @@ describe("a learning frame", () => {
     expect(timeline[7]).toMatchObject({ x: 40, y: 12, target: { tag: "button", type: "submit", text: "Sign in now", path: "button#go" } })
     expect(timeline.every((e, i) => e.t >= 0 && (i === 0 || e.t >= timeline[i - 1].t))).toBe(true)
     const all = JSON.stringify(sent)
-    for (const never of ["kit@example.com", "correct horse battery", "kit@"]) expect(all).not.toContain(never)
+    for (const never of ["alex@example.com", "correct horse battery", "alex@"]) expect(all).not.toContain(never)
   })
 
   test("a PIN pad's keys log no digits, text or place", async () => {
@@ -294,9 +294,9 @@ describe("a learning frame", () => {
     const s = fresh()
     join(s)
     document.body.innerHTML = `<textarea id="msg"></textarea><input id="name">
-      <button id="send">Send kit vogel secr…</button><button id="hi">Hello kitt</button><button id="tail">Mention zanzib…</button>`
+      <button id="send">Send alex mercer secr…</button><button id="hi">Hello kitt</button><button id="tail">Mention zanzib…</button>`
     const msg = $<HTMLTextAreaElement>("#msg")
-    msg.value = `kit vogel secret message ${"filler words ".repeat(30)}zanzibar`
+    msg.value = `alex mercer secret message ${"filler words ".repeat(30)}zanzibar`
     msg.dispatchEvent(trusted(new Event("input", { bubbles: true, composed: true })))
     type($<HTMLInputElement>("#name"), "kittens")
     for (const b of ["send", "hi", "tail"]) $(`#${b}`).dispatchEvent(trusted(new FocusEvent("focusin", { bubbles: true, composed: true })))

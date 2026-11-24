@@ -4,7 +4,7 @@
 // check on it does. e2e/run.ts mounts the site under /gauntlet and hands
 // these its helpers.
 //
-// The e2e logins are the fake host's: kit@acme.test ("correct horse", with
+// The e2e logins are the fake host's: alex@acme.test ("correct horse", with
 // a one-time code) and admin ("hunter2"); the identity "Home" and the card
 // "Personal Visa".
 
@@ -31,13 +31,13 @@ export interface Harness<R extends GauntletRun> {
   video?: string
 }
 
-export const KIT = "kit@acme.test"
+export const ALEX = "alex@acme.test"
 export const KIT_PASSWORD = "correct horse"
 export const E2E_PIN = "246810"
 
 /** The fake host's logins, as the Gauntlet's accounts. */
 export const gauntletAccounts = (totp: string): Account[] => [
-  { username: KIT, password: KIT_PASSWORD, totp, aliases: ["kit", "+1 415 555 0123", "40021987"], pin: E2E_PIN, birthday: "1990-07-04" },
+  { username: ALEX, password: KIT_PASSWORD, totp, aliases: ["alex", "+1 415 555 0123", "40021987"], pin: E2E_PIN, birthday: "1990-07-04" },
   { username: "admin", password: "hunter2" },
 ]
 
@@ -113,7 +113,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
   }
 
   /** Picks the login with `username` from the menu on `sel`, and waits for the pill to settle. */
-  async function pick(c: Ctx, sel: string, username = KIT, target: Page | Frame = c.page) {
+  async function pick(c: Ctx, sel: string, username = ALEX, target: Page | Frame = c.page) {
     const menu = await menuOn(c, sel, target)
     if (!menu) return false
     await menu.locator("button.row", { hasText: username }).first().click()
@@ -185,10 +185,10 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
     await o.before?.()
     await reported(c.run, `/gauntlet/${slug}`)
     c.ok(await pick(c, user), `picking a login on ${user} fills`)
-    c.ok((await value(c.page, user)) === KIT, `${user} gets the username (${await value(c.page, user)})`)
+    c.ok((await value(c.page, user)) === ALEX, `${user} gets the username (${await value(c.page, user)})`)
     c.ok((await value(c.page, pass)) === KIT_PASSWORD, `${pass} gets the password`)
     await c.page.click("#submit")
-    c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+    c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
   }
 
   const tests: Record<string, (c: Ctx) => Promise<void>> = {
@@ -202,7 +202,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.waitForURL("**/identifier-first/password")
       c.ok(await filledWith(c.page, "#password", KIT_PASSWORD), "the password page fills from the same pick")
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     "remember-device": async (c) => {
       await c.page.goto(g("remember-device"))
@@ -215,7 +215,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.waitForSelector("#yes")
       c.ok((await quietOn(c, "#trust")).length === 0, "the remember-device choice opens no menu")
       await c.page.click("#yes")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     pin: async (c) => {
       await c.page.goto(g("pin"))
@@ -225,7 +225,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       c.ok(pin === "", `a 6-digit PIN box doesn't get a password that can't fit it (${pin.length} characters)`)
       await typeInto(c, "#pin", E2E_PIN)
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the PIN typed by hand signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the PIN typed by hand signs in")
     },
     phone: async (c) => {
       await c.page.goto(g("phone"))
@@ -246,22 +246,22 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       })
       if (menu) {
         await h.settled(menu)
-        await menu.locator("button.row", { hasText: KIT }).first().click()
+        await menu.locator("button.row", { hasText: ALEX }).first().click()
       }
       c.ok(await filledWith(c.page, "#password", KIT_PASSWORD), "the password step fills from the list")
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     bank: async (c) => {
       await c.page.goto(g("bank"))
       await reported(c.run, "/gauntlet/bank")
       c.ok(await pick(c, "#customer"), "the menu on the customer number fills")
-      c.ok((await value(c.page, "#customer")) === KIT && (await value(c.page, "#password")) === KIT_PASSWORD, "the customer number and password, nothing else")
+      c.ok((await value(c.page, "#customer")) === ALEX && (await value(c.page, "#password")) === KIT_PASSWORD, "the customer number and password, nothing else")
       const dob = await Promise.all(["#dob-day", "#dob-month", "#dob-year"].map((s) => value(c.page, s)))
       c.ok(dob.every((v) => !v), `the birth date gets no part of the login (${dob.join("/")})`)
       for (const [s, v] of [["#dob-day", "04"], ["#dob-month", "07"], ["#dob-year", "1990"]]) await c.page.fill(s, v)
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     reveal: async (c) => {
       await c.page.goto(g("reveal"))
@@ -271,12 +271,12 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       // The password box wasn't showing at the pick, so the pick can't fill it; its own menu, narrowed to the username, does.
       const menu = await menuOn(c, "#password")
       const rows = menu ? await menu.locator("button.row .sub").allTextContents() : []
-      c.ok(rows.length === 1 && rows[0] === KIT, `the revealed password box's menu has just that login (${rows.join(", ")})`)
+      c.ok(rows.length === 1 && rows[0] === ALEX, `the revealed password box's menu has just that login (${rows.join(", ")})`)
       if (menu) await menu.locator("button.row").first().click()
       c.ok(await filledWith(c.page, "#password", KIT_PASSWORD), "and fills it")
       await wait("the pill goes", () => !menuFrame(c.page), 8000)
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
 
     // ---- Codes and MFA ----
@@ -285,7 +285,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.waitForSelector("#code")
       c.ok(!!(await wait("the code fills", async () => h.isCode(await value(c.page, "#code")))), "the authenticator code fills from the same pick")
       await c.page.click("#verify")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     "totp-split": async (c) => {
       await passwordStep(c, "totp-split")
@@ -293,7 +293,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       const digits = async () => (await Promise.all([1, 2, 3, 4, 5, 6].map((i) => value(c.page, `#d${i}`)))).join("")
       c.ok(!!(await wait("the six boxes fill", async () => h.isCode(await digits()))), "the six boxes fill with the code")
       await c.page.click("#verify")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     backup: async (c) => {
       await passwordStep(c, "backup")
@@ -307,7 +307,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       c.ok((await value(c.page, "#backup-code")) === "", "nor does the XXXX-XXXX one")
       await c.page.fill("#backup-code", BACKUP_CODES[1])
       await c.page.click("#verify")
-      c.ok((await signedInAs(c.page)) === KIT, "and a backup code typed by hand signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and a backup code typed by hand signs in")
       c.ok((await codesAsked(c)) === 0, "the vault is never asked for a code")
     },
     sms: async (c) => sentCode(c, "sms", SMS_CODE),
@@ -325,14 +325,14 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       if (!h.isCode(code)) {
         // Not carried through the picker: the code box's own menu fills it.
         const menu = await menuOn(c, "#code")
-        if (menu) await menu.locator("button.row", { hasText: KIT }).first().click()
+        if (menu) await menu.locator("button.row", { hasText: ALEX }).first().click()
         await wait("the code fills", async () => h.isCode(await value(c.page, "#code")))
         code = await value(c.page, "#code")
       }
       c.ok(h.isCode(code), "after choosing the authenticator, the code fills")
       await wait("the pill goes", () => !menuFrame(c.page), 8000)
       await c.page.click("#verify")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     "number-match": async (c) => {
       await passwordStep(c, "number-match")
@@ -340,7 +340,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       const before = (await fills(c)).length
       await sleep(1500)
       c.ok(!menuFrame(c.page), "the number-matching page shows no menu")
-      c.ok((await signedInAs(c.page, 12_000)) === KIT, "and signs in once the phone approves")
+      c.ok((await signedInAs(c.page, 12_000)) === ALEX, "and signs in once the phone approves")
       c.ok((await fills(c)).length === before, "with nothing asked of the vault meanwhile")
     },
     "security-questions": async (c) => {
@@ -354,7 +354,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.fill("#q1", "Biscuit")
       await c.page.fill("#q2", "maple")
       await c.page.click("#verify")
-      c.ok((await signedInAs(c.page)) === KIT, "and the answers typed by hand sign in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the answers typed by hand sign in")
     },
     "magic-link": async (c) => {
       await c.page.goto(g("magic-link"))
@@ -365,7 +365,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await sleep(1200)
       c.ok(!menuFrame(c.page), "the check-your-email page shows nothing")
       await c.page.click("#magic")
-      c.ok((await signedInAs(c.page)) === KIT, "and the link signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the link signs in")
     },
     passkey: async (c) => {
       await c.page.goto(g("passkey"))
@@ -373,9 +373,9 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.click("#use-password")
       await c.page.waitForSelector("#password", { state: "visible" })
       c.ok(await pick(c, "#username"), "with the password fallback open, the menu fills")
-      c.ok((await value(c.page, "#username")) === KIT && (await value(c.page, "#password")) === KIT_PASSWORD, "both boxes")
+      c.ok((await value(c.page, "#username")) === ALEX && (await value(c.page, "#password")) === KIT_PASSWORD, "both boxes")
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
 
     // ---- Identity ----
@@ -383,26 +383,26 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.goto(g("dob-selects"))
       c.ok(await pickForm(c, "#first", "Home"), "the identity menu fills")
       const got = await Promise.all(["#first", "#last", "#dob-month", "#dob-day", "#dob-year", "#email"].map((s) => value(c.page, s)))
-      c.ok(JSON.stringify(got) === JSON.stringify(["Kit", "Langton", "7", "4", "1990", KIT]), `names, the three birth-date selects and the email (${got.join(" | ")})`)
+      c.ok(JSON.stringify(got) === JSON.stringify(["Alex", "Mercer", "7", "4", "1990", ALEX]), `names, the three birth-date selects and the email (${got.join(" | ")})`)
     },
     "dob-date": async (c) => {
       await c.page.goto(g("dob-date"))
       c.ok(await pickForm(c, "#fullname", "Home"), "the identity menu fills")
       const got = await Promise.all(["#fullname", "#birthday", "#tel"].map((s) => value(c.page, s)))
-      c.ok(got[0] === "Kit Langton" && got[1] === "1990-07-04" && got[2].replace(/\D/g, "").endsWith("4155550123"), `full name, the date input and the phone (${got.join(" | ")})`)
+      c.ok(got[0] === "Alex Mercer" && got[1] === "1990-07-04" && got[2].replace(/\D/g, "").endsWith("4155550123"), `full name, the date input and the phone (${got.join(" | ")})`)
     },
     "dob-masked": async (c) => {
       await c.page.goto(g("dob-masked"))
       c.ok(await pickForm(c, "#given", "Home"), "the identity menu fills")
       const got = await Promise.all(["#given", "#middle", "#family", "#dob"].map((s) => value(c.page, s)))
-      c.ok(got[0] === "Kit" && got[1] === "" && got[2] === "Langton" && got[3] === "07/04/1990", `first, middle, last and MM/DD/YYYY (${got.join(" | ")})`)
+      c.ok(got[0] === "Alex" && got[1] === "" && got[2] === "Mercer" && got[3] === "07/04/1990", `first, middle, last and MM/DD/YYYY (${got.join(" | ")})`)
     },
     "address-cascade": async (c) => {
       await c.page.goto(g("address-cascade"))
       c.ok(await pickForm(c, "#name", "Home"), "the identity menu fills")
       await sleep(800)
       const got = await Promise.all(["#name", "#country", "#line1", "#city", "#state", "#zip"].map((s) => value(c.page, s)))
-      c.ok(JSON.stringify(got) === JSON.stringify(["Kit Langton", "US", "123 Main St", "Brooklyn", "NY", "11201"]), `the address, with the state picked once the country's states load (${got.join(" | ")})`)
+      c.ok(JSON.stringify(got) === JSON.stringify(["Alex Mercer", "US", "123 Main St", "Brooklyn", "NY", "11201"]), `the address, with the state picked once the country's states load (${got.join(" | ")})`)
     },
 
     // ---- Tricky DOM ----
@@ -421,23 +421,23 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       }, 12_000)
       if (menu) {
         await h.settled(menu)
-        await menu.locator("button.row", { hasText: KIT }).first().click()
+        await menu.locator("button.row", { hasText: ALEX }).first().click()
       }
       c.ok(!!(await wait("both fill", async () => (await closedValue("password")) === KIT_PASSWORD)), "the menu fills a form in a closed shadow root")
-      c.ok((await closedValue("username")) === KIT, "username too")
+      c.ok((await closedValue("username")) === ALEX, "username too")
       await wait("the pill goes", () => !menuFrame(c.page), 8000)
       const submit = await c.page.evaluate(() => (window as unknown as { __gauntletClosed: { rect(id: string): DOMRect } }).__gauntletClosed.rect("submit"))
       await c.page.mouse.click(submit.x + submit.width / 2, submit.y + submit.height / 2)
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     "web-component": async (c) => {
       await c.page.goto(g("web-component"))
       await reported(c.run, "/gauntlet/web-component")
       c.ok(await pick(c, "#user"), "the menu on a custom element's input fills")
       const got = await c.page.evaluate(() => ["user", "pass"].map((id) => (document.getElementById(id) as unknown as { value: string }).value))
-      c.ok(got[0] === KIT && got[1] === KIT_PASSWORD, `both custom elements (${got[0]})`)
+      c.ok(got[0] === ALEX && got[1] === KIT_PASSWORD, `both custom elements (${got[0]})`)
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     "iframe-same-origin": (c) => framedLogin(c, "iframe-same-origin", "localhost"),
     "iframe-same-site": (c) => framedLogin(c, "iframe-same-site", "www.acme.test"),
@@ -473,7 +473,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.waitForURL("**/spa/code")
       c.ok(!!(await wait("the code route fills", async () => h.isCode(await value(c.page, "#code")))), "the code route fills too")
       await c.page.click("#verify")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     dialog: (c) => plainLogin(c, "dialog", { before: async () => void (await c.page.click("#open")) }),
     "many-forms": async (c) => {
@@ -486,7 +486,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       c.ok((await value(c.page, "#password")) === KIT_PASSWORD, "with the password")
       c.ok((await value(c.page, "#news-email")) === "" && (await value(c.page, "#q")) === "", "and only it")
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     honeypot: async (c) => {
       await c.page.goto(g("honeypot"))
@@ -496,7 +496,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       c.ok(traps.every((v) => !v), `every honeypot stays empty (${traps.join(" | ")})`)
       c.ok((await value(c.page, "#password")) === KIT_PASSWORD, "the real password box fills")
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the site signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
     "autocomplete-off": (c) => plainLogin(c, "autocomplete-off", { user: "#user", pass: "#pass" }),
     misleading: (c) => plainLogin(c, "misleading", { user: "#password-field", pass: "#email-field" }),
@@ -508,7 +508,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       c.ok((await value(c.page, "#pin")) === "", "the keypad-only PIN box gets nothing")
       for (const d of E2E_PIN) await c.page.click(`#keypad button[data-key="${d}"]`)
       await c.page.click("#submit")
-      c.ok((await signedInAs(c.page)) === KIT, "and the PIN tapped on the keypad signs in")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the PIN tapped on the keypad signs in")
     },
     "no-paste": (c) => plainLogin(c, "no-paste"),
     rules: (c) => plainLogin(c, "rules"),
@@ -554,7 +554,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
     reset: async (c) => {
       await c.page.goto(g("reset"))
       await reported(c.run, "/gauntlet/reset")
-      await typeInto(c, "#username", KIT)
+      await typeInto(c, "#username", ALEX)
       await c.page.click("#continue")
       await c.page.click("#reset-link")
       await c.page.waitForURL("**/reset/new*")
@@ -576,7 +576,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.goto(g("checkout"))
       c.ok(await pickForm(c, "#cc-number", "Visa"), "the card menu fills")
       const card = await Promise.all(["#cc-number", "#cc-month", "#cc-year", "#cc-csc", "#cc-name"].map((s) => value(c.page, s)))
-      c.ok(card[0].replace(/\D/g, "") === "4242424242424242" && card[1] === "08" && card[2] === "2028" && card[3] === "123" && card[4] === "Kit Langton", `number, expiry selects, code and name (${card.join(" | ")})`)
+      c.ok(card[0].replace(/\D/g, "") === "4242424242424242" && card[1] === "08" && card[2] === "2028" && card[3] === "123" && card[4] === "Alex Mercer", `number, expiry selects, code and name (${card.join(" | ")})`)
       c.ok(await pickForm(c, "#bill-line1", "Home"), "the billing address fills from an identity")
       // An address goes only into fields on screen at the pick (docs/autofill.md): the rest, below the fold, take a second pick there.
       const below = await c.page.evaluate(() => document.getElementById("bill-country")!.getBoundingClientRect().top > innerHeight)
@@ -606,7 +606,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
     c.ok((await value(c.page, "#code")) === "", "nor after Resend")
     await c.page.fill("#code", code)
     await c.page.click("#verify")
-    c.ok((await signedInAs(c.page)) === KIT, "and the code typed by hand signs in")
+    c.ok((await signedInAs(c.page)) === ALEX, "and the code typed by hand signs in")
     c.ok((await codesAsked(c)) === 0, "the vault is never asked for a code")
   }
 
@@ -617,10 +617,10 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
     if (!frame) return void c.ok(false, "the frame loads")
     await frame.waitForSelector("#username")
     await reported(c.run, "/gauntlet/frame-login", "any")
-    c.ok(await pick(c, "#username", KIT, frame), "the menu on the frame's field fills")
-    c.ok((await value(frame, "#username")) === KIT && (await value(frame, "#password")) === KIT_PASSWORD, "both boxes in the frame")
+    c.ok(await pick(c, "#username", ALEX, frame), "the menu on the frame's field fills")
+    c.ok((await value(frame, "#username")) === ALEX && (await value(frame, "#password")) === KIT_PASSWORD, "both boxes in the frame")
     await frame.click("#submit")
-    c.ok((await signedInAs(frame)) === KIT, "and the frame signs in")
+    c.ok((await signedInAs(frame)) === ALEX, "and the frame signs in")
   }
 
   /** Runs `slugs` in one browser, one tab each, and prints a line per page. */

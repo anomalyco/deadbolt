@@ -1,7 +1,7 @@
 //! Drawing. Every screen reads `App` and returns Rune elements; handlers call
 //! into `model.rs`.
 //!
-//! Motion (docs/app.md has the full table): screens swap with Kit's
+//! Motion (docs/app.md has the full table): screens swap with the
 //! whole-state replacement (blur σ 1.5, scale .96, fade; exits shorter). A
 //! search replaces the list at once, and any new selection (search, arrows,
 //! a click) replaces the item's title and fields at once. Nothing animates on

@@ -354,7 +354,7 @@ mod tests {
             login: None,
             title,
             url,
-            username: "kit",
+            username: "alex",
             password,
         }
     }
@@ -411,7 +411,7 @@ mod tests {
             None,
             vec![
                 input("url", "https://accounts.google.com"),
-                input("username", "kit@gmail.com"),
+                input("username", "alex@gmail.com"),
                 input("password", "hunter22"),
             ],
         )
@@ -424,7 +424,7 @@ mod tests {
             &mut s,
             &[
                 ("url", "https://google.com.evil.example"),
-                ("username", "kit@gmail.com"),
+                ("username", "alex@gmail.com"),
                 ("password", "hunter22"),
             ],
         );
@@ -450,7 +450,7 @@ mod tests {
         let sign_in = listed[0].sign_in.as_ref().unwrap();
         assert_eq!(
             (sign_in.provider.as_str(), sign_in.account.as_deref()),
-            ("google", Some("kit@gmail.com"))
+            ("google", Some("alex@gmail.com"))
         );
         // Linked again: the same login, nothing new.
         assert_eq!(
@@ -601,19 +601,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut s = loaded(dir.path());
         let origin = "https://example.com";
-        let kit = login(
+        let alex = login(
             &mut s,
-            &[("url", origin), ("username", "kit"), ("password", "old")],
+            &[("url", origin), ("username", "alex"), ("password", "old")],
         );
         login(
             &mut s,
-            &[("url", origin), ("username", "dax"), ("password", "other")],
+            &[("url", origin), ("username", "sam"), ("password", "other")],
         );
         let (status, matches) = check(&s, origin, None, &Secret::new("old")).unwrap();
-        assert_eq!((status, matches), (SiteStatus::Same, vec![kit]));
+        assert_eq!((status, matches), (SiteStatus::Same, vec![alex]));
         let (status, matches) = check(&s, origin, None, &Secret::new("nope")).unwrap();
         assert_eq!((status, matches), (SiteStatus::New, vec![]));
-        let (status, _) = check(&s, origin, Some("kit"), &Secret::new("nope")).unwrap();
+        let (status, _) = check(&s, origin, Some("alex"), &Secret::new("nope")).unwrap();
         assert_eq!(status, SiteStatus::Update);
     }
 
@@ -622,33 +622,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut s = loaded(dir.path());
         let origin = "https://example.com";
-        let kit = login(
+        let alex = login(
             &mut s,
-            &[("url", origin), ("username", "Kit"), ("password", "old")],
+            &[("url", origin), ("username", "Alex"), ("password", "old")],
         );
         let changed = login(
             &mut s,
-            &[("url", origin), ("username", "kit"), ("password", "new")],
+            &[("url", origin), ("username", "alex"), ("password", "new")],
         );
         let unnamed = login(&mut s, &[("url", origin), ("password", "anonymous")]);
         login(
             &mut s,
             &[
                 ("url", "https://elsewhere.com"),
-                ("username", "Kit"),
+                ("username", "Alex"),
                 ("password", "old"),
             ],
         );
         for (username, password, status, mut expected) in [
-            (Some(" KIT "), "old", SiteStatus::Same, vec![kit.clone()]),
+            (Some(" ALEX "), "old", SiteStatus::Same, vec![alex.clone()]),
             (
-                Some("kit"),
+                Some("alex"),
                 "OLD",
                 SiteStatus::Update,
-                vec![kit.clone(), changed],
+                vec![alex.clone(), changed],
             ),
             (Some("other"), "old", SiteStatus::New, vec![]),
-            (None, "old", SiteStatus::Same, vec![kit]),
+            (None, "old", SiteStatus::Same, vec![alex]),
             (None, "missing", SiteStatus::New, vec![]),
             (Some("  "), "anonymous", SiteStatus::Same, vec![unnamed]),
         ] {
@@ -667,7 +667,7 @@ mod tests {
         let origin = "https://example.com";
         let first = login(
             &mut s,
-            &[("url", origin), ("username", "kit"), ("password", "old")],
+            &[("url", origin), ("username", "alex"), ("password", "old")],
         );
         let vault = s.create_vault("work").unwrap();
         let second = create(
@@ -675,7 +675,7 @@ mod tests {
             Some("work"),
             "login",
             None,
-            [("url", origin), ("username", "kit"), ("password", "new")]
+            [("url", origin), ("username", "alex"), ("password", "new")]
                 .into_iter()
                 .map(|(name, value)| FieldInput {
                     name: name.into(),
@@ -691,11 +691,11 @@ mod tests {
         };
         for (password, expected) in [("old", first.clone()), ("new", second.clone())] {
             assert_eq!(
-                check(&s, origin, Some("kit"), &Secret::new(password)).unwrap(),
+                check(&s, origin, Some("alex"), &Secret::new(password)).unwrap(),
                 (SiteStatus::Same, vec![expected])
             );
         }
-        let (status, matches) = check(&s, origin, Some("kit"), &Secret::new("different")).unwrap();
+        let (status, matches) = check(&s, origin, Some("alex"), &Secret::new("different")).unwrap();
         assert_eq!(status, SiteStatus::Update);
         assert_eq!(matches.len(), 2);
         assert!(matches.contains(&first) && matches.contains(&second));
@@ -740,7 +740,7 @@ mod tests {
             &mut s,
             &[
                 ("url", "https://accounts.google.com"),
-                ("username", "dax@gmail.com"),
+                ("username", "sam@gmail.com"),
                 ("password", "google-pw"),
             ],
         );
@@ -777,7 +777,7 @@ mod tests {
         let sign_ins: Vec<_> = logins.iter().map(|l| l.sign_in.clone()).collect();
         assert!(sign_ins.contains(&Some(SignIn {
             provider: "google".into(),
-            account: Some("dax@gmail.com".into()),
+            account: Some("sam@gmail.com".into()),
         })));
         assert!(sign_ins.contains(&Some(SignIn {
             provider: "github".into(),

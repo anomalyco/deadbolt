@@ -306,16 +306,16 @@ pub(crate) const SCENES: &[Scene] = &[
     // A new card, its number typed.
     ("new-card", |s| {
         new_of(s, "card", "Visa");
-        typed(s, "cardholder", "Dax Raad");
+        typed(s, "cardholder", "Sam Rivera");
         typed(s, "number", "4242 4242 4242 4242");
         typed(s, "expiry", "08/29");
     }),
     // A new identity: its name and address in parts.
     ("new-identity", |s| {
         new_of(s, "identity", "Home");
-        typed(s, "given-name", "Dax");
-        typed(s, "family-name", "Raad");
-        typed(s, "email", "dax@anoma.ly");
+        typed(s, "given-name", "Sam");
+        typed(s, "family-name", "Rivera");
+        typed(s, "email", "sam@example.com");
         typed(s, "address-line1", "1 Main St");
         typed(s, "city", "Springfield");
     }),
@@ -342,7 +342,7 @@ pub(crate) const SCENES: &[Scene] = &[
     ("new-database", |s| {
         new_of(s, "database", "Production");
         typed(s, "type", "postgres");
-        typed(s, "host", "db.anoma.ly");
+        typed(s, "host", "db.example.com");
         typed(s, "port", "5432");
         typed(s, "database", "app");
         typed(s, "username", "app");
@@ -353,7 +353,7 @@ pub(crate) const SCENES: &[Scene] = &[
     // A new Wi-Fi network.
     ("new-wifi", |s| {
         new_of(s, "wifi", "Home");
-        typed(s, "ssid", "Raad Home 5G");
+        typed(s, "ssid", "Rivera Home 5G");
         typed(s, "password", "correct-horse");
         typed(s, "security", "WPA3");
     }),
@@ -372,7 +372,7 @@ pub(crate) const SCENES: &[Scene] = &[
     ("edit", |s| {
         vault(s);
         s.edit_selected();
-        typed(s, "username", "kit@anoma.ly");
+        typed(s, "username", "alex@example.com");
     }),
     // The daemon refused a card number.
     ("edit-invalid", |s| {
@@ -402,7 +402,7 @@ pub(crate) const SCENES: &[Scene] = &[
     ("edit-conflict", |s| {
         vault(s);
         s.edit_selected();
-        typed(s, "username", "kit@anoma.ly");
+        typed(s, "username", "alex@example.com");
         if let Some(mut item) = s.detail.clone() {
             if let Some(f) = item.fields.iter_mut().find(|f| f.name == "password") {
                 f.value = "a-new-password-from-the-studio".into();

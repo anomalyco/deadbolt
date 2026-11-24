@@ -788,7 +788,7 @@ mod tests {
                     "login",
                     Some("Work".into()),
                     [
-                        ("username".into(), Field::new(FieldType::Text, "dax")),
+                        ("username".into(), Field::new(FieldType::Text, "sam")),
                         ("password".into(), Field::new(FieldType::Secret, "hunter2")),
                     ],
                 ),

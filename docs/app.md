@@ -1,6 +1,6 @@
 # Desktop app
 
-2026-10-22. Plan and first slice of Deadbolt's desktop UI, built in [Rune](https://github.com/anomalyco/rune). Questions for Kit are marked **Open**.
+2026-10-22. Plan and first slice of Deadbolt's desktop UI, built in [Rune](https://github.com/anomalyco/rune). Open questions are marked **Open**.
 
 ## Architecture
 
@@ -271,4 +271,4 @@ Remaining work:
 
 - An update offer in the app itself. `deadbolt update` run from the bundled helper (or the command link to it) already replaces Deadbolt.app from the `desktop` manifest, requiring `crates/app/update-requirement.txt` of the new bundle, and restarts the daemon ([releasing.md](releasing.md#updater)).
 - After installing or updating, point the browser's native messaging host (`deadbolt browser install`) at `/Applications/Deadbolt.app/Contents/Helpers/deadbolt`.
-- A Mac download button on deadbolt.pw, from the `desktop` manifest. Site publishing needs Dax's approval.
+- A Mac download button on deadbolt.pw, from the `desktop` manifest. Site publishing requires explicit approval.

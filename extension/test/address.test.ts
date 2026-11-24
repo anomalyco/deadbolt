@@ -171,7 +171,7 @@ describe("a registrant form with custom comboboxes", () => {
   afterEach(() => Object.assign(document, { elementFromPoint: before.one }))
 
   const address = ($: (id: string) => HTMLInputElement) => ["a1", "a2", "city", "zip", "state", "country"].map((id) => $(id).value)
-  const kit = { "given-name": "Kit", "family-name": "Langton" }
+  const alex = { "given-name": "Alex", "family-name": "Mercer" }
 
   test("every field gets its role", () => {
     registrant()
@@ -184,9 +184,9 @@ describe("a registrant form with custom comboboxes", () => {
 
   test("one fill of an address kept on one line completes every part of it", async () => {
     const { $ } = registrant()
-    const { filled } = await fillForm(scanForms(), { ...kit, "address-line1": ONE_LINE }, () => true)
+    const { filled } = await fillForm(scanForms(), { ...alex, "address-line1": ONE_LINE }, () => true)
     expect(address($)).toEqual(["1112 Cole St", "", "San Francisco", "94117", "California", "United States"])
-    expect([$("first").value, $("last").value, $("org").value]).toEqual(["Kit", "Langton", ""])
+    expect([$("first").value, $("last").value, $("org").value]).toEqual(["Alex", "Mercer", ""])
     // The country already showed United States: nothing to choose.
     expect(filled).toEqual(["given-name", "family-name", "address-line1", "address-level2", "postal-code", "address-level1"])
     expect(document.querySelector("[role=listbox]")).toBeNull()
@@ -194,7 +194,7 @@ describe("a registrant form with custom comboboxes", () => {
 
   test("the same from an identity with the parts, its phone's calling code chosen too", async () => {
     const { $ } = registrant({ phoneCode: "+44" })
-    const values = { ...kit, "address-line1": "1112 Cole St", city: "San Francisco", region: "CA", "postal-code": "94117", country: "US", phone: "+14155550123" }
+    const values = { ...alex, "address-line1": "1112 Cole St", city: "San Francisco", region: "CA", "postal-code": "94117", country: "US", phone: "+14155550123" }
     const { filled } = await fillForm(scanForms(), values, () => true)
     expect(address($)).toEqual(["1112 Cole St", "", "San Francisco", "94117", "California", "United States"])
     expect([$("code").value, $("phone").value]).toEqual(["United States +1", "4155550123"])
@@ -207,14 +207,14 @@ describe("a registrant form with custom comboboxes", () => {
     $("country").dispatchEvent(new Event("input"))
     document.querySelector<HTMLElement>("[role=option]")!.click()
     expect($("country").value).toBe("Canada")
-    await fillForm(scanForms(), { ...kit, "address-line1": ONE_LINE }, () => true)
+    await fillForm(scanForms(), { ...alex, "address-line1": ONE_LINE }, () => true)
     // The country came from the line, which the identity doesn't have on its own.
     expect([$("country").value, $("state").value]).toEqual(["United States", "California"])
   })
 
   test("a combobox with no matching option is left as it was", async () => {
     const { $, region } = registrant({ states: ["New Jersey", "New York"] })
-    const { filled } = await fillForm(scanForms(), { ...kit, "address-line1": ONE_LINE }, () => true)
+    const { filled } = await fillForm(scanForms(), { ...alex, "address-line1": ONE_LINE }, () => true)
     expect(filled).not.toContain("address-level1")
     expect([$("state").value, region.chosen()]).toEqual(["New Jersey", "New Jersey"])
     expect($("state").getAttribute("aria-expanded")).toBe("false")
@@ -223,7 +223,7 @@ describe("a registrant form with custom comboboxes", () => {
 
   test("a combobox that fails the field check isn't touched", async () => {
     const { $ } = registrant()
-    await fillForm(scanForms(), { ...kit, "address-line1": ONE_LINE }, (el) => el.id !== "state")
+    await fillForm(scanForms(), { ...alex, "address-line1": ONE_LINE }, (el) => el.id !== "state")
     expect($("state").value).toBe("New Jersey")
     expect(document.querySelector("[role=listbox]")).toBeNull()
   })
@@ -231,16 +231,16 @@ describe("a registrant form with custom comboboxes", () => {
   test("an option that isn't what's on screen isn't clicked", async () => {
     const { $ } = registrant()
     document.elementFromPoint = (() => document.body) as typeof document.elementFromPoint
-    await fillForm(scanForms(), { ...kit, "address-line1": ONE_LINE }, () => true)
+    await fillForm(scanForms(), { ...alex, "address-line1": ONE_LINE }, () => true)
     expect($("state").value).toBe("New Jersey")
   })
 
   test("a form with one address box gets the whole line", async () => {
     document.body.innerHTML = `<form><label for="n">Full name</label><input id="n"><label for="a">Address</label><input id="a"></form>`
-    await fillForm(scanForms(), { ...kit, "address-line1": ONE_LINE }, () => true)
+    await fillForm(scanForms(), { ...alex, "address-line1": ONE_LINE }, () => true)
     expect((document.getElementById("a") as HTMLInputElement).value).toBe(ONE_LINE)
     document.body.innerHTML = `<form><label for="n">Full name</label><input id="n"><label for="a">Address</label><textarea id="a"></textarea><label for="z">ZIP</label><input id="z"></form>`
-    await fillForm(scanForms(), { ...kit, "address-line1": ONE_LINE }, () => true)
+    await fillForm(scanForms(), { ...alex, "address-line1": ONE_LINE }, () => true)
     expect((document.getElementById("a") as HTMLTextAreaElement).value).toBe(ONE_LINE)
   })
 })

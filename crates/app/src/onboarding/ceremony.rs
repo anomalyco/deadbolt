@@ -14,7 +14,7 @@ use crate::model::App;
 use crate::view::Paged;
 use crate::view::banner;
 
-/// The bolt's throw: the one sanctioned flourish (Kit's "playful", .3 / .3).
+/// The bolt's throw: the one sanctioned flourish (the "playful" spring, .3 / .3).
 const THROW: Spring = Spring::new(0.3, 0.3);
 
 /// A slow breath for "working on it". Reduced motion holds it full.

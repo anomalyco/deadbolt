@@ -112,7 +112,7 @@ pub fn person(item: &Item) -> Option<String> {
         .map(str::to_string)
 }
 
-/// "Kit Langton · 123 Main St, Brooklyn": the person, and the first address
+/// "Alex Mercer · 123 Main St, Brooklyn": the person, and the first address
 /// line and city. Empty when it has neither.
 pub fn summary(item: &Item) -> String {
     let place: Vec<&str> = ["address-line1", "city"]
@@ -371,8 +371,8 @@ mod tests {
             "identity",
             Some("Home"),
             &[
-                ("given-name", "Kit"),
-                ("family-name", "Langton"),
+                ("given-name", "Alex"),
+                ("family-name", "Mercer"),
                 ("address-line1", "123 Main St"),
                 ("city", "Brooklyn"),
                 ("country", "US"),
@@ -398,7 +398,7 @@ mod tests {
         let (identities, cards) = list(&[&vault], &["identity", "card", "card"]);
         assert_eq!(identities.len(), 1);
         assert_eq!(cards.len(), 1);
-        assert_eq!(identities[0].summary, "Kit Langton · 123 Main St, Brooklyn");
+        assert_eq!(identities[0].summary, "Alex Mercer · 123 Main St, Brooklyn");
         assert!(!identities[0].fields.contains(&"passport".into()));
         assert_eq!(cards[0].title, "Visa •••• 4242");
         assert_eq!(cards[0].last4, "4242");
@@ -424,7 +424,7 @@ mod tests {
         validate(&home, &fields).unwrap();
         assert_eq!(
             values(&home, &fields).collect::<Vec<_>>(),
-            [("given-name", "Kit"), ("country", "US")]
+            [("given-name", "Alex"), ("country", "US")]
         );
         assert!(!needs_verify(&home, &fields));
         let card = vault.item(&card).unwrap();
@@ -458,7 +458,7 @@ mod tests {
             &secret,
             "identity",
             Some("Home"),
-            &[("given-name", "Kit")],
+            &[("given-name", "Alex")],
         );
         let card = add(
             &mut work,
@@ -523,7 +523,7 @@ mod tests {
             pairs(&[
                 ("number", "4242 4242 4242 4242"),
                 ("expiry", "08/28"),
-                ("cardholder", " Kit Langton "),
+                ("cardholder", " Alex Mercer "),
                 ("brand", "Visa"),
             ]),
             false,
@@ -538,7 +538,7 @@ mod tests {
             [
                 ("number", "4242424242424242"),
                 ("expiry", "2028-08"),
-                ("cardholder", "Kit Langton"),
+                ("cardholder", "Alex Mercer"),
                 ("brand", "Visa"),
             ]
         );
@@ -555,7 +555,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            saved_fields("login", pairs(&[("username", "kit")]), false),
+            saved_fields("login", pairs(&[("username", "alex")]), false),
             Err(SaveError::Kind)
         );
         // A new card needs a valid number; an update never changes one.
@@ -577,7 +577,7 @@ mod tests {
         let identity = saved_fields(
             "identity",
             pairs(&[
-                ("given-name", "Kit"),
+                ("given-name", "Alex"),
                 ("phone", "+1 (415) 555-0123"),
                 ("country", "us"),
                 ("birthday", "not a date"),
@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(
             got,
             [
-                ("given-name", "Kit"),
+                ("given-name", "Alex"),
                 ("phone", "+14155550123"),
                 ("country", "US")
             ]
@@ -620,7 +620,7 @@ mod tests {
             &secret,
             "identity",
             None,
-            &[("given-name", "Kit")],
+            &[("given-name", "Alex")],
         );
         let card = vault.item(&card).unwrap();
         assert!(same_number(&card, "4242 4242-4242 4242"));
@@ -652,11 +652,11 @@ mod tests {
             &secret,
             "identity",
             None,
-            &[("nickname", "Kit")],
+            &[("nickname", "Alex")],
         );
         assert_eq!(
             person(&vault.item(&nickname).unwrap()).as_deref(),
-            Some("Kit")
+            Some("Alex")
         );
         let a = add(
             &mut vault,

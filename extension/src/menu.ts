@@ -212,7 +212,7 @@ function row(item: Row, i: number): HTMLElement {
       : "passkey" in item
       ? [avatar("", icon("passkey")), item.passkey.username || "Passkey", `Passkey · ${item.passkey.vault}`]
       : "provider" in item
-        ? // "Sign in with Google · kit@gmail.com": the provider's mark and name, then the account it uses.
+        ? // "Sign in with Google · alex@gmail.com": the provider's mark and name, then the account it uses.
           [providerMark(item.provider.signIn!.provider), `Sign in with ${providerOf(item.provider.signIn!.provider).name}`, item.provider.signIn!.account || item.provider.title]
         : universal
         ? [loginTile(item.account, i), `Sign in${item.account.username ? ` as ${item.account.username}` : ` to ${item.account.title}`}`, "Fills and submits this sign-in"]

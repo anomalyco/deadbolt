@@ -50,7 +50,7 @@ describe("a form-less step (Google's)", () => {
 
   test("its sole Next submits the email step", () => {
     page(email)
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     const p = plan(true)
     expect(typeof p).toBe("object")
     if (typeof p === "string") return
@@ -59,8 +59,8 @@ describe("a form-less step (Google's)", () => {
   })
 
   test("a password step beside a hidden email box submits too", () => {
-    page(`<main><h1>Welcome</h1><div data-profile-identifier>kit@acme.test</div>
-      <input type="email" name="identifier" hidden value="kit@acme.test">
+    page(`<main><h1>Welcome</h1><div data-profile-identifier>alex@acme.test</div>
+      <input type="email" name="identifier" hidden value="alex@acme.test">
       <input type="password" name="Passwd" autocomplete="current-password" aria-label="Enter your password">
       <button type="button">Forgot password?</button>${NEXT}</main>`)
     fill("input[name=Passwd]", "correct horse")
@@ -74,45 +74,45 @@ describe("a form-less step (Google's)", () => {
 
   test("not when two controls read like its submit", () => {
     page(email.replace("Create account", "Continue"))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     expect(plan(true)).toBe("scope")
   })
 
   test("not past a CAPTCHA", () => {
     page(email.replace("</main>", `<div class="g-recaptcha"></div></main>`))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     expect(plan(true)).toBe("captcha")
   })
 
   test("not while an error shows, or a field is marked invalid", () => {
     page(email.replace("</main>", `<div role="alert">Couldn't find your Google Account</div></main>`))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     expect(plan(true)).toBe("error")
     page(email.replace('id="identifierId"', 'id="identifierId" aria-invalid="true"'))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     expect(plan(true)).toBe("error")
   })
 
   test("an empty alert region is no error", () => {
     page(email.replace("</main>", `<div role="alert" aria-live="assertive"></div></main>`))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     expect(typeof plan(true)).toBe("object")
   })
 
   test("a first step that asks to confirm something else isn't a sign-in", () => {
     page(email.replace("<h1>Sign in</h1>", "<h1>Delete your account</h1>"), "Delete your account")
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     expect(plan(true)).toBe("first")
   })
 
-  const code = (prompt: string) => `<main><h1>2-Step Verification</h1><div data-profile-identifier>kit@acme.test</div>
+  const code = (prompt: string) => `<main><h1>2-Step Verification</h1><div data-profile-identifier>alex@acme.test</div>
     <p>${prompt}</p><input type="tel" name="totpPin" id="totpPin" autocomplete="one-time-code" aria-label="Enter code">
     <button type="button">Try another way</button>${NEXT}</main>`
 
   test("an authenticator code step submits, reading past the session's own account chip", () => {
     page(code("Get a verification code from the Google Authenticator app"))
     fill("#totpPin", "492039")
-    expect(typeof plan(false, "kit@acme.test")).toBe("object")
+    expect(typeof plan(false, "alex@acme.test")).toBe("object")
     // Without the account, the chip's address reads as where a code went.
     expect(plan(false)).toBe("delivered")
   })
@@ -130,19 +130,19 @@ describe("a form-less step (Google's)", () => {
 
   test("a button that shows something other than its aria-label refuses", () => {
     page(email.replace(NEXT, `<button type="button" id="next" aria-label="Continue">Delete account</button>`))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     const el = document.querySelector<HTMLInputElement>("#identifierId")!
     const fields = [{ el, role: "email" as const, owner: { form: null, parent: el.parentElement } }] as unknown as ReturnType<typeof scanPage>["fields"]
     expect(submitPlan({ kind: "login", fields, submit: document.querySelector("#next")!, first: true })).toBe("button")
     // One that agrees passes.
     page(email.replace(NEXT, `<button type="button" id="next" aria-label="next">Next</button>`))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     expect(typeof plan(true)).toBe("object")
   })
 
   test("a Next inside a link refuses", () => {
     page(email.replace(NEXT, `<a href="/elsewhere"><button type="button" id="next">Next</button></a>`))
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     const el = document.querySelector<HTMLInputElement>("#identifierId")!
     const fields = [{ el, role: "email" as const, owner: { form: null, parent: el.parentElement } }] as unknown as ReturnType<typeof scanPage>["fields"]
     expect(submitPlan({ kind: "login", fields, submit: document.querySelector("#next")!, first: true })).toBe("button")
@@ -150,7 +150,7 @@ describe("a form-less step (Google's)", () => {
 
   test("not on a page that isn't a secure context", () => {
     page(email)
-    fill("#identifierId", "kit@acme.test")
+    fill("#identifierId", "alex@acme.test")
     Object.defineProperty(window, "isSecureContext", { value: false, configurable: true, writable: true })
     try {
       expect(plan(true)).toBe("insecure")
@@ -166,7 +166,7 @@ describe("a form-less step (Google's)", () => {
     const scan = scanPage()
     const el = document.querySelector<HTMLInputElement>("#totpPin")!
     const fields = [{ el, role: "otp" as const, owner: { form: null, parent: el.parentElement } }] as unknown as typeof scan.fields
-    expect(submitPlan({ kind: "mfa", fields, submit: document.querySelector("#next")!, first: false, account: "kit@acme.test" })).toBe("delivered")
+    expect(submitPlan({ kind: "mfa", fields, submit: document.querySelector("#next")!, first: false, account: "alex@acme.test" })).toBe("delivered")
   })
 })
 
@@ -177,7 +177,7 @@ describe("a form", () => {
 
   test("a POST to this origin submits", () => {
     page(form(`method="post" action="/session"`))
-    fill("input[name=username]", "kit")
+    fill("input[name=username]", "alex")
     fill("input[name=password]", "correct horse")
     const p = plan(true)
     expect(typeof p === "object" && p.form).toBeInstanceOf(HTMLFormElement)
@@ -186,7 +186,7 @@ describe("a form", () => {
   test("a GET, another origin or another tab doesn't", () => {
     for (const attrs of [`action="/session"`, `method="post" action="https://evil.test/session"`, `method="post" target="_blank"`]) {
       page(form(attrs))
-      fill("input[name=username]", "kit")
+      fill("input[name=username]", "alex")
       fill("input[name=password]", "correct horse")
       expect(plan(true)).toBe("destination")
     }
@@ -194,7 +194,7 @@ describe("a form", () => {
 
   test("a button naming a form that isn't there refuses", () => {
     page(form(`method="post" action="/session"`).replace(`<button type="submit">`, `<button type="submit" form="missing">`))
-    fill("input[name=username]", "kit")
+    fill("input[name=username]", "alex")
     fill("input[name=password]", "correct horse")
     const scan = scanPage()
     expect(submitPlan({ kind: "login", fields: scan.fields, submit: document.querySelector("button")!, first: true })).toBe("scope")
@@ -204,7 +204,7 @@ describe("a form", () => {
     page(`<form method="post"><h1>Create your account</h1><input name="email" autocomplete="email">
       <input type="password" name="new" autocomplete="new-password"><input type="password" name="confirm" autocomplete="new-password">
       <button type="submit">Next</button></form>`, "Create your account")
-    fill("input[name=email]", "kit@acme.test")
+    fill("input[name=email]", "alex@acme.test")
     fill("input[name=new]", "x")
     fill("input[name=confirm]", "x")
     expect(plan()).toBe("kind")
@@ -213,12 +213,12 @@ describe("a form", () => {
 
 describe("accountChip", () => {
   test("only when every visible chip is exactly the account", () => {
-    page(`<div data-profile-identifier>Kit@Acme.test</div>`)
-    expect(accountChip("kit@acme.test")).toBe("kit@acme.test")
-    expect(accountChip("olive@acme.test")).toBeUndefined()
-    page(`<div data-profile-identifier>kit@acme.test</div><div data-profile-identifier>olive@acme.test</div>`)
-    expect(accountChip("kit@acme.test")).toBeUndefined()
-    page(`<p>kit@acme.test</p>`)
-    expect(accountChip("kit@acme.test")).toBeUndefined()
+    page(`<div data-profile-identifier>Alex@Acme.test</div>`)
+    expect(accountChip("alex@acme.test")).toBe("alex@acme.test")
+    expect(accountChip("taylor@acme.test")).toBeUndefined()
+    page(`<div data-profile-identifier>alex@acme.test</div><div data-profile-identifier>taylor@acme.test</div>`)
+    expect(accountChip("alex@acme.test")).toBeUndefined()
+    page(`<p>alex@acme.test</p>`)
+    expect(accountChip("alex@acme.test")).toBeUndefined()
   })
 })

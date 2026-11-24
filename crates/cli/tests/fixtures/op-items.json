@@ -9,7 +9,7 @@
   "last_edited_by": "DAXDAXDAXDAXDAXDAXDAXDAXDA",
   "created_at": "2023-11-14T22:13:20Z",
   "updated_at": "2024-03-09T16:00:00Z",
-  "additional_information": "dax@example.com",
+  "additional_information": "sam@example.com",
   "urls": [
     { "label": "website", "primary": true, "href": "https://github.com/login" },
     { "label": "gist", "href": "gist.github.com" }
@@ -19,11 +19,11 @@
     { "id": "docs", "label": "Docs" }
   ],
   "fields": [
-    { "id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "dax@example.com", "reference": "op://Private/GitHub/username" },
+    { "id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "sam@example.com", "reference": "op://Private/GitHub/username" },
     { "id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": "op-github-pw", "entropy": 80.0, "reference": "op://Private/GitHub/password", "password_details": { "entropy": 80, "generated": true, "strength": "FANTASTIC" } },
     { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "work account\nsecond line", "reference": "op://Private/GitHub/notesPlain" },
     { "id": "remember", "type": "STRING", "label": "remember_me", "value": "✓" },
-    { "id": "TOTP_abc123", "section": { "id": "add more", "label": "Security" }, "type": "OTP", "label": "one-time password", "value": "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub", "totp": "123456" },
+    { "id": "TOTP_abc123", "section": { "id": "add more", "label": "Security" }, "type": "OTP", "label": "one-time password", "value": "otpauth://totp/GitHub:sam?secret=JBSWY3DPEHPK3PXP&issuer=GitHub", "totp": "123456" },
     { "id": "f1", "section": { "id": "add more", "label": "Security" }, "type": "CONCEALED", "label": "Recovery codes", "value": "op-recovery-111" },
     { "id": "f2", "section": { "id": "add more", "label": "Security" }, "type": "STRING", "label": "", "value": "untitled value" },
     { "id": "f3", "section": { "id": "add more", "label": "Security" }, "type": "DATE", "label": "member since", "value": "2024-01-01" },
@@ -77,7 +77,7 @@
   ],
   "sections": [ { "id": "contactInfo", "label": "Contact Information" } ],
   "fields": [
-    { "id": "cardholder", "type": "STRING", "label": "cardholder name", "value": "Dax Raad" },
+    { "id": "cardholder", "type": "STRING", "label": "cardholder name", "value": "Sam Rivera" },
     { "id": "type", "type": "CREDIT_CARD_TYPE", "label": "type", "value": "visa" },
     { "id": "ccnum", "type": "CREDIT_CARD_NUMBER", "label": "number", "value": "4242 4242 4242 4242" },
     { "id": "cvv", "type": "CONCEALED", "label": "verification number", "value": "321" },
@@ -129,9 +129,9 @@
     { "id": "internet", "label": "Internet Details" }
   ],
   "fields": [
-    { "id": "firstname", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "first name", "value": "Dax" },
+    { "id": "firstname", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "first name", "value": "Sam" },
     { "id": "initial", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "initial", "value": "" },
-    { "id": "lastname", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "last name", "value": "Raad" },
+    { "id": "lastname", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "last name", "value": "Rivera" },
     { "id": "birthdate", "section": { "id": "name", "label": "Identification" }, "type": "DATE", "label": "birth date", "value": "636246000" },
     { "id": "company", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "company", "value": "Anomaly" },
     { "id": "address", "section": { "id": "address", "label": "Address" }, "type": "ADDRESS", "label": "address", "value": "1 Main St, Springfield, IL, 12345, us" },
@@ -202,7 +202,7 @@
   "category": "PASSPORT",
   "updated_at": "1970-01-01T00:00:00Z",
   "fields": [
-    { "id": "fullname", "type": "STRING", "label": "full name", "value": "Dax Raad" },
+    { "id": "fullname", "type": "STRING", "label": "full name", "value": "Sam Rivera" },
     { "id": "number", "type": "STRING", "label": "number", "value": "op-passport-X123" }
   ]
 }

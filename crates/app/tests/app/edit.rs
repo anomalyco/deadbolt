@@ -444,7 +444,7 @@ fn a_new_login_saves_and_is_selected() {
     let mut r = rig("vault");
     r.new_item();
     r.type_text("Linear");
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.fill("password", "pw-linear");
     r.sent();
     r.command('s');
@@ -452,7 +452,7 @@ fn a_new_login_saves_and_is_selected() {
     assert_eq!((kind.as_str(), name.as_deref()), ("login", Some("Linear")));
     assert_eq!(
         pairs(&created),
-        [("username", "kit"), ("password", "pw-linear")]
+        [("username", "alex"), ("password", "pw-linear")]
     );
     assert!(r.rt.state.edit.form.as_ref().unwrap().saving && r.shows("Saving…"));
 
@@ -624,19 +624,19 @@ fn an_edit_sends_only_what_changed_in_one_set() {
     let form = r.rt.state.edit.form.as_ref().expect("a form");
     assert_eq!(form.id.as_deref(), Some(github.id.as_str()));
     assert_eq!(form.name.text.as_str(), "github.com");
-    assert_eq!(r.value("username"), "dax");
+    assert_eq!(r.value("username"), "sam");
     // Unchanged, ⌘S just closes it.
     r.sent();
     r.command('s');
     assert!(!r.rt.state.editing() && r.sent().is_empty());
 
     r.command('e');
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.fill("notes", "");
     r.command('s');
     let (_, id, name, fields, unset) = r.take_save();
     assert_eq!((id, name), (github.id, None));
-    assert_eq!(pairs(&fields), [("username", "kit")]);
+    assert_eq!(pairs(&fields), [("username", "alex")]);
     assert_eq!(unset, ["notes"]);
 }
 
@@ -711,7 +711,7 @@ fn esc_cancels_and_the_selection_waits_for_a_changed_form() {
 
     // A changed form holds the selection and says so.
     r.command('e');
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.tap(Key::Down);
     assert_eq!(r.rt.state.selected, selected);
     r.click_row(&other);
@@ -729,18 +729,18 @@ fn esc_cancels_and_the_selection_waits_for_a_changed_form() {
 fn an_edit_from_another_device_is_told_and_what_was_typed_stays() {
     let mut r = rig("vault");
     r.command('e');
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.sync_password("their-password");
     let form = r.rt.state.edit.form.as_ref().unwrap();
     assert_eq!(form.conflict, Some(Conflict::Changed));
-    assert_eq!(r.value("username"), "kit");
+    assert_eq!(r.value("username"), "alex");
     assert!(r.shows("Changed on another device"));
 
     // Saving sends only ours, so theirs stays.
     r.sent();
     r.command('s');
     let (_, _, _, fields, unset) = r.take_save();
-    assert_eq!(pairs(&fields), [("username", "kit")]);
+    assert_eq!(pairs(&fields), [("username", "alex")]);
     assert!(unset.is_empty());
 }
 
@@ -750,7 +750,7 @@ fn an_edit_from_another_device_is_told_and_what_was_typed_stays() {
 fn show_theirs_reloads_the_form_from_the_other_device() {
     let mut r = rig("vault");
     r.command('e');
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.sync_password("their-password");
     assert!(r.shows("Show theirs"));
     // The fields make room for the notice first.
@@ -767,13 +767,13 @@ fn show_theirs_reloads_the_form_from_the_other_device() {
 
     let form = r.rt.state.edit.form.as_ref().unwrap();
     assert!(form.conflict.is_none() && !form.changed());
-    assert_eq!(r.value("username"), "dax");
+    assert_eq!(r.value("username"), "sam");
     assert_eq!(r.value("password"), "their-password");
     assert!(!r.shows("Changed on another device"));
 
     // Pressed without moving focus (as VoiceOver does) while the search
     // has it, the form's name takes the keys, never both at once.
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.sync_password("newer-password");
     r.click_at("search");
     r.settle(0.1);
@@ -799,7 +799,7 @@ fn cmd_n_replaces_an_unchanged_edit() {
     r.tap(Key::Escape);
     r.tap(Key::Escape);
     r.command('e');
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.command('n');
     let form = r.rt.state.edit.form.as_ref().unwrap();
     assert!(!form.is_new() && form.nudge);
@@ -811,7 +811,7 @@ fn cmd_n_replaces_an_unchanged_edit() {
 fn enter_chords_in_a_form_never_reach_the_list() {
     let mut r = rig("vault");
     r.command('e');
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     let chords = [
         shift(),
         alt(),
@@ -834,7 +834,7 @@ fn enter_chords_in_a_form_never_reach_the_list() {
             r.press(Key::Enter, mods);
         }
         assert!(r.rt.state.copy.is_none() && r.rt.state.editing() && r.sent().is_empty());
-        assert_eq!(r.value("username"), "kit");
+        assert_eq!(r.value("username"), "alex");
     }
 
     // Notes keep ⇧⏎ for themselves.
@@ -885,7 +885,7 @@ fn add_offers_an_identity_in_parts() {
         "an address line is one line"
     );
     r.rt.update(|s, _| s.edit.form.as_mut().unwrap().name.replace_text("Home"));
-    r.fill("given-name", "Dax");
+    r.fill("given-name", "Sam");
     r.fill("address-line1", "1 Main St");
     r.fill("city", "Springfield");
     r.sent();
@@ -895,7 +895,7 @@ fn add_offers_an_identity_in_parts() {
     assert_eq!(
         pairs(&fields),
         [
-            ("given-name", "Dax"),
+            ("given-name", "Sam"),
             ("address-line1", "1 Main St"),
             ("city", "Springfield")
         ]
@@ -937,11 +937,11 @@ fn enter_breaks_the_line_in_notes() {
 fn a_login_saves_without_a_password() {
     let mut r = rig("vault");
     r.new_item();
-    r.fill("username", "kit");
+    r.fill("username", "alex");
     r.fill("password", "");
     r.sent();
     r.command('s');
-    assert_eq!(pairs(&r.take_create().3), [("username", "kit")]);
+    assert_eq!(pairs(&r.take_create().3), [("username", "alex")]);
 }
 
 /// The picker offers every type, each with its own fields in the core's

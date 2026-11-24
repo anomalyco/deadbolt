@@ -1099,7 +1099,7 @@ fn identity_and_card_fields() {
         ("phone", "(555) 010-0100"),
         ("phone", "+1 555 0100 ext. 3"),
         ("country", "US"),
-        ("given-name", "Kit"),
+        ("given-name", "Alex"),
         ("address-line1", "123 Main St"),
     ] {
         assert!(

@@ -23,16 +23,16 @@ pub const MANY: usize = 243;
 /// final line break.
 pub(super) const FIXTURE_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFixtureFixtureFixtureFixtureFixtureFixtureFixtureFixture00\n-----END PRIVATE KEY-----\n";
 pub(super) const FIXTURE_PUBLIC_KEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureFixtureFixtureFixtureFixture deploy@anoma.ly";
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureFixtureFixtureFixtureFixture deploy@example.com";
 
 const FIXTURE: &[(&str, &str, &str, Option<&str>)] = &[
-    ("3f9a1c", "login", "github.com", Some("dax")),
-    ("7b20e4", "login", "Linear", Some("dax@anoma.ly")),
+    ("3f9a1c", "login", "github.com", Some("sam")),
+    ("7b20e4", "login", "Linear", Some("sam@example.com")),
     ("a81d55", "card", "Visa •••• 4242", Some("08/29")),
-    ("c4e7f0", "login", "fly.io", Some("ops@anoma.ly")),
-    ("e01b9d", "login", "gitlab.com", Some("dax")),
-    ("f5c312", "login", "Cloudflare", Some("dax@anoma.ly")),
-    ("09ad7e", "login", "Hetzner", Some("billing@anoma.ly")),
+    ("c4e7f0", "login", "fly.io", Some("ops@example.com")),
+    ("e01b9d", "login", "gitlab.com", Some("sam")),
+    ("f5c312", "login", "Cloudflare", Some("sam@example.com")),
+    ("09ad7e", "login", "Hetzner", Some("billing@example.com")),
 ];
 
 pub(super) fn locked(s: &mut App) {
@@ -124,7 +124,7 @@ pub(super) fn panel_vault(s: &mut App) {
 
 pub(super) fn welcome(s: &mut App) {
     s.screen = Screen::Onboarding;
-    s.onboarding.device = rune::TextEdit::new("Dax's MacBook Pro");
+    s.onboarding.device = rune::TextEdit::new("Alex's MacBook Pro");
 }
 
 pub(super) fn form(s: &mut App, flow: Flow) {
@@ -311,7 +311,7 @@ pub(super) fn trash(s: &mut App) {
             "d41e07",
             "login",
             "netflix.com",
-            Some("dax@anoma.ly"),
+            Some("sam@example.com"),
             3 * 3600,
         ),
         ("6b0a93", "note", "Spare key", None, 30 * 3600),
@@ -319,7 +319,7 @@ pub(super) fn trash(s: &mut App) {
         (
             "8e3d2a",
             "database",
-            "staging on db.anoma.ly",
+            "staging on db.example.com",
             Some("app"),
             23 * 86400,
         ),
@@ -352,7 +352,7 @@ pub(super) fn trash_item(s: &mut App) {
     };
     let item = ItemInfo {
         fields: vec![
-            field("username", "text", "dax@anoma.ly"),
+            field("username", "text", "sam@example.com"),
             field("password", "secret", "fixture-netflix-password"),
             field("url", "url", "https://netflix.com/login"),
             field("notes", "note", "The family plan. Kitchen TV and the iPad."),
@@ -386,7 +386,7 @@ fn many_item(i: usize) -> ItemInfo {
         short: format!("{i:04x}"),
         kind: "login".into(),
         label: format!("{}-{i:03}.com", SITES[i * SITES.len() / MANY]),
-        detail: Some(format!("user{i}@anoma.ly")),
+        detail: Some(format!("user{i}@example.com")),
         fields: Vec::new(),
         source: None,
         favorite: false,
@@ -435,14 +435,14 @@ pub(super) fn kind_scene(s: &mut App, kind: &str) {
     vault(s);
     for (id, item_kind, label, detail) in [
         ("b7c1e2", "note", "Alarm codes", None),
-        ("d2a9f0", "ssh", "Deploy key", Some("deploy@anoma.ly")),
-        ("5e8b31", "identity", "Dax Raad", Some("dax@anoma.ly")),
-        ("9c4f7a", "passkey", "github.com", Some("thdxr")),
+        ("d2a9f0", "ssh", "Deploy key", Some("deploy@example.com")),
+        ("5e8b31", "identity", "Sam Rivera", Some("sam@example.com")),
+        ("9c4f7a", "passkey", "github.com", Some("samr")),
         ("a41c09", "api", "Stripe", Some("deploy-bot")),
-        ("c3e870", "database", "app on db.anoma.ly", Some("app")),
-        ("e6d215", "wifi", "Raad Home 5G", Some("WPA3")),
+        ("c3e870", "database", "app on db.example.com", Some("app")),
+        ("e6d215", "wifi", "Rivera Home 5G", Some("WPA3")),
         ("f09b44", "document", "Passport scan", Some("812.4 KB")),
-        ("1b7d62", "passport", "Dax Raad", Some("United States")),
+        ("1b7d62", "passport", "Sam Rivera", Some("United States")),
     ] {
         s.items.push(fixture_item(id, item_kind, label, detail));
     }
@@ -492,7 +492,7 @@ pub(super) fn detail_for_selection(s: &mut App) {
             field("number", "secret", "4242424242424242"),
             field("expiry", "month", "2029-08"),
             field("cvv", "secret", "123"),
-            field("cardholder", "text", "Dax Raad"),
+            field("cardholder", "text", "Sam Rivera"),
         ],
         "note" => vec![field(
             "notes",
@@ -507,7 +507,7 @@ pub(super) fn detail_for_selection(s: &mut App) {
                 "text",
                 "SHA256:Fx7tQ2mVb9yLr4cWkP0sN8hJd3aZe6uGo1iTq5XwYnE",
             ),
-            field("comment", "text", "deploy@anoma.ly"),
+            field("comment", "text", "deploy@example.com"),
         ],
         // As the daemon sends it: everything but the private key.
         "passkey" => vec![
@@ -527,7 +527,7 @@ pub(super) fn detail_for_selection(s: &mut App) {
         ],
         "database" => vec![
             field("type", "text", "postgres"),
-            field("host", "text", "db.anoma.ly"),
+            field("host", "text", "db.example.com"),
             field("port", "text", "5432"),
             field("database", "text", "app"),
             field("username", "text", "app"),
@@ -535,11 +535,11 @@ pub(super) fn detail_for_selection(s: &mut App) {
             field(
                 "connection-string",
                 "secret",
-                "postgres://app:pg-secret-77@db.anoma.ly:5432/app",
+                "postgres://app:pg-secret-77@db.example.com:5432/app",
             ),
         ],
         "wifi" => vec![
-            field("ssid", "text", "Raad Home 5G"),
+            field("ssid", "text", "Rivera Home 5G"),
             field("password", "secret", "correct-horse"),
             field("security", "text", "WPA3"),
         ],
@@ -549,7 +549,7 @@ pub(super) fn detail_for_selection(s: &mut App) {
             field("notes", "note", "Scanned 2026-03-02."),
         ],
         "passport" => vec![
-            field("full-name", "text", "Dax Raad"),
+            field("full-name", "text", "Sam Rivera"),
             field("number", "secret", "X12345678"),
             field("issuing-country", "text", "United States"),
             field("nationality", "text", "American"),
@@ -558,9 +558,9 @@ pub(super) fn detail_for_selection(s: &mut App) {
             field("expires", "date", "2031-05-09"),
         ],
         "identity" => vec![
-            field("given-name", "text", "Dax"),
-            field("family-name", "text", "Raad"),
-            field("email", "email", "dax@anoma.ly"),
+            field("given-name", "text", "Sam"),
+            field("family-name", "text", "Rivera"),
+            field("email", "email", "sam@example.com"),
             field("phone", "text", "+15550100"),
             field("address-line1", "text", "1 Main St"),
             field("address-line2", "text", "Apt 2"),
@@ -621,7 +621,7 @@ pub(super) fn vault_with_health(s: &mut App) {
             id: github,
             kind: "login".into(),
             label: "github.com".into(),
-            detail: Some("dax".into()),
+            detail: Some("sam".into()),
             site_url: Some("https://github.com".into()),
             change_url: Some("https://github.com/settings/security".into()),
             password_changed: Some("2024-03-14".into()),
@@ -635,7 +635,7 @@ pub(super) fn vault_with_health(s: &mut App) {
             id: linear.clone(),
             kind: "login".into(),
             label: "Linear".into(),
-            detail: Some("dax@anoma.ly".into()),
+            detail: Some("sam@example.com".into()),
             site_url: Some("https://linear.app".into()),
             change_url: None,
             password_changed: Some("2025-11-02".into()),
@@ -648,7 +648,7 @@ pub(super) fn vault_with_health(s: &mut App) {
                         vault_name: "personal".into(),
                         id: cloudflare.clone(),
                         label: "Cloudflare".into(),
-                        detail: Some("dax@anoma.ly".into()),
+                        detail: Some("sam@example.com".into()),
                     }],
                 },
                 Finding::MissingTwoFactor {
@@ -663,7 +663,7 @@ pub(super) fn vault_with_health(s: &mut App) {
             id: cloudflare,
             kind: "login".into(),
             label: "Cloudflare".into(),
-            detail: Some("dax@anoma.ly".into()),
+            detail: Some("sam@example.com".into()),
             site_url: Some("https://cloudflare.com".into()),
             change_url: Some("https://dash.cloudflare.com/profile/authentication".into()),
             password_changed: None,
@@ -675,7 +675,7 @@ pub(super) fn vault_with_health(s: &mut App) {
                     vault_name: "personal".into(),
                     id: linear,
                     label: "Linear".into(),
-                    detail: Some("dax@anoma.ly".into()),
+                    detail: Some("sam@example.com".into()),
                 }],
             }],
             ignored: Vec::new(),
@@ -686,7 +686,7 @@ pub(super) fn vault_with_health(s: &mut App) {
             id: hetzner,
             kind: "login".into(),
             label: "Hetzner".into(),
-            detail: Some("billing@anoma.ly".into()),
+            detail: Some("billing@example.com".into()),
             site_url: Some("https://console.hetzner.cloud".into()),
             change_url: None,
             password_changed: None,
@@ -703,7 +703,7 @@ pub(super) fn vault_with_health(s: &mut App) {
             id: gitlab,
             kind: "login".into(),
             label: "gitlab.com".into(),
-            detail: Some("dax".into()),
+            detail: Some("sam".into()),
             site_url: Some("https://gitlab.com".into()),
             change_url: Some("https://gitlab.com/-/profile/password/edit".into()),
             password_changed: None,

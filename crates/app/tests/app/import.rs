@@ -33,7 +33,7 @@ const BITWARDEN: &str = r#"{
       "favorite": true,
       "login": {
         "uris": [{ "match": null, "uri": "https://github.com/login" }],
-        "username": "dax",
+        "username": "sam",
         "password": "github-secret-444"
       }
     },
@@ -43,7 +43,7 @@ const BITWARDEN: &str = r#"{
       "name": null,
       "favorite": false,
       "card": {
-        "cardholderName": "Dax Raad",
+        "cardholderName": "Sam Rivera",
         "brand": "Visa",
         "number": "4242 4242 4242 4242",
         "expMonth": "4",

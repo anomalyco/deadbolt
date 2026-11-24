@@ -1219,7 +1219,7 @@ fn many_items() -> Vec<ItemInfo> {
             short: format!("{i:04x}"),
             kind: "login".into(),
             label: format!("site-{i:02}.com"),
-            detail: Some("dax".into()),
+            detail: Some("sam".into()),
             fields: Vec::new(),
             source: None,
             favorite: false,
