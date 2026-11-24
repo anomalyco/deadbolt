@@ -21,13 +21,17 @@ Clippy (warnings are errors), workspace tests and `cargo deny check`. Install
 stable Rust with rustfmt/Clippy and cargo-deny first. CI runs the same steps, with
 cargo-deny and the extension in their own jobs and Rust on Linux and macOS.
 
-For file sizes, `bash scripts/file-size.sh` counts non-test lines per tracked
-`.rs` file under `crates/` and `.ts` file under `extension/src` (inline
-`#[cfg(test)]` items and test files excluded), and runs in `bun run check` and
-CI. It warns above 800 lines and fails above 1,500 unless
-`scripts/file-size-exceptions.txt` lists `<path> <ceiling>`; test files over
-1,000 lines warn. `--update-exceptions` rewrites the list to current sizes, but
-only lowers a ceiling unless given `--allow-raise`; `--warn-only` always exits 0.
+For code shape and file sizes, `bash scripts/file-size.sh` checks tracked
+`.rs` and `.swift` files under `crates/`, `.ts` files under `extension/src`,
+and `.ts`/`.tsx` files under `site/src` (inline `#[cfg(test)]` items and test
+files excluded from production counts), and runs in `bun run check` and CI.
+It warns above 800 non-test lines and fails above 1,500 unless
+`scripts/file-size-exceptions.txt` lists `<path> <ceiling>`; warns on test
+files over 1,000 lines; fails on prefix families (`x.rs`/`x/` + 2+ `x_*.rs` or
+3+ `x_*.rs`, and the same for `.ts`/`.tsx` with `-` or `_`); and warns above
+40 or fails above 60 non-test sources in a folder. `--update-exceptions`
+rewrites the size exception list to current sizes, only lowering ceilings
+unless given `--allow-raise`; `--warn-only` always exits 0.
 
 See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 `DEADBOLT_SIM_SEED`, `DEADBOLT_SIM_SEEDS`, `DEADBOLT_SIM_TRACE`,
