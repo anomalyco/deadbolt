@@ -345,3 +345,37 @@ fn generate_round_trips() {
         other => panic!("expected a password, got {other:?}"),
     }
 }
+
+/// Names in logs and traces are the wire's own.
+#[test]
+fn names_match_the_wire() {
+    for code in [
+        ErrorCode::Locked,
+        ErrorCode::NotInitialized,
+        ErrorCode::NotFound,
+        ErrorCode::DomainMismatch,
+        ErrorCode::Exists,
+        ErrorCode::Version,
+        ErrorCode::Weak,
+        ErrorCode::Forbidden,
+        ErrorCode::RateLimited,
+        ErrorCode::InteractionRequired,
+        ErrorCode::Cancelled,
+        ErrorCode::Failed,
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), code.name());
+    }
+    for json in [
+        r#"{"cmd":"status"}"#,
+        r#"{"cmd":"vault-list"}"#,
+        r#"{"cmd":"touch-id-set","enabled":true}"#,
+        r#"{"cmd":"unlock","passphrase":"hunter22","timeout_secs":null}"#,
+        r#"{"cmd":"sync-one-password","vault":null,"account":null,"op_vaults":[],"dry_run":true}"#,
+        r#"{"cmd":"autofill-status"}"#,
+        r#"{"cmd":"send-list"}"#,
+    ] {
+        let command: Command = serde_json::from_str(json).unwrap();
+        let tag = serde_json::from_str::<serde_json::Value>(json).unwrap()["cmd"].clone();
+        assert_eq!(tag, command.name(), "{json}");
+    }
+}

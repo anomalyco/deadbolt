@@ -7,6 +7,7 @@ pub mod file;
 pub mod paths;
 pub mod peer;
 pub mod protocol;
+pub mod telemetry;
 
 use std::fmt;
 use std::fs;

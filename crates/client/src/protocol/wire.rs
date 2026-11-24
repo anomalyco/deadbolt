@@ -120,6 +120,26 @@ pub enum ErrorCode {
     Failed,
 }
 
+impl ErrorCode {
+    /// The code's wire name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::NotInitialized => "not-initialized",
+            Self::NotFound => "not-found",
+            Self::DomainMismatch => "domain-mismatch",
+            Self::Exists => "exists",
+            Self::Version => "version",
+            Self::Weak => "weak",
+            Self::Forbidden => "forbidden",
+            Self::RateLimited => "rate-limited",
+            Self::InteractionRequired => "interaction-required",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {

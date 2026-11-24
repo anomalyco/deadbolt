@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, bail};
+use deadbolt_client::telemetry::Span;
 use deadbolt_net::PeerId;
 use tokio::io::AsyncWriteExt;
 
@@ -18,7 +19,25 @@ use super::{
 use crate::protocol::{Change, Command, Message, Reply};
 
 impl Daemon {
+    /// Runs `command` in a `daemon.command` span when telemetry is on. The
+    /// span names the command and the outcome, and an error's code, never
+    /// what the request carried or the error's message.
     pub(super) async fn dispatch(
+        self: Arc<Self>,
+        command: Command,
+        conv: &Conversation,
+    ) -> Result<Reply> {
+        let mut span = Span::root("daemon.command").attr("command", command.name());
+        let result = self.dispatch_command(command, conv).await;
+        match &result {
+            Ok(_) => span.ok(),
+            Err(error) => span.fail(crate::client::code(error).map(ErrorCode::name)),
+        }
+        span.end();
+        result
+    }
+
+    async fn dispatch_command(
         self: Arc<Self>,
         command: Command,
         conv: &Conversation,
