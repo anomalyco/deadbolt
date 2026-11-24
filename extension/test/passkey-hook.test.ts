@@ -63,7 +63,7 @@ function once<T>(items: T[]) {
 }
 
 const descriptors = (n: number) => Array.from({ length: n }, (_, i) => ({ type: "public-key", id: id(i) }))
-const user = { id: id(9), name: "kit", displayName: "Kit" }
+const user = { id: id(9), name: "alex", displayName: "Alex" }
 
 test("with the channel down, the browser gets every entry of a list the page could read only once", async () => {
   const { credentials, native } = await hooked()

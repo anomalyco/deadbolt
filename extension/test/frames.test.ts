@@ -67,8 +67,8 @@ describe("sendToFrame", () => {
   const target = { tabId: 1, frameId: 0, documentId: "top-doc", origin: "https://www.example.com" }
 
   test("delivers to the exact document", async () => {
-    expect(await sendToFrame(target, { type: "db:fill", values: { username: "kit" }, form: 1, approval: "a" })).toBe(true)
-    expect(delivered).toEqual([{ tabId: 1, message: { type: "db:fill", values: { username: "kit" }, form: 1, approval: "a" }, options: { documentId: "top-doc" } }])
+    expect(await sendToFrame(target, { type: "db:fill", values: { username: "alex" }, form: 1, approval: "a" })).toBe(true)
+    expect(delivered).toEqual([{ tabId: 1, message: { type: "db:fill", values: { username: "alex" }, form: 1, approval: "a" }, options: { documentId: "top-doc" } }])
   })
 
   test("not after the frame navigated to another document", async () => {

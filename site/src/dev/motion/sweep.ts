@@ -11,19 +11,19 @@
 // --check exits 1 when any candidate scores global.checkMinScore or more. --commit names a tree that isn't a git
 // checkout (an old commit's `git archive`); --hold-at-end draws the dim-out at the last step, as before f715c1c.
 //
-// Needs motion-lint checked out beside deadbolt (~/code/open-source/motion-lint), or MOTION_LINT_DIR.
-// Traces go to <out> (default: a temp dir) as a motion-lint sweep: `motion-lint analyze <out> --config site/src/dev/motion-lint.config.json`.
+// Needs motion-lint checked out beside deadbolt, or MOTION_LINT_DIR.
+// Traces go to <out> (default: a temp dir) as a motion-lint sweep: `motion-lint analyze <out> --config site/src/dev/motion/lint.config.json`.
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import * as React from "react"
-import { emptyLight } from "../story/light"
-import { smoothstep, span } from "../story/motion"
-import { storyApi } from "../story/Story"
-import { cardCollector, createLightProbe, storyNameOf } from "./light-channels"
+import { emptyLight } from "../../story/light"
+import { smoothstep, span } from "../../story/motion"
+import { storyApi } from "../../story/Story"
+import { cardCollector, createLightProbe, storyNameOf } from "../light-channels"
 
-const site = resolve(import.meta.dir, "../..")
+const site = resolve(import.meta.dir, "../../..")
 const motionLint = process.env.MOTION_LINT_DIR ?? resolve(site, "../../motion-lint")
 if (!existsSync(join(motionLint, "src/web/index.ts"))) {
   console.error(`motion-sweep: no motion-lint at ${motionLint} (clone github.com/kitlangton/motion-lint beside deadbolt, or set MOTION_LINT_DIR)`)
@@ -38,7 +38,7 @@ const has = (name: string) => args.includes(`--${name}`)
 const dt = Number(flag("dt") ?? 1 / 120)
 const top = Number(flag("top") ?? 10)
 const only = flag("scene")
-const configPath = flag("config") ?? join(import.meta.dir, "motion-lint.config.json")
+const configPath = flag("config") ?? join(import.meta.dir, "lint.config.json")
 const { config } = loadConfig(configPath)
 
 // Story.tsx's loop (not exported): the scene dims out over FADE after its last step while its clock keeps running,

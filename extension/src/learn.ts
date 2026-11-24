@@ -257,7 +257,7 @@ export const clip = (s: string | null | undefined, n = MAX_TEXT) => (s ?? "").re
 /**
  * Page text with anything that may be the user's own taken out: email
  * addresses, runs of four or more digits, and the values typed in this
- * document (a step 2 that says "Signed in as kit" names the username).
+ * document (a step 2 that says "Signed in as alex" names the username).
  */
 export const scrub = (text: string, typed: Iterable<string> = []): string => scrubber(typed)(text)
 

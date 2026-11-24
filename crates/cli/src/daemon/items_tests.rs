@@ -51,7 +51,7 @@ fn codes_come_from_the_otp_field() {
     let mut s = loaded(dir.path());
     // RFC 6238's SHA-1 secret, "12345678901234567890".
     let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
-    let otp = format!("otpauth://totp/Site:dax?secret={secret}&digits=8&issuer=Site");
+    let otp = format!("otpauth://totp/Site:sam?secret={secret}&digits=8&issuer=Site");
     let fields = vec![input("password", "pw"), input("otp", &otp)];
     create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
     let code = code(&s, None, &words("site"), Duration::from_millis(59_250)).unwrap();
@@ -222,12 +222,12 @@ fn imports_skip_duplicates_and_a_dry_run_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = loaded(dir.path());
     let export = "name,url,username,password\n\
-        GitHub,https://github.com/login,dax,pw-1\n\
-        GitHub again,https://www.GitHub.com/,dax,pw-1\n\
-        Other user,https://github.com,kit,pw-1\n\
-        New password,https://github.com,dax,pw-2\n\
-        No url,,dax,pw-1\n\
-        No url again,not a url,dax,pw-1\n\
+        GitHub,https://github.com/login,sam,pw-1\n\
+        GitHub again,https://www.GitHub.com/,sam,pw-1\n\
+        Other user,https://github.com,alex,pw-1\n\
+        New password,https://github.com,sam,pw-2\n\
+        No url,,sam,pw-1\n\
+        No url again,not a url,sam,pw-1\n\
         Prod DB,,postgres,pg-pw\n\
         Staging DB,,postgres,pg-pw\n\
         Prod DB,,postgres,pg-pw\n\
@@ -287,7 +287,7 @@ fn sign_in_export(with_account: bool, with_rest: bool) -> String {
         items.push(
             r#"{"uuid": "gacct", "state": "active", "categoryUuid": "001", "updatedAt": 1,
               "details": {"loginFields": [
-                {"value": "dax@gmail.com", "designation": "username"},
+                {"value": "sam@gmail.com", "designation": "username"},
                 {"value": "google-pw", "fieldType": "P", "designation": "password"}]},
               "overview": {"title": "Google", "url": "https://accounts.google.com"}}"#
                 .to_string(),
@@ -611,8 +611,8 @@ fn notes_ssh_keys_and_identities_import_once() {
         {"type": 2, "name": "Alarm", "notes": "code 5678"},
         {"type": 5, "name": "Deploy", "sshKey": {"privateKey": "-----BEGIN KEY-----\nabc\n"}},
         {"type": 5, "name": "Deploy copy", "sshKey": {"privateKey": "-----BEGIN KEY-----\nabc"}},
-        {"type": 4, "name": "Me", "identity": {"firstName": "Dax", "email": "dax@example.com"}},
-        {"type": 4, "name": "Me", "identity": {"firstName": "Dax", "email": "dax@example.com"}}
+        {"type": 4, "name": "Me", "identity": {"firstName": "Sam", "email": "sam@example.com"}},
+        {"type": 4, "name": "Me", "identity": {"firstName": "Sam", "email": "sam@example.com"}}
     ]}"#;
     let report = import(&mut s, export, true);
     assert_eq!(
@@ -707,9 +707,9 @@ fn search_skips_the_derived_label() {
     let key = item(
         "ssh",
         None,
-        &[("private-key", "k"), ("comment", "dax@laptop")],
+        &[("private-key", "k"), ("comment", "sam@laptop")],
     );
-    assert_eq!(label(&key), "dax@laptop");
+    assert_eq!(label(&key), "sam@laptop");
     assert!(matches(&key, &q(&["laptop"]), false));
     let printed = item(
         "ssh",
@@ -722,23 +722,23 @@ fn search_skips_the_derived_label() {
         "identity",
         Some("Me"),
         &[
-            ("given-name", "Dax"),
-            ("family-name", "Raad"),
-            ("email", "dax@example.com"),
+            ("given-name", "Sam"),
+            ("family-name", "Rivera"),
+            ("email", "sam@example.com"),
         ],
     );
-    assert_eq!(detail(&me).as_deref(), Some("dax@example.com"));
-    assert!(matches(&me, &q(&["raad", "example"]), false));
+    assert_eq!(detail(&me).as_deref(), Some("sam@example.com"));
+    assert!(matches(&me, &q(&["rivera", "example"]), false));
     let unnamed = item(
         "identity",
         None,
-        &[("given-name", "Dax"), ("family-name", "Raad")],
+        &[("given-name", "Sam"), ("family-name", "Rivera")],
     );
-    assert_eq!(label(&unnamed), "Dax Raad");
+    assert_eq!(label(&unnamed), "Sam Rivera");
     // One made before names had parts still reads by its old name.
-    let legacy = item("identity", None, &[("name", "Kit Langton")]);
-    assert_eq!(label(&legacy), "Kit Langton");
-    assert!(matches(&legacy, &q(&["langton"]), false));
+    let legacy = item("identity", None, &[("name", "Alex Mercer")]);
+    assert_eq!(label(&legacy), "Alex Mercer");
+    assert!(matches(&legacy, &q(&["mercer"]), false));
     let phone = item("identity", None, &[("phone", "+1 555 0100")]);
     assert!(matches(&phone, &q(&["0100"]), false));
     // The type word and the label's filler match no item, branded or not.
@@ -770,11 +770,15 @@ fn login_labels_use_the_browser_title_rules() {
             vec![("url", "https://[2001:DB8::1]")],
             "[2001:db8::1]",
         ),
-        (None, vec![("url", "not a url"), ("username", "kit")], "kit"),
         (
             None,
-            vec![("url", "https://www."), ("username", "kit")],
-            "kit",
+            vec![("url", "not a url"), ("username", "alex")],
+            "alex",
+        ),
+        (
+            None,
+            vec![("url", "https://www."), ("username", "alex")],
+            "alex",
         ),
         (None, vec![("url", "https://www.")], "login"),
         (None, vec![("password", "never a title")], "login"),

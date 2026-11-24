@@ -357,7 +357,7 @@ mod tests {
     fn requests_are_checked_for_shape() {
         let ok = serde_json::json!({
             "origin": "https://example.com", "rpId": "example.com",
-            "challenge": "AAAAAAAAAAAAAAAAAAAAAA", "user": {"id": "a2l0", "name": "kit"},
+            "challenge": "AAAAAAAAAAAAAAAAAAAAAA", "user": {"id": "YWxleA", "name": "alex"},
             "exclude": [], "userVerification": "preferred",
         });
         let Ok(Command::PasskeyCreate { verify, .. }) = create(ok.clone()) else {

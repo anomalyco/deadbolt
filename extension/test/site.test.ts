@@ -28,7 +28,7 @@ describe("fillableOrigin", () => {
   })
 
   test("other schemes never", () => {
-    expect(fillableOrigin(u("file:///Users/kit/login.html"))).toBe(false)
+    expect(fillableOrigin(u("file:///Users/alex/login.html"))).toBe(false)
     expect(fillableOrigin(u("chrome://settings/"))).toBe(false)
     expect(fillableOrigin(u("data:text/html,<input type=password>"))).toBe(false)
   })
@@ -105,7 +105,7 @@ describe("saveTitle", () => {
     expect(saveTitle("Create your account · Acme", "vogel.dev")).toBe("Acme")
     expect(saveTitle("Sign in - Google Accounts", "google.com")).toBe("Google Accounts")
     expect(saveTitle("Amazon Sign-In", "amazon.com")).toBe("Amazon")
-    expect(saveTitle("Kit's Notes", "notes.example")).toBe("Kit's Notes")
+    expect(saveTitle("Alex's Notes", "notes.example")).toBe("Alex's Notes")
     expect(saveTitle("Pay-as-you-go plans", "example.com")).toBe("Pay-as-you-go plans")
   })
 
@@ -177,7 +177,7 @@ describe("sameSiteChain (a frame's login field and the inline menu)", () => {
   test("a cross-site frame is refused", () => {
     expect(chain("https://idmsa.apple.com/", "https://evil.example/")).toBe(false)
     // Private-section public suffixes are their own sites.
-    expect(chain("https://kit.github.io/", "https://evil.github.io/")).toBe(false)
+    expect(chain("https://alex.github.io/", "https://evil.github.io/")).toBe(false)
   })
 
   test("a same-site frame nested in a cross-site frame is refused", () => {

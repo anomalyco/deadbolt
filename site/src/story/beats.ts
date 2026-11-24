@@ -1,5 +1,5 @@
 import type { Light, Tone } from "./light"
-import type { Flight, SceneCue } from "../sound"
+import type { Flight, SceneCue } from "../sound/useCues"
 import { DARK, clamp01, cooling, ease, flash, smootherInverse, smootherstep, smoothstep, span, type Box, type Point } from "./motion"
 import { coolingScale, shutter } from "./tuning"
 

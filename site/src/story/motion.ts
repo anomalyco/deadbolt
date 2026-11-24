@@ -40,7 +40,7 @@ export const ease = {
 
 export type Spring = { duration: number; bounce: number }
 
-/** Kit's palette, as visual duration and bounce (bounce 0 by default). */
+/** Motion palette, as visual duration and bounce (bounce 0 by default). */
 export const springs = {
   instant: { duration: .1, bounce: 0 },
   snappy: { duration: .25, bounce: 0 },

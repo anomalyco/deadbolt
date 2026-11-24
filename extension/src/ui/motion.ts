@@ -8,7 +8,7 @@
 // frame, for geometry that follows a moving target and carries its speed
 // when the target changes.
 
-/** ω for a spring that settles in `duration` seconds (Kit's: ω = 2π / duration, ζ = 1 − bounce). */
+/** ω for a spring that settles in `duration` seconds (ω = 2π / duration, ζ = 1 − bounce). */
 const omega = (duration: number) => (2 * Math.PI) / duration
 
 /** How far a critically damped spring has gone at time t (0 → 1). */

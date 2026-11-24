@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::common::*;
+use crate::support::*;
 use deadbolt_net::{Error, NodeConfig, SyncOutcome};
 use tokio::sync::Notify;
 

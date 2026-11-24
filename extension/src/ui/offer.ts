@@ -75,7 +75,7 @@ export function offerCard(offer: SaveOffer, tabId: number | undefined, render: (
   return card
 }
 
-/** "Save card for shop.com?", "Update phone for Kit Langton?", "Update Visa •••• 4242?": a form offer's heading in the popup. */
+/** "Save card for shop.com?", "Update phone for Alex Mercer?", "Update Visa •••• 4242?": a form offer's heading in the popup. */
 function formHeading(offer: SaveOffer): string | null {
   if (!offer.what) return null
   if (!offer.update) return `Save ${FORM_WORDS[offer.what].noun} for ${offer.site}?`

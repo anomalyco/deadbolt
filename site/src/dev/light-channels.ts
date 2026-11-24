@@ -13,7 +13,7 @@ import { DARK, type Box, type Point } from "../story/motion"
 //   print <card> <tone>.level, .churn, .open, .visible   a printed band: its ink, a hatch's scroll, its cleared disc
 //   light:dot, light:ring elements           heads, embers, sparks; rings opening and closing
 //
-// Used by the clock sweep (motion-sweep.ts) and the live recorder (motion-lint-live.ts). The channel and element
+// Used by the clock sweep (motion/sweep.ts) and the live recorder (motion/lint-live.ts). The channel and element
 // shapes match motion-lint's trace writer; this file doesn't import motion-lint so it builds without it.
 //
 // It reads a frame the way light.ts's pack does (a mirror: pack keeps its budget private): nothing at or under

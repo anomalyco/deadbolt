@@ -8,7 +8,7 @@ import { fakeHost, installChrome, pageSender, type FakeChrome } from "./chrome"
 describe("what a typed value shows", () => {
   test("shapes", () => {
     expect(shapeOf("anything", "password")).toBe("secret")
-    expect(shapeOf(" kit@example.com ", "text")).toBe("email")
+    expect(shapeOf(" alex@example.com ", "text")).toBe("email")
     expect(shapeOf("492039", "text")).toBe("digits")
     expect(shapeOf("+1 (555) 010-2030", "tel")).toBe("phone")
     expect(shapeOf("5550102030", "text")).toBe("phone")
@@ -32,7 +32,7 @@ describe("what a typed value shows", () => {
   })
 
   test("page text loses what may be the user's", () => {
-    expect(scrub("Welcome back, Octocat (kit@example.com), card 4242", ["octocat"])).toBe("Welcome back, <typed> (<email>), card <n>")
+    expect(scrub("Welcome back, Octocat (alex@example.com), card 4242", ["octocat"])).toBe("Welcome back, <typed> (<email>), card <n>")
     expect(scrub("Enter the code sent to ••••1234")).toBe("Enter the code sent to ••••<n>")
     expect(scrub("a.b+c (1)", ["a.b+c"])).toBe("<typed> (1)")
   })
@@ -147,7 +147,7 @@ describe("Learner", () => {
   test("a step says whether the typed value was a saved username, then drops the digest", async () => {
     await learner.start(1)
     const { id, salt } = broadcast()[0]!
-    const saved = await usernameDigest(salt, "Kit@Example.com")
+    const saved = await usernameDigest(salt, "Alex@Example.com")
     expect(await learner.step(pageSender(), id, step({ order: 1, shape: "email", length: "9-16", digest: saved, truth: "email" }))).toBe(true)
     expect(await learner.step(pageSender({ frameId: 4, origin: "https://login.other.net", url: "https://login.other.net/" }), id, step({ order: 1, shape: "email", length: "9-16", digest: "0".repeat(64), truth: "email" }, { frame: { top: false, depth: 1, origin: "https://login.other.net", path: "/", queryKeys: [] } }))).toBe(true)
     // A frame on another site that says it's on the page's site isn't taken at its word.
@@ -358,7 +358,7 @@ describe("Learner", () => {
   test("the timeline: frames' events, checked and bounded, then Chrome's navigations and popups, in batches", async () => {
     await learner.start(1)
     const { id } = broadcast()[0]!
-    const button = { tag: "button", type: "submit", text: "Continue", path: "form#login > button", value: "kit@example.com" }
+    const button = { tag: "button", type: "submit", text: "Continue", path: "form#login > button", value: "alex@example.com" }
     expect(
       await learner.events(pageSender(), id, [
         { t: 10, type: "click", target: button, x: 120.4, y: 80, secret: "correct horse" },
@@ -385,7 +385,7 @@ describe("Learner", () => {
       expect.objectContaining({ type: "signed-in" }),
     ])
     const all = JSON.stringify(lines)
-    for (const never of ["kit@example.com", "correct horse", "s3cr3t", "quietzone", "frag"]) expect(all).not.toContain(never)
+    for (const never of ["alex@example.com", "correct horse", "s3cr3t", "quietzone", "frag"]) expect(all).not.toContain(never)
     expect(lines.at(-1)?.line).toMatchObject({ event: "end", events: 7 })
   })
 

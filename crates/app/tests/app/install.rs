@@ -251,7 +251,7 @@ fn the_manual_path_stays_under_the_title_bar() {
     let mut rt = runtime("install-command");
     rt.update(|s, _| {
         let i = s.installer.as_mut().unwrap();
-        i.error = Some("Couldn't link /Users/dax/.local/bin/deadbolt: permission denied.".into());
+        i.error = Some("Couldn't link /Users/sam/.local/bin/deadbolt: permission denied.".into());
         let scan = i.scan.as_mut().unwrap();
         scan.manual = true;
         scan.on_path = false;

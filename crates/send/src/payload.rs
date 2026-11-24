@@ -248,7 +248,7 @@ mod tests {
                 Node::Group(Group {
                     name: Some("github".into()),
                     entries: vec![
-                        Node::Entry(Entry::text("username", "dax", false)),
+                        Node::Entry(Entry::text("username", "sam", false)),
                         Node::Group(Group::default()),
                     ],
                 }),

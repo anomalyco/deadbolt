@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn only_deadbolt_ui_and_the_bundles_own_executable_run_the_app_here() {
-        let cli = Path::new("/home/kit/.local/bin/deadbolt");
+        let cli = Path::new("/home/alex/.local/bin/deadbolt");
         let ui = argv(&["deadbolt", "ui", "--scene", "vault"]);
         assert_eq!(
             ui_args(&ui, Some(cli), false),
@@ -489,17 +489,17 @@ mod tests {
 
     #[test]
     fn an_app_outside_applications_gets_a_link_in_the_users() {
-        let home = Path::new("/Users/kit");
+        let home = Path::new("/Users/alex");
         let npm =
             Path::new("/opt/homebrew/lib/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app");
         let nothing = |_: &Path| false;
         assert_eq!(
             applications_link(npm, home, nothing),
-            Some(PathBuf::from("/Users/kit/Applications/Deadbolt.app"))
+            Some(PathBuf::from("/Users/alex/Applications/Deadbolt.app"))
         );
         // Either Applications folder already has a Deadbolt (a link included).
         for there in [
-            "/Users/kit/Applications/Deadbolt.app",
+            "/Users/alex/Applications/Deadbolt.app",
             "/Applications/Deadbolt.app",
         ] {
             assert_eq!(
@@ -510,7 +510,7 @@ mod tests {
         // Already in one, or somewhere it can't stay.
         for bundle in [
             "/Applications/Deadbolt.app",
-            "/Users/kit/Applications/Deadbolt.app",
+            "/Users/alex/Applications/Deadbolt.app",
             "/Volumes/Deadbolt/Deadbolt.app",
             "/private/var/folders/x/AppTranslocation/y/d/Deadbolt.app",
         ] {

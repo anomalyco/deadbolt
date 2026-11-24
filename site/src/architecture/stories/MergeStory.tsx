@@ -120,7 +120,7 @@ function Merge({ t, light, story }: { t: number; light: Light; story: StoryApi }
     <Frame id="item" box={itemBox} t={t} story={story} light={light} label="github" detail="login" heat={itemHeat} headerY={itemBox[1] + 22}>
       <line x1={itemBox[0] + 14} x2={itemBox[0] + itemBox[2] - 14} y1={itemBox[1] + 40} y2={itemBox[1] + 40} stroke="#1f1f1f" />
       <text x={itemBox[0] + 18} y={itemBox[1] + 60} dominantBaseline="middle" className="story-note" fill={shade("#6a6a6a", ["#a8a49c", itemLit])}>username</text>
-      <text x={itemBox[0] + 124} y={itemBox[1] + 60} dominantBaseline="middle" className="story-entry" fill={shade("#8a867e", ["#e8e4dc", itemLit])}>kit</text>
+      <text x={itemBox[0] + 124} y={itemBox[1] + 60} dominantBaseline="middle" className="story-entry" fill={shade("#8a867e", ["#e8e4dc", itemLit])}>alex</text>
       <text x={itemBox[0] + 18} y={itemBox[1] + 82} dominantBaseline="middle" className="story-note" fill={shade("#6a6a6a", ["#a8a49c", itemLit])}>password</text>
       <text x={itemBox[0] + 124} y={itemBox[1] + 82} dominantBaseline="middle" className="story-entry" fill={shade("#9a968e", ["#fff1dc", Math.max(itemLit, itemHeat)])}>{passwordVal}</text>
       {expand > .02 && <>

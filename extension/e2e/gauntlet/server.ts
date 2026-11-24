@@ -44,14 +44,14 @@ function seed(): Seed {
   if (existsSync(SEED)) return JSON.parse(readFileSync(SEED, "utf8"))
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_!"
   const password = Array.from({ length: 18 }, () => alphabet[randomInt(alphabet.length)]).join("")
-  const username = "kit@gauntlet.demo"
+  const username = "alex@gauntlet.demo"
   const s: Seed = {
     url: PUBLIC,
     title: "Gauntlet",
     username,
     password,
     otpauth: `otpauth://totp/Gauntlet:${username}?secret=${b32(randomBytes(20))}&issuer=Gauntlet`,
-    aliases: { phone: "+1 415 555 0123", customerNumber: "40021987", username: "kit" },
+    aliases: { phone: "+1 415 555 0123", customerNumber: "40021987", username: "alex" },
     pin: String(randomInt(100000, 1000000)),
     keypadPin: KEYPAD_PIN,
     birthday: "1990-07-04",

@@ -150,10 +150,10 @@ mod tests {
             short: id.into(),
             kind: "login".into(),
             label: id.into(),
-            detail: Some("dax".into()),
+            detail: Some("sam".into()),
             fields: vec![
                 field("password", "secret", "hunter2"),
-                field("username", "text", "dax"),
+                field("username", "text", "sam"),
                 field("otp", "otp", ""),
             ],
             source: None,
@@ -170,7 +170,7 @@ mod tests {
         let page = cache.get("a").unwrap();
         let value = |name: &str| &page.fields.iter().find(|f| f.name == name).unwrap().value;
         assert_eq!(value("password"), "");
-        assert_eq!(value("username"), "dax");
+        assert_eq!(value("username"), "sam");
         assert_eq!(page.fields.len(), 3, "every field keeps its place");
     }
 

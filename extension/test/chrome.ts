@@ -246,7 +246,7 @@ function fakeIndexedDB(fake: FakeChrome) {
 export const NO_FACTS: PageFacts = { loginForm: false, passwordEmpty: false, mfa: false, error: false, challenge: false, account: false, signOut: false, loginish: false }
 
 export const ACCOUNTS: Account[] = [
-  { ref: `${"a".repeat(64)}:${"1".repeat(32)}`, vault: "Personal", title: "Example", username: "kit@example.com", hasPassword: true, hasTotp: true, urls: [] },
+  { ref: `${"a".repeat(64)}:${"1".repeat(32)}`, vault: "Personal", title: "Example", username: "alex@example.com", hasPassword: true, hasTotp: true, urls: [] },
   { ref: `${"a".repeat(64)}:${"2".repeat(32)}`, vault: "Work", title: "Example admin", username: "admin", hasPassword: true, hasTotp: false, urls: [] },
 ]
 
@@ -254,11 +254,11 @@ export const ACCOUNTS: Account[] = [
 export const HOME_REF = `${"c".repeat(64)}:${"1".repeat(32)}`
 export const VISA_REF = `${"c".repeat(64)}:${"3".repeat(32)}`
 export const HOME_VALUES: Record<string, string> = {
-  "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "+14155550123",
+  "given-name": "Alex", "family-name": "Mercer", email: "alex@example.com", phone: "+14155550123",
   "address-line1": "123 Main St", city: "Brooklyn", region: "NY", "postal-code": "11201", country: "US",
 }
-export const IDENTITIES: FormIdentity[] = [{ ref: HOME_REF, vault: "Personal", title: "Home", summary: "Kit Langton · 123 Main St, Brooklyn", fields: Object.keys(HOME_VALUES) as FormIdentity["fields"] }]
-export const CARDS: FormCard[] = [{ ref: VISA_REF, vault: "Personal", title: "Visa •••• 4242", brand: "Visa", last4: "4242", expiry: "2028-08", cardholder: "Kit Langton", fields: ["number", "expiry", "cardholder", "brand"] }]
+export const IDENTITIES: FormIdentity[] = [{ ref: HOME_REF, vault: "Personal", title: "Home", summary: "Alex Mercer · 123 Main St, Brooklyn", fields: Object.keys(HOME_VALUES) as FormIdentity["fields"] }]
+export const CARDS: FormCard[] = [{ ref: VISA_REF, vault: "Personal", title: "Visa •••• 4242", brand: "Visa", last4: "4242", expiry: "2028-08", cardholder: "Alex Mercer", fields: ["number", "expiry", "cardholder", "brand"] }]
 
 export interface FakeHost {
   host: VaultBackend
@@ -268,7 +268,7 @@ export interface FakeHost {
   holdFills(): () => void
 }
 
-/** A host with two saved logins: kit@example.com / "correct horse" (with a code) and admin / "hunter2". */
+/** A host with two saved logins: alex@example.com / "correct horse" (with a code) and admin / "hunter2". */
 export function fakeHost(): FakeHost {
   const requests: Request[] = []
   const listeners: Array<(s: Status) => void> = []
@@ -286,7 +286,7 @@ export function fakeHost(): FakeHost {
           return { type: "list", site: "example.com", accounts: ACCOUNTS }
         case "fill":
           await held
-          return { type: "fill", username: "kit@example.com", password: "correct horse", totp: "492039" }
+          return { type: "fill", username: "alex@example.com", password: "correct horse", totp: "492039" }
         case "check": {
           // Without a username, by password alone: "same" or nothing.
           if (req.username === undefined) return { type: "check", status: req.password === "hunter2" ? "same" : "new", matches: req.password === "hunter2" ? [ACCOUNTS[1].ref] : [] }

@@ -10,11 +10,14 @@ license = "UNLICENSED"
 rust-version = "1.91"
 
 [workspace.lints.rust]
+# shared-lints begin
 unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
+# shared-lints end
 
 [workspace.lints.clippy]
+# shared-lints begin
 await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"
 dbg_macro = "deny"
@@ -25,11 +28,14 @@ let_underscore_must_use = "deny"
 todo = "warn"
 undocumented_unsafe_blocks = "deny"
 unwrap_used = "warn"
+# shared-lints end
 
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+debug = "line-tables-only"
+split-debuginfo = "packed"
 
 # Full debuginfo was ~90% of every test binary. Line tables keep file:line in
 # backtraces; for a debugger session, run with CARGO_PROFILE_DEV_DEBUG=full.

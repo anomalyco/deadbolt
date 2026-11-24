@@ -761,7 +761,7 @@ fn live_neighbors_skip_deleted_ids_on_both_sides() {
 fn items_set_delete_and_restore() {
     let mut a = Dev::create();
     let fields = [
-        ("username".into(), text("dax")),
+        ("username".into(), text("sam")),
         ("password".into(), secret("one")),
     ];
     let (item, _) = a
@@ -1078,7 +1078,7 @@ fn schema_is_enforced_at_commit() {
         ("expiry", Field::new(FieldType::Month, "2027-04")),
         ("cvv", secret("1234")),
         ("brand", text("Visa")),
-        ("cardholder", text("Dax")),
+        ("cardholder", text("Sam")),
         ("site", Field::new(FieldType::Url, "https://bank.example")),
         ("recovery", secret("words")),
     ]);
@@ -1088,7 +1088,7 @@ fn schema_is_enforced_at_commit() {
 
     // Valid: a login without a password, a note, an identity with a birthday.
     a.write(vec![
-        create("login", vec![("username", text("dax"))]),
+        create("login", vec![("username", text("sam"))]),
         create("note", vec![("notes", secret("line one\nline two"))]),
         create(
             "identity",
@@ -1152,7 +1152,7 @@ fn schema_is_enforced_at_commit() {
     }
     // One bad op rejects the whole entry.
     let mixed = vec![
-        DataOp::set(item, "username", text("dax")),
+        DataOp::set(item, "username", text("sam")),
         DataOp::remove(card, "number"),
     ];
     assert!(a.vault.write(&a.secret, mixed).is_err());
@@ -1174,7 +1174,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
 
     a.raw(vec![
         DataOp::remove(item, "Bad Name"),
-        DataOp::set(item, "username", text("dax")),
+        DataOp::set(item, "username", text("sam")),
         DataOp::set(item, "password", text("wrong type")),
         DataOp::set(item, "url", Field::new(FieldType::Url, "not a url")),
         DataOp::name(item, Some(String::new())),
@@ -1212,7 +1212,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
     assert_eq!(got.kind, "login");
     assert_eq!(got.name.as_deref(), Some("Work"));
     assert_eq!(got.fields["password"], secret("orig"));
-    assert_eq!(value(&got, "username"), "dax");
+    assert_eq!(value(&got, "username"), "sam");
     assert_eq!(value(&got, "notes"), "from c");
     assert_eq!(got.fields["otp"].kind, FieldType::Otp);
     assert!(!got.fields.contains_key("url") && !got.fields.contains_key("x"));
@@ -1224,7 +1224,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
     // Ignored ops leave no trace in the history.
     assert!(vault.history(&item).iter().all(|v| match &v.change {
         Change::Remove { field } => field != "Bad Name",
-        Change::Set { value, .. } => value.kind != FieldType::Text || value.value == "dax",
+        Change::Set { value, .. } => value.kind != FieldType::Text || value.value == "sam",
         _ => true,
     }));
     assert_eq!(vault.items().len(), 2);
@@ -1333,7 +1333,7 @@ fn concurrent_edits_pick_hash_winner_and_keep_loser() {
     let mut a = Dev::create();
     let mut b = a.invite();
     let item = a.login("p0");
-    a.set(item, "username", "dax");
+    a.set(item, "username", "sam");
     sync(&a, &mut b);
     let ea = a.set(item, "password", "from-a");
     let eb = b.set(item, "password", "from-b");
@@ -1385,12 +1385,12 @@ fn concurrent_edits_to_different_fields_both_survive() {
     let mut a = Dev::create();
     let item = a.login("p");
     let mut b = a.invite();
-    a.set(item, "username", "dax");
+    a.set(item, "username", "sam");
     b.set(item, "url", "https://github.com");
     sync_both(&mut a, &mut b);
     for vault in [&a.vault, &b.vault] {
         let got = vault.item(&item).unwrap();
-        assert_eq!(value(&got, "username"), "dax");
+        assert_eq!(value(&got, "username"), "sam");
         assert_eq!(value(&got, "url"), "https://github.com");
     }
 }

@@ -1,6 +1,6 @@
 # Deadbolt proposal — revision 1: no Deadbolt-run infrastructure
 
-2026-10-15, after dax: "dropping data is not a disqualifier. I don't think we want to run any of our own infrastructure for this, ideally. We can in the future run our own relays that guarantee data availability."
+2026-10-15, design constraint: "dropping data is not a disqualifier. I don't think we want to run any of our own infrastructure for this, ideally. We can in the future run our own relays that guarantee data availability."
 
 Supersedes §6 (Transports) and parts of §5 (Recovery) of `04-proposal.md`.
 

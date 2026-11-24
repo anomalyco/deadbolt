@@ -783,7 +783,7 @@ mod tests {
                     FieldInput {
                         name: "username".into(),
                         kind: None,
-                        value: "kit".into(),
+                        value: "alex".into(),
                     },
                     FieldInput {
                         name: "password".into(),
@@ -830,7 +830,7 @@ mod tests {
         for row in &rows {
             let text = String::from_utf8_lossy(&row.bytes);
             assert!(!text.contains(SECRET), "a value was stored: {text}");
-            assert!(!text.contains("\"kit\""), "a value was stored: {text}");
+            assert!(!text.contains("\"alex\""), "a value was stored: {text}");
         }
         let entries = stored(&daemon);
         let commands: Vec<_> = entries.iter().map(|e| e.command.as_str()).collect();

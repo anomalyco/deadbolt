@@ -1,6 +1,6 @@
 # Welcome screen concept
 
-Status: concept, not built. A prototype of the desktop app's first screen, from a design session with Dax (2026-10-29).
+Status: concept, not built. A prototype of the desktop app's first screen (2026-10-29).
 
 Open `index.html` in a browser (a static file, no build). Move the cursor around and hover the two rows.
 

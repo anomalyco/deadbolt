@@ -241,7 +241,7 @@ mod tests {
 
     fn uri(secret: &[u8], algorithm: &str) -> String {
         format!(
-            "otpauth://totp/Example:dax?secret={}&algorithm={algorithm}&digits=8&period=30&issuer=Example",
+            "otpauth://totp/Example:sam?secret={}&algorithm={algorithm}&digits=8&period=30&issuer=Example",
             BASE32_NOPAD.encode(secret)
         )
     }
@@ -315,7 +315,7 @@ mod tests {
     fn uris_ignore_label_issuer_and_case() {
         let canonical = Totp::parse("JBSWY3DPEHPK3PXP").unwrap();
         for variant in [
-            "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
+            "otpauth://totp/GitHub:sam?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
             "OTPAUTH://TOTP/x?SECRET=jbswy3dpehpk3pxp&Algorithm=sha1",
             "otpauth://totp/a%20b?issuer=A&secret=JBSW%20Y3DP+EHPK3PXP%3D%3D",
             "otpauth://totp?secret=JBSWY3DPEHPK3PXP&image=https://x.test/a.png",

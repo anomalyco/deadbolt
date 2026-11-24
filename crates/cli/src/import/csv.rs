@@ -181,8 +181,8 @@ mod tests {
     #[test]
     fn maps_an_apple_passwords_export() {
         let export = "Title,URL,Username,Password,Notes,OTPAuth
-example.com (dax),https://example.com/login,dax,\"apple,pw,1\",\"line one
-line two, with \"\"quotes\"\"\",otpauth://totp/Example:dax?secret=JBSWY3DPEHPK3PXP
+example.com (sam),https://example.com/login,sam,\"apple,pw,1\",\"line one
+line two, with \"\"quotes\"\"\",otpauth://totp/Example:sam?secret=JBSWY3DPEHPK3PXP
 Site,site.example,,apple-pw-2,,JBSWY3DPEHPK3PXP
 No password,https://nopw.example,someone,,,
 ,,,apple-pw-3,,
@@ -191,7 +191,7 @@ No password,https://nopw.example,someone,,,
         let (items, report) = parse(export).unwrap();
         assert_eq!(report.source, ImportSource::ApplePasswords);
         assert_eq!(items.len(), 4);
-        assert_eq!(items[0].name.as_deref(), Some("example.com (dax)"));
+        assert_eq!(items[0].name.as_deref(), Some("example.com (sam)"));
         assert_eq!(
             fields(&items[0]),
             [
@@ -199,11 +199,11 @@ No password,https://nopw.example,someone,,,
                 (
                     "otp",
                     "otp",
-                    "otpauth://totp/Example:dax?secret=JBSWY3DPEHPK3PXP"
+                    "otpauth://totp/Example:sam?secret=JBSWY3DPEHPK3PXP"
                 ),
                 ("password", "secret", "apple,pw,1"),
                 ("url", "url", "https://example.com/login"),
-                ("username", "text", "dax"),
+                ("username", "text", "sam"),
             ]
         );
         assert_eq!(
@@ -233,8 +233,8 @@ No password,https://nopw.example,someone,,,
     #[test]
     fn maps_a_1password_csv_export() {
         let export = "Title,Url,Username,Password,OTPAuth,Favorite,Archived,Tags,Notes
-GitHub,https://github.com,dax,op-csv-pw,,true,false,\"work,dev\",a note
-Old,https://old.example,dax,op-old-pw,,false,true,,
+GitHub,https://github.com,sam,op-csv-pw,,true,false,\"work,dev\",a note
+Old,https://old.example,sam,op-old-pw,,false,true,,
 ";
         let (items, report) = parse(export).unwrap();
         assert_eq!(report.source, ImportSource::OnePassword);
@@ -244,7 +244,7 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
                 ("notes", "note", "a note"),
                 ("password", "secret", "op-csv-pw"),
                 ("url", "url", "https://github.com"),
-                ("username", "text", "dax"),
+                ("username", "text", "sam"),
             ]
         );
         assert!(items[0].favorite);
@@ -264,7 +264,7 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
     #[test]
     fn maps_browser_exports() {
         let chrome = "name,url,username,password,note\r\n\
-            Example,https://example.com/,dax,chrome-pw,\r\n\
+            Example,https://example.com/,sam,chrome-pw,\r\n\
             ,android://abc@com.example.app/,,chrome-pw-2,hi\r\n";
         let (items, report) = parse(chrome).unwrap();
         assert_eq!(report.source, ImportSource::Csv);
@@ -273,7 +273,7 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
             [
                 ("password", "secret", "chrome-pw"),
                 ("url", "url", "https://example.com/"),
-                ("username", "text", "dax"),
+                ("username", "text", "sam"),
             ]
         );
         assert_eq!(
@@ -286,7 +286,7 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
         );
         assert_eq!(lines(&report), ["imported 2 from CSV (logins 2, cards 0)"]);
         let firefox = "\"url\",\"username\",\"password\",\"httpRealm\",\"formActionOrigin\",\"guid\",\"timeCreated\"
-\"https://example.com\",\"dax\",\"ff-pw\",,\"https://example.com\",\"{abc}\",\"1700000000000\"
+\"https://example.com\",\"sam\",\"ff-pw\",,\"https://example.com\",\"{abc}\",\"1700000000000\"
 ";
         let (items, report) = parse(firefox).unwrap();
         assert_eq!(items.len(), 1);

@@ -772,7 +772,7 @@ pub(super) mod tests {
         );
         assert_eq!(info.label, "deadbolt-ui · unverified (Linux)");
         let app = Process {
-            exe: Some("/home/kit/.local/bin/deadbolt".into()),
+            exe: Some("/home/alex/.local/bin/deadbolt".into()),
             args: vec!["deadbolt".into(), "ui".into()],
             ..Process::default()
         };

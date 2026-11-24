@@ -25,7 +25,7 @@ pub enum ItemCommand {
     /// license, bank, document, passport, driver-license, membership, crypto,
     /// id-document.
     ///
-    /// Examples: deadbolt new login username=dax url=github.com
+    /// Examples: deadbolt new login username=sam url=github.com
     ///           deadbolt new api credential=- username=deploy-bot type=bearer
     ///           deadbolt new document file=./passport.pdf --name Passport scan
     New {
@@ -106,7 +106,7 @@ pub enum ItemCommand {
     /// Set fields, the name, favorite state or tags. Arguments containing `=`
     /// are assignments, the others are the query.
     ///
-    /// Example: deadbolt set github dax password=- url=github.com
+    /// Example: deadbolt set github sam password=- url=github.com
     ///          deadbolt set github recovery:file=./codes.pdf
     ///          deadbolt set github --favorite --tag work/aws
     Set {
@@ -284,7 +284,7 @@ fn mask(item: &ItemInfo, field: &crate::protocol::FieldInfo) -> String {
 
 /// `code` stands in for the code field's masked value. `account` is the
 /// label of the login `sign-in-account` names, if it is here: then
-/// `sign-in-with` reads "Google · dax@example.com" and the id is left out.
+/// `sign-in-with` reads "Google · sam@example.com" and the id is left out.
 fn show(item: &ItemInfo, reveal: bool, code: Option<String>, account: Option<String>) {
     let code_field = code_field(&item.fields);
     let mut rows: Vec<(&str, String)> = vec![
@@ -734,10 +734,10 @@ mod tests {
             short: "c0ff".into(),
             kind: "login".into(),
             label: "github.com".into(),
-            detail: Some("dax".into()),
+            detail: Some("sam".into()),
             fields: [
                 field("password", "secret", "pw"),
-                field("username", "text", "dax"),
+                field("username", "text", "sam"),
                 field("otp", "otp", "JBSWY3DPEHPK3PXP"),
                 field("backup", "otp", "KRSXG5CTMVRXEZLU"),
             ]
@@ -756,7 +756,7 @@ mod tests {
         };
         let cases = [
             (None, "pw", vec![("github", false)]),
-            (Some("username"), "dax", vec![("github", false)]),
+            (Some("username"), "sam", vec![("github", false)]),
             (Some("otp"), "JBSWY3DPEHPK3PXP", vec![("github", true)]),
             (
                 Some("backup"),

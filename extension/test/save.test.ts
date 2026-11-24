@@ -469,7 +469,7 @@ describe("new passwords", () => {
     host.host.send = (async (req: RequestBody) =>
       req.type === "list" ? { type: "list", site: "example.com", accounts: [{ ...(await list(req) as { accounts: object[] }).accounts[0] }] } : list(req)) as typeof host.host.send
     await submit({ password: "forgotten", newPassword: "a new one" }, "change-password")
-    expect(saver.pending(1)).toMatchObject({ username: "kit@example.com", update: true })
+    expect(saver.pending(1)).toMatchObject({ username: "alex@example.com", update: true })
   })
 
   test("a change-password form with a username asks the host the same whether or not the current password matched", async () => {
@@ -988,7 +988,7 @@ describe("cards and identities typed into a form", () => {
   })
 
   test("a changed expiry is an update of that card; an unchanged card, or one Deadbolt filled, offers nothing", async () => {
-    await checkout({ card: { number: "4242424242424242", expiry: "2028-08", cardholder: "Kit Langton", brand: "Visa" } })
+    await checkout({ card: { number: "4242424242424242", expiry: "2028-08", cardholder: "Alex Mercer", brand: "Visa" } })
     expect(saver.pending(1)).toBeUndefined()
     expect(requests("forms")).toHaveLength(1)
     fake.session = {}
@@ -1041,7 +1041,7 @@ describe("cards and identities typed into a form", () => {
 
   test("a swapped or planted email isn't written into a saved identity: only what the user typed is", async () => {
     // The user typed a new phone; the page swapped the email (not typed) at submit.
-    await checkout({ identity: { "given-name": "Kit", "family-name": "Langton", email: "attacker@example.net", phone: "(415) 555-0199" }, typed: ["given-name", "family-name", "phone"] })
+    await checkout({ identity: { "given-name": "Alex", "family-name": "Mercer", email: "attacker@example.net", phone: "(415) 555-0199" }, typed: ["given-name", "family-name", "phone"] })
     expect(saver.pending(1)).toMatchObject({ username: "Home", update: true, what: "details", changes: "phone", saveNew: true })
     // The page's email isn't even compared.
     expect(requests("fill-form")[0]).toMatchObject({ fields: ["given-name", "family-name", "phone"] })
@@ -1059,7 +1059,7 @@ describe("cards and identities typed into a form", () => {
     expect(saveForm()[0].ref).toBeUndefined()
 
     fake.session = {}
-    await checkout({ identity: { "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", "address-line1": "5 Oak Ave", city: "Brooklyn", "postal-code": "11215", country: "US" } })
+    await checkout({ identity: { "given-name": "Alex", "family-name": "Mercer", email: "alex@example.com", "address-line1": "5 Oak Ave", city: "Brooklyn", "postal-code": "11215", country: "US" } })
     expect(saver.pending(1)).toMatchObject({ username: "Home", update: true, what: "address", changes: "address" })
     expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Address updated" })
     expect(saveForm()[1]).toEqual({ type: "save-form", origin: "https://www.example.com", kind: "identity", ref: HOME_REF, fields: { "address-line1": "5 Oak Ave", "postal-code": "11215" } })
@@ -1178,8 +1178,8 @@ describe("what a form save offers", () => {
   test("a card: by last four digits and brand, with only what changed", () => {
     const visa = { number: "4242424242424242", brand: "Visa" }
     expect(cardPlan({ ...visa, expiry: "2028-08" }, CARDS)).toBeNull()
-    expect(cardPlan({ ...visa, cardholder: "KIT  LANGTON" }, CARDS)).toBeNull()
-    expect(cardPlan({ ...visa, cardholder: "Kit Lovelace" }, CARDS)).toMatchObject({ ref: VISA_REF, fields: { cardholder: "Kit Lovelace" }, label: "Visa •••• 4242", what: "card", change: "Name on card: Kit Lovelace", match: visa.number })
+    expect(cardPlan({ ...visa, cardholder: "ALEX  MERCER" }, CARDS)).toBeNull()
+    expect(cardPlan({ ...visa, cardholder: "Alex Lovelace" }, CARDS)).toMatchObject({ ref: VISA_REF, fields: { cardholder: "Alex Lovelace" }, label: "Visa •••• 4242", what: "card", change: "Name on card: Alex Lovelace", match: visa.number })
     // Another brand with the same last four is another card; so is one whose brand isn't known on either side.
     expect(cardPlan({ number: "5105105105104242", brand: "Mastercard" }, CARDS)?.ref).toBeUndefined()
     expect(cardPlan({ number: "4242424242424242" }, CARDS)?.ref).toBeUndefined()
@@ -1194,7 +1194,7 @@ describe("what a form save offers", () => {
 
   test("a card's values never include a security code, and a number only as digits", () => {
     expect(cleanCard({ number: "4242424242424242", cvv: "123", pin: "1234", expiry: "2028-08" })).toEqual({ number: "4242424242424242", expiry: "2028-08", brand: "Visa" })
-    expect(cleanCard({ number: "4242 4242", expiry: "08/28", cardholder: "Kit" })).toEqual({ cardholder: "Kit" })
+    expect(cleanCard({ number: "4242 4242", expiry: "08/28", cardholder: "Alex" })).toEqual({ cardholder: "Alex" })
     expect(cleanCard({ cvv: "123" })).toBeUndefined()
     // The brand only from the number: never what the page says.
     expect(cleanCard({ number: "4242424242424242", brand: "Mastercard" })?.brand).toBe("Visa")
@@ -1203,18 +1203,18 @@ describe("what a form save offers", () => {
 
   test("an identity: one group changed is an update, two is a new identity, too little is nothing", () => {
     const home = { ref: HOME_REF, values: HOME_VALUES }
-    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0199" }, [{ ...home, title: "Home" }])).toMatchObject({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, label: "Home", what: "details", changes: "phone" })
+    expect(identityPlan({ "given-name": "Alex", "family-name": "Mercer", email: "alex@example.com", phone: "(415) 555-0199" }, [{ ...home, title: "Home" }])).toMatchObject({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, label: "Home", what: "details", changes: "phone" })
     // A swapped email the user didn't type is neither compared nor written.
     const trust: Trust = { typed: new Set(["given-name", "family-name", "phone"]), filled: new Set() }
-    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "evil@example.net", phone: "(415) 555-0199" }, [home], trust)).toMatchObject({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, changes: "phone" })
+    expect(identityPlan({ "given-name": "Alex", "family-name": "Mercer", email: "evil@example.net", phone: "(415) 555-0199" }, [home], trust)).toMatchObject({ ref: HOME_REF, fields: { phone: "(415) 555-0199" }, changes: "phone" })
     // Values Deadbolt filled from Home are written back to Home only, and only if changed.
     const fromHome: Trust = { typed: new Set(["phone"]), filled: new Set(["given-name", "family-name", "email"]), from: HOME_REF }
-    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0199" }, [home], fromHome)?.fields).toEqual({ phone: "(415) 555-0199" })
+    expect(identityPlan({ "given-name": "Alex", "family-name": "Mercer", email: "alex@example.com", phone: "(415) 555-0199" }, [home], fromHome)?.fields).toEqual({ phone: "(415) 555-0199" })
     // A phone written another way is the same phone.
-    expect(identityPlan({ "given-name": "Kit", "family-name": "Langton", email: "kit@example.com", phone: "(415) 555-0123" }, [home])).toBeNull()
+    expect(identityPlan({ "given-name": "Alex", "family-name": "Mercer", email: "alex@example.com", phone: "(415) 555-0123" }, [home])).toBeNull()
     expect(identityPlan({ "given-name": "Ada", "family-name": "Lovelace", "address-line1": "1 Main St", city: "Springfield" }, [home])?.ref).toBeUndefined()
-    expect(identityPlan({ email: "kit@example.com" }, [home])).toBeNull()
-    expect(identityPlan({ "given-name": "Kit", email: "kit@example.com" }, [])).toBeNull()
+    expect(identityPlan({ email: "alex@example.com" }, [home])).toBeNull()
+    expect(identityPlan({ "given-name": "Alex", email: "alex@example.com" }, [])).toBeNull()
   })
 })
 

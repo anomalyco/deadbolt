@@ -157,7 +157,7 @@ describe("fillFields", () => {
     // The password passes when fields are picked, then the page hides it.
     let checksOfP = 0
     const check = (el: HTMLInputElement) => el !== p || ++checksOfP < 2
-    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "kit", password: "secret" }, check)
+    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "alex", password: "secret" }, check)
     expect(filled).toEqual(["username"])
     expect(p.value).toBe("")
   })
@@ -179,9 +179,9 @@ describe("fillFields", () => {
     }
     render()
     const [u, p] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
-    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "kit", password: "secret" }, () => true)
+    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "alex", password: "secret" }, () => true)
     expect(filled).toEqual(["username", "password"])
-    expect(state).toEqual({ u: "kit", p: "secret" })
+    expect(state).toEqual({ u: "alex", p: "secret" })
     // A look-alike somewhere else in the form is no successor.
     document.body.innerHTML = `<form><div id="box"><input id="u" name="u"><input id="p" name="p" type="password"></div><div id="elsewhere"></div></form>`
     const [u2, p2] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
@@ -189,7 +189,7 @@ describe("fillFields", () => {
       p2.remove()
       document.getElementById("elsewhere")!.innerHTML = `<input id="p" name="p" type="password">`
     })
-    expect((await fillFields([field(u2, "username"), field(p2, "password")], { username: "kit", password: "secret" }, () => true)).filled).toEqual(["username"])
+    expect((await fillFields([field(u2, "username"), field(p2, "password")], { username: "alex", password: "secret" }, () => true)).filled).toEqual(["username"])
     expect((document.getElementById("p") as HTMLInputElement).value).toBe("")
   })
 
@@ -207,7 +207,7 @@ describe("fillFields", () => {
       })
       return { u, p, next }
     }
-    const fill = (u: HTMLInputElement, p: HTMLInputElement, check: (el: HTMLInputElement) => boolean) => fillFields([field(u, "username"), field(p, "password")], { username: "kit", password: "secret" }, check)
+    const fill = (u: HTMLInputElement, p: HTMLInputElement, check: (el: HTMLInputElement) => boolean) => fillFields([field(u, "username"), field(p, "password")], { username: "alex", password: "secret" }, check)
     const cover = document.createElement("section")
     let hit: () => Element | null = () => null
     const before = { one: document.elementFromPoint, all: document.elementsFromPoint }
@@ -257,7 +257,7 @@ describe("fillFields", () => {
     document.body.innerHTML = `<form><input id="u" type="tel"><input id="p" type="password" maxlength="6"></form>`
     const [u, p] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
     const fields = [field(u, "phone"), field(p, "password")]
-    expect((await fillFields(fields, { username: "kit@acme.test", password: "correct horse" }, () => true)).filled).toEqual([])
+    expect((await fillFields(fields, { username: "alex@acme.test", password: "correct horse" }, () => true)).filled).toEqual([])
     expect([u.value, p.value]).toEqual(["", ""])
     expect((await fillFields(fields, { username: "+1 (415) 555-0123", password: "482916" }, () => true)).filled).toEqual(["phone", "password"])
     expect([u.value, p.value]).toEqual(["+1 (415) 555-0123", "482916"])
@@ -270,7 +270,7 @@ describe("fillFields", () => {
     const fields = [field(u, "username"), field(p, "password")]
     // Between the username and the password, the page moves the password box.
     u.addEventListener("change", () => document.getElementById("b")!.append(p))
-    const { filled } = await fillFields(fields, { username: "kit", password: "secret" }, () => true)
+    const { filled } = await fillFields(fields, { username: "alex", password: "secret" }, () => true)
     expect(filled).toEqual(["username"])
     expect(p.value).toBe("")
   })
@@ -293,7 +293,7 @@ describe("fillFields", () => {
     const p = document.getElementById("p") as HTMLInputElement
     let late = false
     p.addEventListener("change", () => setTimeout(() => (late = true), 0))
-    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "kit", password: "secret" }, () => true)
+    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "alex", password: "secret" }, () => true)
     expect(filled).toEqual(["username", "password"])
     expect(late).toBe(false)
   })
@@ -336,43 +336,43 @@ describe("form values", () => {
     document.body.innerHTML = html
     return document.body.firstElementChild as HTMLInputElement & HTMLSelectElement & HTMLTextAreaElement
   }
-  const kit = {
-    "given-name": "Kit", "additional-name": "J", "family-name": "Langton", phone: "+14155550123", country: "US", region: "NY",
+  const alex = {
+    "given-name": "Alex", "additional-name": "J", "family-name": "Mercer", phone: "+14155550123", country: "US", region: "NY",
     "address-line1": "123 Main St", "address-line2": "Apt 4", city: "Brooklyn", "postal-code": "11201", birthday: "1990-07-04",
   }
-  const card = { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Kit J Langton", brand: "Visa" }
+  const card = { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Alex J Mercer", brand: "Visa" }
 
   test("names: full and split", () => {
-    expect(valueFor("name", el(`<input>`), kit)).toBe("Kit J Langton")
-    expect(valueFor("cc-given-name", el(`<input>`), card)).toBe("Kit J")
-    expect(valueFor("cc-family-name", el(`<input>`), card)).toBe("Langton")
+    expect(valueFor("name", el(`<input>`), alex)).toBe("Alex J Mercer")
+    expect(valueFor("cc-given-name", el(`<input>`), card)).toBe("Alex J")
+    expect(valueFor("cc-family-name", el(`<input>`), card)).toBe("Mercer")
   })
 
   test("street address joined in one box, lines in a textarea", () => {
-    expect(valueFor("street-address", el(`<input>`), kit)).toBe("123 Main St, Apt 4")
-    expect(valueFor("street-address", el(`<textarea></textarea>`), kit)).toBe("123 Main St\nApt 4")
+    expect(valueFor("street-address", el(`<input>`), alex)).toBe("123 Main St, Apt 4")
+    expect(valueFor("street-address", el(`<textarea></textarea>`), alex)).toBe("123 Main St\nApt 4")
   })
 
   test("phone international, national when the box is short", () => {
-    expect(valueFor("tel", el(`<input type="tel">`), kit)).toBe("+14155550123")
-    expect(valueFor("tel", el(`<input type="tel" maxlength="10">`), kit)).toBe("4155550123")
-    expect(valueFor("tel-national", el(`<input>`), { ...kit, phone: "+442071234567", country: "GB" })).toBe("02071234567")
-    expect(valueFor("tel-country-code", el(`<input>`), kit)).toBe("+1")
+    expect(valueFor("tel", el(`<input type="tel">`), alex)).toBe("+14155550123")
+    expect(valueFor("tel", el(`<input type="tel" maxlength="10">`), alex)).toBe("4155550123")
+    expect(valueFor("tel-national", el(`<input>`), { ...alex, phone: "+442071234567", country: "GB" })).toBe("02071234567")
+    expect(valueFor("tel-country-code", el(`<input>`), alex)).toBe("+1")
   })
 
   test("country and region: code, name or the matching option", () => {
-    expect(valueFor("country", el(`<input maxlength="2">`), kit)).toBe("US")
-    expect(valueFor("country", el(`<input>`), kit)).toBe("United States")
-    expect(valueFor("country", el(`<select><option value="">Choose</option><option value="CA">Canada</option><option value="USA">United States of America</option></select>`), kit)).toBe("USA")
-    expect(valueFor("address-level1", el(`<select><option value="1">New Jersey</option><option value="2">New York</option></select>`), kit)).toBe("2")
-    expect(valueFor("address-level1", el(`<input maxlength="2">`), { ...kit, region: "New York" })).toBe("NY")
+    expect(valueFor("country", el(`<input maxlength="2">`), alex)).toBe("US")
+    expect(valueFor("country", el(`<input>`), alex)).toBe("United States")
+    expect(valueFor("country", el(`<select><option value="">Choose</option><option value="CA">Canada</option><option value="USA">United States of America</option></select>`), alex)).toBe("USA")
+    expect(valueFor("address-level1", el(`<select><option value="1">New Jersey</option><option value="2">New York</option></select>`), alex)).toBe("2")
+    expect(valueFor("address-level1", el(`<input maxlength="2">`), { ...alex, region: "New York" })).toBe("NY")
   })
 
   test("birthday whole and in parts", () => {
-    expect(valueFor("bday", el(`<input type="date">`), kit)).toBe("1990-07-04")
-    expect(valueFor("bday", el(`<input placeholder="MM/DD/YYYY">`), kit)).toBe("07/04/1990")
-    expect(valueFor("bday-month", el(`<select><option value="6">June</option><option value="7">July</option></select>`), kit)).toBe("7")
-    expect(valueFor("bday-year", el(`<input maxlength="4">`), kit)).toBe("1990")
+    expect(valueFor("bday", el(`<input type="date">`), alex)).toBe("1990-07-04")
+    expect(valueFor("bday", el(`<input placeholder="MM/DD/YYYY">`), alex)).toBe("07/04/1990")
+    expect(valueFor("bday-month", el(`<select><option value="6">June</option><option value="7">July</option></select>`), alex)).toBe("7")
+    expect(valueFor("bday-year", el(`<input maxlength="4">`), alex)).toBe("1990")
   })
 
   test("expiry in one box, and as month and year", () => {
@@ -410,9 +410,9 @@ describe("form values", () => {
   test("a whole section fills, selects included", async () => {
     document.body.innerHTML = `<form><input id="n" autocomplete="name"><input id="z" autocomplete="postal-code"><select id="c" autocomplete="country"><option value="">-</option><option value="US">United States</option></select></form>`
     const fields = scanForms()
-    const { filled } = await fillForm(fields, kit, () => true)
+    const { filled } = await fillForm(fields, alex, () => true)
     expect(filled).toEqual(["name", "postal-code", "country"])
-    expect((document.getElementById("n") as HTMLInputElement).value).toBe("Kit J Langton")
+    expect((document.getElementById("n") as HTMLInputElement).value).toBe("Alex J Mercer")
     expect((document.getElementById("c") as HTMLSelectElement).value).toBe("US")
   })
 
@@ -420,7 +420,7 @@ describe("form values", () => {
     document.body.innerHTML = `<form><label for="g">First name</label><input id="g"><label for="d">Date of birth</label><input id="d" placeholder="MM/DD/YYYY" maxlength="10"></form>`
     const fields = scanForms()
     expect(fields.map((f) => f.role)).toEqual(["given-name", "bday"])
-    await fillForm(fields, kit, () => true)
+    await fillForm(fields, alex, () => true)
     expect((document.getElementById("d") as HTMLInputElement).value).toBe("07/04/1990")
   })
 
@@ -431,7 +431,7 @@ describe("form values", () => {
       state.innerHTML = `<option value="">State</option><option value="CA">California</option><option value="NY">New York</option>`
       state.disabled = false
     }, 200))
-    const { filled } = await fillForm(scanForms(), kit, (el) => !el.disabled)
+    const { filled } = await fillForm(scanForms(), alex, (el) => !el.disabled)
     expect(filled).toEqual(["country", "address-level1"])
     expect(state.value).toBe("NY")
   })
@@ -472,11 +472,11 @@ describe("what was submitted, for a save", () => {
   test("a card Deadbolt filled and nobody changed is nothing; one with a changed expiry keeps its filled number", async () => {
     document.body.innerHTML = CHECKOUT
     const fields = scanForms()
-    await fillForm(fields, { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Kit Langton" }, () => true)
+    await fillForm(fields, { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Alex Mercer" }, () => true)
     expect(await readSubmitted(fields)).toEqual({})
     type("exp", "01/31")
     // Each value says whether the user typed it or Deadbolt filled it.
-    expect(await readSubmitted(fields)).toEqual({ card: { number: "4242424242424242", brand: "Visa", expiry: "2031-01", cardholder: "Kit Langton" }, typed: ["expiry"], filled: ["number", "brand", "cardholder"] })
+    expect(await readSubmitted(fields)).toEqual({ card: { number: "4242424242424242", brand: "Visa", expiry: "2031-01", cardholder: "Alex Mercer" }, typed: ["expiry"], filled: ["number", "brand", "cardholder"] })
   })
 
   test("a number the page put there, or one that isn't a card number, isn't read", async () => {
@@ -506,12 +506,12 @@ describe("what was submitted, for a save", () => {
       <input id="n" autocomplete="name"><input id="e" autocomplete="email"><input id="t" autocomplete="tel">
       <input id="a" autocomplete="address-line1"><input id="c" autocomplete="address-level2">
     </form>`
-    for (const [id, v] of [["n", "Kit Langton"], ["e", "kit@example.com"], ["a", "5 Oak Ave"], ["c", "Brooklyn"]]) type(id, v)
+    for (const [id, v] of [["n", "Alex Mercer"], ["e", "alex@example.com"], ["a", "5 Oak Ave"], ["c", "Brooklyn"]]) type(id, v)
     // The page swaps the email the user typed and plants a phone, in fields that show nowhere.
     ;(document.getElementById("e") as HTMLInputElement).value = "attacker@example.net"
     ;(document.getElementById("t") as HTMLInputElement).value = "+15550100999"
     const got = await readSubmitted(scanForms())
-    expect(got.identity).toEqual({ "given-name": "Kit", "family-name": "Langton", "address-line1": "5 Oak Ave", city: "Brooklyn" })
+    expect(got.identity).toEqual({ "given-name": "Alex", "family-name": "Mercer", "address-line1": "5 Oak Ave", city: "Brooklyn" })
     expect(got.typed).not.toContain("email")
     expect(JSON.stringify(got)).not.toContain("attacker")
     expect(JSON.stringify(got)).not.toContain("0100999")

@@ -681,7 +681,7 @@ mod tests {
     fn an_edit_sends_only_what_changed() {
         let item = item(&[
             ("password", "secret", "pw-1"),
-            ("username", "text", "dax"),
+            ("username", "text", "sam"),
             ("notes", "note", "old"),
             ("pet", "text", "rex"),
         ]);
@@ -694,7 +694,7 @@ mod tests {
             ["username", "password", "url", "otp", "notes", "pet"]
         );
 
-        set(&mut form, "username", "  kit ");
+        set(&mut form, "username", "  alex ");
         set(&mut form, "notes", " \n");
         set(&mut form, "url", "github.com");
         let c = form.changes().unwrap();
@@ -703,7 +703,7 @@ mod tests {
             .iter()
             .map(|f| (f.name.as_str(), f.value.as_str()))
             .collect();
-        assert_eq!(sent, [("username", "kit"), ("url", "github.com")]);
+        assert_eq!(sent, [("username", "alex"), ("url", "github.com")]);
         assert_eq!(c.unset, ["notes"]);
         assert_eq!(c.name, None);
         assert!(form.changed());
@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn a_wiped_field_is_masked_and_empty() {
         for (name, kind) in [("username", "text"), ("password", "secret")] {
-            let mut input = Input::from_item(name, kind, false, false, Some("dax-hunter22"));
+            let mut input = Input::from_item(name, kind, false, false, Some("sam-hunter22"));
             input.edit.set_revealed(true);
             input.wipe();
             assert!(input.edit.is_secure() && input.edit.text.is_empty());

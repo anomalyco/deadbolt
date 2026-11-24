@@ -205,13 +205,13 @@ mod tests {
     #[test]
     fn the_entry_opens_this_binarys_app_from_the_launcher() {
         assert_eq!(
-            entry(Path::new("/home/kit/.local/bin/deadbolt")).unwrap(),
+            entry(Path::new("/home/alex/.local/bin/deadbolt")).unwrap(),
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=Deadbolt\n\
              GenericName=Password Manager\n\
              Comment=A decentralized password manager\n\
-             Exec=/home/kit/.local/bin/deadbolt app\n\
+             Exec=/home/alex/.local/bin/deadbolt app\n\
              Icon=pw.deadbolt.Deadbolt\n\
              Terminal=false\n\
              Categories=Utility;Security;\n\
@@ -237,22 +237,22 @@ mod tests {
     #[test]
     fn files_go_under_the_xdg_data_directory() {
         let files = Files::from_vars(|name| match name {
-            "HOME" => Some("/home/kit".into()),
+            "HOME" => Some("/home/alex".into()),
             _ => None,
         })
         .unwrap();
         assert_eq!(
             files.entry,
-            Path::new("/home/kit/.local/share/applications/pw.deadbolt.Deadbolt.desktop")
+            Path::new("/home/alex/.local/share/applications/pw.deadbolt.Deadbolt.desktop")
         );
         assert_eq!(
             files.icon,
             Path::new(
-                "/home/kit/.local/share/icons/hicolor/scalable/apps/pw.deadbolt.Deadbolt.svg"
+                "/home/alex/.local/share/icons/hicolor/scalable/apps/pw.deadbolt.Deadbolt.svg"
             )
         );
         let xdg = Files::from_vars(|name| match name {
-            "HOME" => Some("/home/kit".into()),
+            "HOME" => Some("/home/alex".into()),
             "XDG_DATA_HOME" => Some("/data".into()),
             _ => None,
         })

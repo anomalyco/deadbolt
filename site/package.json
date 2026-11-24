@@ -8,7 +8,7 @@
     "build": "sh scripts/wasm.sh && tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "sh scripts/wasm.sh && tsc --noEmit",
-    "motion-sweep": "bun src/dev/motion-sweep.ts",
+    "motion-sweep": "bun src/dev/motion/sweep.ts",
     "deploy": "bun run build && bunx wrangler deploy",
     "wasm": "sh scripts/wasm.sh"
   },

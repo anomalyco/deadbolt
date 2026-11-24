@@ -42,7 +42,7 @@ describe("parseHostMessage", () => {
       if (m?.kind !== "reply" || m.reply.type !== "list") throw new Error("expected a list")
       return m.reply.accounts[0].signIn
     }
-    expect(list({ provider: "google", account: "kit@gmail.com", extra: 1 })).toEqual({ provider: "google", account: "kit@gmail.com" })
+    expect(list({ provider: "google", account: "alex@gmail.com", extra: 1 })).toEqual({ provider: "google", account: "alex@gmail.com" })
     expect(list({ provider: "Okta Acme" })).toEqual({ provider: "Okta Acme" })
     expect(list({ provider: "" })).toBeUndefined()
     expect(list({ provider: "x".repeat(65) })).toBeUndefined()
@@ -112,7 +112,7 @@ describe("forms", () => {
       type: "forms",
       canVerify: true,
       identities: [
-        { ref: home, vault: "personal", title: "Home", summary: "Kit Langton · 123 Main St, Brooklyn", fields: ["given-name", "city", "passport"] },
+        { ref: home, vault: "personal", title: "Home", summary: "Alex Mercer · 123 Main St, Brooklyn", fields: ["given-name", "city", "passport"] },
         { ref: "nope", title: "Bad" },
       ],
       cards: [
@@ -126,14 +126,14 @@ describe("forms", () => {
       reply: {
         type: "forms",
         canVerify: true,
-        identities: [{ ref: home, vault: "personal", title: "Home", summary: "Kit Langton · 123 Main St, Brooklyn", fields: ["given-name", "city"] }],
+        identities: [{ ref: home, vault: "personal", title: "Home", summary: "Alex Mercer · 123 Main St, Brooklyn", fields: ["given-name", "city"] }],
         cards: [{ ref, vault: "personal", title: "Visa •••• 4242", brand: "Visa", last4: "4242", expiry: "2028-08", cardholder: undefined, billing: home, fields: ["number"] }],
       },
     })
   })
   test("fill-form keeps only form fields", () => {
-    const m = parseHostMessage({ id: 2, type: "fill-form", verified: true, values: { number: "4242424242424242", "given-name": "Kit", pin: "9876" } })
-    expect(m).toEqual({ kind: "reply", id: 2, reply: { type: "fill-form", verified: true, values: { number: "4242424242424242", "given-name": "Kit" } } })
+    const m = parseHostMessage({ id: 2, type: "fill-form", verified: true, values: { number: "4242424242424242", "given-name": "Alex", pin: "9876" } })
+    expect(m).toEqual({ kind: "reply", id: 2, reply: { type: "fill-form", verified: true, values: { number: "4242424242424242", "given-name": "Alex" } } })
     expect(parseHostMessage({ id: 3, type: "fill-form", values: [] })).toBeNull()
   })
 })

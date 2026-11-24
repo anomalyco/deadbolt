@@ -10,8 +10,6 @@ DEADBOLT_SIM_SEED=42 DEADBOLT_SIM_SEEDS=1 cargo test -p deadbolt-cli --bin deadb
 DEADBOLT_SIM_SEEDS=1000 cargo test -p deadbolt-cli --bin deadbolt daemon::sim::exploration
 ```
 
-In Kit's environment, put the command (including `env NAME=value`) after
-`hivemind run --kind cargo --`.
 
 The exact-cap file regression transfers a 10 MiB file, rejects a one-byte
 aggregate overflow, and checks concurrent attachments and selective reads after

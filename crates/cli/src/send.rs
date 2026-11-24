@@ -1227,7 +1227,7 @@ mod tests {
         let stripe = Group {
             name: Some("Stripe".into()),
             entries: vec![
-                Node::Entry(Entry::text("username", "dax", false)),
+                Node::Entry(Entry::text("username", "sam", false)),
                 Node::Entry(Entry::text("secret-key", "sk_live", true)),
             ],
         };
@@ -1373,7 +1373,7 @@ mod tests {
             label: "GitHub".into(),
             detail: None,
             fields: vec![
-                field("username", "text", "dax"),
+                field("username", "text", "sam"),
                 field("password", "secret", "hunter2"),
                 field("otp", "otp", "JBSWY3DPEHPK3PXP"),
                 field("notes", "note", ""),

@@ -440,7 +440,7 @@ fn the_daemon_computes_the_code() {
         "login",
         "url=github.com",
         "password=pw",
-        "otp=otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
+        "otp=otpauth://totp/GitHub:sam?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
     ]);
     let daemon = Daemon::spawn(device.paths(), device.launch(), Window::Main);
     let mut rt = Runtime::new(

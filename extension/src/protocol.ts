@@ -202,7 +202,7 @@ export interface FormIdentity {
   ref: string
   vault: string
   title: string
-  /** "Kit Langton · 123 Main St, Brooklyn"; may be empty. */
+  /** "Alex Mercer · 123 Main St, Brooklyn"; may be empty. */
   summary: string
   fields: IdentityField[]
 }

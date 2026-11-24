@@ -136,10 +136,10 @@ describe("provider chain, page side", () => {
 
   test("an unlinked chain never clicks a tile on the provider's chooser, in any language", async () => {
     const s = fresh()
-    const chooser = `<h1>Konto auswählen</h1><p>weiter zu Example</p><ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>`
+    const chooser = `<h1>Konto auswählen</h1><p>weiter zu Example</p><ul><li data-box="10 100 300 48" data-identifier="alex@gmail.com">Alex</li></ul>`
     page(chooser, `https://accounts.google.com/o/oauth2/v2/auth?hl=de&redirect_uri=${encodeURIComponent("https://www.example.com/cb")}`)
     await status(s)
-    const ask = (home?: string[]) => deliver<ProviderReport>({ type: "db:provider-probe", session: s, provider: "google", site: "example.com", account: "kit@gmail.com", ...(home ? { home } : {}) })
+    const ask = (home?: string[]) => deliver<ProviderReport>({ type: "db:provider-probe", session: s, provider: "google", site: "example.com", account: "alex@gmail.com", ...(home ? { home } : {}) })
     expect(await ask(["https://www.example.com"])).toEqual({ kind: "stop", reason: "choose" })
     expect((await ask()).kind).toBe("chooser")
   })
@@ -151,21 +151,21 @@ describe("provider chain, page side", () => {
 
   test("hard consent preempts the chooser's tile", async () => {
     const s = fresh()
-    page(`<h1>Choose an account</h1><ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
+    page(`<h1>Choose an account</h1><ul><li data-box="10 100 300 48" data-identifier="alex@gmail.com">Alex</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
     await status(s)
-    expect((await probe(s, "kit@gmail.com")).kind).toBe("chooser")
+    expect((await probe(s, "alex@gmail.com")).kind).toBe("chooser")
     document.body.insertAdjacentHTML("beforeend", `<button data-box="400 300 80 32">Allow</button>`)
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
     // "to continue to" is Google's chooser copy, not consent.
-    page(`<h1>Choose an account</h1><p>to continue to Example</p><ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
-    expect((await probe(s, "kit@gmail.com")).kind).toBe("chooser")
+    page(`<h1>Choose an account</h1><p>to continue to Example</p><ul><li data-box="10 100 300 48" data-identifier="alex@gmail.com">Alex</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
+    expect((await probe(s, "alex@gmail.com")).kind).toBe("chooser")
   })
 
   test("consent appearing after the probe stops the click", async () => {
     const s = fresh()
-    page(`<ul><li id="t" data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
+    page(`<ul><li id="t" data-box="10 100 300 48" data-identifier="alex@gmail.com">Alex</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
     await status(s)
-    const report = await probe(s, "kit@gmail.com")
+    const report = await probe(s, "alex@gmail.com")
     let clicked = 0
     document.getElementById("t")!.addEventListener("click", () => clicked++)
     document.body.insertAdjacentHTML("beforeend", `<p>Example wants to access your Google Account</p>`)
@@ -176,9 +176,9 @@ describe("provider chain, page side", () => {
 
   test("two tiles for the account are ambiguous", async () => {
     const s = fresh()
-    page(`<ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li><li data-box="10 160 300 48" data-email="kit@gmail.com">Kit</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
+    page(`<ul><li data-box="10 100 300 48" data-identifier="alex@gmail.com">Alex</li><li data-box="10 160 300 48" data-email="alex@gmail.com">Alex</li></ul>`, "https://accounts.google.com/o/oauth2/v2/auth")
     await status(s)
-    expect((await probe(s, "kit@gmail.com")).kind).toBe("stop")
+    expect((await probe(s, "alex@gmail.com")).kind).toBe("stop")
   })
 
   test("a form fills whole and submits, or not at all", async () => {
@@ -190,14 +190,14 @@ describe("provider chain, page side", () => {
     const email = document.getElementById("e") as HTMLInputElement
     const password = document.getElementById("p") as HTMLInputElement
     // A missing value writes nothing; nor does a value for a role the form doesn't have.
-    expect(await act(s, report.action!, { username: "kit@example.com" })).toBe(false)
+    expect(await act(s, report.action!, { username: "alex@example.com" })).toBe(false)
     expect([email.value, password.value]).toEqual(["", ""])
     const again = await probe(s)
-    expect(await act(s, again.action!, { username: "kit@example.com", password: "pw", totp: "123456" })).toBe(false)
+    expect(await act(s, again.action!, { username: "alex@example.com", password: "pw", totp: "123456" })).toBe(false)
     expect([email.value, password.value]).toEqual(["", ""])
     const third = await probe(s)
-    expect(await act(s, third.action!, { username: "kit@example.com", password: "pw" })).toBe(true)
-    expect([email.value, password.value]).toEqual(["kit@example.com", "pw"])
+    expect(await act(s, third.action!, { username: "alex@example.com", password: "pw" })).toBe(true)
+    expect([email.value, password.value]).toEqual(["alex@example.com", "pw"])
     await Bun.sleep(200)
     expect(submits).toHaveLength(1)
     expect(submits[0].button.textContent).toBe("Next")
@@ -208,7 +208,7 @@ describe("provider chain, page side", () => {
     page(LOGIN)
     await status(s)
     const report = await probe(s)
-    const pending = act(s, report.action!, { username: "kit@example.com", password: "pw" })
+    const pending = act(s, report.action!, { username: "alex@example.com", password: "pw" })
     // Between the identifier and the password, the chain ends.
     await Bun.sleep(5)
     await status(s, "", true)
@@ -255,18 +255,18 @@ describe("provider chain, page side", () => {
   })
 
   test("a click finds its control afresh when it lands", async () => {
-    const TILE = `<ul><li id="t" data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>`
+    const TILE = `<ul><li id="t" data-box="10 100 300 48" data-identifier="alex@gmail.com">Alex</li></ul>`
     const s = fresh()
     page(TILE, "https://accounts.google.com/o/oauth2/v2/auth")
     await status(s)
     let clicked = 0
     document.getElementById("t")!.addEventListener("click", () => clicked++)
-    expect(await act(s, (await probe(s, "kit@gmail.com")).action!)).toBe(true)
+    expect(await act(s, (await probe(s, "alex@gmail.com")).action!)).toBe(true)
     await settle()
     expect(clicked).toBe(1)
     // A second tile for the account between the answer and the click: ambiguous, no click.
-    expect(await act(s, (await probe(s, "kit@gmail.com")).action!)).toBe(true)
-    document.querySelector("ul")!.insertAdjacentHTML("beforeend", `<li data-box="10 160 300 48" data-email="kit@gmail.com">Kit</li>`)
+    expect(await act(s, (await probe(s, "alex@gmail.com")).action!)).toBe(true)
+    document.querySelector("ul")!.insertAdjacentHTML("beforeend", `<li data-box="10 160 300 48" data-email="alex@gmail.com">Alex</li>`)
     await settle()
     expect(clicked).toBe(1)
   })
@@ -275,7 +275,7 @@ describe("provider chain, page side", () => {
     const s = fresh()
     page(LOGIN)
     await status(s)
-    expect(await act(s, (await probe(s)).action!, { username: "kit@example.com", password: "pw" })).toBe(true)
+    expect(await act(s, (await probe(s)).action!, { username: "alex@example.com", password: "pw" })).toBe(true)
     return { email: document.getElementById("e") as HTMLInputElement, password: document.getElementById("p") as HTMLInputElement }
   }
   const setValue = (el: HTMLInputElement, v: string) => Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, v)
@@ -285,7 +285,7 @@ describe("provider chain, page side", () => {
     history.replaceState(null, "", "/v3/signin/changed")
     await Bun.sleep(200)
     expect(submits).toHaveLength(0)
-    expect([email.value, password.value]).toEqual(["kit@example.com", "pw"])
+    expect([email.value, password.value]).toEqual(["alex@example.com", "pw"])
   })
 
   test("the delayed submit declines a stale form", async () => {
@@ -332,18 +332,18 @@ describe("provider chain, page side", () => {
   test("Google's sign-in disclosure is not consent when the chooser returns home; a consent control still is", async () => {
     const s = fresh()
     const footer = "<p>To continue, Google will share your name, email address, language preference and profile picture with Acme.</p>"
-    const chooser = `<h1>Choose an account</h1><ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>${footer}`
+    const chooser = `<h1>Choose an account</h1><ul><li data-box="10 100 300 48" data-identifier="alex@gmail.com">Alex</li></ul>${footer}`
     page(chooser, "https://accounts.google.com/o/oauth2/v2/auth?client_id=acme&redirect_uri=https%3A%2F%2Fwww.example.com%2Fcallback")
     await status(s)
-    expect((await probe(s, "kit@gmail.com")).kind).toBe("chooser")
-    document.body.insertAdjacentHTML("beforeend", `<button data-box="400 300 120 32">Continue as Kit</button>`)
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
+    expect((await probe(s, "alex@gmail.com")).kind).toBe("chooser")
+    document.body.insertAdjacentHTML("beforeend", `<button data-box="400 300 120 32">Continue as Alex</button>`)
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
     // A client the URL can't tie to the site: picking the account may be the consent itself.
     page(chooser, "https://accounts.google.com/o/oauth2/v2/auth?client_id=someone")
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
     // Sending the person anywhere but the site: nothing at all.
     page(chooser, "https://accounts.google.com/o/oauth2/v2/auth?client_id=someone&redirect_uri=https%3A%2F%2Fevil.test%2Fcallback")
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
   })
 
   test.each([
@@ -355,9 +355,9 @@ describe("provider chain, page side", () => {
     const s = fresh()
     page(LOGIN, url)
     await status(s)
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
     page(`<h1>Confirm it's you</h1><button data-box="10 100 200 40">Use a passkey</button>`, url)
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
   })
 
   test.each([
@@ -374,7 +374,7 @@ describe("provider chain, page side", () => {
     const s = fresh()
     page(LOGIN, `https://accounts.google.com/v3/signin/challenge/pwd?${query}`)
     await status(s)
-    const report = await probe(s, "kit@gmail.com")
+    const report = await probe(s, "alex@gmail.com")
     expect(report.kind).toBe(kind)
     if (kind === "stop") expect(report.reason).toBe("unknown")
   })
@@ -387,17 +387,17 @@ describe("provider chain, page side", () => {
 
   test("a Google code step's account chip for the linked account is not a delivery address", async () => {
     const s = fresh()
-    page(TOTP("kit@gmail.com"), TOTP_URL)
+    page(TOTP("alex@gmail.com"), TOTP_URL)
     await status(s)
-    expect(await probe(s, "kit@gmail.com")).toMatchObject({ kind: "form", roles: ["otp"] })
+    expect(await probe(s, "alex@gmail.com")).toMatchObject({ kind: "form", roles: ["otp"] })
     // Strict otherwise: no account named, another account's chip, or any other line with it.
     expect(await probe(s)).toEqual({ kind: "stop", reason: "sms" })
     page(TOTP("someone@gmail.com"), TOTP_URL)
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "sms" })
-    page(TOTP("kit@gmail.com", "<p>We sent a code to kit@gmail.com</p>"), TOTP_URL)
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "sms" })
-    page(TOTP("kit@gmail.com", "<p>kit@gmail.com</p><p>Or get a text message instead</p>"), TOTP_URL)
-    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "sms" })
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "sms" })
+    page(TOTP("alex@gmail.com", "<p>We sent a code to alex@gmail.com</p>"), TOTP_URL)
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "sms" })
+    page(TOTP("alex@gmail.com", "<p>alex@gmail.com</p><p>Or get a text message instead</p>"), TOTP_URL)
+    expect(await probe(s, "alex@gmail.com")).toEqual({ kind: "stop", reason: "sms" })
   })
 
   const pill = () => Array.from(document.documentElement.children).find((el) => el instanceof HTMLElement && el.style.zIndex === "2147483647")

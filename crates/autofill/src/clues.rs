@@ -180,60 +180,57 @@ pub enum RulesError {
 pub const FILES: &[(&str, &str)] = &[
     (
         "fields/username.toml",
-        include_str!("../../rules/fields/username.toml"),
+        include_str!("../rules/fields/username.toml"),
     ),
     (
         "fields/email.toml",
-        include_str!("../../rules/fields/email.toml"),
+        include_str!("../rules/fields/email.toml"),
     ),
     (
         "fields/phone.toml",
-        include_str!("../../rules/fields/phone.toml"),
+        include_str!("../rules/fields/phone.toml"),
     ),
     (
         "fields/password.toml",
-        include_str!("../../rules/fields/password.toml"),
+        include_str!("../rules/fields/password.toml"),
     ),
     (
         "fields/new-password.toml",
-        include_str!("../../rules/fields/new-password.toml"),
+        include_str!("../rules/fields/new-password.toml"),
     ),
-    (
-        "fields/otp.toml",
-        include_str!("../../rules/fields/otp.toml"),
-    ),
+    ("fields/otp.toml", include_str!("../rules/fields/otp.toml")),
     (
         "fields/captcha.toml",
-        include_str!("../../rules/fields/captcha.toml"),
+        include_str!("../rules/fields/captcha.toml"),
     ),
     (
         "fields/not-a-login-field.toml",
-        include_str!("../../rules/fields/not-a-login-field.toml"),
+        include_str!("../rules/fields/not-a-login-field.toml"),
     ),
     (
         "fields/non-login-autocomplete.toml",
-        include_str!("../../rules/fields/non-login-autocomplete.toml"),
+        include_str!("../rules/fields/non-login-autocomplete.toml"),
     ),
     (
         "forms/login.toml",
-        include_str!("../../rules/forms/login.toml"),
+        include_str!("../rules/forms/login.toml"),
     ),
     (
         "forms/signup.toml",
-        include_str!("../../rules/forms/signup.toml"),
+        include_str!("../rules/forms/signup.toml"),
     ),
     (
         "forms/change-password.toml",
-        include_str!("../../rules/forms/change-password.toml"),
+        include_str!("../rules/forms/change-password.toml"),
     ),
     (
         "forms/reset.toml",
-        include_str!("../../rules/forms/reset.toml"),
+        include_str!("../rules/forms/reset.toml"),
     ),
-    ("forms/mfa.toml", include_str!("../../rules/forms/mfa.toml")),
+    ("forms/mfa.toml", include_str!("../rules/forms/mfa.toml")),
     (
         "forms/newsletter.toml",
-        include_str!("../../rules/forms/newsletter.toml"),
+        include_str!("../rules/forms/newsletter.toml"),
     ),
 ];
 

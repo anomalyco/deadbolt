@@ -14,7 +14,7 @@ pub enum CallerClass {
     /// Deadbolt's macOS AutoFill Credential Provider extension
     /// (`Contents/PlugIns/DeadboltAutoFill.appex`).
     AutoFill,
-    /// Anything else, Kit's own terminal included.
+    /// Anything else, the user's own terminal included.
     Caller,
 }
 

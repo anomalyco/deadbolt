@@ -25,7 +25,7 @@ fn unlock_search_copy_lock() {
     device.run(&[
         "new",
         "login",
-        "username=dax",
+        "username=sam",
         "url=github.com",
         "password=hunter22",
     ]);
@@ -153,7 +153,7 @@ fn quick_panel_unlock_filter_copy() {
     device.run(&[
         "new",
         "login",
-        "username=dax",
+        "username=sam",
         "url=github.com",
         "password=hunter22",
     ]);
@@ -461,7 +461,7 @@ fn join_from_another_device_in_the_app() {
     inviter.run(&[
         "new",
         "login",
-        "username=dax",
+        "username=sam",
         "url=github.com",
         "password=hunter22",
     ]);
@@ -622,7 +622,7 @@ fn the_app_follows_the_daemon() {
     device.run(&[
         "new",
         "login",
-        "username=dax",
+        "username=sam",
         "url=github.com",
         "password=hunter22",
     ]);
@@ -673,7 +673,7 @@ fn a_deleted_selection_goes_at_once() {
     let device = Device::new();
     device.run(&["init"]);
     for (url, user, password) in [
-        ("github.com", "dax", "hunter22"),
+        ("github.com", "sam", "hunter22"),
         ("fly.io", "ops", "flyfly"),
     ] {
         let (url, user, password) = (
@@ -763,7 +763,7 @@ fn add_edit_and_delete_items() {
     device.run(&[
         "new",
         "login",
-        "username=dax",
+        "username=sam",
         "url=github.com",
         "password=hunter22",
     ]);
@@ -796,7 +796,7 @@ fn add_edit_and_delete_items() {
     for c in "Linear".chars() {
         rt.key(key(Key::Text(c.into())));
     }
-    fill(&mut rt, "username", "kit");
+    fill(&mut rt, "username", "alex");
     rt.key(command('s'));
     until(&mut rt, "the new login, selected", |s| {
         !s.editing()
@@ -807,13 +807,13 @@ fn add_edit_and_delete_items() {
     assert_eq!(device.output(&["get", "Linear"]).trim(), password);
     assert_eq!(
         device.output(&["get", "-f", "username", "Linear"]).trim(),
-        "kit"
+        "alex"
     );
 
     // ⌘E: a new URL, the username emptied, saved as one change.
     rt.key(command('e'));
     rt.frame(1.0 / 60.0);
-    assert_eq!(form_value(&rt.state, "username"), "kit");
+    assert_eq!(form_value(&rt.state, "username"), "alex");
     fill(&mut rt, "username", "");
     fill(&mut rt, "url", "linear.app");
     rt.key(command('s'));

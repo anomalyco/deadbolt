@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn the_extension_id_derives_from_the_committed_key() {
-        let key = include_str!("../../../../extension/manifest-key.txt").trim();
+        let key = include_str!("../../../extension/manifest-key.txt").trim();
         let der = data_encoding::BASE64.decode(key.as_bytes()).unwrap();
         let digest = Sha256::digest(&der);
         let id: String = digest[..16]
@@ -446,23 +446,23 @@ mod tests {
         let file = "NativeMessagingHosts/pw.deadbolt.browser.json";
         for xdg in [None, Some("")] {
             let linux = Dirs::from_vars(false, |name| match name {
-                "HOME" => Some("/home/kit".into()),
+                "HOME" => Some("/home/alex".into()),
                 "XDG_CONFIG_HOME" => xdg.map(String::from),
                 _ => None,
             })
             .unwrap();
             assert_eq!(
                 path(&linux, Browser::Chrome).unwrap(),
-                format!("/home/kit/.config/google-chrome/{file}")
+                format!("/home/alex/.config/google-chrome/{file}")
             );
             assert_eq!(
                 path(&linux, Browser::Brave).unwrap(),
-                format!("/home/kit/.config/BraveSoftware/Brave-Browser/{file}")
+                format!("/home/alex/.config/BraveSoftware/Brave-Browser/{file}")
             );
             assert_eq!(path(&linux, Browser::Arc), None);
         }
         let linux = Dirs::from_vars(false, |name| match name {
-            "HOME" => Some("/home/kit".into()),
+            "HOME" => Some("/home/alex".into()),
             "XDG_CONFIG_HOME" => Some("/xdg".into()),
             _ => None,
         })
@@ -476,18 +476,18 @@ mod tests {
             format!("/xdg/net.imput.helium/{file}")
         );
         let macos = Dirs::from_vars(true, |name| match name {
-            "HOME" => Some("/Users/kit".into()),
+            "HOME" => Some("/Users/alex".into()),
             "XDG_CONFIG_HOME" => Some("/xdg".into()),
             _ => None,
         })
         .unwrap();
         assert_eq!(
             path(&macos, Browser::Arc).unwrap(),
-            format!("/Users/kit/Library/Application Support/Arc/User Data/{file}")
+            format!("/Users/alex/Library/Application Support/Arc/User Data/{file}")
         );
         assert_eq!(
             path(&macos, Browser::Helium).unwrap(),
-            format!("/Users/kit/Library/Application Support/net.imput.helium/{file}")
+            format!("/Users/alex/Library/Application Support/net.imput.helium/{file}")
         );
         assert!(Dirs::from_vars(false, |_| None).is_err());
         assert!(Dirs::from_vars(false, |_| Some(String::new())).is_err());

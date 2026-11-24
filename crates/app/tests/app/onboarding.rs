@@ -252,7 +252,7 @@ fn the_device_name_arrives_later_without_moving_the_field() {
         rt.update(move |s, _| {
             s.onboarding.device = rune::TextEdit::new("");
             s.onboarding.worker =
-                Worker::scripted(vec![(at, Progress::DeviceName("Kit's Mac".into()))]);
+                Worker::scripted(vec![(at, Progress::DeviceName("Alex's Mac".into()))]);
         });
         rt
     };
@@ -264,7 +264,7 @@ fn the_device_name_arrives_later_without_moving_the_field() {
     assert_eq!(rt.state.onboarding.device.text, "", "nothing yet");
     let before = rect(&rt);
     settle(&mut rt, 0.5);
-    assert_eq!(rt.state.onboarding.device.text, "Kit's Mac");
+    assert_eq!(rt.state.onboarding.device.text, "Alex's Mac");
     assert_eq!(rect(&rt), before, "the field holds still");
 
     let mut rt = fresh(0.5);
@@ -297,7 +297,7 @@ fn the_device_name_arrives_later_without_moving_the_field() {
     assert_eq!(rt.state.onboarding.step, Step::Welcome);
     rt.update(|s, _| s.choose(Flow::Create));
     rt.frame(FRAME);
-    assert_eq!(rt.state.onboarding.device.text, "Kit's Mac");
+    assert_eq!(rt.state.onboarding.device.text, "Alex's Mac");
 }
 
 /// ⇧⌘Space in a field opens the quick panel; it never types a space, not

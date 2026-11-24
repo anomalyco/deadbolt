@@ -99,7 +99,7 @@ fn a_deleted_item_opens_read_only_and_restores_into_the_vault() {
             FieldInfo {
                 name: "username".into(),
                 kind: "text".into(),
-                value: "dax".into(),
+                value: "sam".into(),
             },
             FieldInfo {
                 name: "password".into(),
@@ -114,7 +114,7 @@ fn a_deleted_item_opens_read_only_and_restores_into_the_vault() {
         result: Ok(Values::new(item)),
     });
     assert!(r.rt.state.trash.shown.is_some());
-    assert!(r.shows("dax"), "its plain fields show");
+    assert!(r.shows("sam"), "its plain fields show");
     assert!(
         r.plaintext("hunter2-spare").is_empty(),
         "secrets stay masked"

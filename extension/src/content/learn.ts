@@ -195,7 +195,7 @@ const typedValues = () => [...identifiers, ...latest.values()].map((v) => v.slic
 /**
  * Page text scrubbed of what was typed in this frame: each typed value whole,
  * then any word that's a typed word or the start of one (three letters or
- * more), however long the text typed: an echo cut short ("Send kit vogel
+ * more), however long the text typed: an echo cut short ("Send alex mercer
  * secr…") names it as well as a whole one.
  */
 function ownScrubber(): (text: string) => string {

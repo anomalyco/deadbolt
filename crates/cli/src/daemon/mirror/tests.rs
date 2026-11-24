@@ -310,7 +310,7 @@ fn deletes_only_what_the_mirror_added() {
     let mut s = loaded(dir.path());
     let mut op = op_items();
     sync(&mut s, &op);
-    create(&mut s, "login", "Mine", &[("password", "kit-pw")]);
+    create(&mut s, "login", "Mine", &[("password", "alex-pw")]);
     op.retain(|i| i["title"] != "A note" && i["title"] != "Visa");
     let report = sync(&mut s, &op);
     assert_eq!(
@@ -339,7 +339,7 @@ fn takes_over_the_same_content_and_adds_the_rest_beside() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = loaded(dir.path());
     import_without_sources(&mut s);
-    create(&mut s, "login", "Mine", &[("password", "kit-pw")]);
+    create(&mut s, "login", "Mine", &[("password", "alex-pw")]);
     let count = items(&s).len();
     let mut op = op_items();
     let report = sync(&mut s, &op);
@@ -386,7 +386,7 @@ fn a_login_with_the_same_username_and_url_is_taken_over_keeping_its_own_fields()
         "login",
         "GitHub (work)",
         &[
-            ("username", "dax@example.com"),
+            ("username", "sam@example.com"),
             ("password", "mine"),
             ("url", "https://github.com/login"),
             ("pin", "2468"),
@@ -494,7 +494,7 @@ fn a_login_matched_here_already_makes_another_with_its_username_and_url_ambiguou
         "login",
         "GitHub (work)",
         &[
-            ("username", "dax@example.com"),
+            ("username", "sam@example.com"),
             ("password", "mine"),
             ("url", "https://github.com/login"),
         ],
@@ -596,7 +596,7 @@ fn an_item_that_only_shares_a_name_is_never_overwritten() {
         &mut s,
         "login",
         "GitHub",
-        &[("username", "dax@example.com"), ("password", "mine")],
+        &[("username", "sam@example.com"), ("password", "mine")],
     );
     let report = sync(&mut s, &op_items());
     assert_eq!(report.count(MirrorAction::Adopt), 0, "{report:?}");
@@ -667,7 +667,7 @@ fn an_import_is_taken_over_by_id() {
 fn ambiguity_is_reported_from_the_side_it_is_on() {
     let github = |password: &'static str| {
         [
-            ("username", "dax@example.com"),
+            ("username", "sam@example.com"),
             ("password", password),
             ("url", "https://github.com/login"),
         ]
@@ -920,8 +920,8 @@ fn fake_op(dir: &std::path::Path, script: &str) -> Op {
 async fn chooses_the_account_already_mirrored() {
     let dir = tempfile::tempdir().unwrap();
     let accounts = json!([
-        { "url": "https://my.1password.com/", "email": "dax@example.com", "user_uuid": USER, "account_uuid": ACCOUNT },
-        { "url": "team.1password.com", "email": "dax@example.com", "user_uuid": "U2", "account_uuid": "A2" },
+        { "url": "https://my.1password.com/", "email": "sam@example.com", "user_uuid": USER, "account_uuid": ACCOUNT },
+        { "url": "team.1password.com", "email": "sam@example.com", "user_uuid": "U2", "account_uuid": "A2" },
     ]);
     std::fs::write(dir.path().join("accounts.json"), accounts.to_string()).unwrap();
     let op = fake_op(dir.path(), r#"cat "$(dirname "$0")/accounts.json""#);
@@ -931,7 +931,7 @@ async fn chooses_the_account_already_mirrored() {
     assert_eq!(
         error.to_string(),
         "2 1Password accounts: choose one with --account \
-         (dax@example.com on my.1password.com, dax@example.com on team.1password.com)"
+         (sam@example.com on my.1password.com, sam@example.com on team.1password.com)"
     );
     let chosen = super::account(&op, Some("my.1password.com"), &none, &none)
         .await

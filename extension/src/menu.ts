@@ -10,20 +10,22 @@
 // labels roll. Every pick and button waits for the visibility guard and the
 // dwell (see ui/dom.ts) before it does anything.
 
-import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, MenuUnlockReply, OfferChoice, PanelClosed, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
-import { provider as providerOf } from "./signin"
-import type { Account, FormCard, FormIdentity } from "./protocol"
-import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
-import { animateTo, MENU_MOTION, reducedMotion, REDUCED_FADE, rollLabel, ROLL_CSS, SHRINK_WAITS_MS, spring, Spring, timing } from "./ui/motion"
-import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
-import { folding, host, MARK_ROOM, onFold, PILL_HEIGHT, placePill, riding, whenWide } from "./ui/pill-frame"
-import { ring } from "./ui/ring"
-import { offerTitle } from "./ui/offer"
-import { brandBySlug, siteTile } from "./ui/site-icon"
-import { lockedRow, turnInFlight, turnIntoLogins, waitOnPanel } from "./ui/unlock"
 
-/** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
-type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account } | { generate: true } | { identity: FormIdentity } | { card: FormCard }
+import type { FieldRole, MenuLoadReply, MenuUnlockReply, PanelClosed, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
+import { provider as providerOf } from "./signin"
+import type { Account } from "./protocol"
+import { avatar, confirmPick, Dwell, Entry, h, icon, watchVisibility } from "./ui/dom"
+import { animateTo, MENU_MOTION, reducedMotion, ROLL_CSS, spring, Spring, timing } from "./ui/motion"
+import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
+import { onFold } from "./ui/pill-frame"
+import { ring } from "./ui/ring"
+import { siteTile } from "./ui/site-icon"
+import { lockedRow, turnInFlight, turnIntoLogins, waitOnPanel } from "./ui/unlock"
+import { COLLAPSE_GRACE_MS, FILLED_STAYS_MS, renderOffer, REPLAY_MS, ROW, type OfferState } from "./menu/offer"
+import { createPillController } from "./menu/pill"
+import { cardLine, CHEVRON, matches, notice, pillName, providerMark, type Row } from "./menu/rows"
+
+export { cardLine }
 
 // Set once the background accepts a token from the parent window.
 let token = ""
@@ -142,39 +144,11 @@ async function confirmScale(at: number): Promise<boolean> {
 const entry = new Entry()
 const COVERED = "This menu is covered. Nothing was filled."
 /** How long the save offer stays in the page before it leaves the offer to the toolbar. */
-const OFFER_STAYS_MS = 12_000
-/** After a save that failed once the offer's time was up, it stays this much longer. */
-const OFFER_REARM_MS = 6000
-/** The dot the offer shrinks to stays this long before leaving the offer to the toolbar. */
-const DOT_STAYS_MS = 20_000
-/** Reopened from the dot, the pill stays this long. */
-const OFFER_REOPENED_MS = 8000
-/** The offer's compact pill is this tall; its dot this wide. */
-const ROW = 36
-const DOT = 28
-/** The pointer resting on the pill this long opens it. */
-const OPEN_AFTER_MS = 350
-/** Leaving the open offer closes it after this grace. */
-const COLLAPSE_GRACE_MS = 300
-/** Reopened from the dot under the pointer, it waits this long before opening further. */
-const REOPEN_SETTLES_MS = 500
-/** Pointer events this soon after the frame changed size may be the browser replaying an old position. */
-const REPLAY_MS = 150
-/** The pill and the dot cross-fade over this long (menu.css). */
-const CROSSFADE_MS = 260
 /** The pointer moving onto the corner offer's top account this long lists the others: passing over it doesn't. */
 const EXPAND_AFTER_MS = 150
-/** How long a pill says how it went before it goes. */
-const FILLED_STAYS_MS = 900
 const FAILED_STAYS_MS = 1800
-/** A pill's flash as its fill lands, or fails: up quickly, then cooling. */
-const PILL_FLASH_MS = 1100
-/** How far the frame's width leads a pill's label roll. */
-const WIDTH_LEAD_MS = 80
 /** How long narrowing's row animations run: the dwell starts again after. */
 const NARROW_SETTLES_MS = 480
-/** "Saving…" stays in the Save button at least this long, so it can be read. */
-const SAVING_READS_MS = 520
 
 document.head.append(h("style", {}, ROLL_CSS))
 
@@ -219,11 +193,13 @@ new ResizeObserver(() => mode !== "pill" && report()).observe(surface)
 
 // ---- The account list ----------------------------------------------------------
 
-/** "Visa ••4242 · 08/28": the brand (or the card's name), its last digits, and when it expires. */
-export function cardLine(card: FormCard): string {
-  const expiry = card.expiry ? ` · ${card.expiry.slice(5, 7)}/${card.expiry.slice(2, 4)}` : ""
-  return `${card.brand || card.title} ••${card.last4}${expiry}`
-}
+const { land, toCircle, fold, settle } = createPillController({
+  surface,
+  setMode: (next) => { mode = next },
+  report,
+  done,
+  relax,
+})
 
 function row(item: Row, i: number): HTMLElement {
   const [tile, title, sub] =
@@ -236,7 +212,7 @@ function row(item: Row, i: number): HTMLElement {
       : "passkey" in item
       ? [avatar("", icon("passkey")), item.passkey.username || "Passkey", `Passkey · ${item.passkey.vault}`]
       : "provider" in item
-        ? // "Sign in with Google · kit@gmail.com": the provider's mark and name, then the account it uses.
+        ? // "Sign in with Google · alex@gmail.com": the provider's mark and name, then the account it uses.
           [providerMark(item.provider.signIn!.provider), `Sign in with ${providerOf(item.provider.signIn!.provider).name}`, item.provider.signIn!.account || item.provider.title]
         : universal
         ? [loginTile(item.account, i), `Sign in${item.account.username ? ` as ${item.account.username}` : ` to ${item.account.title}`}`, "Fills and submits this sign-in"]
@@ -298,66 +274,6 @@ function loginTile(account: Account, i: number): HTMLElement {
   })
 }
 
-/**
- * Brand colours of the providers Simple Icons doesn't carry (their owners
- * asked it not to): their initial in that colour. Microsoft's four squares
- * are drawn, being plain geometry.
- */
-const UNBUNDLED: Record<string, string> = { amazon: "FF9900", slack: "4A154B", linkedin: "0A66C2", microsoft: "737373" }
-const MICROSOFT = [["F25022", 0, 0], ["7FBA00", 13, 0], ["00A4EF", 0, 13], ["FFB900", 13, 13]] as const
-
-/** Near-black (Apple, GitHub, X): drawn in the tile's own ink, so it reads in dark mode too. */
-function brandInk(hex: string): string {
-  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.12 ? "currentColor" : `#${hex}`
-}
-
-const SVG_NS = "http://www.w3.org/2000/svg"
-function markSvg(paint: (svg: SVGSVGElement) => void, box = "0 0 24 24"): SVGSVGElement {
-  const el = document.createElementNS(SVG_NS, "svg")
-  el.setAttribute("viewBox", box)
-  el.setAttribute("aria-hidden", "true")
-  paint(el)
-  return el
-}
-
-/**
- * A provider's mark, its logo in its brand colour from the bundled Simple
- * Icons subset (no request), whatever the site icons setting: it says who
- * the row signs in with. Its initial until that loads, or for a provider
- * the subset lacks.
- */
-function providerMark(id: string): HTMLElement {
-  const p = providerOf(id)
-  const el = avatar(p.name)
-  el.classList.add("provider")
-  const show = (mark: SVGSVGElement) => {
-    el.replaceChildren(mark)
-    el.classList.add("mark")
-  }
-  if (p.id === "microsoft")
-    show(markSvg((s) => MICROSOFT.forEach(([fill, x, y]) => {
-      const r = document.createElementNS(SVG_NS, "rect")
-      for (const [k, v] of Object.entries({ x, y, width: 11, height: 11, fill: `#${fill}` })) r.setAttribute(k, String(v))
-      s.append(r)
-    })))
-  else if (UNBUNDLED[p.id]) el.style.color = brandInk(UNBUNDLED[p.id])
-  else if (p.hosts.length)
-    void brandBySlug(p.id).then((brand) => {
-      if (!brand || !/^[0-9a-f]{6}$/i.test(brand[1])) return
-      show(markSvg((s) => {
-        const path = document.createElementNS(SVG_NS, "path")
-        path.setAttribute("d", brand[2])
-        path.setAttribute("fill", brandInk(brand[1]))
-        s.append(path)
-      }))
-    })
-  return el
-}
-
-function notice(glyph: Element, title: string, sub: string): HTMLElement {
-  return h("div", { class: "row notice" }, avatar("", glyph), h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)))
-}
 
 /**
  * The locked row (ui/unlock.ts), pressed: the browser-only Deadbolt unlocks in
@@ -488,22 +404,6 @@ addEventListener("pointercancel", () => !busy && relax(), true)
 /** What the user has typed in the field, lowercased; the list shows the rows it matches. */
 let query = ""
 
-function matches(item: Row, q: string): boolean {
-  if (!q) return true
-  // A generated password matches nothing typed: typing a password of one's own puts it away.
-  if ("generate" in item) return false
-  const hay =
-    "identity" in item
-      ? [item.identity.title, item.identity.summary]
-      : "card" in item
-      ? [item.card.title, item.card.brand ?? "", item.card.cardholder ?? ""]
-      : "passkey" in item
-      ? [item.passkey.username ?? ""]
-      : "provider" in item
-        ? [item.provider.title, item.provider.signIn?.account ?? "", providerOf(item.provider.signIn?.provider ?? "").name]
-        : [item.account.title, item.account.username ?? ""]
-  return hay.some((s) => s.toLowerCase().includes(q))
-}
 
 const visible = () => accounts.flatMap((a, i) => (matches(a, query) ? [i] : []))
 
@@ -657,53 +557,6 @@ async function pick(i: number) {
   setTimeout(() => done(), FAILED_STAYS_MS)
 }
 
-/** The pill's own answer as its ring closes, or goes: its whole ground flashes green, or red, and cools. */
-function land(ok: boolean) {
-  // A tinted layer under the pill's content, up fast, then cooling slowly: a light, not a fade.
-  const glow = h("span", { class: `pill-glow${ok ? "" : " failed"}`, "aria-hidden": "true" })
-  surface.append(glow)
-  glow
-    .animate([{ opacity: 0, easing: "ease-out" }, { opacity: 1, offset: 0.15, easing: "cubic-bezier(.2,.7,.3,1)" }, { opacity: 0 }], PILL_FLASH_MS)
-    .finished.then(() => glow.remove(), () => glow.remove())
-}
-
-/**
- * A filled pill going: its words fade where they are and its green goes,
- * then the frame shrinks into the circle at its right end, the pill
- * narrowing with it frame by frame so the tile rides its left edge there
- * (placePill), and the circle fades as it arrives.
- */
-function toCircle(pill: HTMLElement) {
-  if (reducedMotion()) return done()
-  for (const el of pill.querySelectorAll<HTMLElement>(".pill-label, .pill-mark"))
-    el.animate([{ opacity: 1, filter: "blur(0px)" }, { opacity: 0, filter: "blur(2px)" }], { duration: 160, easing: "ease-out", fill: "forwards" })
-  const tile = pill.querySelector<HTMLElement>(".avatar, .offer-mark")
-  if (tile) tile.style.flexShrink = "0"
-  const shrink = spring(MENU_MOTION.frameSize).duration
-  setTimeout(() => {
-    if (!pill.isConnected) return
-    riding.closingUp = pill
-    // The ring goes back to its plain track, the rim's light out.
-    for (const el of pill.querySelectorAll<HTMLElement>(".ring-comet, .pill-glow"))
-      el.animate([{ opacity: getComputedStyle(el).opacity }, { opacity: 0 }], { duration: shrink * 0.5, easing: "ease-out", fill: "forwards" })
-    report(PILL_HEIGHT - pill.getBoundingClientRect().width)
-    pill.style.boxSizing = "border-box"
-    pill.style.overflow = "clip"
-    whenWide(PILL_HEIGHT, placePill)
-    // It starts to fade while it's still closing.
-    setTimeout(() => done(), shrink * 0.55)
-  }, 120)
-}
-
-/** What a pick's pill calls it: the login's username, or the item's name. */
-function pillName(a: (typeof accounts)[number]): string {
-  if ("identity" in a) return a.identity.title
-  if ("card" in a) return cardLine(a.card)
-  if ("generate" in a) return "Strong password"
-  if ("passkey" in a) return a.passkey.username || "Passkey"
-  if ("account" in a) return a.account.username || a.account.title
-  return ""
-}
 
 /**
  * A "Sign in with …" row picked: the page's content script rings the site's
@@ -722,146 +575,6 @@ async function signInWith(i: number, account: Account) {
   say(`Deadbolt couldn't find the page's ${name} button.`)
 }
 
-// ---- Folding into a pill ---------------------------------------------------------
-
-/**
- * Folds the surface into a pill at its place on the page (the end of the
- * field the menu belongs to, or the top right for the save offer):
- * `persist` (the picked row's avatar, or the Save button's label) and `lead`
- * travel into it, everything else fades and blurs where it is, and the frame
- * contracts from where it is onto the pill, which is laid out at its final
- * size and place from the start. Returns the pill's label. Without `check`,
- * the pill has no check of its own to open when it's done (a pick's ring says so).
- */
-function fold(persist: HTMLElement | null, text: string, { persistIsLabel = false, lead, check = true }: { persistIsLabel?: boolean; lead?: HTMLElement; check?: boolean } = {}): HTMLElement {
-  mode = "pill"
-  const pill = h("div", { class: "pill waiting" })
-  const label = persistIsLabel && persist ? h("span", { class: "pill-label" }) : h("span", { class: "pill-label" }, text)
-  label.dataset.text = persistIsLabel && persist ? (persist.dataset.text ?? text) : text
-  const slots = { lead: h("span", { class: "pill-slot" }), persist: h("span", { class: "pill-slot" }) }
-  // A `persist` that isn't on the menu has nowhere to travel from: it's in the pill from the start.
-  const inPlace = !!persist && !persistIsLabel && !persist.isConnected
-  if (lead) pill.append(slots.lead)
-  if (inPlace) pill.append(persist)
-  else if (persist && !persistIsLabel) pill.append(slots.persist)
-  pill.append(label)
-  if (check) pill.append(h("span", { class: "pill-mark", "aria-hidden": "true" }, icon("check")))
-  // Whatever goes fades where it is; the pill is the main change. It keeps
-  // its size too, so the narrowing frame closes over it instead of reflowing it.
-  const fading = Array.from(surface.children) as HTMLElement[]
-  for (const el of fading) el.style.width = `${el.getBoundingClientRect().width}px`
-  Object.assign(folding, { fading, travellers: [], label: null, pin: null })
-  surface.classList.add("folded")
-  document.body.append(pill)
-  for (const el of fading) {
-    el.setAttribute("aria-hidden", "true")
-    el.style.pointerEvents = "none"
-    animateTo(el, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, MENU_MOTION.foldOut)
-  }
-  // The pill's size, before anything moves into it: the label's text and the slots' sizes.
-  if (persistIsLabel && persist) label.append(...Array.from(persist.cloneNode(true).childNodes))
-  const size = (slot: HTMLElement, el: HTMLElement | null | undefined, w: number) => {
-    if (!el) return
-    slot.style.cssText = `display:inline-block;flex-shrink:0;width:${w}px;height:${w}px`
-  }
-  size(slots.lead, lead, 22)
-  size(slots.persist, persist && !persistIsLabel && !inPlace ? persist : null, 22)
-  report()
-
-  // Once the content script says where the frame is going, the pill takes
-  // its place and what stays moves in, each from where it was.
-  whenWide(null, () => {
-    pill.classList.remove("waiting")
-    placePill()
-    const moveIn = (el: HTMLElement | null | undefined, slot: HTMLElement, asLabel = false) => {
-      if (!el?.isConnected) return
-      const from = el.getBoundingClientRect()
-      // A gap of its size stays behind, so what fades out doesn't shift into the hole.
-      const gap = h("span", { "aria-hidden": "true" })
-      gap.style.cssText = `display:inline-block;flex-shrink:0;width:${from.width}px;height:${from.height}px`
-      el.replaceWith(gap)
-      const target = asLabel ? label : slot
-      if (asLabel) {
-        // The label itself travels; the pill's own copy of its text takes over where it lands.
-        label.replaceChildren(...Array.from(el.childNodes))
-        el.remove()
-      } else slot.replaceWith(el)
-      // Reduced motion: it fades in where it lands.
-      if (reducedMotion()) return void (asLabel ? label : el).animate([{ opacity: 0 }, { opacity: 1 }], REDUCED_FADE)
-      const to = (asLabel ? target : el).getBoundingClientRect()
-      const dx = from.left + from.width / 2 - (to.left + to.width / 2)
-      const dy = from.top + from.height / 2 - (to.top + to.height / 2)
-      const scale = to.width && !asLabel ? from.width / to.width : 1
-      // On the frame's springs it goes as far as the frame has (see stepFold); without them, on its own.
-      if (host.springs) folding.travellers.push({ el: asLabel ? label : el, dx, dy, scale })
-      else (asLabel ? label : el).animate([{ transform: `translate(${dx}px, ${dy}px) scale(${scale})` }, { transform: "none" }], spring(MENU_MOTION.foldIn))
-    }
-    moveIn(lead, slots.lead)
-    if (persistIsLabel) moveIn(persist, slots.persist, true)
-    else if (!inPlace) moveIn(persist, slots.persist)
-    if (!persistIsLabel) {
-      if (host.springs && !reducedMotion()) folding.label = label
-      else label.animate([{ opacity: 0 }, { opacity: 1 }], timing(MENU_MOTION.pillLabel))
-    }
-    placePill()
-  })
-  return label
-}
-
-/** The label's width with `text` in it, measured off to the side. */
-function widthOf(label: HTMLElement, text: string): number {
-  const probe = h("span", { class: label.className, "aria-hidden": "true" }, text)
-  probe.style.cssText = "position:absolute;visibility:hidden;left:0;top:0"
-  label.parentElement?.append(probe)
-  const w = probe.getBoundingClientRect().width
-  probe.remove()
-  return w
-}
-
-/**
- * The pill says how it went. The frame always holds the pill: growing, its
- * width leads (the new width goes to the content script first, and the label
- * rolls, and the check comes in, once the frame has started toward it);
- * shrinking, the label goes first and the frame follows on the same spring.
- */
-function settle(label: HTMLElement, text: string, ok: boolean) {
-  const pill = label.parentElement
-  if (!pill) return
-  const mark = ok ? pill.querySelector<HTMLElement>(".pill-mark") : null
-  const grow = widthOf(label, text) - label.getBoundingClientRect().width + (mark ? MARK_ROOM : 0)
-  const width = Math.ceil(pill.getBoundingClientRect().width + grow)
-  // Only the check comes, the words staying: it opens with the frame itself, from the moment the frame starts toward it.
-  if (mark && (label.dataset.text ?? label.textContent) === text && grow > 0) {
-    report(grow)
-    return whenWide(width, () => {
-      mark.style.transition = "opacity 200ms ease-out 120ms"
-      if (!reducedMotion()) riding.opening = mark
-      relax()
-      pill.classList.remove("failed")
-      pill.classList.add("ok")
-      placePill()
-    })
-  }
-  const say = () => {
-    const mark = pill.querySelector<HTMLElement>(".pill-mark")
-    if (mark && !reducedMotion()) {
-      const { easing, duration } = spring(0.45)
-      mark.style.transition = `width ${duration}ms ${easing}, margin-left ${duration}ms ${easing}, opacity 200ms ease-out 120ms`
-    }
-    rollLabel(label, text)
-    relax()
-    pill.classList.toggle("ok", ok)
-    pill.classList.toggle("failed", !ok)
-  }
-  if (grow < 0) {
-    say()
-    return void setTimeout(() => report(grow), SHRINK_WAITS_MS)
-  }
-  report(grow)
-  // The frame's width springs over .37 s from when the content script hears of
-  // it; the label rolls over .45 s, a beat later, so the width stays ahead.
-  whenWide(width, () => setTimeout(say, WIDTH_LEAD_MS))
-}
 
 // ---- Keys and presses ----------------------------------------------------------
 
@@ -1033,7 +746,6 @@ rowsEl.addEventListener("focus", (e) => e.isTrusted && universal && expandUniver
  */
 const moving = (e: PointerEvent) => e.isTrusted && (e.movementX !== 0 || e.movementY !== 0) && e.timeStamp - resizedAt > REPLAY_MS
 
-const CHEVRON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 
 /**
  * The corner offer, collapsed: its top account's own row (the site's first
@@ -1135,258 +847,47 @@ function showNotice(notice: Extract<MenuLoadReply, { kind: "notice" }>) {
   setTimeout(() => done(), FILLED_STAYS_MS + 600)
 }
 
+
 // ---- The save offer --------------------------------------------------------------
 
-/**
- * The save offer's shape: a small pill in the corner ("compact"), opened on
- * approach to show who and the other choices ("open"), or just Deadbolt's
- * mark ("dot") once it's not wanted for now.
- */
-type OfferState = "compact" | "open" | "dot"
-let offerState: OfferState = "compact"
+let getOfferState: () => OfferState = () => "compact"
 /** Re-measures the offer and tells the parent its size (see report). */
 let offerSize: () => { width: number; height: number } = () => ({ width: 0, height: 0 })
 
-/**
- * "Save login?" after a confirmed sign-in, in the top right corner of the
- * page. It shows the username and site only; the password stays in the
- * background.
- *
- * The whole card is laid out once, at its open size, anchored to the top
- * right corner; the frame shows only as much of it as the shape needs, so
- * opening and closing are the frame's clip and radius moving, with nothing
- * inside reflowing. The parent moving the frame restarts the dwell, so a
- * button that just came into view takes no press until it has sat still.
- */
 function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
-  mode = "save"
-  const title = offerTitle(offer)
-  document.body.classList.add("save")
-  document.body.dataset.offer = offerState
-  const status = h("p", { class: "offer-status" })
-  // An update says so on its button.
-  const primary = offer.update ? "Update" : "Save"
-  const saveLabel = h("span", { class: "roll-label" }, primary)
-  saveLabel.dataset.text = primary
-  const save = h("button", { class: "btn primary", type: "button" }, saveLabel)
-  const later = h("button", { class: "btn", type: "button" }, "Not now")
-  const never = h("button", { class: "link never", type: "button" }, "Never for this site")
-  // An update of a card or identity may be kept as a new one instead.
-  const asNew = offer.saveNew ? h("button", { class: "btn new", type: "button" }, "Save as new") : null
-  const bar = h("span", { class: "bar", "aria-hidden": "true" })
-  const mark = h("span", { class: "offer-mark", "aria-hidden": "true" }, svg(ICONS.deadbolt))
-  const row = h("div", { class: "offer-row" }, mark, h("h1", { class: "offer-title" }, title), save)
-  const section = h(
-    "section",
-    { class: "offer", "aria-label": title.slice(0, -1) },
-    row,
-    h(
-      "div",
-      { class: "offer-more" },
-      h("p", { class: "offer-user" }, h("span", { class: "value" }, offer.username), h("span", { class: "site" }, ` · ${offer.site}`)),
-      // What an update changes, for a card: "Expires 08/28 → 09/30".
-      offer.change ? h("p", { class: "offer-change" }, offer.change) : null,
-      status,
-      h("div", { class: "offer-actions" }, never, asNew, later),
-    ),
-    bar,
+  const handles = renderOffer(
+    {
+      surface,
+      dwell,
+      entry,
+      send,
+      token: () => token,
+      port: () => port,
+      report,
+      done,
+      leaveLikeSave,
+      fold,
+      settle,
+      press,
+      relax,
+      announce,
+      confirmScale,
+      isBusy: () => busy,
+      setBusy: (value) => { busy = value },
+      getMode: () => mode,
+      setMode: (next) => { mode = next },
+      isPressedScale: () => pressedScale,
+      getPressedAt: () => pressedAt,
+      isPointerAway: () => pointerAway,
+      setPointerAway: (value) => { pointerAway = value },
+      getResizedAt: () => resizedAt,
+    },
+    offer,
   )
-  const dot = h("button", { class: "dot", type: "button", "aria-label": title }, svg(ICONS.deadbolt))
-  surface.replaceChildren(section, dot)
-  section.inert = offerState === "dot"
-  dot.inert = offerState !== "dot"
-
-  // The compact pill: the top row, from the mark (with the row's padding) to the corner.
-  const compactWidth = () => Math.ceil(section.getBoundingClientRect().right - mark.getBoundingClientRect().left + 12)
-  offerSize = () => {
-    if (offerState === "dot") return { width: DOT, height: DOT }
-    const box = section.getBoundingClientRect()
-    if (offerState === "open") return { width: Math.ceil(box.width), height: Math.ceil(box.height) }
-    const width = compactWidth()
-    bar.style.width = `${width}px`
-    return { width, height: ROW }
-  }
-  // The bar runs along the compact pill's bottom edge.
-  bar.style.width = `${compactWidth()}px`
-
-  // ---- Shape ----
-  let grace: ReturnType<typeof setTimeout> | undefined
-  let reopenedAt = -Infinity
-  const shape = (next: OfferState) => {
-    clearTimeout(grace)
-    if (next === offerState || mode !== "save") return
-    for (const a of surface.getAnimations()) a.cancel()
-    const fromDot = offerState === "dot"
-    offerState = next
-    document.body.dataset.offer = next
-    if (fromDot) reopenedAt = performance.now()
-    // Only what shows takes focus: the dot alone, or the pill alone.
-    section.inert = next === "dot"
-    dot.inert = next !== "dot"
-    port?.postMessage({ type: "db:radius", radius: next === "open" ? 12 : next === "dot" ? DOT / 2 : ROW / 2 })
-    // The pill and the dot cross-fade (inside the frame): the dwell counts
-    // from when that's over, as after a move.
-    if (fromDot || next === "dot") {
-      dwell.moved(performance.now())
-      setTimeout(() => dwell.moved(performance.now()), CROSSFADE_MS)
-    }
-    report()
-  }
-  // Where the pointer is, by real movement only. The browser's own idea
-  // (:hover) goes stale once the pointer leaves for the page, and after the
-  // frame changes size it replays the last position here as if the pointer
-  // had moved; the content script says when the pointer is in the page
-  // (db:away), and only movement after that counts.
-  const pointer = { inside: false }
-  const real = (e: PointerEvent) => e.isTrusted && (!pointerAway || e.movementX !== 0 || e.movementY !== 0 || e.timeStamp - resizedAt > REPLAY_MS)
-  const wanted = () => pointer.inside || section.matches(":focus-within")
-  // Approach opens it; leaving closes it again after a moment's grace.
-  // Opening waits a moment under the pointer: a quick Save from the pill
-  // goes ahead without the card opening (which, being a move, would make
-  // the press wait out the dwell again).
-  let opening: ReturnType<typeof setTimeout> | undefined
-  const approach = (e: PointerEvent) => {
-    if (!real(e)) return
-    pointerAway = false
-    pointer.inside = true
-    if (offerState === "dot") return shape("compact")
-    // Just reopened from the dot under the pointer: stay compact until the pointer moves on it.
-    if (offerState !== "compact" || opening !== undefined || performance.now() - reopenedAt < REOPEN_SETTLES_MS) return
-    opening = setTimeout(() => {
-      opening = undefined
-      if (pointer.inside && offerState === "compact" && !busy && !document.body.classList.contains("held")) shape("open")
-    }, OPEN_AFTER_MS)
-  }
-  const depart = () => {
-    pointer.inside = false
-    clearTimeout(opening)
-    opening = undefined
-    clearTimeout(grace)
-    grace = setTimeout(() => offerState === "open" && !wanted() && !busy && shape("compact"), COLLAPSE_GRACE_MS)
-  }
-  section.addEventListener("pointerenter", approach)
-  section.addEventListener("pointermove", approach)
-  section.addEventListener("pointerleave", depart)
-  // Keyboard focus opens it; the focus a click gives a button doesn't (that
-  // would move the frame under the press, and the press would be refused).
-  section.addEventListener("focusin", (e) => offerState !== "dot" && e.target instanceof Element && e.target.matches(":focus-visible") && shape("open"))
-  section.addEventListener("focusout", () => !pointer.inside && depart())
-  dot.addEventListener("pointerenter", approach)
-  dot.addEventListener("pointermove", approach)
-  dot.addEventListener("pointerleave", () => (pointer.inside = false))
-  dot.addEventListener("click", (e) => e.isTrusted && shape("compact"))
-  // Tabbed onto, the dot is the pill again, and focus moves onto its Save (the dot leaves the tab order).
-  dot.addEventListener("focus", () => {
-    shape("compact")
-    save.focus({ preventScroll: true })
-  })
-  away = () => {
-    pointerAway = true
-    if (pointer.inside || offerState === "open") depart()
-  }
-
-  // ---- Time ----
-  // The pill's bar empties over twelve seconds, then it shrinks to the dot,
-  // which stays twenty more before leaving the offer to the toolbar. Stepped
-  // frame by frame, never animated (see menu.css), and paused while the offer
-  // is open, under the pointer or focus, approached, or a press is checked.
-  let barEnded = false
-  const time = { total: OFFER_STAYS_MS, left: OFFER_STAYS_MS, last: performance.now(), shape: offerState }
-  const tick = (now: number) => {
-    if (!section.isConnected || mode !== "save") return
-    if (time.shape !== offerState) {
-      // The dot has its own time, and so does the pill reopened from it;
-      // opening and closing the pill keeps the time it had.
-      const from = time.shape
-      time.shape = offerState
-      if (offerState === "dot") Object.assign(time, { total: DOT_STAYS_MS, left: DOT_STAYS_MS })
-      else if (from === "dot") Object.assign(time, { total: OFFER_REOPENED_MS, left: OFFER_REOPENED_MS })
-    }
-    const paused = offerState === "open" || wanted() || dot.matches(":focus") || document.body.matches(".near, .held, .busy")
-    if (!paused) time.left = Math.max(0, time.left - (now - time.last))
-    time.last = now
-    if (offerState !== "dot") bar.style.transform = `scaleX(${time.left / time.total})`
-    if (time.left > 0) return void requestAnimationFrame(tick)
-    if (offerState === "dot") return leaveLikeSave()
-    barEnded = true
-    if (!busy) shape("dot")
-    requestAnimationFrame(tick)
-  }
-  requestAnimationFrame(tick)
-  /** After a save that failed once the time was up: the pill stays a while longer. */
-  const rearm = () => {
-    if (!barEnded) return
-    barEnded = false
-    Object.assign(time, { total: OFFER_REARM_MS, left: OFFER_REARM_MS, last: performance.now(), shape: offerState })
-  }
-  // A click elsewhere in the page (the content script says so): the dot.
-  tuck = () => !busy && shape("dot")
-
-  const say = (text: string) => {
-    status.hidden = !text
-    if (text) rollLabel(status, text)
-    announce(text)
-  }
-  say("")
-  // It shows in the corner, away from where the user is: a screen reader hears it came.
-  // An update names what it changes: "Update phone for Kit Langton?".
-  announce(`${title.slice(0, -1)} for ${offer.what && offer.update ? offer.username : offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
-  const answer = async (choice: OfferChoice, e: MouseEvent) => {
-    // Real presses only.
-    if (!e.isTrusted || busy || offerState === "dot") return
-    // Enter or Space count only once the user came into the surface themselves (see Entry): say where else to answer.
-    if (e.detail === 0 && !entry.entered) return say("Click to answer here, or answer in Deadbolt's toolbar button.")
-    if (!pressedScale || !dwell.settled(pressedAt)) {
-      relax()
-      shape("open")
-      return say(pressedScale && dwell.visible ? "Press again in a moment." : "This offer is covered. Nothing was saved.")
-    }
-    busy = true
-    if (e.currentTarget instanceof HTMLElement) press(e.currentTarget)
-    if (!(await confirmScale(pressedAt))) {
-      busy = false
-      relax()
-      shape("open")
-      return say("This offer is covered. Nothing was saved.")
-    }
-    document.body.classList.remove("held")
-    // "Saving…" rolls in the button itself, and stays long enough to read.
-    const shownAt = performance.now()
-    const saving = choice === "save" || choice === "new"
-    if (saving) {
-      document.body.classList.add("busy")
-      rollLabel(saveLabel, "Saving…")
-    }
-    const reply = await send<ChooseReply>({ type: "db:surface-choose", token, choice })
-    if (!saving) return leaveLikeSave()
-    if (reply?.ok) {
-      await new Promise((r) => setTimeout(r, Math.max(0, SAVING_READS_MS - (performance.now() - shownAt))))
-      const label = fold(saveLabel, "Saving…", { persistIsLabel: true, lead: mark })
-      // Once the pill has its place, its label rolls on to the result: "Saved"
-      // for a new login and an update alike, so the pill is the same either way.
-      return void setTimeout(() => {
-        settle(label, "Saved", true)
-        announce("Saved")
-        setTimeout(() => done(true), FILLED_STAYS_MS + 450)
-      }, 380)
-    }
-    if (!reply || ("gone" in reply && reply.gone)) return leaveLikeSave()
-    // Locked or busy: open, say so in place, and let Save be pressed again, for a while.
-    busy = false
-    relax()
-    document.body.classList.remove("busy")
-    rollLabel(saveLabel, primary)
-    shape("open")
-    say(reply.message)
-    rearm()
-  }
-  // The press shows at once; what it does waits for the checks.
-  for (const b of [save, later, never, ...(asNew ? [asNew] : [])]) b.addEventListener("pointerdown", (e) => e.isTrusted && e.button === 0 && !busy && press(b))
-  save.addEventListener("click", (e) => void answer("save", e))
-  asNew?.addEventListener("click", (e) => void answer("new", e))
-  later.addEventListener("click", (e) => void answer("later", e))
-  never.addEventListener("click", (e) => void answer("never", e))
-  report()
+  getOfferState = handles.state
+  offerSize = handles.size
+  tuck = handles.tuck
+  away = handles.away
 }
 
 /** The offer's answer to a click elsewhere in the page, once it's showing. */
@@ -1434,7 +935,7 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
         const origin = typeof data.origin === "string" ? data.origin : "top left"
         for (const el of [surface, ...Array.from(document.querySelectorAll<HTMLElement>(".pill"))]) {
           if (!corner) el.style.transformOrigin = origin
-          if (corner && mode === "save" && offerState === "compact") el.style.borderRadius = `${ROW / 2}px`
+          if (corner && mode === "save" && getOfferState() === "compact") el.style.borderRadius = `${ROW / 2}px`
           const anim = el.animate(
             reducedMotion()
               ? [{ opacity: 0 }, { opacity: 1 }]
@@ -1493,3 +994,4 @@ chrome.runtime.onMessage.addListener((message: StatusChanged | PanelClosed) => {
   if (message?.type === "db:status") void load()
   if (message?.type === "db:panel-closed") waitOnPanel(rowsEl, false)
 })
+

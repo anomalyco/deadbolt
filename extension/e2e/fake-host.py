@@ -39,26 +39,26 @@ LIST_DELAY = float(os.environ.get("DEADBOLT_FAKE_LIST_DELAY") or 0)
 REF1 = "a" * 64 + ":" + "1" * 32
 REF2 = "a" * 64 + ":" + "2" * 32
 ACCOUNTS = [
-    {"ref": REF1, "vault": "Personal", "title": "Acme", "username": "kit@acme.test", "hasPassword": True, "hasTotp": True, "urls": ["http://www.acme.test", "http://accounts.acme.test"]},
+    {"ref": REF1, "vault": "Personal", "title": "Acme", "username": "alex@acme.test", "hasPassword": True, "hasTotp": True, "urls": ["http://www.acme.test", "http://accounts.acme.test"]},
     {"ref": REF2, "vault": "Work", "title": "Acme admin", "username": "admin", "hasPassword": True, "hasTotp": False, "urls": []},
 ]
 HOME = "c" * 64 + ":" + "1" * 32
 WORK = "c" * 64 + ":" + "2" * 32
 VISA = "c" * 64 + ":" + "3" * 32
 IDENTITIES = [
-    {"ref": HOME, "title": "Home", "summary": "Kit Langton · 123 Main St, Brooklyn"},
-    {"ref": WORK, "title": "Work", "summary": "Kit Langton · 1 Market St, San Francisco"},
+    {"ref": HOME, "title": "Home", "summary": "Alex Mercer · 123 Main St, Brooklyn"},
+    {"ref": WORK, "title": "Work", "summary": "Alex Mercer · 1 Market St, San Francisco"},
 ]
-CARDS = [{"ref": VISA, "title": "Personal Visa", "brand": "Visa", "last4": "4242", "expiry": "2028-08", "cardholder": "Kit Langton"}]
+CARDS = [{"ref": VISA, "title": "Personal Visa", "brand": "Visa", "last4": "4242", "expiry": "2028-08", "cardholder": "Alex Mercer"}]
 FORM_VALUES = {
-    HOME: {"given-name": "Kit", "family-name": "Langton", "email": "kit@acme.test", "phone": "+14155550123", "organization": "Acme",
+    HOME: {"given-name": "Alex", "family-name": "Mercer", "email": "alex@acme.test", "phone": "+14155550123", "organization": "Acme",
            "address-line1": "123 Main St", "address-line2": "Apt 4", "city": "Brooklyn", "region": "NY", "postal-code": "11201",
            "country": "US", "birthday": "1990-07-04"},
-    WORK: {"given-name": "Kit", "family-name": "Langton", "address-line1": "1 Market St", "city": "San Francisco", "region": "CA",
+    WORK: {"given-name": "Alex", "family-name": "Mercer", "address-line1": "1 Market St", "city": "San Francisco", "region": "CA",
            "postal-code": "94105", "country": "US"},
-    VISA: {"number": "4242424242424242", "cvv": "123", "expiry": "2028-08", "cardholder": "Kit Langton", "brand": "Visa"},
+    VISA: {"number": "4242424242424242", "cvv": "123", "expiry": "2028-08", "cardholder": "Alex Mercer", "brand": "Visa"},
 }
-VALUES = {REF1: {"username": "kit@acme.test", "password": "correct horse", "totp": "492039"}, REF2: {"username": "admin", "password": "hunter2"}}
+VALUES = {REF1: {"username": "alex@acme.test", "password": "correct horse", "totp": "492039"}, REF2: {"username": "admin", "password": "hunter2"}}
 # DEADBOLT_FAKE_USERNAME and DEADBOLT_FAKE_PASSWORD replace the first login's
 # values (corpus/sweep.ts, on real sites).
 if os.environ.get("DEADBOLT_FAKE_USERNAME"):
@@ -79,15 +79,15 @@ if os.environ.get("DEADBOLT_FAKE_ORIGIN"):
 if os.environ.get("DEADBOLT_FAKE_SIGNIN"):
     REF3 = "a" * 64 + ":" + "3" * 32
     REF4 = "a" * 64 + ":" + "4" * 32
-    ACCOUNTS.append({"ref": REF3, "vault": "Personal", "title": "Acme", "hasPassword": False, "hasTotp": False, "urls": [], "signIn": {"provider": "google", "account": "kit@gmail.com"}})
-    ACCOUNTS.append({"ref": REF4, "vault": "Personal", "title": "Google", "username": "kit@gmail.com", "hasPassword": True, "hasTotp": False, "urls": ["https://accounts.google.com"]})
+    ACCOUNTS.append({"ref": REF3, "vault": "Personal", "title": "Acme", "hasPassword": False, "hasTotp": False, "urls": [], "signIn": {"provider": "google", "account": "alex@gmail.com"}})
+    ACCOUNTS.append({"ref": REF4, "vault": "Personal", "title": "Google", "username": "alex@gmail.com", "hasPassword": True, "hasTotp": False, "urls": ["https://accounts.google.com"]})
     VALUES[REF3] = {}
-    VALUES[REF4] = {"username": "kit@gmail.com", "password": "google password"}
+    VALUES[REF4] = {"username": "alex@gmail.com", "password": "google password"}
 # DEADBOLT_FAKE_GOOGLE=1: three google.com logins, for Google's password step.
 if os.environ.get("DEADBOLT_FAKE_GOOGLE"):
     ACCOUNTS = [
         {"ref": "b" * 64 + ":" + str(i) * 32, "vault": "Personal", "title": "Google", "username": u, "hasPassword": True, "hasTotp": False, "urls": ["https://accounts.google.com"]}
-        for i, u in enumerate(["ryan@gmail.com", "ryan@anoma.ly", "kit@gmail.com"], 1)
+        for i, u in enumerate(["jordan@gmail.com", "jordan@example.com", "alex@gmail.com"], 1)
     ]
 
 

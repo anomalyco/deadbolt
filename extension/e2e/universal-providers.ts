@@ -715,14 +715,14 @@ try {
   // A linked login for a provider Deadbolt knows no hosts for (Okta): the pick
   // points at the site's own Okta button, as before chains, and clicks nothing.
   if (native) {
-    cli("new", "login", "--name", "Okta", "url=https://acme.okta.com", "username=kit@acme.test", "password=synthetic-okta-password")
+    cli("new", "login", "--name", "Okta", "url=https://acme.okta.com", "username=alex@acme.test", "password=synthetic-okta-password")
     const ref = JSON.stringify(await hostRequest({ type: "list", origin: "https://acme.okta.com" })).match(/"ref":"([^"]+)"/)?.[1]
     if (!ref) throw new Error("the host lists no Okta login")
     cli("new", "login", "--name", "Acme via Okta", `url=${site}`, "sign-in-with=okta", `sign-in-account=${ref.split(":")[1]}`)
     cli("unset", "--field", "password", "Acme via Okta")
   } else {
     const save = async (name: string, fields: Array<{ name: string; value: string }>) => String((await command({ type: "device-item-save", kind: "login", name, fields })).reply.ref)
-    const oktaRef = await save("Okta", [{ name: "url", value: "https://acme.okta.com" }, { name: "username", value: "kit@acme.test" }, { name: "password", value: "synthetic-okta-password" }])
+    const oktaRef = await save("Okta", [{ name: "url", value: "https://acme.okta.com" }, { name: "username", value: "alex@acme.test" }, { name: "password", value: "synthetic-okta-password" }])
     await save("Acme via Okta", [{ name: "url", value: site }, { name: "sign-in-with", value: "okta" }, { name: "sign-in-account", value: oktaRef.split(":")[1] }])
   }
   // Past the offer's five-second cache of Acme's logins (bg/universal.ts).

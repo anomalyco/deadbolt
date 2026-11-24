@@ -56,22 +56,22 @@ describe("parseOptions", () => {
     })
     expect(parseOptions("get", { challenge: "" })).toBeNull()
     expect(parseOptions("get", { challenge: CHALLENGE, rpId: 3 })).toBeNull()
-    expect(parseOptions("create", { challenge: CHALLENGE, user: { id: "a".repeat(87), name: "kit" } })).toBeNull()
-    expect(parseOptions("create", { challenge: CHALLENGE, user: { name: "kit" } })).toBeNull()
+    expect(parseOptions("create", { challenge: CHALLENGE, user: { id: "a".repeat(87), name: "alex" } })).toBeNull()
+    expect(parseOptions("create", { challenge: CHALLENGE, user: { name: "alex" } })).toBeNull()
   })
 
   test("a credential list is whole or the browser's: never cut short or filtered", () => {
     const many = Array.from({ length: 65 }, (_, i) => `AQ${i}`)
     for (const list of [["AQ", 5], ["AQ", "not base64!"], ["AQ", null], many, "AQ", {}, null]) {
       expect(parseOptions("get", { challenge: CHALLENGE, allow: list })).toBeNull()
-      expect(parseOptions("create", { challenge: CHALLENGE, user: { id: "a2l0", name: "kit" }, exclude: list })).toBeNull()
+      expect(parseOptions("create", { challenge: CHALLENGE, user: { id: "YWxleA", name: "alex" }, exclude: list })).toBeNull()
     }
     expect(parseOptions("get", { challenge: CHALLENGE, allow: many.slice(0, 64) })).toMatchObject({ allow: many.slice(0, 64) })
     expect(parseOptions("get", { challenge: CHALLENGE })).toMatchObject({ allow: [] })
   })
 
   test("so is the algorithm list: none read means the browser's, never any algorithm", () => {
-    const at = (algorithms: unknown) => parseOptions("create", { challenge: CHALLENGE, user: { id: "a2l0", name: "kit" }, exclude: [], algorithms })
+    const at = (algorithms: unknown) => parseOptions("create", { challenge: CHALLENGE, user: { id: "YWxleA", name: "alex" }, exclude: [], algorithms })
     for (const list of [[null], [-7, null], ["-7"], undefined, null, {}, Array(65).fill(-7)]) expect(at(list)).toBeNull()
     expect(at([])).toMatchObject({ algorithms: [] })
     expect(at([-257, -7])).toMatchObject({ algorithms: [-257, -7] })
@@ -111,14 +111,14 @@ function passkeyHost(canVerify = false) {
         case "passkey-list":
           await gates.list
           if (req.rpId === "elsewhere.com") throw new HostError("domain_mismatch", "no")
-          return { type: "passkeys", rpId: req.rpId ?? "www.example.com", canVerify, passkeys: answers.passkeys === false ? [] : [{ ref: REF, vault: "Personal", credentialId: "Y3JlZA", username: "kit" }] }
+          return { type: "passkeys", rpId: req.rpId ?? "www.example.com", canVerify, passkeys: answers.passkeys === false ? [] : [{ ref: REF, vault: "Personal", credentialId: "Y3JlZA", username: "alex" }] }
         case "list":
-          return { type: "list", site: "example.com", accounts: Array.from({ length: answers.logins ?? 0 }, (_, i) => ({ ref: `${"b".repeat(64)}:${i}`, username: "kit", hasPassword: true })) }
+          return { type: "list", site: "example.com", accounts: Array.from({ length: answers.logins ?? 0 }, (_, i) => ({ ref: `${"b".repeat(64)}:${i}`, username: "alex", hasPassword: true })) }
         case "passkey-create":
           if (answers.createError) throw answers.createError
           return { type: "passkey-created", ref: OTHER, credentialId: "bmV3", clientDataJSON: clientData("webauthn.create", req.origin, answers.crossOrigin), attestationObject: "YW8", authenticatorData: "YWQ", publicKey: "cGs", verified: false }
         case "passkey-get":
-          return { type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: clientData("webauthn.get", req.origin, answers.crossOrigin), authenticatorData: "YWQ", signature: "c2ln", userHandle: "a2l0", verified: false }
+          return { type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: clientData("webauthn.get", req.origin, answers.crossOrigin), authenticatorData: "YWQ", signature: "c2ln", userHandle: "YWxleA", verified: false }
         case "passkey-cancel":
           ceremony?.reject(new HostError("cancelled", "cancelled"))
           return { type: "passkey-cancelled", found: !!ceremony }
@@ -152,7 +152,7 @@ beforeEach(() => {
 })
 
 const call = (kind: "get" | "create", sender: chrome.runtime.MessageSender, request: number, options: unknown, allowed: unknown = true) => passkeys.request(kind, sender, request, options, allowed)
-const create = (over: Record<string, unknown> = {}) => ({ challenge: CHALLENGE, user: { id: "a2l0", name: "kit" }, algorithms: [-7, -257], exclude: [], ...over })
+const create = (over: Record<string, unknown> = {}) => ({ challenge: CHALLENGE, user: { id: "YWxleA", name: "alex" }, algorithms: [-7, -257], exclude: [], ...over })
 const get = (over: Record<string, unknown> = {}) => ({ challenge: CHALLENGE, allow: [], ...over })
 const kinds = () => h.requests.map((r) => r.type)
 
@@ -223,7 +223,7 @@ describe("frames", () => {
     passkeys.choose(1, (await prompted()).id, { action: "save" })
     expect(await reply).toMatchObject({ credential: { credentialId: "bmV3" } })
     const made = h.requests.find((r) => r.type === "passkey-create")
-    expect(made).toMatchObject({ origin: "https://www.example.com", rpId: "example.com", challenge: CHALLENGE, user: { id: "a2l0", name: "kit" } })
+    expect(made).toMatchObject({ origin: "https://www.example.com", rpId: "example.com", challenge: CHALLENGE, user: { id: "YWxleA", name: "alex" } })
   })
 })
 
@@ -261,7 +261,7 @@ describe("registration", () => {
   test("asks in the popup, and Cancel or Use another device store nothing", async () => {
     const first = call("create", pageSender(), 1, create())
     const prompt = await prompted()
-    expect(prompt).toMatchObject({ kind: "create", rpId: "www.example.com", username: "kit", registered: false, verify: false })
+    expect(prompt).toMatchObject({ kind: "create", rpId: "www.example.com", username: "alex", registered: false, verify: false })
     expect(opened).toEqual([1])
     expect(fake.badges[1]).toBe("1")
     passkeys.choose(1, prompt.id, { action: "cancel" })
@@ -323,9 +323,9 @@ describe("sign-in", () => {
     passkeys = new Passkeys(h.host, { openPopup: async () => {} })
     const again = call("get", pageSender(), 2, get({ rpId: "example.com", userVerification: "required" }))
     const prompt = await prompted()
-    expect(prompt).toMatchObject({ kind: "get", rpId: "example.com", verify: true, passkeys: [{ ref: REF, username: "kit", vault: "Personal" }] })
+    expect(prompt).toMatchObject({ kind: "get", rpId: "example.com", verify: true, passkeys: [{ ref: REF, username: "alex", vault: "Personal" }] })
     passkeys.choose(1, prompt.id, { action: "use", ref: REF })
-    expect(await again).toEqual({ credential: { credentialId: "Y3JlZA", clientDataJSON: GET_DATA, authenticatorData: "YWQ", signature: "c2ln", userHandle: "a2l0" } })
+    expect(await again).toEqual({ credential: { credentialId: "Y3JlZA", clientDataJSON: GET_DATA, authenticatorData: "YWQ", signature: "c2ln", userHandle: "YWxleA" } })
     expect(h.requests[1]).toMatchObject({ type: "passkey-get", origin: "https://www.example.com", rpId: "example.com", ref: REF, challenge: CHALLENGE, userVerification: "required" })
   })
 
@@ -455,7 +455,7 @@ class NativePort {
     this.sent.push(m)
     if (m.type === "hello" && !this.holdHello) this.hello()
     if (m.type === "passkey-list")
-      queueMicrotask(() => this.push({ id: m.id, type: "passkeys", rpId: m.rpId ?? "www.example.com", canVerify: false, passkeys: [{ ref: REF, vault: "Personal", credentialId: "Y3JlZA", username: "kit" }] }))
+      queueMicrotask(() => this.push({ id: m.id, type: "passkeys", rpId: m.rpId ?? "www.example.com", canVerify: false, passkeys: [{ ref: REF, vault: "Personal", credentialId: "Y3JlZA", username: "alex" }] }))
   }
   /** Answers the hello. */
   hello() {
@@ -548,7 +548,7 @@ describe("autofill sign-in (conditional mediation)", () => {
     let answered: HookReply | null = null
     void call("get", pageSender(), 5, get({ mediation: "conditional" })).then((r) => (answered = r))
     for (let i = 0; i < 20 && !passkeys.menuPasskeys(target, "username").length; i++) await tick()
-    expect(passkeys.menuPasskeys(target, "username")).toEqual([{ ref: REF, vault: "Personal", username: "kit" }])
+    expect(passkeys.menuPasskeys(target, "username")).toEqual([{ ref: REF, vault: "Personal", username: "alex" }])
     expect(passkeys.menuPasskeys(target, "otp")).toEqual([])
     expect(passkeys.menuPasskeys({ ...target, documentId: "other-doc" }, "username")).toEqual([])
     expect(passkeys.prompt(1)).toBeUndefined()
@@ -642,7 +642,7 @@ describe("autofill sign-in (conditional mediation)", () => {
     const frame = { tabId: 1, frameId: 3, documentId: "frame-doc", origin: "https://www.example.com" }
     const seen = watch(pageSender({ frameId: 3, documentId: "frame-doc" }))
     await settle()
-    expect(passkeys.menuPasskeys(frame, "password")).toEqual([{ ref: REF, vault: "Personal", username: "kit" }])
+    expect(passkeys.menuPasskeys(frame, "password")).toEqual([{ ref: REF, vault: "Personal", username: "alex" }])
     expect(passkeys.menuPasskeys(target, "username")).toEqual([])
     expect(await passkeys.menuPick(frame, REF)).toEqual({ ok: true })
     await settle()
@@ -729,8 +729,8 @@ describe("host replies", () => {
     // Only a worker's own true says its preset asks for the passphrase.
     expect(parseHostMessage({ id: 1, type: "passkeys", rpId: "example.com", canVerify: false, asksPassphrase: true, passkeys: [] })).toMatchObject({ reply: { asksPassphrase: true } })
     expect(parseHostMessage({ id: 1, type: "passkeys", rpId: "example.com", canVerify: false, asksPassphrase: "yes", passkeys: [] })).not.toHaveProperty("reply.asksPassphrase")
-    expect(parseHostMessage({ id: 2, type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: "e30", authenticatorData: "YQ", signature: "c2ln", userHandle: "a2l0" })?.kind).toBe("reply")
-    expect(parseHostMessage({ id: 2, type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: "{}", authenticatorData: "YQ", signature: "c2ln", userHandle: "a2l0" })).toBeNull()
+    expect(parseHostMessage({ id: 2, type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: "e30", authenticatorData: "YQ", signature: "c2ln", userHandle: "YWxleA" })?.kind).toBe("reply")
+    expect(parseHostMessage({ id: 2, type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: "{}", authenticatorData: "YQ", signature: "c2ln", userHandle: "YWxleA" })).toBeNull()
     expect(parseHostMessage({ id: 3, type: "error", code: "cancelled", message: "x" })).toMatchObject({ reply: { code: "cancelled" } })
   })
 })

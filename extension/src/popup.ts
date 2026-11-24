@@ -199,7 +199,7 @@ function accountRow(a: Account, first: boolean, index = 0): HTMLElement {
     icon("copy"),
   )
   if (!a.username) copy.setAttribute("disabled", "")
-  // "Sign in with Google · kit@gmail.com" for a login that signs in with another account.
+  // "Sign in with Google · alex@gmail.com" for a login that signs in with another account.
   const via = a.signIn ? `Sign in with ${provider(a.signIn.provider).name}${a.signIn.account ? ` · ${a.signIn.account}` : ""}` : ""
   const sub = via && !a.hasPassword ? via : [a.username || "No username", a.hasTotp ? "2FA code" : "", via].filter(Boolean).join(" · ")
   // One that signs in with another account and has no password has nothing to fill.
