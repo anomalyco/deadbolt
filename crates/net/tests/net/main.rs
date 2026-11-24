@@ -3,7 +3,7 @@
 
 #![cfg(test)]
 
-mod common;
+mod support;
 
 mod pair;
 mod sync;

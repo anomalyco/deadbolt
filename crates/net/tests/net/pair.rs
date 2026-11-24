@@ -1,6 +1,6 @@
 use std::{sync::Mutex, time::Duration};
 
-use crate::common::*;
+use crate::support::*;
 use deadbolt_net::{
     Blob, Error, HandlerError, Inviter, Joiner, PairingCode, PairingContext, PairingOptions,
 };

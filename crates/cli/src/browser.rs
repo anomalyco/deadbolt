@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn the_extension_id_derives_from_the_committed_key() {
-        let key = include_str!("../../../../extension/manifest-key.txt").trim();
+        let key = include_str!("../../../extension/manifest-key.txt").trim();
         let der = data_encoding::BASE64.decode(key.as_bytes()).unwrap();
         let digest = Sha256::digest(&der);
         let id: String = digest[..16]
