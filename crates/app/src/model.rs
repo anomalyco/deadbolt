@@ -180,18 +180,27 @@ impl App {
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         self.clock = now;
         let mut changed = false;
-        for done in self.daemon.drain(now) {
-            self.apply(done, tx);
+        let drained = self.daemon.drain(now);
+        if !drained.is_empty() {
+            // Daemon-driven changes (lock, sync, unlock error, save, import) animate
+            // unless `apply` asks for `tx.instant()` (e.g. a list that moves the selection).
+            tx.animated();
+            for done in drained {
+                self.apply(done, tx);
+            }
             changed = true;
         }
         changed |= self.poll_onboarding(now, tx);
-        changed |= self.tick_held(now, tx);
         changed |= self.tick_copy(now, tx);
         self.tick_code(now, tx);
-        changed |= self.tick_import(now);
+        changed |= self.tick_import(now, tx);
+        changed |= self.tick_held(now, tx);
         if let Some(installer) = &mut self.installer {
             installer.stamp_copy(now, tx);
-            changed |= installer.poll(now);
+            if installer.poll(now) {
+                tx.animated();
+                changed = true;
+            }
         }
         // The install page, Settings, Recently Deleted and Security belong to
         // the vault; leaving it closes them.

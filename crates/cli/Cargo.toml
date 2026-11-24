@@ -49,7 +49,7 @@ p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem", "getrandom"] }
 p384 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 p521 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 # Its own memory and CPU (the daemon), and a counting allocator in dev builds.
-procwatch = { git = "https://github.com/anomalyco/rune", rev = "b1457ab0d1f18cd77fa49da83155b280af2830f8" }
+procwatch = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
 pkcs8 = { version = "0.11", default-features = false, features = ["pem", "encryption", "std"] }
 ssh-key = { version = "0.7.0-rc.11", features = ["std", "ed25519", "p256", "p384", "p521", "encryption", "getrandom"] }
 url = "2.5.8"

@@ -339,3 +339,32 @@ fn settings_keys_scroll_offscreen_rows_into_view() {
         "activity row scrolled clear of the bottom edge ({row:?} in {viewport:?})"
     );
 }
+
+#[test]
+fn poll_driven_onboarding_completion_animates_its_title_swap() {
+    let app = rune::tooling::initial_state(&deadbolt_app::spec(), Some("creating"));
+    let mut rt = Runtime::new(
+        app,
+        deadbolt_app::view::app,
+        (820.0, 540.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    // The creating scene finishes at t = 1.2 s; advance past it to 1.25 s.
+    for _ in 0..75 {
+        rt.frame(FRAME);
+    }
+    let (_, entering) = at(&rt, "title-Vault created").expect("Vault created title mounted");
+    assert!(
+        entering > 0.0 && entering < 0.9,
+        "title crossfades in via Tx::animated (opacity {entering})"
+    );
+    let (_, leaving) = at(&rt, "title-Creating your vault").expect("old title still fading out");
+    assert!(
+        leaving > 0.0 && leaving < 1.0,
+        "old title fades out (opacity {leaving})"
+    );
+}

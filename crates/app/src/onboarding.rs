@@ -518,6 +518,7 @@ impl App {
         if let Some(done) = self.onboarding.done_at {
             let age = now - done;
             if age >= moment::OPEN {
+                tx.animated();
                 self.open_vault(tx);
                 return true;
             }
@@ -530,6 +531,9 @@ impl App {
                 self.onboarding.phase = phase;
                 changed = true;
             }
+        }
+        if changed {
+            tx.animated();
         }
         changed
     }
