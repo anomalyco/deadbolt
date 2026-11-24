@@ -190,7 +190,6 @@ impl App {
                 return false;
             }
             Phase::Copied { until: Some(until) } if now >= *until - 1e-3 => {
-                tx.animated();
                 self.begin_close(Some(now + HIDE_AFTER));
                 tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
             }

@@ -4,6 +4,8 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Explicit so every cargo-deny version checks transitive crates too (0.22 defaults to workspace-only).
+unmaintained = "all"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only reachable through iroh; no replacement available" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant: Linux-only, through Rune's zbus 5 / accesskit_unix atspi; drop when Rune moves back to zbus 6" },

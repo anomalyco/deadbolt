@@ -199,7 +199,6 @@ impl App {
         };
         if let Some(cleared) = copy.cleared_at {
             if now - cleared >= CLEARED_NOTICE - 1e-3 {
-                tx.animated();
                 self.copy = None;
                 return true;
             }
@@ -211,7 +210,6 @@ impl App {
         let mut remaining = copy.remaining(now);
         match copy.copied.as_ref().map(SecretCopy::state) {
             Some(SecretState::Failed(error)) => {
-                tx.animated();
                 copy.copied = None;
                 copy.error = Some(format!("Couldn't copy: {error}"));
                 copy.cleared_at = Some(now);
@@ -223,12 +221,10 @@ impl App {
             // or a lock cleared it early: this countdown ends quietly; the
             // clipboard is no longer this one's to clear.
             Some(SecretState::Replaced) => {
-                tx.animated();
                 self.copy = None;
                 return true;
             }
             Some(SecretState::Cleared) if remaining > EXPIRY_SLACK => {
-                tx.animated();
                 self.copy = None;
                 return true;
             }
@@ -237,7 +233,6 @@ impl App {
             _ => {}
         }
         if remaining <= 0.0 {
-            tx.animated();
             if let Some(c) = copy.copied.take() {
                 c.clear_now();
             }
@@ -248,9 +243,6 @@ impl App {
         let shown = remaining.ceil() as u32;
         let changed = shown != copy.shown;
         copy.shown = shown;
-        if changed {
-            tx.animated();
-        }
         tx.wake_after(self.next_tick(remaining));
         changed
     }
