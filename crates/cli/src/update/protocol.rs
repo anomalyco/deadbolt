@@ -50,6 +50,19 @@ pub(super) struct Manifest {
     release: Release,
 }
 
+impl Manifest {
+    /// The version the release lists for its npm distribution, when it
+    /// carries one: Release is then the source of truth and the registry
+    /// isn't asked. Releases written before npm is recorded have none.
+    pub(super) fn npm_version(&self) -> Option<&str> {
+        self.release
+            .distributions
+            .iter()
+            .find(|distribution| distribution.kind == "npm")
+            .and_then(|distribution| distribution.version.as_deref())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Release {
     version: String,
@@ -168,16 +181,19 @@ pub fn decide(artifact: &str, channel: &str, text: &str, running: &Running) -> D
             None => return Decision::None("no_target"),
         },
         "unknown" => {}
-        kind => {
-            let Some(distribution) = release.distributions.iter().find(|d| d.kind == kind) else {
-                return Decision::None("distribution_unlisted");
-            };
-            let Some(version) = &distribution.version else {
-                return Decision::None("distribution_pending");
-            };
-            candidate.clone_from(version);
-            command.clone_from(&distribution.command);
-        }
+        kind => match release.distributions.iter().find(|d| d.kind == kind) {
+            Some(distribution) => {
+                let Some(version) = &distribution.version else {
+                    return Decision::None("distribution_pending");
+                };
+                candidate.clone_from(version);
+                command.clone_from(&distribution.command);
+            }
+            // Releases written before npm was recorded carry no `npm`
+            // entry; the registry says what npm serves until it does.
+            None if kind == "npm" => {}
+            None => return Decision::None("distribution_unlisted"),
+        },
     }
     if candidate == running.version {
         return Decision::None("up_to_date");

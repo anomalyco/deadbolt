@@ -9,7 +9,7 @@ use url::Url;
 use super::install::{UpdateState, check_sequence, state_dir};
 use super::protocol::{Decision, Running, Target, build_channel, decide, rollout_bucket};
 use super::replace::{refuse_foreign_root, stage_beside};
-use super::service::{SERVICE, Service};
+use super::service::{Manifest, SERVICE, Service};
 use crate::config::{ExtensionBuild, ExtensionDir};
 use crate::paths::Paths;
 
@@ -155,10 +155,14 @@ pub(super) async fn extension(
         }
         return Ok(false);
     }
-    let Some((url, text)) = service.manifest("extension", channel).await? else {
+    let Some(manifest) = service.manifest("extension", channel, None).await? else {
         println!("Browser extension: no {channel} release yet");
         return Ok(false);
     };
+    let Manifest::Found(manifest) = manifest else {
+        bail!("the service answered 304 to a manifest request without an ETag");
+    };
+    let (url, text) = (manifest.url, manifest.text);
     check_sequence(state, "extension", channel, &text, allow_rollback)?;
     let mut available = false;
     let mut failed = None;

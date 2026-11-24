@@ -47,6 +47,22 @@ fn update(device: &Device) -> Option<deadbolt_client::protocol::UpdateInfo> {
         .update
 }
 
+/// The update the daemon reports, if it answered at all: the bounded wait
+/// an opted-out daemon is watched through, without a fixed sleep.
+fn reported_update(device: &Device) -> Option<Option<deadbolt_client::protocol::UpdateInfo>> {
+    let paths = deadbolt_client::Paths::from_vars(|name| match name {
+        "DEADBOLT_HOME" => Some(device.path("home").into()),
+        "XDG_RUNTIME_DIR" => Some(device.path("run").into()),
+        "XDG_STATE_HOME" => Some(device.path("state").into()),
+        "XDG_CONFIG_HOME" => Some(device.path("config").into()),
+        _ => None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(deadbolt_client::status(&paths))
+        .map(|status| status.update)
+}
+
 #[test]
 fn the_daemon_tells_status_and_watchers_when_an_update_is_out() {
     let a = Device::new();
@@ -104,7 +120,8 @@ fn the_daemon_tells_status_and_watchers_when_an_update_is_out() {
     a.run(&["debug", "daemon", "stop"]);
     assert!(wait(&mut watch, Duration::from_secs(10)).success());
 
-    // Opted out, the daemon never asks.
+    // Opted out, the daemon never asks. Wait for it to answer, then watch
+    // through a check interval (a second here) without an update.
     let b = Device::new();
     files
         .lock()
@@ -117,8 +134,16 @@ fn the_daemon_tells_status_and_watchers_when_an_update_is_out() {
             .env("DEADBOLT_NO_UPDATE_CHECK", "1"),
     );
     assert!(out.status.success());
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(update(&b), None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while reported_update(&b).is_none() {
+        assert!(Instant::now() < deadline, "the daemon never answered");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let watch = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < watch {
+        assert_eq!(reported_update(&b), Some(None));
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Copies this deadbolt to `to`, with the `deadbolt-enclave` beside it that

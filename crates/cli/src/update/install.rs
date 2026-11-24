@@ -21,7 +21,7 @@ use super::protocol::{
     Decision, Reason, Running, VERSION, build_channel, decide, rollout_bucket, target, validated,
 };
 use super::replace::{refuse_foreign_root, update_app, update_cli};
-use super::service::Service;
+use super::service::{Manifest, Service};
 use crate::paths::Paths;
 use crate::protocol::UpdateInfo;
 
@@ -140,58 +140,113 @@ fn artifact_of(install: &Install) -> Result<(&'static str, &'static str, &'stati
     })
 }
 
+/// The channel's manifest and what the client rules say to do with it.
+pub(super) struct Found {
+    url: Url,
+    text: String,
+    etag: Option<String>,
+    decision: Decision,
+}
+
+/// A manifest read for `find`: unchanged since the caller's `ETag`, or
+/// the channel's manifest and its decision.
+pub(super) enum Fetched {
+    Unchanged,
+    Read(Box<Found>),
+}
+
 /// The channel's manifest for `artifact` and what to do about it, `None`
 /// when the channel has none: [`decide`], then for npm's package
 /// [`served_by_npm`], for the platform package this system installs
-/// ([`platform_package`]).
-async fn find(
+/// ([`platform_package`]). Sends `etag` as `If-None-Match` when known.
+pub(super) async fn find(
     service: &Service,
     install: &Install,
     artifact: &str,
     channel: &str,
     running: &Running<'_>,
-) -> Result<Option<(Url, String, Decision)>> {
-    let Some((url, text)) = service.manifest(artifact, channel).await? else {
+    etag: Option<&str>,
+) -> Result<Option<Fetched>> {
+    let Some(manifest) = service.manifest(artifact, channel, etag).await? else {
         return Ok(None);
     };
+    let Manifest::Found(manifest) = manifest else {
+        return Ok(Some(Fetched::Unchanged));
+    };
+    let (url, text, etag) = (manifest.url, manifest.text, manifest.etag);
     let mut decision = decide(artifact, channel, &text, running);
     if let Install::Managed(manager) = install
         && manager.npm()
         && matches!(decision, Decision::Notify { .. })
     {
-        let served = service.npm_version(channel).await?;
-        let platform = match &served {
-            Some(version) => {
-                let name = platform_package(running.target, static_libc);
-                service
-                    .npm_has(&name, version)
-                    .await?
-                    .then_some(version.as_str())
-            }
-            None => None,
-        };
-        decision = served_by_npm(decision, served.as_deref(), platform);
+        if let Some(version) = npm_from_release(artifact, channel, &text) {
+            // Release is the source of truth: no registry request, and the
+            // platform package is released with it.
+            decision = served_by_npm(decision, Some(&version), Some(&version));
+        } else {
+            let served = service.npm_version(channel).await?;
+            let platform = match &served {
+                Some(version) => {
+                    let name = platform_package(running.target, static_libc);
+                    service
+                        .npm_has(&name, version)
+                        .await?
+                        .then_some(version.as_str())
+                }
+                None => None,
+            };
+            decision = served_by_npm(decision, served.as_deref(), platform);
+        }
     }
-    Ok(Some((url, text, decision)))
+    Ok(Some(Fetched::Read(Box::new(Found {
+        url,
+        text,
+        etag,
+        decision,
+    }))))
+}
+
+/// The version the manifest lists for npm, if it lists one: Release is the
+/// source of truth, and the registry is only asked for releases that
+/// don't carry it yet.
+pub(super) fn npm_from_release(artifact: &str, channel: &str, text: &str) -> Option<String> {
+    validated(artifact, channel, text)
+        .ok()?
+        .npm_version()
+        .map(str::to_string)
+}
+
+/// The last `ETag` seen for each `<artifact>/<channel>` manifest, kept
+/// by the daemon between polls so an unchanged manifest costs a 304.
+pub type Etags = BTreeMap<String, String>;
+
+/// What a background check found. `Unchanged` is a `304 Not Modified`:
+/// the manifest is the one the caller last saw, so the answer stands.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Checked {
+    Unchanged,
+    Found(Option<UpdateInfo>),
 }
 
 /// The daemon's background check: whether this install has an update on
 /// `channel` that `deadbolt update` would install (the release service's
 /// rules, npm's version for npm's package, Homebrew's for Homebrew). It
 /// never downloads or installs anything, nor writes the sequence floors
-/// `update` keeps, but it ignores a manifest older than them. `None` for
-/// installs it can't update: Nix, Cargo and system packages, and an app
-/// that can't be replaced where it is.
-pub async fn available(paths: &Paths, channel: &str) -> Result<Option<UpdateInfo>> {
+/// `update` keeps, but it ignores a manifest older than them. `Found(None)`
+/// for installs it can't update (Nix, Cargo and system packages, and an app
+/// that can't be replaced where it is) and for no update. `etags` carries
+/// each manifest's `ETag` between polls.
+pub async fn available(paths: &Paths, channel: &str, etags: &mut Etags) -> Result<Checked> {
     let exe = crate::app::this_binary()?;
     let install = method(&exe).await;
     if matches!(
         install,
         Install::Unmovable(_) | Install::Managed(Manager::Nix | Manager::Cargo | Manager::System)
     ) {
-        return Ok(None);
+        return Ok(Checked::Found(None));
     }
     let (artifact, _, distribution) = artifact_of(&install)?;
+    let key = format!("{artifact}/{channel}");
     let state = state_dir(paths);
     let target = target()?;
     let running = Running {
@@ -202,10 +257,28 @@ pub async fn available(paths: &Paths, channel: &str) -> Result<Option<UpdateInfo
         channel: Some(channel),
     };
     let service = Service::new(Some(channel))?;
-    let Some((url, text, decision)) = find(&service, &install, artifact, channel, &running).await?
-    else {
-        return Ok(None);
+    let found = etags.get(&key).map(String::as_str);
+    let Some(fetched) = find(&service, &install, artifact, channel, &running, found).await? else {
+        etags.remove(&key);
+        return Ok(Checked::Found(None));
     };
+    let Fetched::Read(found) = fetched else {
+        return Ok(Checked::Unchanged);
+    };
+    let Found {
+        url,
+        text,
+        etag,
+        decision,
+    } = *found;
+    match etag {
+        Some(etag) => {
+            etags.insert(key, etag);
+        }
+        None => {
+            etags.remove(&key);
+        }
+    }
     if let Ok(manifest) = validated(artifact, channel, &text) {
         let floor = read_floors(&state)?
             .get(&format!("{artifact}/{channel}"))
@@ -218,14 +291,14 @@ pub async fn available(paths: &Paths, channel: &str) -> Result<Option<UpdateInfo
             );
         }
     }
-    Ok(match decision {
+    Ok(Checked::Found(match decision {
         Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),
         Decision::Install { version, .. } | Decision::Notify { version, .. } => Some(UpdateInfo {
             version,
             method: method_key(&install).into(),
         }),
         Decision::None(_) => None,
-    })
+    }))
 }
 
 /// The state directory: the log's.
@@ -266,10 +339,18 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         bucket,
         channel: built,
     };
-    let Some((url, text, decision)) = find(&service, &install, artifact, channel, &running).await?
-    else {
+    let Some(fetched) = find(&service, &install, artifact, channel, &running, None).await? else {
         bail!("there is no {channel} release of {what} yet");
     };
+    let Fetched::Read(found) = fetched else {
+        bail!("the service answered 304 to a manifest request without an ETag");
+    };
+    let Found {
+        url,
+        text,
+        decision,
+        ..
+    } = *found;
     let mut available = false;
     if let Decision::Reject(reason) = decision {
         bail!("{url} is not a usable {artifact} manifest ({reason})");
@@ -324,9 +405,13 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
                     }
                     update_package(paths, manager, &upgrade, &exe, &version).await?;
                 }
-                None => match command {
-                    Some(command) => println!("Update it with: {command}"),
-                    None => println!("To update: {}", manager.hint(channel)),
+                None => match (manager, command) {
+                    // A package no manager claimed gets its own hint: the
+                    // release's npm command may name the wrong manager.
+                    (Manager::Package, _) | (_, None) => {
+                        println!("To update: {}", manager.hint(channel))
+                    }
+                    (_, Some(command)) => println!("Update it with: {command}"),
                 },
             }
         }

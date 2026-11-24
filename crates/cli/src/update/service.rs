@@ -27,6 +27,27 @@ const REGISTRY_OVERRIDE: &str = "DEADBOLT_NPM_REGISTRY_URL";
 /// The largest manifest read.
 const MANIFEST_LIMIT: usize = 1 << 20;
 
+/// A manifest read from the service.
+pub(super) enum Manifest {
+    /// `304 Not Modified`: the manifest is the one the caller's `ETag` names.
+    Unchanged,
+    Found(Read),
+}
+
+/// A manifest the service sent.
+pub(super) struct Read {
+    pub(super) url: Url,
+    pub(super) text: String,
+    /// The `ETag` to send on the next poll.
+    pub(super) etag: Option<String>,
+}
+
+/// A small document the service sent, with its `ETag`.
+enum Small {
+    NotModified,
+    Found { text: String, etag: Option<String> },
+}
+
 pub(super) struct Service {
     base: Url,
     registry: Url,
@@ -42,24 +63,26 @@ impl Service {
             REGISTRY_OVERRIDE,
             env(REGISTRY_OVERRIDE).as_deref(),
         )?;
-        // reqwest takes the process's rustls provider; Deadbolt's is ring.
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let user_agent = format!("deadbolt/{}/{VERSION}/cli", channel.unwrap_or("source"));
-        let client = reqwest::Client::builder()
-            .user_agent(user_agent)
-            .https_only(base.scheme() == "https" && registry.scheme() == "https")
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(60))
-            .build()
-            .context("setting up HTTPS")?;
+        let client = client(
+            &format!("deadbolt/{}/{VERSION}/cli", channel.unwrap_or("source")),
+            base.scheme() == "https" && registry.scheme() == "https",
+        )?;
         Ok(Self {
             base,
             registry,
             client,
         })
+    }
+
+    /// A service whose base is a test server, with the same client settings.
+    #[cfg(test)]
+    pub(super) fn at(base: Url) -> Self {
+        let https = base.scheme() == "https";
+        Self {
+            registry: base.clone(),
+            client: client("deadbolt/test/source/cli", https).expect("a client"),
+            base,
+        }
     }
 
     fn manifest_url(&self, artifact: &str, channel: &str) -> Result<Url> {
@@ -68,15 +91,20 @@ impl Service {
             .join(&format!("deadbolt/{artifact}/{channel}.json"))?)
     }
 
-    /// The manifest's URL and text; `None` when the channel has no release
-    /// of `artifact`.
+    /// The manifest at `url`, sending `etag` as `If-None-Match` when one is
+    /// known; `None` when the channel has no release of `artifact`.
     pub(super) async fn manifest(
         &self,
         artifact: &str,
         channel: &str,
-    ) -> Result<Option<(Url, String)>> {
+        etag: Option<&str>,
+    ) -> Result<Option<Manifest>> {
         let url = self.manifest_url(artifact, channel)?;
-        Ok(self.small(&url).await?.map(|text| (url, text)))
+        Ok(match self.small_etag(&url, etag).await? {
+            None => None,
+            Some(Small::NotModified) => Some(Manifest::Unchanged),
+            Some(Small::Found { text, etag }) => Some(Manifest::Found(Read { url, text, etag })),
+        })
     }
 
     /// The version npm serves for `channel` (its dist-tag: `latest` for
@@ -113,14 +141,40 @@ impl Service {
 
     /// A small document's text, as manifests are read: `None` on 404.
     async fn small(&self, url: &Url) -> Result<Option<String>> {
+        Ok(match self.small_etag(url, None).await? {
+            None => None,
+            Some(Small::Found { text, .. }) => Some(text),
+            Some(Small::NotModified) => bail!("the service answered 304 unasked"),
+        })
+    }
+
+    /// A small document and its `ETag`, asking with `If-None-Match` when
+    /// `etag` is known: `None` on 404, `NotModified` on 304.
+    async fn small_etag(&self, url: &Url, etag: Option<&str>) -> Result<Option<Small>> {
         let fetch = async {
-            let mut response = self.client.get(url.clone()).send().await?;
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let mut request = self.client.get(url.clone());
+            if let Some(etag) = etag {
+                request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+            }
+            let mut response = request.send().await?;
+            let status = response.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
-            if !response.status().is_success() {
-                bail!("the service answered {}", response.status());
+            if status == reqwest::StatusCode::NOT_MODIFIED {
+                if etag.is_none() {
+                    bail!("the service answered 304 unasked");
+                }
+                return Ok(Some(Small::NotModified));
             }
+            if !status.is_success() {
+                bail!("the service answered {status}");
+            }
+            let etag = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
             let mut body = Vec::new();
             while let Some(chunk) = response.chunk().await? {
                 body.extend_from_slice(&chunk);
@@ -128,7 +182,10 @@ impl Service {
                     bail!("it is too large for a manifest");
                 }
             }
-            Ok(Some(String::from_utf8(body).context("it is not UTF-8")?))
+            Ok(Some(Small::Found {
+                text: String::from_utf8(body).context("it is not UTF-8")?,
+                etag,
+            }))
         };
         tokio::time::timeout(Duration::from_secs(30), fetch)
             .await
@@ -187,6 +244,22 @@ impl Service {
             .with_context(|| format!("downloading {url} took too long"))?
             .with_context(|| format!("downloading {url}"))
     }
+}
+
+/// The HTTP client every service request uses.
+fn client(user_agent: &str, https_only: bool) -> Result<reqwest::Client> {
+    // reqwest takes the process's rustls provider; Deadbolt's is ring.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+    reqwest::Client::builder()
+        .user_agent(user_agent)
+        .https_only(https_only)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .context("setting up HTTPS")
 }
 
 /// A base URL: `default`, or in debug builds `over` (from the variable

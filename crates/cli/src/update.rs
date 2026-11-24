@@ -25,7 +25,7 @@ mod replace;
 mod service;
 
 pub use self::extension::{extension_dir_ok, switch_extension};
-pub use self::install::{UpdateArgs, available, run};
+pub use self::install::{Checked, Etags, UpdateArgs, available, run};
 pub use self::notice::notice;
 pub(crate) use self::protocol::build_channel;
 
@@ -51,8 +51,8 @@ use self::extension::{
 };
 #[cfg(test)]
 use self::install::{
-    OUTPUT_LINES, UpdateState, check_sequence, output_tail, platform_package, served_by_npm,
-    static_for, upgrade_failure, user_link,
+    OUTPUT_LINES, UpdateState, check_sequence, npm_from_release, output_tail, platform_package,
+    served_by_npm, static_for, upgrade_failure, user_link,
 };
 #[cfg(test)]
 use self::method::{
