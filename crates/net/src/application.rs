@@ -345,6 +345,12 @@ pub fn missing_for<S: State>(
 
 /// Skip malformed/rejected entries, not the valid removals beside them. Check
 /// data against the evolving membership, and commit independently per vault.
+///
+/// Data from a peer the vault no longer admits is dropped, with one exception:
+/// in the batch that delivers the peer's own removal, data written before that
+/// removal (the peer was a member in its causal past) is still applied. Only
+/// data that causally follows the removal, which the peer should never have
+/// held, and every later batch are refused.
 pub fn receive<S: State>(
     s: &mut S,
     peer: &DeviceId,
@@ -368,9 +374,13 @@ pub fn receive<S: State>(
     let mut added = 0;
     for (id, entries) in grouped {
         added += s.update(id, |vault, _| {
+            let admitted = vault.is_member(peer);
             let mut added = 0;
             for entry in entries {
-                if entry.log() == Log::Data && !vault.is_member(peer) {
+                if entry.log() == Log::Data
+                    && !vault.is_member(peer)
+                    && !(admitted && vault.was_member_before(&entry, peer) == Some(true))
+                {
                     continue;
                 }
                 match vault.apply(entry) {

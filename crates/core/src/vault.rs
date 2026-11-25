@@ -53,6 +53,20 @@ impl Node {
     }
 }
 
+/// The merged clock and depth of an entry whose dependencies are `deps`.
+fn causal_past<'a>(deps: impl IntoIterator<Item = &'a Node>) -> (Clock, u64) {
+    let mut clock = Clock::new();
+    let mut depth = 0;
+    for dep in deps {
+        for (log, &seq) in &dep.clock {
+            let max = clock.entry(*log).or_insert(seq);
+            *max = (*max).max(seq);
+        }
+        depth = depth.max(dep.depth + 1);
+    }
+    (clock, depth)
+}
+
 /// The latest seq per log a device holds; the sync frontier.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Heads(BTreeMap<LogId, u64>);
@@ -481,15 +495,7 @@ impl<P: Prefix> VaultState<P> {
             }
             _ => {}
         }
-        let mut clock = Clock::new();
-        let mut depth = 0;
-        for dep in &deps {
-            for (log, &seq) in &dep.clock {
-                let max = clock.entry(*log).or_insert(seq);
-                *max = (*max).max(seq);
-            }
-            depth = depth.max(dep.depth + 1);
-        }
+        let (mut clock, depth) = causal_past(deps);
         let past = self.past_membership(&clock);
         if !past.is_member(&entry.author()) {
             return Err(Error::NotMember);
@@ -510,6 +516,18 @@ impl<P: Prefix> VaultState<P> {
             clock,
         });
         Ok(true)
+    }
+
+    /// Whether `device` was an active member in `entry`'s causal past: the
+    /// membership its author saw. `None` if a dependency isn't stored yet.
+    pub fn was_member_before(&mut self, entry: &Entry, device: &DeviceId) -> Option<bool> {
+        let deps = entry
+            .deps()
+            .iter()
+            .map(|dep| self.node(dep))
+            .collect::<Option<Vec<_>>>()?;
+        let (clock, _) = causal_past(deps);
+        Some(self.past_membership(&clock).is_member(device))
     }
 
     /// Signs `payload` as the next entry in `secret`'s log, applies it, and
