@@ -2,6 +2,7 @@
 compile_error!("deadbolt currently supports Unix platforms only");
 
 mod app;
+mod broker;
 mod browser;
 mod caller;
 mod client;
@@ -382,6 +383,13 @@ enum TouchIdCommand {
 }
 
 fn main() -> ExitCode {
+    // The broker hardens itself before anything else runs, telemetry included.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == broker::COMMAND)
+    {
+        return broker::run(&std::env::args_os().skip(2).collect::<Vec<_>>());
+    }
     let code = run_main();
     telemetry::flush();
     code

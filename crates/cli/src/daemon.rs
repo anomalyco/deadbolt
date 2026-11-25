@@ -25,7 +25,7 @@ mod ssh_keys;
 mod status;
 mod sync;
 mod system;
-mod taint;
+pub(crate) mod taint;
 #[cfg(test)]
 mod tests;
 mod updates;
