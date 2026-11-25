@@ -1,10 +1,13 @@
 //! Security, wire-format, epoch, and property test suite for `deadbolt_core::v2`.
 
+mod checkpoints;
+mod dataplane;
 mod epochs;
 mod lineage;
 mod model;
 mod order;
 mod scenarios;
+mod sim;
 
 use std::collections::{BTreeMap, BTreeSet};
 
