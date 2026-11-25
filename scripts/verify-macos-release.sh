@@ -9,10 +9,13 @@
 #   the DMG's, and the app meets crates/app/update-requirement.txt.
 # - Every Mach-O is Developer ID-signed with the hardened runtime as its
 #   identity (anomaly.deadbolt, anomaly.deadbolt.cli, anomaly.deadbolt.enclave).
-# - Touch ID pin: each architecture slice of `deadbolt` embeds the SHA-256 of
-#   the same slice of the deadbolt-enclave beside it (docs/touch-id.md).
-# - The app's CLI, helper and app start; the CLI tarballs' `deadbolt` reports
-#   the version.
+# - Touch ID pin: each architecture slice of `deadbolt` and of the app
+#   (`deadbolt-ui`) embeds the SHA-256 of the same slice of the
+#   deadbolt-enclave it ships with (docs/touch-id.md).
+# - The headless `deadbolt` (the app's helper and the CLI tarballs') has no
+#   GPU or windowing code in it: it never links Metal.
+# - The app's CLI, helper and app start; the CLI tarballs hold only
+#   `deadbolt` and `deadbolt-enclave`, and their `deadbolt` reports the version.
 #
 # Environment: DEADBOLT_TEAM_ID.
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -40,6 +43,11 @@ check_pin() {
   rm -f "$slice"
 }
 
+# headless <deadbolt>: the CLI and daemon carry none of the app.
+headless() {
+  if otool -L "$1" | grep -q 'Metal.framework'; then die "$1 links Metal: it has the app in it."; fi
+}
+
 check_app() {
   local app=$1
   local plist="$app/Contents/Info.plist"
@@ -53,7 +61,9 @@ check_app() {
   check_developer_id "$DEADBOLT_ENCLAVE_ID" "$app/Contents/Helpers/deadbolt-enclave"
   for arch in arm64 x86_64; do
     check_pin "$app/Contents/Helpers/deadbolt" "$app/Contents/Helpers/deadbolt-enclave" "$arch"
+    check_pin "$app/Contents/MacOS/Deadbolt" "$app/Contents/Helpers/deadbolt-enclave" "$arch"
   done
+  headless "$app/Contents/Helpers/deadbolt"
 }
 
 xcrun stapler validate "$dmg"
@@ -76,6 +86,8 @@ for pair in darwin-arm64=arm64 darwin-x64=x86_64; do
   cli="$check/cli/$platform"
   mkdir -p "$cli"
   tar -xzf "$dir/deadbolt-$v-$platform.tar.gz" -C "$cli"
+  [ "$(cd "$cli" && echo *)" = "deadbolt deadbolt-enclave" ] || die "$platform's tarball must hold exactly deadbolt and deadbolt-enclave."
+  headless "$cli/deadbolt"
   check_developer_id "$DEADBOLT_CLI_ID" "$cli/deadbolt"
   check_developer_id "$DEADBOLT_ENCLAVE_ID" "$cli/deadbolt-enclave"
   check_pin "$cli/deadbolt" "$cli/deadbolt-enclave" "$arch"

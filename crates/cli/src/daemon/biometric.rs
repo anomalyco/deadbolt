@@ -620,16 +620,13 @@ mod macos {
             let dir = exe
                 .parent()
                 .ok_or_else(|| anyhow!("executable has no parent directory"))?;
-            (
-                dir.join("deadbolt-enclave"),
-                env!("DEADBOLT_ENCLAVE_SHA256"),
-            )
+            (dir.join("deadbolt-enclave"), deadbolt_enclave::SHA256)
         };
 
         #[cfg(test)]
         let (candidate, expected_sha) = (
-            PathBuf::from(env!("DEADBOLT_ENCLAVE_TEST_BIN")),
-            env!("DEADBOLT_ENCLAVE_TEST_SHA256"),
+            PathBuf::from(deadbolt_enclave::TEST_BIN),
+            deadbolt_enclave::TEST_SHA256,
         );
 
         if let Err(err) = verify_helper_at(&candidate, expected_sha) {

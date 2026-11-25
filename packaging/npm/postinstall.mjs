@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 // @deadbolt/cli's postinstall: points bin/deadbolt at this platform's
-// `deadbolt` from its @deadbolt/cli-<platform> package, as @opencode/cli's
-// postinstall does. On macOS that's Deadbolt.app's Contents/Helpers/deadbolt
-// (the package carries the signed app), so the command, the daemon and the app
-// are one install, and `deadbolt app` opens that Deadbolt.app. Links, never
-// copies: Deadbolt knows its own files by real path (the Touch ID helper
-// beside it, the app around it).
+// `deadbolt` from its @deadbolt/cli-<platform> package (its bin/deadbolt), as
+// @opencode/cli's postinstall does. Links, never copies: Deadbolt knows its own
+// files by real path (the Touch ID helper beside it on macOS, the desktop app,
+// deadbolt-ui, beside it on glibc Linux). On macOS the app is Deadbolt.app,
+// installed apart, which `deadbolt app` finds in Applications.
 //
 // It never fails the install: a package manager that sees a failed script
 // removes the package, and with it the user's `deadbolt`. When it can't link
@@ -45,8 +44,8 @@ function libc() {
   return "glibc"
 }
 
-// On glibc only the build with the app: never the static build quietly in
-// its place. On musl the static build, else the glibc one (which runs where
+// On glibc only the build with the app (deadbolt-ui): never the static build
+// quietly in its place. On musl the static build, else the glibc one (which runs where
 // glibc compatibility is installed); on a glibc older than 2.28 only the
 // static build.
 function packageNames() {
@@ -55,11 +54,9 @@ function packageNames() {
   return names.filter((name) => dependencies[name])
 }
 
-// `deadbolt` inside a platform package's directory: Deadbolt.app's helper on
-// macOS (bin/deadbolt in an unsigned build without the app), else bin/deadbolt.
+// `deadbolt` inside a platform package's directory.
 function binaryIn(packageDir) {
-  const helper = path.join(packageDir, "Deadbolt.app", "Contents", "Helpers", "deadbolt")
-  return fs.existsSync(helper) ? helper : path.join(packageDir, "bin", "deadbolt")
+  return path.join(packageDir, "bin", "deadbolt")
 }
 
 // Links bin/deadbolt to `source` once a link beside it runs, so a build that

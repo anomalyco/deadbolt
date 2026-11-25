@@ -398,10 +398,9 @@ fn run_main() -> ExitCode {
             .and_then(telemetry::endpoint),
     );
     let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    // Deadbolt.app's own executable and `deadbolt ui` are the app itself.
-    let exe = app::this_binary().ok();
-    if let Some(argv) = app::ui_args(&args, exe.as_deref(), cfg!(target_os = "macos")) {
-        return app::run_ui(argv);
+    // `deadbolt ui [flags]` is `deadbolt-ui [flags]`, the app's own program.
+    if args.get(1).is_some_and(|a| a == app::UI) {
+        return app::run_ui(&args[2..]);
     }
     // A browser runs a native messaging host with the caller's origin as its
     // only argument, which can't name a subcommand.
@@ -415,7 +414,6 @@ fn run_main() -> ExitCode {
     // Bare `deadbolt` from an app launcher opens the app; from a terminal,
     // or when the app can't be opened, it prints usage as before.
     if args.len() == 1
-        && app::BUILT_IN
         && app::bare_opens_app(app::from_terminal(), cfg!(target_os = "macos"), |name| {
             config::env(name).ok()
         })

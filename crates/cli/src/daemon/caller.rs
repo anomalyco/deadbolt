@@ -266,8 +266,8 @@ impl Callers {
 
 /// The app of the daemon's own bundle, `Deadbolt.app/Contents/MacOS/Deadbolt`
 /// for its `Contents/Helpers/deadbolt`, symlinks resolved. Outside a bundle
-/// there is none: `deadbolt ui` there runs the daemon's own code under its own
-/// identity, so it's a caller like the CLI.
+/// there is none: `deadbolt-ui` there has no app identity to check, so it's
+/// a caller like the CLI.
 #[cfg(any(test, target_os = "macos"))]
 fn app_beside(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
@@ -463,16 +463,7 @@ fn label(class: CallerClass, program: Option<&str>, process: &Process) -> String
         .map(|a| a.name.trim_start_matches('-'))
         .find(|name| SHELLS.contains(name))
         .map(str::to_string);
-    // The app outside a bundle is this binary run as `deadbolt ui` (labels
-    // only: a process can rewrite its own arguments).
-    let ui = process.args.get(1).is_some_and(|a| a == crate::app::UI);
-    let program = program.map(|p| {
-        if ui {
-            format!("{} ui", base(p))
-        } else {
-            base(p)
-        }
-    });
+    let program = program.map(base);
     let mut parts: Vec<String> = Vec::new();
     for part in [host, shell, program].into_iter().flatten() {
         if parts.last() != Some(&part) {
@@ -771,14 +762,6 @@ pub(super) mod tests {
             Some("/usr/lib/deadbolt/deadbolt-ui")
         );
         assert_eq!(info.label, "deadbolt-ui · unverified (Linux)");
-        let app = Process {
-            exe: Some("/home/alex/.local/bin/deadbolt".into()),
-            args: vec!["deadbolt".into(), "ui".into()],
-            ..Process::default()
-        };
-        let info = from_proc(peer(78, 1), app);
-        assert_eq!(info.class, CallerClass::Caller);
-        assert_eq!(info.label, "deadbolt ui · unverified (Linux)");
     }
 
     #[test]

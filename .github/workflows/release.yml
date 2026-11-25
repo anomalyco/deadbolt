@@ -103,14 +103,16 @@ jobs:
 
   # ---- Build: repository code; no environment, secrets, or id-token ----------
 
-  # `deadbolt` with the app built in (glibc), for desktops and most servers.
-  # Built in manylinux_2_28 (AlmaLinux 8, glibc 2.28), so it runs on any
+  # The headless `deadbolt` and, beside it, the desktop app `deadbolt-ui`
+  # (glibc), for desktops and most servers. Built in manylinux_2_28
+  # (AlmaLinux 8, glibc 2.28), so they run on any
   # distribution with glibc 2.28 or newer (Debian 10, Ubuntu 18.10, RHEL 8 and
-  # later); a runner's own Ubuntu 24.04 would need 2.39. Rune loads Wayland,
-  # X11 and the GPU drivers when a window opens, so the binary links only
-  # libc, libm and libgcc_s, and the CLI and daemon run on a box with no
-  # display or desktop libraries (checked in AlmaLinux 8 minimal). Building
-  # links libxkbcommon, which --as-needed drops again since nothing calls it.
+  # later); a runner's own Ubuntu 24.04 would need 2.39. `deadbolt` has no app
+  # code in it, and Rune loads Wayland, X11 and the GPU drivers only when a
+  # window opens, so both link only libc, libm and libgcc_s, and the CLI and
+  # daemon run on a box with no display or desktop libraries (checked in
+  # AlmaLinux 8 minimal). Building `deadbolt-ui` links libxkbcommon, which
+  # --as-needed drops again since nothing calls it.
   build-linux-x64:
     name: Build Linux x64
     needs: plan
@@ -140,7 +142,7 @@ jobs:
             dnf install -y -q libxkbcommon-devel
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             export PATH="$HOME/.cargo/bin:$PATH"
-            cargo build --release --locked -p deadbolt-cli --target "$TARGET"
+            cargo build --release --locked -p deadbolt-cli -p deadbolt-app --bin deadbolt --bin deadbolt-ui --target "$TARGET"
             chown -R "$HOST_UID" target'
           scripts/package-cli.sh "$DEADBOLT_VERSION" "$PLATFORM" "target/$TARGET/release" "$RUNNER_TEMP/dist"
       - name: Check
@@ -148,15 +150,22 @@ jobs:
           check=$(mktemp -d)
           tar -xzf "$RUNNER_TEMP/dist/deadbolt-$DEADBOLT_VERSION-$PLATFORM.tar.gz" -C "$check"
           # Only glibc and libgcc_s: every desktop library is loaded at runtime.
-          for lib in $(readelf -dW "$check/deadbolt" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
-            case "$lib" in
-              "$LOADER" | libc.so.6 | libm.so.6 | libdl.so.2 | libpthread.so.0 | librt.so.1 | libutil.so.1 | libgcc_s.so.1) ;;
-              *) echo "::error::deadbolt needs $lib, beyond glibc and libgcc_s."; exit 1 ;;
-            esac
+          for bin in deadbolt deadbolt-ui; do
+            for lib in $(readelf -dW "$check/$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+              case "$lib" in
+                "$LOADER" | libc.so.6 | libm.so.6 | libdl.so.2 | libpthread.so.0 | librt.so.1 | libutil.so.1 | libgcc_s.so.1) ;;
+                *) echo "::error::$bin needs $lib, beyond glibc and libgcc_s."; exit 1 ;;
+              esac
+            done
+            newest=$(objdump -T "$check/$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            if [ "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" != GLIBC_2.28 ]; then
+              echo "::error::$bin needs $newest, newer than glibc 2.28."
+              exit 1
+            fi
           done
-          newest=$(objdump -T "$check/deadbolt" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
-          if [ "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" != GLIBC_2.28 ]; then
-            echo "::error::deadbolt needs $newest, newer than glibc 2.28."
+          # The headless deadbolt carries none of the app.
+          if strings "$check/deadbolt" | grep -q 'wgpu'; then
+            echo "::error::deadbolt has the app (wgpu) in it."
             exit 1
           fi
           # The CLI and the daemon on a glibc 2.28 box with no display and no
@@ -199,7 +208,7 @@ jobs:
       digest: ${{ steps.upload.outputs.digest }}
     steps: *linux-steps
 
-  # Static (musl) `deadbolt` without the app, for Alpine and other musl
+  # Static (musl) `deadbolt`, without the app, for Alpine and other musl
   # systems, containers and anything older than glibc 2.28.
   build-linux-x64-musl:
     name: Build Linux x64 (musl)
@@ -228,7 +237,7 @@ jobs:
           # C code (ring, blake3) for the musl target goes through musl-gcc.
           export "CC_${TARGET//-/_}=musl-gcc"
           scripts/set-crate-version.sh "$PWD" "$DEADBOLT_VERSION"
-          cargo build --release --locked -p deadbolt-cli --no-default-features --target "$TARGET"
+          cargo build --release --locked -p deadbolt-cli --target "$TARGET"
           scripts/package-cli.sh "$DEADBOLT_VERSION" "$PLATFORM" "target/$TARGET/release" "$RUNNER_TEMP/dist"
           check=$(mktemp -d)
           tar -xzf "$RUNNER_TEMP/dist/deadbolt-$DEADBOLT_VERSION-$PLATFORM.tar.gz" -C "$check"
@@ -242,9 +251,9 @@ jobs:
             exit 1
           fi
           "$check/deadbolt" --version | grep -qF "deadbolt $DEADBOLT_VERSION"
-          # No app in this build, and it says so.
+          # No app beside it, and it says so.
           if "$check/deadbolt" app 2> "$check/app.err"; then exit 1; fi
-          grep -q "without the desktop app" "$check/app.err"
+          grep -q "deadbolt-ui) isn't installed" "$check/app.err"
       - id: upload
         uses: ./.github/release/upload
         with:
@@ -309,7 +318,7 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-      - run: crates/cli/scripts/build-enclave.sh "$RUNNER_TEMP/enclave"
+      - run: crates/enclave/scripts/build-enclave.sh "$RUNNER_TEMP/enclave"
       - id: upload
         uses: ./.github/release/upload
         with:
@@ -428,8 +437,9 @@ jobs:
 
   # ---- Build: repository code; no environment, secrets, or id-token ----------
 
-  # Universal Deadbolt.app (signed ad hoc around the helper) and the macOS CLI
-  # tarballs, compiled against the signed helper when there is one.
+  # Universal Deadbolt.app (deadbolt-ui and deadbolt, signed ad hoc around the
+  # helper) and the macOS CLI tarballs (the headless deadbolt only), compiled
+  # against the signed helper when there is one.
   build-macos:
     name: Build macOS
     needs: [plan, build-enclave, sign-enclave]
@@ -483,11 +493,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dsym"
           for pair in darwin-arm64=aarch64 darwin-x64=x86_64; do
             platform=${pair%%=*} arch=${pair#*=}
-            dsym="target/$arch-apple-darwin/release/deadbolt.dSYM"
-            if [ -d "$dsym" ]; then
-              /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$dsym" \
-                "$RUNNER_TEMP/dsym/deadbolt-$DEADBOLT_VERSION-$platform.dSYM.zip"
-            fi
+            for bin in deadbolt deadbolt-ui; do
+              dsym="target/$arch-apple-darwin/release/$bin.dSYM"
+              if [ -d "$dsym" ]; then
+                /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$dsym" \
+                  "$RUNNER_TEMP/dsym/$bin-$DEADBOLT_VERSION-$platform.dSYM.zip"
+              fi
+            done
           done
       # Named macos-dsym (not build-macos-*) so sign-macos's build-macos-*
       # download pattern never pulls debug symbols into the signing job.
@@ -564,8 +576,9 @@ jobs:
       - run: scripts/verify-macos-release.sh "$RUNNER_TEMP/in/sign-macos" "$DEADBOLT_VERSION"
 
   # The npm packages (scripts/package-npm.sh): @deadbolt/cli and one package
-  # per platform, the darwin ones carrying the signed, notarized Deadbolt.app.
-  # Signed builds only; then checks the app survived npm's packing.
+  # per platform, each its CLI tarball (the darwin ones the signed, notarized
+  # headless deadbolt and its Touch ID helper; Deadbolt.app ships apart).
+  # Signed builds only; then checks the signatures survived npm's packing.
   build-npm:
     name: Build npm packages
     needs: [plan, build-linux-x64, build-linux-arm64, build-linux-x64-musl, build-linux-arm64-musl, sign-macos, verify-macos]
@@ -605,16 +618,19 @@ jobs:
           for arch in arm64 x64; do
             check=$(mktemp -d)
             tar -xzf "$RUNNER_TEMP/npm/deadbolt-cli-darwin-$arch-$DEADBOLT_VERSION.tgz" -C "$check"
-            app="$check/package/Deadbolt.app"
-            codesign --verify --deep --strict --verbose=2 "$app"
-            spctl --assess --type execute --verbose=2 "$app"
-            xcrun stapler validate "$app"
+            for bin in deadbolt deadbolt-enclave; do
+              codesign --verify --strict --verbose=2 "$check/package/bin/$bin"
+            done
+            if otool -L "$check/package/bin/deadbolt" | grep -q 'Metal.framework'; then
+              echo "::error::darwin-$arch's deadbolt has the app in it."
+              exit 1
+            fi
           done
-          # Installed as users install it: the command is the app's helper.
+          # Installed as users install it: the command is the package's deadbolt.
           prefix=$(mktemp -d)
           npm install --global --prefix "$prefix" --no-fund --no-audit \
             "$RUNNER_TEMP/npm/deadbolt-cli-darwin-arm64-$DEADBOLT_VERSION.tgz" "$RUNNER_TEMP/npm/deadbolt-cli-$DEADBOLT_VERSION.tgz"
-          readlink "$prefix/lib/node_modules/@deadbolt/cli/bin/deadbolt" | grep -q 'Deadbolt.app/Contents/Helpers/deadbolt$'
+          readlink "$prefix/lib/node_modules/@deadbolt/cli/bin/deadbolt" | grep -q 'cli-darwin-arm64/bin/deadbolt$'
           "$prefix/bin/deadbolt" --version | grep -qF "deadbolt $DEADBOLT_VERSION"
       - id: upload
         uses: ./.github/release/upload

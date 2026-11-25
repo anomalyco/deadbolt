@@ -8,11 +8,11 @@
 #   scripts/package-npm.sh <version> <in> <out>
 #
 # <in> holds the release build's artifacts: build-cli-linux-*/ (the Linux
-# tarballs) and sign-macos/ (the signed, notarized, stapled
-# Deadbolt-<version>-macos-universal.zip). The darwin packages carry that
-# Deadbolt.app: the command is its Contents/Helpers/deadbolt, so the CLI, the
-# daemon and the app are one install. Run on macOS (ditto keeps the bundle as
-# signed). Writes <out>/deadbolt-cli-*.tgz.
+# tarballs) and sign-macos/ (the signed, notarized macOS CLI tarballs). Each
+# platform package's bin/ is its tarball: the headless `deadbolt`, with
+# `deadbolt-enclave` on macOS and the desktop app, `deadbolt-ui`, on glibc
+# Linux. On macOS the app is Deadbolt.app (the DMG or the Homebrew cask), which
+# `deadbolt app` finds in Applications. Writes <out>/deadbolt-cli-*.tgz.
 set -euo pipefail
 
 [ $# -eq 3 ] || { echo "Usage: $0 <version> <in> <out>" >&2; exit 1; }
@@ -20,7 +20,6 @@ v=$1 in=$2 out=$3
 root=$(cd "$(dirname "$0")/.." && pwd)
 repository=git+https://github.com/anomalyco/deadbolt.git
 fail() { echo "$*" >&2; exit 1; }
-[ "$(uname -s)" = Darwin ] || fail "Packing the darwin packages needs macOS (ditto)."
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 work=$(mktemp -d)
@@ -55,31 +54,26 @@ for target in linux-x64 linux-arm64 linux-x64-musl linux-arm64-musl darwin-arm64
       ;;
     linux-*)
       libc=glibc
-      description="Deadbolt for Linux $arch (glibc 2.28+), installed by @deadbolt/cli."
+      description="Deadbolt for Linux $arch (glibc 2.28+), with the desktop app, installed by @deadbolt/cli."
       ;;
     darwin-*)
       libc=
-      description="Deadbolt.app and its deadbolt for macOS $arch, installed by @deadbolt/cli."
+      description="Deadbolt's CLI and daemon for macOS $arch (the app is Deadbolt.app), installed by @deadbolt/cli."
       ;;
   esac
   case "$target" in
-    linux-*)
-      tarball="$in/build-cli-$target/deadbolt-$v-$target.tar.gz"
-      [ -f "$tarball" ] || fail "$tarball is missing."
-      mkdir "$dir/bin"
-      tar -xzf "$tarball" -C "$dir/bin"
-      [ "$(ls "$dir/bin")" = deadbolt ] || fail "$tarball must hold exactly deadbolt."
-      chmod 755 "$dir/bin/deadbolt"
-      ;;
-    darwin-*)
-      zip="$in/sign-macos/Deadbolt-$v-macos-universal.zip"
-      [ -f "$zip" ] || fail "$zip is missing."
-      /usr/bin/ditto -x -k "$zip" "$dir"
-      [ "$(ls "$dir")" = Deadbolt.app ] || fail "$zip must hold exactly Deadbolt.app."
-      # npm packs regular files and directories only.
-      [ -z "$(find "$dir/Deadbolt.app" ! -type f ! -type d)" ] || fail "Deadbolt.app holds something npm can't pack."
-      ;;
+    linux-*-musl) tarball="$in/build-cli-$target/deadbolt-$v-$target.tar.gz" files="deadbolt" ;;
+    linux-*) tarball="$in/build-cli-$target/deadbolt-$v-$target.tar.gz" files="deadbolt deadbolt-ui" ;;
+    darwin-*) tarball="$in/sign-macos/deadbolt-$v-$target.tar.gz" files="deadbolt deadbolt-enclave" ;;
   esac
+  [ -f "$tarball" ] || fail "$tarball is missing."
+  mkdir "$dir/bin"
+  tar -xzf "$tarball" -C "$dir/bin"
+  [ "$(cd "$dir/bin" && echo *)" = "$files" ] || fail "$tarball must hold exactly $files."
+  for file in $files; do
+    [ -f "$dir/bin/$file" ] && [ ! -L "$dir/bin/$file" ] || fail "$tarball's $file is not a regular file."
+    chmod 755 "$dir/bin/$file"
+  done
   os=${target%%-*}
   package_json "$name" "$description" "$os" "$arch" "$libc" > "$dir/package.json"
   pack "$dir"
@@ -91,7 +85,7 @@ mkdir -p "$wrapper/bin"
 cp "$root/packaging/npm/deadbolt" "$wrapper/bin/deadbolt"
 cp "$root/packaging/npm/postinstall.mjs" "$wrapper/postinstall.mjs"
 chmod 755 "$wrapper/bin/deadbolt"
-package_json @deadbolt/cli "Deadbolt, a local-first password manager: the CLI, with the desktop app built in." |
+package_json @deadbolt/cli "Deadbolt, a local-first password manager: the CLI and daemon (and on Linux desktops, the app)." |
   jq --argjson dependencies "$dependencies" '. + {
     bin: {deadbolt: "./bin/deadbolt"},
     scripts: {postinstall: "node ./postinstall.mjs"},

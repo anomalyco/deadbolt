@@ -1,8 +1,8 @@
 // Mutual code-signature verification and bundle/App-Group discovery for
 // `DeadboltAutoFill.appex` (`docs/macos-autofill.md`).
 //
-// Mirrors `crates/client/src/peer.rs`, `crates/cli/src/daemon/identify.swift`,
-// and `crates/cli/src/daemon/enclave.swift`.
+// Mirrors `crates/client/src/peer.rs`, `crates/enclave/swift/identify.swift`,
+// and `crates/enclave/swift/enclave.swift`.
 
 import Darwin
 import Foundation

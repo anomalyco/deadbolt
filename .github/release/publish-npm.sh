@@ -45,18 +45,19 @@ for file in "$npm_dir"/*.tgz; do
   [ "$config" = false ] || die "$name sets publishConfig beyond access"
   # Only the wrapper runs a script: its postinstall links bin/deadbolt.
   [ "$install" = false ] || [ "$name" = @deadbolt/cli ] || die "$name has an install script"
+  # Each platform package is its CLI tarball in bin/ (scripts/package-npm.sh):
+  # the headless deadbolt, its Touch ID helper on macOS, the app on glibc Linux.
   case "$name" in
-    @deadbolt/cli-darwin-*)
-      # The signed app, whose helper is the command (scripts/package-npm.sh).
-      tar -tzf "$file" > "$RUNNER_TEMP/npm-files"
-      grep -xF package/Deadbolt.app/Contents/Helpers/deadbolt-enclave "$RUNNER_TEMP/npm-files" > /dev/null ||
-        die "$name doesn't carry Deadbolt.app."
-      ;;
-    @deadbolt/cli-linux-*)
-      [ "$(tar -tzf "$file" | LC_ALL=C sort | tr '\n' ' ')" = "package/bin/deadbolt package/package.json " ] ||
-        die "$name must hold exactly bin/deadbolt."
-      ;;
+    @deadbolt/cli-darwin-*) bins="deadbolt deadbolt-enclave" ;;
+    @deadbolt/cli-linux-*-musl) bins="deadbolt" ;;
+    @deadbolt/cli-linux-*) bins="deadbolt deadbolt-ui" ;;
+    *) bins="" ;;
   esac
+  if [ -n "$bins" ]; then
+    want=$( (for bin in $bins; do echo "package/bin/$bin"; done; echo package/package.json) | LC_ALL=C sort | tr '\n' ' ')
+    [ "$(tar -tzf "$file" | LC_ALL=C sort | tr '\n' ' ')" = "$want" ] ||
+      die "$name must hold exactly bin/{$bins}."
+  fi
   printf '%s\t%s\n' "$name" "$file" >> "$list"
 done
 for name in $expected; do cut -f1 "$list" | grep -xF -- "$name" > /dev/null || die "Missing package $name"; done

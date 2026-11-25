@@ -978,6 +978,7 @@ fn unpacks_only_the_cli_from_its_tarball() {
     std::fs::create_dir(&src).unwrap();
     std::fs::write(src.join("deadbolt"), "cli").unwrap();
     std::fs::write(src.join("deadbolt-enclave"), "helper").unwrap();
+    std::fs::write(src.join("deadbolt-ui"), "app").unwrap();
     std::fs::write(src.join("README"), "other").unwrap();
     std::os::unix::fs::symlink("/etc/passwd", src.join("link")).unwrap();
     let tar = |name: &str, files: &[&str]| {
@@ -995,13 +996,17 @@ fn unpacks_only_the_cli_from_its_tarball() {
         std::fs::create_dir(&out).unwrap();
         unpack_cli(&archive, &out).map(|_| out)
     };
-    let out = tar("good.tar.gz", &["./deadbolt", "deadbolt-enclave", "README"]).unwrap();
+    let out = tar(
+        "good.tar.gz",
+        &["./deadbolt", "deadbolt-enclave", "deadbolt-ui", "README"],
+    )
+    .unwrap();
     let mut names: Vec<_> = std::fs::read_dir(&out)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    assert_eq!(names, ["deadbolt", "deadbolt-enclave"]);
+    assert_eq!(names, ["deadbolt", "deadbolt-enclave", "deadbolt-ui"]);
     assert_eq!(
         std::fs::read_to_string(out.join("deadbolt")).unwrap(),
         "cli"

@@ -21,25 +21,24 @@ case "$version" in
   *) build=$(printf '%s\n' "${version%%-*}" | awk -F. '{ print ($1 * 10000) + ($2 * 100) + $3 }') ;;
 esac
 target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
-# One program: `deadbolt` with the app built in. Contents/MacOS/Deadbolt and
-# Contents/Helpers/deadbolt are two copies of it, signed apart (the app as
-# anomaly.deadbolt, the CLI and daemon as deadbolt), so the daemon tells the app
-# from the CLI by signature and path; run as MacOS/Deadbolt it is only ever
-# the app.
+# Two programs from one build: the app, `deadbolt-ui`, as Contents/MacOS/Deadbolt
+# (signed as anomaly.deadbolt), and the headless CLI and daemon, `deadbolt`, as
+# Contents/Helpers/deadbolt (signed as deadbolt). The daemon tells the app from
+# the CLI by signature and path. Both pin the same deadbolt-enclave.
 if $universal; then
   for arch in aarch64 x86_64; do
-    cargo +stable build --release --locked -p deadbolt-cli --target "$arch-apple-darwin" -j 2
+    cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app --bin deadbolt --bin deadbolt-ui --target "$arch-apple-darwin" -j 2
   done
-  for bin in deadbolt deadbolt-enclave; do
+  for bin in deadbolt deadbolt-ui deadbolt-enclave; do
     lipo -create "$target/aarch64-apple-darwin/release/$bin" "$target/x86_64-apple-darwin/release/$bin" -output "$scratch/$bin"
   done
 else
-  cargo +stable build --release --locked -p deadbolt-cli -j 2
-  cp "$target/release/deadbolt" "$target/release/deadbolt-enclave" "$scratch/"
+  cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app --bin deadbolt --bin deadbolt-ui -j 2
+  cp "$target/release/deadbolt" "$target/release/deadbolt-ui" "$target/release/deadbolt-enclave" "$scratch/"
 fi
 app="$scratch/Deadbolt.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
-cp "$scratch/deadbolt" "$app/Contents/MacOS/Deadbolt"
+cp "$scratch/deadbolt-ui" "$app/Contents/MacOS/Deadbolt"
 cp "$scratch/deadbolt" "$app/Contents/Helpers/deadbolt"
 cp "$scratch/deadbolt-enclave" "$app/Contents/Helpers/deadbolt-enclave"
 chmod 755 "$app/Contents/MacOS/Deadbolt" "$app/Contents/Helpers/deadbolt" "$app/Contents/Helpers/deadbolt-enclave"
@@ -92,12 +91,12 @@ if [[ -n ${DEADBOLT_APP_PROVISION_PROFILE:-} ]]; then
 fi
 
 # Nested executable first, outer seal last.
-# Do NOT re-sign `Contents/Helpers/deadbolt-enclave` here: `crates/cli/build.rs`
+# Do NOT re-sign `Contents/Helpers/deadbolt-enclave` here: `crates/enclave/build.rs`
 # already signed it (or took the release workflow's Developer ID-signed helper
 # from `DEADBOLT_ENCLAVE_PREBUILT`; docs/releasing.md) (using `DEADBOLT_APPLE_SIGNING_IDENTITY` with `--options runtime
 # --timestamp` when set, or ad-hoc `-` otherwise) before embedding its whole-file
-# SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt` (both copies). Re-signing `deadbolt-enclave`
-# after `deadbolt` is compiled would alter its `__LINKEDIT` signature bytes and
+# SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt` and `deadbolt-ui`. Re-signing `deadbolt-enclave`
+# after they are compiled would alter its `__LINKEDIT` signature bytes and
 # break the daemon's SHA-256 verification.
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
 if [[ $sign_id != "-" ]]; then
@@ -132,13 +131,15 @@ if $bundle_autofill; then
   codesign --verify --strict "$app/Contents/PlugIns/DeadboltAutoFill.appex"
 fi
 codesign --verify --deep --strict "$app"
-# The app pins the helper it ships: it is `deadbolt`, built against it.
+# The app and its CLI both pin the helper they ship, built against it.
 helper="$app/Contents/Helpers/deadbolt-enclave"
 if $universal; then slices="arm64 x86_64"; else slices=thin; fi
 for slice in $slices; do
   if [[ $slice == thin ]]; then cp "$helper" "$scratch/helper-$slice"; else lipo "$helper" -thin "$slice" -output "$scratch/helper-$slice"; fi
   pin=$(shasum -a 256 "$scratch/helper-$slice" | cut -d' ' -f1)
-  grep -aqF "$pin" "$app/Contents/MacOS/Deadbolt" || { echo "Deadbolt doesn't pin its $slice deadbolt-enclave ($pin)." >&2; exit 1; }
+  for bin in MacOS/Deadbolt Helpers/deadbolt; do
+    grep -aqF "$pin" "$app/Contents/$bin" || { echo "$bin doesn't pin its $slice deadbolt-enclave ($pin)." >&2; exit 1; }
+  done
 done
 "$app/Contents/Helpers/deadbolt" --version
 "$app/Contents/Helpers/deadbolt-enclave" status >/dev/null

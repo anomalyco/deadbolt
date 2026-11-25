@@ -657,15 +657,25 @@ impl Daemon {
     }
 }
 
-/// Bundles always launch their own helper; otherwise the daemon is this
-/// `deadbolt` itself. Development runs allow an override.
+/// Bundles always launch their own helper; otherwise the daemon is the
+/// `deadbolt` beside this `deadbolt-ui`, else one on the PATH
+/// ([`crate::binary::discover`]). Development runs allow an override.
 /// A passphrase goes only to a daemon running that program, as the
 /// `deadbolt-enclave` beside it sees the daemon's code signature, and only once
 /// that helper is the one this build pinned (macOS).
 pub fn launch() -> Launch {
     let exe = std::env::current_exe().ok().map(crate::binary::resolved);
-    let program =
-        crate::binary::discover(exe.as_deref(), std::env::var_os("DEADBOLT_BIN").as_deref());
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let search = crate::binary::search_dirs(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        home.as_deref(),
+    );
+    let program = crate::binary::discover(
+        exe.as_deref(),
+        std::env::var_os("DEADBOLT_BIN").as_deref(),
+        &search,
+        crate::binary::executable,
+    );
     let expected = std::fs::canonicalize(&program).unwrap_or_else(|_| program.clone());
     deadbolt_client::set_daemon_check(Box::new(move |socket| {
         let helper = expected.with_file_name("deadbolt-enclave");

@@ -1352,6 +1352,7 @@ dependencies = [
  "blake3",
  "deadbolt-client",
  "deadbolt-core",
+ "deadbolt-enclave",
  "procwatch",
  "rune",
  "rune-kit",
@@ -1375,9 +1376,9 @@ dependencies = [
  "clap",
  "csv",
  "data-encoding",
- "deadbolt-app",
  "deadbolt-client",
  "deadbolt-core",
+ "deadbolt-enclave",
  "deadbolt-net",
  "deadbolt-send",
  "deadbolt-store",
@@ -1453,6 +1454,10 @@ dependencies = [
  "zeroize",
  "zxcvbn",
 ]
+
+[[package]]
+name = "deadbolt-enclave"
+version = "0.0.0"
 
 [[package]]
 name = "deadbolt-net"

@@ -1,13 +1,15 @@
 #!/bin/sh
 # Packs one platform's CLI release tarball, deadbolt-<version>-<platform>.tar.gz,
-# from a Cargo release directory: `deadbolt` at the root, and on macOS the
-# Touch ID helper `deadbolt-enclave` beside it (the daemon looks for it next to
-# its own executable; docs/touch-id.md). The install script and the Homebrew
-# formula install both files into one directory.
+# from a Cargo release directory: the headless `deadbolt` at the root; on
+# macOS the Touch ID helper `deadbolt-enclave` beside it (the daemon looks for
+# it next to its own executable; docs/touch-id.md), the app shipping only as
+# Deadbolt.app; on glibc Linux the desktop app, `deadbolt-ui`, beside it (which
+# `deadbolt app` finds there). The install script and the Homebrew formula
+# install every file into one directory.
 #
 #   scripts/package-cli.sh <version> <platform> <cargo release dir> <out>
 #
-# <platform> is linux-x64, linux-arm64 (glibc, the app built in),
+# <platform> is linux-x64, linux-arm64 (glibc, with the app),
 # linux-x64-musl, linux-arm64-musl (static, no app), darwin-x64 or darwin-arm64.
 set -eu
 
@@ -16,7 +18,8 @@ version=$1 platform=$2 bin=$3 out=$4
 root=$(cd "$(dirname "$0")/.." && pwd)
 
 case "$platform" in
-  linux-x64 | linux-arm64 | linux-x64-musl | linux-arm64-musl) files=deadbolt ;;
+  linux-x64 | linux-arm64) files="deadbolt deadbolt-ui" ;;
+  linux-x64-musl | linux-arm64-musl) files=deadbolt ;;
   darwin-x64 | darwin-arm64) files="deadbolt deadbolt-enclave" ;;
   *) echo "Unknown platform $platform." >&2; exit 1 ;;
 esac

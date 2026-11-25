@@ -56,13 +56,6 @@ pub fn spec() -> AppSpec<App> {
     }
 }
 
-/// What the `deadbolt` binary the app is built into hands it.
-pub struct Host {
-    /// The SHA-256 of the `deadbolt-enclave` that binary pinned (macOS),
-    /// which the app checks before trusting it about the daemon.
-    pub enclave_sha256: &'static str,
-}
-
 /// Runs the app against this user's daemon and clipboard, unless `args`
 /// (without the program name) ask for Rune's tooling (`--snap`, `--tree`, `--script`, `--scene`, …): those
 /// runs get no daemon (and Rune keeps headless runs off the clipboard), so a
@@ -75,10 +68,9 @@ pub struct Host {
 /// panel instead of the main window. Headless runs register the default
 /// shortcut on the panel virtually, so a script's `{"shortcut": …}` and
 /// `{"menu": …}` steps reach it without touching the desktop.
-pub fn run(argv: Vec<String>, host: Host) {
+pub fn run(argv: Vec<String>) {
     // From here until the windows are built.
     let mut launch = Span::root("app.launch");
-    enclave::pin(host.enclave_sha256);
     rune::set_app_id(APP_ID);
     let args = rune::tooling::Args::parse_from(argv.clone());
     let (live, headless) = (is_live(&args), args.headless());

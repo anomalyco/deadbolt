@@ -1,6 +1,6 @@
 [package]
 name = "deadbolt-app"
-description = "Deadbolt's desktop app: a Rune client of the running daemon, built into `deadbolt` (docs/app.md)."
+description = "Deadbolt's desktop app, the deadbolt-ui binary: a Rune client of the running daemon (docs/app.md)."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -15,6 +15,11 @@ workspace = true
 # Keycaps overlay (`--keys` / `--pointer`) in release builds (used by `scripts/hold-down.sh`).
 keys-overlay = ["rune/keys-overlay"]
 
+# The app's own program, apart from the headless `deadbolt` (docs/app.md).
+[[bin]]
+name = "deadbolt-ui"
+path = "src/main.rs"
+
 [[test]]
 name = "app"
 path = "tests/app/main.rs"
@@ -23,6 +28,7 @@ path = "tests/app/main.rs"
 blake3 = "1.8"
 deadbolt-client = { path = "../client" }
 deadbolt-core = { path = "../core" }
+deadbolt-enclave = { path = "../enclave" }
 # Rune is pinned to a rev and bumped deliberately; procwatch comes from the same rev.
 procwatch = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
 # `tooling` stays on so release scripts (`snap.sh`, `bundle.sh`, `verify-macos-release.sh`) can run `--snap` / `--list-scenes`.

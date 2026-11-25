@@ -150,12 +150,13 @@ pub(super) fn swap(files: &[(PathBuf, PathBuf)], aside: &Path) -> Result<()> {
 /// The largest file taken from a CLI tarball.
 const TAR_FILE_LIMIT: u64 = 256 << 20;
 
-/// Unpacks `deadbolt` and `deadbolt-enclave` from the gzipped tarball
-/// `archive` into `out`, and nothing else: no other names, links, devices
-/// or paths, so nothing lands outside `out` or keeps the archive's owner.
+/// Unpacks `deadbolt`, `deadbolt-enclave` and `deadbolt-ui` from the gzipped
+/// tarball `archive` into `out`, and nothing else: no other names, links,
+/// devices or paths, so nothing lands outside `out` or keeps the archive's
+/// owner.
 pub(super) fn unpack_cli(archive: &Path, out: &Path) -> Result<Vec<PathBuf>> {
     use std::io::Read;
-    const NAMES: [&str; 2] = ["deadbolt", "deadbolt-enclave"];
+    const NAMES: [&str; 3] = ["deadbolt", "deadbolt-enclave", "deadbolt-ui"];
     let octal = |field: &[u8]| -> Result<u64> {
         let text = std::str::from_utf8(field)
             .ok()
@@ -269,8 +270,8 @@ pub(super) fn pax_path(body: &[u8]) -> Option<String> {
     None
 }
 
-/// Replaces the standalone `exe` (and `deadbolt-enclave` beside it) with the
-/// release's tarball.
+/// Replaces the standalone `exe` (and the `deadbolt-enclave` and
+/// `deadbolt-ui` beside it) with the release's tarball.
 #[expect(clippy::too_many_arguments, reason = "one call site, all distinct")]
 pub(super) async fn update_cli(
     paths: &Paths,
@@ -319,15 +320,21 @@ pub(super) async fn update_cli(
             );
         }
     }
+    // The app beside it, when the release has one (glibc Linux).
+    let ui = unpacked.join("deadbolt-ui");
+    let ui = ui.is_file().then_some(ui);
     let ours = daemon_runs(paths, |p| p == exe).await;
     let mut files = Vec::new();
-    for file in std::iter::once(&new).chain(&enclave) {
+    for file in std::iter::once(&new).chain(&enclave).chain(&ui) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755))?;
     }
     // The helper first: the new deadbolt pins it, the old one checks before use.
     if let Some(enclave) = &enclave {
         files.push((enclave.clone(), installed_enclave));
+    }
+    if let Some(ui) = &ui {
+        files.push((ui.clone(), dir.join("deadbolt-ui")));
     }
     files.push((new, exe.to_path_buf()));
     swap(&files, &stage.path().join("old"))?;
