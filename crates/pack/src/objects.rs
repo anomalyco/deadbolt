@@ -1,7 +1,12 @@
 //! Content-addressed blobs (`blob/<blake3 hex>`) and the viewer's outbox
-//! (`outbox/<random hex>.wrap`). Neither needs the writer lock: a blob is
-//! created once and identical wherever it's written, and every outbox entry
-//! has a fresh random name, so the lock-free iOS viewer can leave one.
+//! (`outbox/<random hex>.wrap`).
+//!
+//! Storing a blob takes the writer lock ([`crate::VaultDir::put_blob`]):
+//! replacing a torn copy reads, deletes and recreates it, and two unlocked
+//! writers racing through that could delete each other's complete copy.
+//! Reading a blob needs no lock, since every read is checked against the
+//! hash. The outbox needs none either: every entry has a fresh random name,
+//! so the lock-free iOS viewer can leave one.
 
 use crate::blocks::Blocks;
 use crate::crypto;
@@ -9,8 +14,9 @@ use crate::error::{Error, Result};
 use crate::names::{self, OUTBOX_DIR, OUTBOX_SUFFIX};
 
 /// Stores a blob under its hash. Storing the same bytes again is a no-op; a
-/// torn earlier write under that name is replaced.
-pub fn put_blob<B: Blocks>(blocks: &B, bytes: &[u8]) -> Result<[u8; 32]> {
+/// torn earlier write under that name is replaced. The caller holds the
+/// writer lock: this is reached only through [`crate::VaultDir::put_blob`].
+pub(crate) fn put_blob<B: Blocks>(blocks: &B, bytes: &[u8]) -> Result<[u8; 32]> {
     let hash: [u8; 32] = blake3::hash(bytes).into();
     let name = names::blob(&hash);
     match blocks.create_new(&name, bytes) {

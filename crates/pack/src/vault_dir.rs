@@ -8,12 +8,17 @@
 //! - **W5 Compaction** ([`VaultDir::compact`]): write and sync
 //!   `gen-(n+1).pack`, then create and sync `wal-(n+1).log` holding the
 //!   carried tail, and only then delete every older generation and WAL. A
-//!   crash at any step leaves a state W3 opens to the same frames.
+//!   crash at any step leaves a state W3 opens to the same frames. That
+//!   holds because the carried tail comes only from the WALs on disk, which
+//!   survive until step 3; a frame only the old pack holds can't be carried,
+//!   and compaction refuses one ([`Error::InvalidCompactionInput`]).
 //! - **W6 Readers** ([`VaultReader`]) take no lock and see a consistent
 //!   snapshot while a writer appends or compacts.
 //!
 //! Generation numbers only go up, past every `gen-` and `wal-` file seen, so
 //! no name is created twice.
+
+use std::collections::HashSet;
 
 use crate::blocks::{BlockReader, Blocks};
 use crate::crypto::KEY_LEN;
@@ -136,12 +141,21 @@ impl<B: Blocks> VaultDir<B> {
     /// W5. `input` must cover every frame the directory holds except
     /// `carried`, which starts the new WAL. `input.generation` is set to
     /// [`VaultDir::next_generation`].
+    ///
+    /// `carried` must come from the current WAL tail: every frame in it must
+    /// already be in a `wal-*.log` on disk, or nothing is written and this
+    /// returns [`Error::InvalidCompactionInput`]. Those WALs stay until the
+    /// new pack and WAL are both durable, so a crash before then, or a
+    /// lock-free [`VaultReader`] that opened the old files, still finds every
+    /// carried frame. A frame that only the old pack holds would be in no file
+    /// at all between step 2's crash point and step 3's delete.
     pub fn compact(
         &mut self,
         mut input: PackInput,
         epoch_key: &[u8; KEY_LEN],
         carried: &[Vec<u8>],
     ) -> Result<PackSummary> {
+        self.check_carried(carried)?;
         let m = self.next_gen;
         input.generation = m;
         // 1. The new pack, synced.
@@ -171,6 +185,28 @@ impl<B: Blocks> VaultDir<B> {
         Ok(summary)
     }
 
+    /// Every carried frame is a record of some WAL on disk.
+    fn check_carried(&self, carried: &[Vec<u8>]) -> Result<()> {
+        if carried.is_empty() {
+            return Ok(());
+        }
+        let mut on_disk = Vec::new();
+        for n in numbered(&self.blocks, WAL_PREFIX, WAL_SUFFIX)? {
+            on_disk.extend(log::read(&self.blocks, &names::wal_log(n))?);
+        }
+        let on_disk: HashSet<&[u8]> = on_disk.iter().map(Vec::as_slice).collect();
+        let count = carried
+            .iter()
+            .filter(|frame| !on_disk.contains(frame.as_slice()))
+            .count();
+        if count > 0 {
+            return Err(Error::InvalidCompactionInput { count });
+        }
+        Ok(())
+    }
+
+    /// Stores a blob under its hash. Only the writer stores blobs: replacing
+    /// a damaged copy deletes it first, which a second writer could race.
     pub fn put_blob(&self, bytes: &[u8]) -> Result<[u8; 32]> {
         objects::put_blob(&self.blocks, bytes)
     }
