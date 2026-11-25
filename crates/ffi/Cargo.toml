@@ -1,0 +1,33 @@
+[package]
+name = "deadbolt-ffi"
+description = "Deadbolt for Swift through UniFFI: with `client`, the macOS AutoFill extension's daemon client over the App Group socket (deadbolt-client, deadbolt-proto)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# The static library links into DeadboltAutoFill.appex
+# (crates/app/scripts/build-autofill.sh); the rlib serves tests and Clippy.
+crate-type = ["staticlib", "rlib"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["client"]
+# The macOS AutoFill extension's client.
+client = ["dep:deadbolt-client", "dep:deadbolt-proto", "dep:rustix", "dep:serde_json", "dep:zeroize"]
+
+[dependencies]
+deadbolt-client = { path = "../client", optional = true }
+deadbolt-proto = { path = "../proto", optional = true }
+rustix = { version = "1.1.5", default-features = false, features = ["event", "net", "std"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
+# Exactly the version `bindgen/` generates the Swift bindings with.
+uniffi = "=0.32.2"
+zeroize = { version = "1.9", optional = true }
+
+[dev-dependencies]
+tempfile = "3.27.0"

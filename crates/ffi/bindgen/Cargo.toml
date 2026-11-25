@@ -1,0 +1,20 @@
+# UniFFI's binding generator, at exactly deadbolt-ffi's `uniffi` version. A
+# build tool, like `wasm-bindgen-cli` for deadbolt-send-web: its own
+# workspace and lockfile, so none of it (askama and its templates) reaches
+# Deadbolt's dependency graph. crates/app/scripts/build-autofill.sh runs it.
+
+[package]
+name = "deadbolt-uniffi-bindgen"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "UNLICENSED"
+
+[workspace]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "main.rs"
+
+[dependencies]
+uniffi = { version = "=0.32.2", features = ["cli"] }

@@ -24,16 +24,18 @@ target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'impor
 # Two programs from one build: the app, `deadbolt-ui`, as Contents/MacOS/Deadbolt
 # (signed as anomaly.deadbolt), and the headless CLI and daemon, `deadbolt`, as
 # Contents/Helpers/deadbolt (signed as deadbolt). The daemon tells the app from
-# the CLI by signature and path. Both pin the same deadbolt-enclave.
+# the CLI by signature and path. Both pin the same deadbolt-enclave. The same
+# build makes deadbolt-ffi's library, which build-autofill.sh links into
+# DeadboltAutoFill.appex.
 if $universal; then
   for arch in aarch64 x86_64; do
-    cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app --bin deadbolt --bin deadbolt-ui --target "$arch-apple-darwin" -j 2
+    cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app -p deadbolt-ffi --lib --bin deadbolt --bin deadbolt-ui --target "$arch-apple-darwin" -j 2
   done
   for bin in deadbolt deadbolt-ui deadbolt-enclave; do
     lipo -create "$target/aarch64-apple-darwin/release/$bin" "$target/x86_64-apple-darwin/release/$bin" -output "$scratch/$bin"
   done
 else
-  cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app --bin deadbolt --bin deadbolt-ui -j 2
+  cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app -p deadbolt-ffi --lib --bin deadbolt --bin deadbolt-ui -j 2
   cp "$target/release/deadbolt" "$target/release/deadbolt-ui" "$target/release/deadbolt-enclave" "$scratch/"
 fi
 app="$scratch/Deadbolt.app"
@@ -69,9 +71,9 @@ done
 iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbolt.icns"
 
 if $universal; then
-  bash crates/app/scripts/build-autofill.sh --universal "$scratch/DeadboltAutoFill.appex" "$version" "$build" >/dev/null
+  bash crates/app/scripts/build-autofill.sh --universal --ffi-target-dir "$target" "$scratch/DeadboltAutoFill.appex" "$version" "$build" >/dev/null
 else
-  bash crates/app/scripts/build-autofill.sh "$scratch/DeadboltAutoFill.appex" "$version" "$build" >/dev/null
+  bash crates/app/scripts/build-autofill.sh --ffi-target-dir "$target" "$scratch/DeadboltAutoFill.appex" "$version" "$build" >/dev/null
 fi
 
 bundle_autofill=false

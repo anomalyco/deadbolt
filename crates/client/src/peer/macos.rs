@@ -24,7 +24,7 @@ use security_framework::os::macos::code_signing::{
     Flags, GuestAttributes, SecCode, SecRequirement,
 };
 
-use super::{Ancestor, CodeSignature, Process};
+use super::{APP_GROUP_SUFFIX, Ancestor, CodeSignature, Process};
 
 /// The code running as `token`'s process, from the kernel: `None` once
 /// that pid version is gone, even if the pid lives on.
@@ -70,6 +70,25 @@ pub fn running(token: &[u32; 8]) -> Option<CodeSignature> {
     // Again after reading everything: the process may have exited meanwhile.
     guest(token)?;
     Some(found)
+}
+
+/// This process's own Deadbolt App Group (`<team>.anomaly.deadbolt`), by
+/// its running code: its signature valid and chaining to Apple for its
+/// team, and its entitlements naming the group (or `<team>.*`). `None` for
+/// an ad-hoc build, which has no team: asking macOS for a container the
+/// process isn't entitled to would prompt the user.
+pub fn own_app_group() -> Option<String> {
+    let me = SecCode::for_self(Flags::NONE).ok()?;
+    let found = signature(&me, None, true, |requirement| {
+        code::running_is_valid(&me, requirement)
+    });
+    let team = found.team_id?;
+    let group = format!("{team}.{APP_GROUP_SUFFIX}");
+    let wildcard = format!("{team}.*");
+    code::application_groups(&me, true)
+        .iter()
+        .any(|g| *g == group || *g == wildcard)
+        .then_some(group)
 }
 
 /// The signature on disk at `path`, its slice for this process's own
@@ -299,6 +318,12 @@ mod tests {
         assert!(identify(stale).is_none());
         assert!(running(&stale).is_none());
         assert!(!live_token(&stale));
+    }
+
+    /// A test binary is signed ad hoc: no team, so no App Group to ask for.
+    #[test]
+    fn an_ad_hoc_build_has_no_app_group() {
+        assert_eq!(own_app_group(), None);
     }
 
     /// An Apple platform binary is valid with no team; a file that isn't
