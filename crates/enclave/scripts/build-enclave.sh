@@ -21,7 +21,7 @@ for arch in aarch64 x86_64; do
   esac
   mkdir -p "$out/$arch"
   bin="$out/$arch/deadbolt-enclave"
-  swiftc -O -parse-as-library -target "$triple" "$src/enclave.swift" "$src/identify.swift" \
+  swiftc -O -parse-as-library -target "$triple" "$src/enclave.swift" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$src/Info.plist" \
     -o "$bin"
   strip "$bin"

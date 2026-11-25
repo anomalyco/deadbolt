@@ -15,7 +15,7 @@ use crate::protocol::{ActivityEntry, CallerInfo, Check, Command, Outcome, Reply,
 pub fn install() {
     deadbolt_client::set_daemon_check(Box::new(|socket| {
         let exe = own_exe().map_err(|e| format!("locating this binary: {e}"))?;
-        peer::check(&socket, &helper()?, &exe)
+        peer::check(&socket, &exe)
     }));
 }
 
@@ -23,16 +23,6 @@ pub fn install() {
 /// app bundle's helper.
 pub fn own_exe() -> std::io::Result<PathBuf> {
     std::env::current_exe().and_then(std::fs::canonicalize)
-}
-
-#[cfg(target_os = "macos")]
-fn helper() -> Result<PathBuf, String> {
-    crate::daemon::biometric::helper().map_err(|e| format!("{e:#}"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn helper() -> Result<PathBuf, String> {
-    Ok(PathBuf::new())
 }
 
 pub async fn whoami(paths: &Paths, json: bool) -> Result<()> {

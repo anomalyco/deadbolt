@@ -332,13 +332,6 @@ pub fn refresh_status() -> BiometricStatus {
     status
 }
 
-/// The hash-checked `deadbolt-enclave`, which also identifies the daemon's
-/// peers (`deadbolt-enclave identify`).
-#[cfg(target_os = "macos")]
-pub fn helper() -> anyhow::Result<std::path::PathBuf> {
-    macos::verified_helper_path()
-}
-
 /// Resolves the shared macOS App Group container directory (`<TEAM_ID>.anomaly.deadbolt`)
 /// through `deadbolt-enclave group-container`. Returns `Ok(None)` when the
 /// running daemon or helper is not signed with that App Group entitlement (e.g.

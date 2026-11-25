@@ -1,7 +1,7 @@
 //! The `deadbolt-enclave` beside the daemon, checked against the SHA-256
 //! `crates/enclave` pinned (the same pin `deadbolt` is built with) before the
-//! app trusts what it says about the daemon, as `deadbolt` checks it before
-//! every use (docs/touch-id.md). A universal helper matches by the slice for
+//! app sends the daemon a passphrase, as `deadbolt` checks it before every
+//! use (docs/touch-id.md). A universal helper matches by the slice for
 //! this Mac's architecture.
 
 use std::path::Path;

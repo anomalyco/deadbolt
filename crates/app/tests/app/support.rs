@@ -98,8 +98,7 @@ impl Device {
     pub fn launch(&self) -> Launch {
         let bin = std::fs::canonicalize(&self.bin).unwrap();
         deadbolt_client::set_daemon_check(Box::new(move |socket| {
-            let helper = bin.with_file_name("deadbolt-enclave");
-            deadbolt_client::peer::check(&socket, &helper, &bin)
+            deadbolt_client::peer::check(&socket, &bin)
         }));
         let script = self._dir.path().join("deadbolt");
         let mut body = String::from("#!/bin/sh\nexec env");
