@@ -726,6 +726,8 @@ jobs:
     needs: [plan, build-npm, publish-attestations, publish]
     if: ${{ !cancelled() && needs.publish-attestations.result == 'success' && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
+    # Up to 30 minutes of it waiting for the registry (publish-npm.sh).
+    timeout-minutes: 45
     environment: release
     permissions:
       contents: read
