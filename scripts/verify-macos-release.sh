@@ -52,12 +52,26 @@ check_pin() {
 # `deadbolt` sets up a store and starts its daemon, and both drive it, so
 # each client's check of the daemon's signature runs for real.
 smoke() {
-  local home
+  local starter=$1 home run
   home=$(mktemp -d "$check/home.XXXXXX")
+  # macOS Unix socket paths cap at 104 bytes; $TMPDIR under /var/folders is
+  # already ~50 bytes, so keep the runtime dir short under /tmp.
+  run=$(mktemp -d /tmp/db-smoke.XXXXXX)
+  chmod 700 "$run"
   (
-    export HOME="$home" DEADBOLT_HOME="$home/store" XDG_RUNTIME_DIR="$home/run"
-    mkdir -m 700 "$XDG_RUNTIME_DIR"
-    trap '"$1" debug daemon stop > /dev/null 2>&1 || true' EXIT
+    export HOME="$home" DEADBOLT_HOME="$home/store" XDG_RUNTIME_DIR="$run"
+    # shellcheck disable=SC2329
+    cleanup_smoke() {
+      local rc=$?
+      if [ "$rc" -ne 0 ]; then
+        for log in "$home/.local/state"/deadbolt-*/daemon.log; do
+          [ -f "$log" ] && { echo "--- $log ---"; cat "$log"; }
+        done
+      fi
+      "$starter" debug daemon stop > /dev/null 2>&1 || true
+      rm -rf "$run"
+    }
+    trap cleanup_smoke EXIT
     DEADBOLT_PASSPHRASE="release check" "$1" init --device-name release < /dev/null
     for bin in "$1" "$2"; do
       "$bin" debug daemon status | grep -qx unlocked || die "$bin does not take the daemon $1 started."
