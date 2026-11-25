@@ -47,7 +47,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: cargo +stable check -p deadbolt-net --features private-relay-fixture --locked
 
-  # Both browser Rust clients: Send and the standalone extension device.
+  # The Rust that runs in browsers: the vault core and Send.
   wasm:
     name: Browser cores (wasm32)
     if: github.event_name != 'schedule'
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: rustup target add wasm32-unknown-unknown --toolchain stable
-      - run: cargo +stable clippy -p deadbolt-send -p deadbolt-send-web -p deadbolt-ext-core --target wasm32-unknown-unknown --locked -- -D warnings
+      - run: cargo +stable clippy -p deadbolt-core -p deadbolt-send -p deadbolt-send-web --target wasm32-unknown-unknown --locked -- -D warnings
 
   extension:
     name: Browser extension
@@ -75,70 +75,6 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run build
-
-  # The browser-only device (`scripts/build.ts --standalone`: the Rust vault
-  # in wasm, in an offscreen worker) in headless Chromium, with no native host
-  # and nothing reachable beyond loopback: create, save, list, actual fill,
-  # lock, wrong passphrase, unlock and restart (`e2e/standalone.ts --smoke`).
-  # The full run pairs a real CLI over n0's public relays, so it isn't here.
-  extension-standalone:
-    name: Browser extension standalone smoke
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: extension
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: rustup target add wasm32-unknown-unknown --toolchain stable
-      # The exact wasm-bindgen crates/ext-core pins (scripts/wasm.sh checks it).
-      - run: cargo install wasm-bindgen-cli --version "$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' ../crates/ext-core/Cargo.toml)" --locked
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.2
-      - run: bun install --frozen-lockfile
-      - run: bunx playwright-core install --with-deps chromium
-        timeout-minutes: 10
-      - run: bun e2e/standalone.ts --smoke
-
-  # The native e2e scenarios again, against the browser-only device and its
-  # real wasm vault instead of the fake host (`e2e/run.ts --standalone`): the
-  # parity test between the two builds. Four slices, as the native run.
-  extension-standalone-e2e:
-    name: Browser extension standalone e2e (shard ${{ matrix.shard }}/4)
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    defaults:
-      run:
-        shell: bash
-        working-directory: extension
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: rustup target add wasm32-unknown-unknown --toolchain stable
-      - run: cargo install wasm-bindgen-cli --version "$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' ../crates/ext-core/Cargo.toml)" --locked
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.2
-      - run: bun install --frozen-lockfile
-      - run: bunx playwright-core install --with-deps chromium
-        timeout-minutes: 10
-      - run: |
-          mkdir -p e2e-out
-          bun e2e/run.ts --standalone --shard ${{ matrix.shard }}/4 --stills e2e-out/stills 2>&1 | tee e2e-out/run.log
-      - if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: standalone-e2e-shard-${{ matrix.shard }}
-          path: extension/e2e-out
-          if-no-files-found: ignore
 
   # Hidden and covered fields, form swaps, opaque origins, value swaps,
   # navigating mid-fill and the back/forward cache, in headless Chromium with

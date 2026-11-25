@@ -17,8 +17,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 
-use crate::config::ExtensionBuild;
-
 /// The native messaging host's name, which the extension connects to.
 pub const HOST_NAME: &str = "anomaly.deadbolt.browser";
 
@@ -241,22 +239,11 @@ fn pick(chosen: &[Browser], dirs: &Dirs) -> Result<Vec<Browser>> {
 }
 
 /// Registers this binary as the native messaging host with `browsers`, and
-/// `extension_dir` as the unpacked copy of `build` that `deadbolt update`
-/// keeps current.
-pub fn install(
-    browsers: &[Browser],
-    extension_dir: Option<&Path>,
-    build: ExtensionBuild,
-    config: &Path,
-) -> Result<()> {
-    match extension_dir {
-        Some(dir) => register_extension_dir(dir, build, config)?,
-        None if build == ExtensionBuild::Standalone => bail!(
-            "--standalone keeps an unpacked copy current: pass --extension-dir <dir> \
-             (a new or empty directory), or download it from \
-             https://anoma.ly/release/deadbolt/extension/dev/chromium-standalone"
-        ),
-        None => {}
+/// `extension_dir` as the unpacked copy that `deadbolt update` keeps
+/// current.
+pub fn install(browsers: &[Browser], extension_dir: Option<&Path>, config: &Path) -> Result<()> {
+    if let Some(dir) = extension_dir {
+        register_extension_dir(dir, config)?;
     }
     let dirs = Dirs::get()?;
     let program = std::env::current_exe().context("finding this binary")?;
@@ -279,7 +266,7 @@ pub fn install(
 /// Records `dir` as the unpacked extension `deadbolt update` keeps current:
 /// it must not exist yet, be empty, or already hold Deadbolt's extension, as
 /// updating replaces everything in it.
-fn register_extension_dir(dir: &Path, build: ExtensionBuild, config: &Path) -> Result<()> {
+fn register_extension_dir(dir: &Path, config: &Path) -> Result<()> {
     let dir = extension_path(dir)?;
     if !crate::update::extension_dir_ok(&dir) {
         bail!(
@@ -288,12 +275,11 @@ fn register_extension_dir(dir: &Path, build: ExtensionBuild, config: &Path) -> R
             dir.display()
         );
     }
-    crate::config::set_extension_dir(config, &dir, build)?;
+    crate::config::set_extension_dir(config, &dir)?;
     println!(
-        "`deadbolt update` keeps the {} extension in {} current: run it now to \
+        "`deadbolt update` keeps the extension in {} current: run it now to \
          fetch it, then load it unpacked from there (chrome://extensions, \
          Developer mode, Load unpacked)",
-        build.name(),
         dir.display()
     );
     Ok(())

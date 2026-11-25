@@ -67,9 +67,7 @@ pub use items::{
     TagCount, code_field, noun, primary_field, sign_in_name, sign_in_provider,
 };
 pub use reference::{Reference, SCHEME};
-pub use reports::{
-    Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
-};
+pub use reports::{Code, ImportReport, ImportSource, SignInCounts, Tally};
 pub use resolve::{Purpose, ResolvedSecret};
 pub use send::{SendInfo, SendState, SenderInfo};
 pub use site::{
@@ -86,7 +84,7 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 28;
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// The longest line the daemon reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;

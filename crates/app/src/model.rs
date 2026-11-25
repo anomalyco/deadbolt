@@ -88,7 +88,6 @@ pub struct App {
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub import: crate::import::Import,
-    pub mirror: crate::mirror::Mirror,
     pub activity: crate::activity::Activity,
     /// Recently Deleted, in the item's place (⇧⌘⌫).
     pub trash: crate::trash::Trash,
@@ -153,7 +152,6 @@ impl App {
             copy: None,
             notice: None,
             import: crate::import::Import::default(),
-            mirror: crate::mirror::Mirror::default(),
             activity: crate::activity::Activity::default(),
             trash: crate::trash::Trash::default(),
             health: crate::health::Health::default(),
@@ -271,7 +269,6 @@ impl App {
                 applied,
                 result,
             } => self.on_imported(seq, applied, result, tx),
-            Done::Mirrored { seq, result } => self.on_mirrored(seq, result, tx),
             Done::Saved { seq, result } => self.on_saved(seq, result, tx),
             Done::Favorited { seq, result } => self.on_favorited(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
@@ -568,7 +565,6 @@ impl App {
         self.notice = None;
         self.forget_import();
         self.forget_edit();
-        self.mirror.forget();
         self.activity.forget();
         self.trash.forget();
         self.health.forget();
@@ -612,7 +608,6 @@ impl App {
         self.hotkey.recorder.cancel();
         self.hotkey.reset_error = None;
         self.touch_id_error = None;
-        self.mirror.result = None;
         self.activity.forget();
     }
 }

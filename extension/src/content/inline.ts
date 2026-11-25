@@ -76,7 +76,6 @@ let frame: HTMLIFrameElement | null = null
 let anchor: FormControl | null = null
 /** Where the anchor was when the surface opened on it: a pill follows a box the page re-rendered in its place (see successor). */
 let anchorOwner: FieldOwner | null = null
-let unlockAnchor: FormControl | null = null
 /**
  * For a field in a frame below: where it showed in this page when the menu
  * opened, the page's scroll then, and the frame element it shows in (if
@@ -949,9 +948,7 @@ export function initMenu(page: PageState) {
     resetFillState()
   })
   // Answering tells the background the message reached a live document.
-  chrome.runtime.onMessage.addListener((message: ToContent, sender, respond) => {
-    // Unlock's wait and return come only from the service worker: this extension, and not from a tab (a page's frame or an extension page).
-    const fromWorker = sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL("background.js")
+  chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     switch (message?.type) {
       case "db:fill":
         applyFill(fillHost, message).then(respond, () => respond({ filled: [] }))
@@ -988,32 +985,12 @@ export function initMenu(page: PageState) {
         return void respond(true)
       case "db:close-menu":
         if (message.token === token) {
-          if (message.unlock && fromWorker) unlockAnchor = anchor
           if (mode === "accounts") {
             dismissedFor = anchor
             closeMenu(true)
           } else leave()
         }
         return void respond(true)
-      case "db:unlock-wait":
-        if (!fromWorker) return void respond(false)
-        const framed = getFramedFor()
-        unlockAnchor = framed instanceof HTMLInputElement || framed instanceof HTMLTextAreaElement || framed instanceof HTMLSelectElement ? framed : anchor
-        return void respond(!!unlockAnchor)
-      case "db:unlock-return": {
-        if (!fromWorker) return void respond(false)
-        const el = unlockAnchor
-        unlockAnchor = null
-        if (!el?.isConnected || !fillable(el)) return void respond(false)
-        // Focus fires synchronously. Suppress its passive query so the
-        // explicit reopen below wins, including on previously empty fields.
-        dismissedFor = el
-        lastGestureAt = Date.now()
-        el.focus()
-        dismissedFor = null
-        void maybeOpen(el, "again")
-        return void respond(true)
-      }
       case "db:resize-menu":
         if (message.token === token) resize(message.height, message.width, message.mode)
         return void respond(true)

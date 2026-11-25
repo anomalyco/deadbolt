@@ -11,7 +11,6 @@
 mod bitwarden;
 mod csv;
 pub mod onepassword;
-pub mod op;
 pub mod tags;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -89,11 +88,6 @@ pub struct MirrorVersion {
 }
 
 impl MirrorVersion {
-    /// Whether a sync keeps it up to date.
-    pub fn mirrored(&self) -> bool {
-        self.origin != Origin::Import
-    }
-
     /// `updated:digest`, then `:import`, or `:adopted:` and the fields'
     /// names joined by commas (followed optionally by `:` and unpadded
     /// base64url folded tags joined by commas), unless a sync added it.
@@ -340,11 +334,6 @@ impl Summary {
         add(&mut self.skipped, other.skipped);
         add(&mut self.warnings, other.warnings);
         add(&mut self.dropped, other.dropped);
-    }
-
-    /// Why an item was skipped, for a summary of that one item.
-    fn skip_reason(&self) -> Option<&'static str> {
-        self.skipped.keys().next().map(|(one, _)| *one)
     }
 
     /// Counts a mapped item.

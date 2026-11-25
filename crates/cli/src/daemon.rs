@@ -15,7 +15,6 @@ mod items;
 mod legacy;
 mod lifecycle;
 mod macos_autofill;
-mod mirror;
 mod pairing;
 mod passkeys;
 mod secrets;
@@ -71,7 +70,6 @@ pub use lifecycle::serve;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const BIOMETRIC_CANCEL_COOLDOWN: Duration = Duration::from_secs(2);
-const INTERRUPTED: &str = "locked during the sync from 1Password; nothing was written";
 
 struct AbortOnDrop(JoinHandle<()>);
 
@@ -108,13 +106,9 @@ pub struct Daemon {
     transition: tokio::sync::Mutex<()>,
     /// Held by the one join or pair running.
     pairing: tokio::sync::Mutex<()>,
-    /// Held by the one sync from 1Password running.
-    syncing_op: tokio::sync::Mutex<()>,
-    /// Bumped by a lock and at shutdown: a sync from 1Password running
-    /// kills `op` and writes nothing.
+    /// Bumped by a lock and at shutdown: background work running (a
+    /// breach check) stops and writes nothing.
     interrupts: watch::Sender<u64>,
-    #[cfg(test)]
-    op_program: Mutex<Option<std::path::PathBuf>>,
     /// In-memory metadata of `"biometric.token"`, loaded once at startup and
     /// updated on enrollment/clear/wipe so `status()` never opens `store.redb`.
     biometric_slot: Mutex<Option<biometric::TokenMeta>>,
@@ -173,10 +167,7 @@ impl Daemon {
             sync_now: Notify::new(),
             transition: tokio::sync::Mutex::new(()),
             pairing: tokio::sync::Mutex::new(()),
-            syncing_op: tokio::sync::Mutex::new(()),
             interrupts: watch::channel(0).0,
-            #[cfg(test)]
-            op_program: Mutex::default(),
             biometric_was_enrolled: AtomicBool::new(initial_slot.is_some()),
             biometric_slot: Mutex::new(initial_slot),
             biometric_flight: Mutex::default(),
@@ -210,19 +201,6 @@ impl Daemon {
 
     fn interrupt_op(&self) {
         self.interrupts.send_modify(|n| *n += 1);
-    }
-
-    fn op(&self) -> mirror::Op {
-        #[cfg(test)]
-        if let Some(program) = self
-            .op_program
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
-            return mirror::Op::at(program);
-        }
-        mirror::Op::find()
     }
 
     fn cancel_biometric_prompt(&self) {

@@ -96,15 +96,6 @@ pub(super) fn new_of(s: &mut App, kind: &str, name: &str) {
     }
 }
 
-/// The vault with github.com mirrored from 1Password, selected.
-pub(super) fn mirrored(s: &mut App) {
-    vault(s);
-    for item in s.items.iter_mut().filter(|i| i.label == "github.com") {
-        item.source = Some("1Password".into());
-    }
-    detail_for_selection(s);
-}
-
 /// ⌥⌘Space, the scenes' other shortcut.
 #[expect(clippy::expect_used, reason = "a constant")]
 pub(super) fn other_shortcut() -> rune::Shortcut {
@@ -262,7 +253,6 @@ fn fixture_item(id: &str, kind: &str, label: &str, detail: Option<&str>) -> Item
         label: label.into(),
         detail: detail.map(Into::into),
         fields: Vec::new(),
-        source: None,
         favorite,
         tags: tags.iter().map(|t| (*t).to_owned()).collect(),
         deleted_at: None,
@@ -388,7 +378,6 @@ fn many_item(i: usize) -> ItemInfo {
         label: format!("{}-{i:03}.com", SITES[i * SITES.len() / MANY]),
         detail: Some(format!("user{i}@example.com")),
         fields: Vec::new(),
-        source: None,
         favorite: false,
         tags: Vec::new(),
         deleted_at: None,

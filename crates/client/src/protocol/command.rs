@@ -203,17 +203,6 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
     },
-    /// Mirrors 1Password into `vault` with the 1Password CLI (`op`), which
-    /// the daemon runs: from every vault of `account` (`op`'s default
-    /// without one), or only the `op_vaults` named. Fails as `locked`
-    /// before asking 1Password anything. With `dry_run` it writes nothing.
-    /// Replies `mirror`.
-    SyncOnePassword {
-        vault: Option<String>,
-        account: Option<String>,
-        op_vaults: Vec<String>,
-        dry_run: bool,
-    },
     /// Browser autofill: the logins, in every vault, saved for the site of
     /// the web page at `origin`, without values; replies `site-logins`.
     /// Each carries only its URLs on that site. Doesn't count as use for the
@@ -561,7 +550,6 @@ impl Command {
             Self::ItemRestore { .. } => "item-restore",
             Self::Import { .. } => "import",
             Self::Generate { .. } => "generate",
-            Self::SyncOnePassword { .. } => "sync-one-password",
             Self::SiteLogins { .. } => "site-logins",
             Self::SiteFill { .. } => "site-fill",
             Self::SiteGenerateCheck { .. } => "site-generate-check",

@@ -5,7 +5,7 @@
 // real browser profile or vault: each run uses a fresh profile directory with
 // the fake host's manifest in it.
 //
-//   bun run e2e [--standalone] [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
+//   bun run e2e [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
 //
 // `--video <dir>` records the `film` run (the menu, a fill, a sign-in and
 // the save offer in the page) to <dir>/deadbolt-surface.webm, and
@@ -17,16 +17,6 @@
 // `--only security` is the fast subset CI runs first: hidden and covered fields, form
 // swaps, opaque origins, value swaps, navigation during a fill and the
 // back/forward cache.
-//
-// `--standalone` runs the same scenarios against the browser-only device
-// (bg/standalone.ts, a `--standalone` e2e build) and its real wasm vault
-// instead of the fake host: each profile creates a vault through the
-// extension's own page and saves the fake host's logins, identities and
-// card into it (seedVault), and the host log is what the service worker
-// sent the vault. The fake host's other knobs have counterparts there (a
-// locked vault, one never set up, slow or rate-limited answers from the
-// worker's side). Native-daemon passkey and Touch ID scenarios are skipped
-// by name; e2e/standalone.ts covers real standalone passkeys and Strict reauth.
 //
 // `--deadbolt <path to the deadbolt binary>` adds the passkey run, which
 // needs a real daemon to sign: it makes a throwaway store (fast KDF, local
@@ -41,11 +31,9 @@
 
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
-import { createHmac } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { VAULT_REQUEST } from "../src/bg/vault-messages"
 import { axe, describe } from "./axe"
 import { gauntlet } from "./gauntlet/site"
 import { gmailPage } from "./gmail-flow"
@@ -58,11 +46,10 @@ const arg = (name: string) => {
   return i > 0 ? process.argv[i + 1] : undefined
 }
 // An e2e build of its own (DEADBOLT_E2E: provider pages on .test hosts), never dist/.
-const standalone = process.argv.includes("--standalone")
 const prebuilt = arg("--dist")
 const dist = prebuilt ?? (await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-")))
 if (!prebuilt) {
-  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist, standalone ? "--standalone" : "--native"], { stdout: "inherit", stderr: "inherit" })
+  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist], { stdout: "inherit", stderr: "inherit" })
   if (!built.success) throw new Error("the e2e build failed")
 }
 const stills = arg("--stills")
@@ -810,7 +797,7 @@ const server = Bun.serve({
       gauntletSite ??= gauntlet({
         base: "/gauntlet",
         accounts: gauntletAccounts(TOTP_SECRET),
-        fixedCodes: standalone ? [] : ["492039"],
+        fixedCodes: ["492039"],
         sameSiteOrigin: (u) => (u.hostname.endsWith(".acme.test") ? `http://accounts.acme.test:${u.port}` : null),
         crossSiteOrigin: (u) => `http://pay.evilpay.test:${u.port}`,
       })
@@ -1316,7 +1303,7 @@ interface LaunchOptions {
 async function launch(options: LaunchOptions = {}): Promise<Run> {
   const dir = await mkdtemp(join(tmpdir(), "deadbolt-e2e-"))
   const log = join(dir, "host.log")
-  if (options.host !== false && !standalone) {
+  if (options.host !== false) {
     await mkdir(join(dir, "NativeMessagingHosts"))
     await writeFile(
       join(dir, "NativeMessagingHosts", "anomaly.deadbolt.browser.json"),
@@ -1397,93 +1384,13 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
   })
   const run = { context, worker, log, dir }
   runs.set(context, run)
-  if (standalone) await seedVault(run, options)
   return run
 }
 
-// ---- The standalone device ------------------------------------------------------
-
-/** The one-time password the seeded Acme login has, and its codes (RFC 6238, SHA-1, 30 s, 6 digits). */
+/** The one-time password the fake host's Acme login has. */
 const TOTP_SECRET = "JBSWY3DPEHPK3PXP"
-function totpAt(seconds: number): string {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-  let bits = ""
-  for (const c of TOTP_SECRET) bits += alphabet.indexOf(c).toString(2).padStart(5, "0")
-  const key = Buffer.from(bits.match(/.{8}/g)!.map((b) => parseInt(b, 2)))
-  const counter = Buffer.alloc(8)
-  counter.writeBigUInt64BE(BigInt(Math.floor(seconds / 30)))
-  const mac = createHmac("sha1", key).update(counter).digest()
-  const at = mac[mac.length - 1] & 0xf
-  return String((mac.readUInt32BE(at) & 0x7fffffff) % 1_000_000).padStart(6, "0")
-}
-/** Whether `code` is the Acme login's one-time code: the fake host's fixed one, or the vault's current (or just-ended) one. */
-const isCode = (code: string) => (standalone ? [totpAt(Date.now() / 1000), totpAt(Date.now() / 1000 - 30)].includes(code) : code === "492039")
-
-const SEED_PASSPHRASE = "e2e standalone synthetic passphrase"
-
-/**
- * Puts the fake host's data in the profile's own vault: created through
- * device.html as a person would (the real KDF), then the logins (on every
- * test site, as the fake host lists them everywhere), the two identities
- * and the card, with the fake host's values. `status: "locked"` locks it
- * after; `host: false` leaves it never set up. Before any page asks, the
- * service worker's messages to the vault are logged (the host log), and
- * `fillDelay` and `rateLimit` act on them as the fake host would.
- */
-async function seedVault(run: Run, options: LaunchOptions) {
-  await run.worker.evaluate(
-    ({ type, delay, listDelay, limited }) => {
-      const log: unknown[] = []
-      ;(globalThis as unknown as { __vaultLog: unknown[] }).__vaultLog = log
-      const send = chrome.runtime.sendMessage.bind(chrome.runtime) as (...args: unknown[]) => Promise<unknown>
-      ;(chrome.runtime as unknown as { sendMessage: unknown }).sendMessage = (...args: unknown[]) => {
-        const m = args[0] as { type?: string; body?: Record<string, unknown> }
-        const kind = String(m?.body?.type ?? "")
-        if (m?.type !== type || kind.startsWith("device-")) return send(...args)
-        log.push(JSON.parse(JSON.stringify(m.body)))
-        if (limited.includes(kind)) return Promise.resolve({ reply: { type: "error", code: "rate_limited", message: "too many requests; try again in a moment" } })
-        if (delay && (kind === "fill" || kind === "fill-form")) return new Promise((r) => setTimeout(r, delay * 1000)).then(() => send(...args))
-        if (listDelay && kind === "list") return new Promise((r) => setTimeout(r, listDelay * 1000)).then(() => send(...args))
-        return send(...args)
-      }
-    },
-    { type: VAULT_REQUEST, delay: options.fillDelay ?? 0, listDelay: options.listDelay ?? 0, limited: (options.rateLimit ?? "").split(",").filter(Boolean) },
-  )
-  if (options.host === false) return
-  const page = await run.context.newPage()
-  try {
-    await page.goto(`chrome-extension://${ID}/device.html`)
-    const ask = async (command: Record<string, unknown>) => {
-      const r = (await page.evaluate((command) => chrome.runtime.sendMessage({ type: "db:device", command }), command)) as { ok: boolean; message?: string; reply?: Record<string, unknown> }
-      if (!r?.ok) throw new Error(`seeding the vault: ${command.type}: ${r?.message}`)
-      return r.reply!
-    }
-    await ask({ type: "device-create", passphrase: SEED_PASSPHRASE, name: "personal" })
-    const port = server.port
-    const sites = [`http://localhost:${port}`, `http://www.acme.test:${port}`, `http://accounts.acme.test:${port}`, `http://appstoreconnect.apple.test:${port}`, `http://www.schwab.test:${port}`]
-    const urls = (list: string[]) => list.map((value, i) => (i ? { name: `url-${i + 1}`, value, type: "url" } : { name: "url", value }))
-    const login = async (name: string, fields: Array<{ name: string; value: string; type?: string }>) => String((await ask({ type: "device-item-save", kind: "login", name, fields })).ref)
-    if (options.google) {
-      // Also for acme.test, where the same page must narrow nothing (googleAccount).
-      for (const u of ["jordan@gmail.com", "jordan@example.com", "alex@gmail.com"]) await login("Google", [...urls([`http://accounts.google.test:${port}`, `http://www.acme.test:${port}`]), { name: "username", value: u }, { name: "password", value: "google password" }])
-    } else {
-      await login("Acme", [...urls(options.saved ? [options.saved] : sites), { name: "username", value: "alex@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
-      await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
-      if (options.keyLogin) await login("Acme API key", [...urls(sites), { name: "password", value: "acme api key" }])
-      if (options.signIn) {
-        const google = await login("Google", [...urls([`http://accounts.google.test:${port}`]), { name: "username", value: "alex@gmail.com" }, { name: "password", value: "google password" }])
-        await login("Acme", [...urls(sites), { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: google.split(":")[1] }])
-      }
-    }
-    const item = (kind: string, name: string, values: Record<string, string>) => ask({ type: "device-item-save", kind, name, fields: Object.entries(values).map(([name, value]) => ({ name, value })) })
-    await item("identity", "Home", { "given-name": "Alex", "family-name": "Mercer", email: "alex@acme.test", phone: "+14155550123", organization: "Acme", "address-line1": "123 Main St", "address-line2": "Apt 4", city: "Brooklyn", region: "NY", "postal-code": "11201", country: "US", birthday: "1990-07-04" })
-    await item("identity", "Work", { "given-name": "Alex", "family-name": "Mercer", "address-line1": "1 Market St", city: "San Francisco", region: "CA", "postal-code": "94105", country: "US" })
-    await item("card", "Personal Visa", { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Alex Mercer", brand: "Visa" })
-    if (options.status === "locked") await ask({ type: "device-lock" })
-  } finally {
-    await page.close()
-  }
-}
+/** Whether `code` is the Acme login's one-time code: the fake host's fixed one. */
+const isCode = (code: string) => code === "492039"
 
 const runs = new Map<BrowserContext, Run>()
 
@@ -1493,7 +1400,6 @@ async function close(run: Run) {
 }
 
 async function hostLog(run: Run): Promise<Array<Record<string, unknown>>> {
-  if (standalone) return run.worker.evaluate(() => (globalThis as unknown as { __vaultLog?: Array<Record<string, unknown>> }).__vaultLog ?? []).catch(() => [])
   const text = await readFile(run.log, "utf8").catch(() => "")
   return text
     .split("\n")
@@ -1594,9 +1500,9 @@ async function popup(run: Run, tabPrefix: string, name?: string): Promise<Page> 
   return page
 }
 
-/** The popup's rows for the page's logins, and their Fill when it's the primary button: the native popup's, or the vault's (src/vault). */
-const POPUP_TITLE = standalone ? ".vrow.here .title" : ".account-title"
-const POPUP_FILL_PRIMARY = standalone ? ".vrow button.fill.primary" : ".account button.primary"
+/** The popup's rows for the page's logins, and their Fill when it's the primary button. */
+const POPUP_TITLE = ".account-title"
+const POPUP_FILL_PRIMARY = ".account button.primary"
 
 /** The toolbar badge for the tab showing `prefix`. */
 const badge = (run: Run, prefix = site) =>
@@ -1690,8 +1596,7 @@ async function fillAndTotp(scheme: Scheme) {
 
     const p = await popup(run, site, `popup-ready-${scheme}`)
     check((await p.locator(POPUP_TITLE).allTextContents()).join(",") === "Acme,Acme admin", "popup lists the site's logins")
-    // The standalone popup is the vault itself, which copies a password when asked (docs/extension-device.md).
-    if (!standalone) check(!(await p.locator("button", { hasText: /copy password/i }).count()), "popup offers no password copy")
+    check(!(await p.locator("button", { hasText: /copy password/i }).count()), "popup offers no password copy")
   } catch (err) {
     check(false, `fill scenario threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "fill")
@@ -2268,23 +2173,16 @@ async function locked(scheme: Scheme) {
     await page.click("#email")
     const menu = await until("locked menu", async () => {
       const f: Frame | null = extensionFrame(page, "menu.html")
-      return f && (await f.locator(standalone ? ".row" : ".notice").count()) > 0 ? f : null
+      return f && (await f.locator(".notice").count()) > 0 ? f : null
     })
     if (menu) {
-      // The browser-only vault's menu offers to unlock it in its own page.
-      if (standalone) check(((await menu.locator(".title").textContent()) ?? "") === "Unlock Deadbolt", "menu offers to unlock Deadbolt")
-      else check(((await menu.locator(".title").textContent()) ?? "").includes("locked"), "menu says Deadbolt is locked")
+      check(((await menu.locator(".title").textContent()) ?? "").includes("locked"), "menu says Deadbolt is locked")
       await Bun.sleep(400)
       await shotAround(page, `menu-locked-${scheme}`, menu, "#email")
     }
     const p = await popup(run, site, `popup-locked-${scheme}`)
-    if (standalone) {
-      // The browser-only vault unlocks in its own popup.
-      check((await p.locator("input[type=password]").count()) === 1 && (await p.getByRole("button", { name: "Unlock", exact: true }).count()) === 1, "popup asks for the passphrase to unlock")
-    } else {
-      check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
-      check(!(await p.locator("input[type=password]").count()), "popup never asks for the passphrase")
-    }
+    check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
+    check(!(await p.locator("input[type=password]").count()), "popup never asks for the passphrase")
   } catch (err) {
     check(false, `locked threw: ${(err as Error).message.split("\n")[0]}`)
   } finally {
@@ -2298,8 +2196,7 @@ async function notInstalled(scheme: Scheme) {
     const page = await run.context.newPage()
     await page.goto(`${site}/login`)
     const p = await popup(run, site, `popup-not-installed-${scheme}`)
-    if (standalone) check((await p.locator("button", { hasText: /pair with an existing device/i }).count()) > 0, "a vault never set up offers to pair or create one")
-    else check(((await p.locator(".command code").textContent()) ?? "") === "deadbolt browser install", "popup shows the install command")
+    check(((await p.locator(".command code").textContent()) ?? "") === "deadbolt browser install", "popup shows the install command")
   } catch (err) {
     check(false, `not installed threw: ${(err as Error).message.split("\n")[0]}`)
   } finally {
@@ -5026,9 +4923,7 @@ async function formsSurface(scheme: Scheme) {
     const cards = await formsMenu(run, page, "#cc", "/forms/card-single")
     if (cards) {
       check((await cards.locator(".row .title").first().textContent()) === "Visa ••4242 · 08/28", "a card field lists cards as brand, last digits and expiry")
-      // The browser-only vault has no Touch ID: Comfortable fills on the pick (Strict's passphrase is e2e/standalone.ts's).
-      if (standalone) check((await footText(cards)) === "", "and asks for nothing more under Comfortable")
-      else check((await footText(cards)) === "Deadbolt may ask for Touch ID.", "and says Touch ID may be asked")
+      check((await footText(cards)) === "Deadbolt may ask for Touch ID.", "and says Touch ID may be asked")
       await shotAround(page, `forms-card-${scheme}`, cards, "#cc")
       check((await pickRow(cards, "Visa")) === "ok", "picking a card says Filled")
       const got = await values(page, ["cc", "exp", "cvc", "holder"])
@@ -5074,36 +4969,6 @@ async function formsSurface(scheme: Scheme) {
       check(await acceptForm(page, offer.offer, `forms-update-card-open-${scheme}`), "Save updates the card")
       const update = (await formSaves(run)).find((r) => r.kind === "card" && r.ref)
       check(sorted(update?.fields) === sorted({ expiry: "2031-01" }), `only its expiry changes (${sorted(update?.fields)})`)
-    }
-
-    // The browser-only vault compares the typed number with the card's: a
-    // Visa with the same last four digits but another number is a new card.
-    // (The native daemon has no such comparison yet: there it's the update.)
-    if (standalone) {
-      await newTurn(run)
-      await page.goto(`${site}/forms/pay`)
-      await formsFound(run, page, "/forms/pay")
-      await typeIn(page, { holder: "Alex Mercer", cc: "4000 0000 0002 4242", exp: "02 / 32", cvc: "123" })
-      await page.press("#cvc", "Enter")
-      await page.waitForURL("**/forms/thanks")
-      offer = await formOffer(page, "the same last four digits are offered as an update first")
-      if (offer) {
-        await Bun.sleep(500)
-        await offer.offer.locator(".offer-row").hover()
-        await until("the offer opens on approach", async () => (await frameBox(offer!.offer)).height > 60)
-        await settled(offer.offer)
-        await offer.offer.locator(".offer-row .btn.primary").click()
-        const instead = await until("another card is offered as new", async () => {
-          const f = extensionFrame(page, "menu.html")
-          return f && (await f.locator(".offer-title").textContent().catch(() => "")) === "Save card?" ? f : null
-        }, 15_000)
-        check(!!instead, "Update of another number with the same last four: the vault says no, and Save card? is offered instead")
-        const sent = (await formSaves(run)).find((r) => r.ref && (r as { match?: { number: string } }).match?.number === "4000000000024242")
-        check(!!sent && !("number" in sent.fields), "the typed number went only as a match, never as a field")
-        if (instead) check(await acceptForm(page, instead, `forms-save-card-instead-${scheme}`), "and saved as a new card")
-        const added = (await formSaves(run)).find((r) => !r.ref && r.fields.number === "4000000000024242")
-        check(!!added, "a new card with that number")
-      }
     }
 
     // A typed address: a new identity, then Home with a new street.
@@ -5492,66 +5357,9 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
   return passed
 }
 
-/** The lines of every recording, each with its session: what the native host was asked to write, or what the browser-only vault keeps (bg/learn-log.ts). */
+/** The lines of every recording, each with its session: what the native host was asked to write. */
 async function learnLines(run: Run): Promise<Array<Record<string, unknown>>> {
-  if (!standalone) return (await hostLog(run)).filter((r) => r.type === "learn").map((r) => ({ session: r.session, ...(r.line as Record<string, unknown>) }))
-  const page = await run.context.newPage()
-  try {
-    await page.goto(`chrome-extension://${ID}/device.html`)
-    return await page.evaluate(
-      () =>
-        new Promise<Array<Record<string, unknown>>>((resolve) => {
-          const req = indexedDB.open("deadbolt-learn", 2)
-          req.onupgradeneeded = () => {
-            req.result.createObjectStore("logs", { keyPath: "session" })
-            req.result.createObjectStore("lines", { autoIncrement: true }).createIndex("session", "session")
-          }
-          req.onsuccess = () => {
-            const all = req.result.transaction("lines").objectStore("lines").getAll()
-            all.onsuccess = () => {
-              req.result.close()
-              resolve((all.result as Array<{ session: string; text: string }>).map((l) => ({ session: l.session, ...JSON.parse(l.text) })))
-            }
-          }
-        }),
-    )
-  } finally {
-    await page.close()
-  }
-}
-
-/**
- * The browser-only vault's store already holds eleven recordings, one eight
- * days old, ten an hour old, in version 1's layout (each log's lines in its
- * record): the extension's first write moves them to version 2's.
- */
-async function seedRecordings(run: Run) {
-  const page = await run.context.newPage()
-  try {
-    await page.goto(`chrome-extension://${ID}/device.html`)
-    await page.evaluate(
-      () =>
-        new Promise<void>((resolve, reject) => {
-          const req = indexedDB.open("deadbolt-learn", 1)
-          req.onupgradeneeded = () => req.result.createObjectStore("logs", { keyPath: "session" })
-          req.onsuccess = () => {
-            const tx = req.result.transaction("logs", "readwrite")
-            const now = Date.now()
-            for (let i = 0; i < 11; i++) {
-              const session = `${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`
-              tx.objectStore("logs").put({ session, updated: i === 0 ? now - 8 * 86_400_000 : now - 3_600_000 + i, bytes: 30, lines: [JSON.stringify({ event: "start", site: "seeded" })] })
-            }
-            tx.oncomplete = () => {
-              req.result.close()
-              resolve()
-            }
-            tx.onerror = () => reject(tx.error)
-          }
-        }),
-    )
-  } finally {
-    await page.close()
-  }
+  return (await hostLog(run)).filter((r) => r.type === "learn").map((r) => ({ session: r.session, ...(r.line as Record<string, unknown>) }))
 }
 
 /** The record shortcut, as Chrome would fire it: CDP's key events never reach extension commands, so the e2e build hands the scenario its handler. */
@@ -5567,7 +5375,7 @@ const recordShortcut = (run: Run, prefix = site) =>
 async function recordStills(scheme: Scheme) {
   const run = await launch({ scheme, reducedMotion: true })
   const page = await run.context.newPage()
-  // The whole popup: the browser-only vault's is wider than the native one.
+  // The whole popup, at its own width.
   const still = async (name: string) => {
     const p = await popup(run, site)
     const { width, height } = await p.evaluate(() => document.body.getBoundingClientRect())
@@ -5600,8 +5408,7 @@ async function recordStills(scheme: Scheme) {
  * named keys, navigations), never what's typed or pasted, while Deadbolt's
  * menu stays away. The shortcut stops it; the popup offers Download and
  * Delete. Then "Never for this site" on an offer: the popup says saving is
- * off, and Turn on undoes it (the browser-only vault also lists it in
- * Settings).
+ * off, and Turn on undoes it.
  */
 async function learnAndNever() {
   if (stills) for (const scheme of ["light", "dark"] as const) await recordStills(scheme)
@@ -5617,7 +5424,6 @@ async function learnAndNever() {
     check(/^(Alt\+Shift\+[A-Z]|⌥⇧[A-Z])$/.test(shortcut), `the record command has its shortcut (${shortcut || "none"})`)
 
     // The browser keeps the newest 10 recordings for 7 days: a new one prunes the rest.
-    if (standalone) await seedRecordings(run)
     await page.goto(`${site}/login?next=home`)
     await formFound(page)
     const p = await popup(run, site)
@@ -5651,10 +5457,6 @@ async function learnAndNever() {
     }, 15_000)
     const recorded = logged?.find((l) => l.event === "start" && l.site === "localhost")?.session
     const lines = logged?.filter((l) => l.session === recorded) ?? null
-    if (standalone) {
-      const kept = new Set(logged?.map((l) => l.session))
-      check(kept.size === 10 && !kept.has("00000000-0000-4000-8000-000000000000") && !kept.has("00000001-0000-4000-8000-000000000000"), `version 1's logs move over, and a new recording keeps the newest 10, none past 7 days (${kept.size})`)
-    }
     const events = (lines ?? []).map((l) => l.event)
     check(events[0] === "start" && events.includes("step") && events.includes("timeline") && (lines ?? []).at(-1)?.reason === "stopped", `the log has the start, steps, the timeline and the end (${[...new Set(events)].join(",")})`)
     const timeline = (lines ?? []).filter((l) => l.event === "timeline").flatMap((l) => l.events as Array<{ type: string; key?: string; target?: { id?: string }; frame?: { path: string } }>)
@@ -5675,20 +5477,12 @@ async function learnAndNever() {
     await Bun.sleep(1200)
     check((await done.locator(".record-bar[data-state=done] button", { hasText: "Delete" }).count()) === 1, "and keeps it, with Delete next to Download")
     await done.close()
-    if (standalone) {
-      const s = await popup(run, site)
-      await s.getByRole("button", { name: "Settings", exact: true }).click()
-      check(!!(await until("Settings lists the recordings", async () => (await s.locator(".settings").textContent())?.includes("10 recordings"))), "Settings › Recordings keeps it, with Download")
-      await s.close()
-    }
 
     const again = await popup(run, site)
     await again.locator(".record-bar[data-state=done] button", { hasText: "Delete" }).click()
     check(!!(await until("Delete removes it", async () => (await again.locator(".record-bar[data-state=done]").count()) === 0)), "Delete removes the recording")
     await again.close()
-    const sessions = new Set((await learnLines(run)).map((l) => l.session))
-    if (standalone) check(sessions.size === 9 && !sessions.has(recorded), "and it's gone from the browser's recordings")
-    else check((await hostLog(run)).some((r) => r.type === "learn-delete" && r.session === recorded), "and the host deletes its log")
+    check((await hostLog(run)).some((r) => r.type === "learn-delete" && r.session === recorded), "and the host deletes its log")
 
     await signIn(run, page, "/login?next=home", "never@acme.test", "never password")
     await page.waitForURL("**/home")
@@ -5696,12 +5490,6 @@ async function learnAndNever() {
     const { p: o } = await offerIn(run)
     await o.locator(".offer button.link", { hasText: "Never for this site" }).click()
     check(!!(await until("the popup says saving is off", async () => (await o.locator(".saving-off", { hasText: "Saving is off for localhost" }).count()) > 0)), "Never for this site: the popup says saving is off, with Turn on")
-    if (standalone) {
-      const s = await popup(run, site)
-      await s.getByRole("button", { name: "Settings", exact: true }).click()
-      check(!!(await until("Settings lists the site", async () => (await s.getByRole("button", { name: "Turn saving on for localhost" }).count()) > 0)), "and Settings lists it")
-      await s.close()
-    }
     await o.locator(".saving-off button", { hasText: "Turn on" }).click()
     check(!!(await until("Turn on undoes it", async () => (await o.locator(".saving-off", { hasText: "Saving is off" }).count()) === 0)), "Turn on offers to save there again")
     await o.close()
@@ -5719,8 +5507,7 @@ async function learnAndNever() {
  * Every surface in `scheme`, checked with axe-core (WCAG 2.2 A and AA, with
  * axe's best practices, contrast included): the inline menu as it opens and
  * once the keyboard is in it, the Filled pill, the save offer small and
- * open, the toolbar popup and, in the browser-only build, device.html's
- * views. A surface that axe finds nothing wrong with passes.
+ * open and the toolbar popup. A surface that axe finds nothing wrong with passes.
  */
 async function audited(where: string, target: Page | Frame | null, surface = false) {
   if (!target) return check(false, `axe: ${where} wasn't there to check`)
@@ -5847,47 +5634,6 @@ async function a11y(scheme: Scheme) {
     // An address field's menu: a caption over the identities.
     await page.goto(`${site}/forms/tokens`)
     await audited(`the address menu (${scheme})`, await formsMenu(run, page, "#ship-name", "/forms/tokens"), true)
-    if (standalone) {
-      const device = await run.context.newPage()
-      await device.goto(`chrome-extension://${ID}/device.html`)
-      await device.getByRole("searchbox", { name: "Search the vault" }).waitFor()
-      await Bun.sleep(500)
-      await audited(`device.html's list (${scheme})`, device)
-      // The list by keyboard: ↓ from the search to a row, Enter opens it, Back returns focus to that row.
-      await device.keyboard.press("ArrowDown")
-      await device.keyboard.press("ArrowDown")
-      const row = await device.evaluate(() => document.activeElement?.textContent ?? "")
-      await shot(device, `a11y-device-keyboard-${scheme}`)
-      await device.keyboard.press("Enter")
-      await device.getByRole("button", { name: "Edit", exact: true }).waitFor()
-      await Bun.sleep(400)
-      await audited(`a login (${scheme})`, device)
-      check(await device.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Back"), "an opened login puts focus on Back")
-      await device.keyboard.press("Enter")
-      await device.getByRole("searchbox", { name: "Search the vault" }).waitFor()
-      check((await device.evaluate(() => document.activeElement?.textContent ?? "")) === row && row !== "", `back in the list, focus is on the row that was opened (${row})`)
-      await device.locator(".vrow-main", { hasText: "Acme" }).first().click()
-      await device.getByRole("button", { name: "Edit", exact: true }).waitFor()
-      const copy = device.getByRole("button", { name: "Copy one-time code", exact: true })
-      await copy.focus()
-      // A change to the vault repaints the open login, as a new code does.
-      const repainted = device.locator(".code-value").evaluate((el) => new Promise<void>((done) => new MutationObserver(() => done()).observe(el.closest(".view")!, { childList: true })))
-      await device.evaluate(() => chrome.runtime.sendMessage({ type: "db:device", command: { type: "device-item-save", kind: "login", name: "Elsewhere", fields: [{ name: "url", value: "https://elsewhere.test" }, { name: "username", value: "e" }, { name: "password", value: "p" }] } }))
-      await repainted
-      check(await copy.evaluate((b) => b === document.activeElement), "repainting a login keeps focus on Copy one-time code")
-      await device.getByRole("button", { name: "Edit", exact: true }).click()
-      await Bun.sleep(400)
-      await audited(`editing a login (${scheme})`, device)
-      await device.getByRole("button", { name: "Settings", exact: true }).click()
-      await Bun.sleep(600)
-      await audited(`settings (${scheme})`, device)
-      // 400% zoom on a 1280 px window is 320 CSS px: nothing scrolls sideways.
-      await device.setViewportSize({ width: 320, height: 640 })
-      await device.getByRole("button", { name: "Back", exact: true }).click()
-      await Bun.sleep(400)
-      check(await device.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "device.html reflows to 320 px without scrolling sideways")
-      await device.close()
-    }
   } catch (err) {
     check(false, `a11y threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "a11y")
@@ -5914,13 +5660,6 @@ async function a11yStates(scheme: Scheme) {
       }
       const p = await popup(run, site)
       await audited(`the ${status} popup (${scheme})`, p)
-      if (standalone) {
-        const device = await run.context.newPage()
-        await device.goto(`chrome-extension://${ID}/device.html`)
-        await device.waitForSelector(".top")
-        await Bun.sleep(800)
-        await audited(`device.html ${status} (${scheme})`, device)
-      }
     } catch (err) {
       check(false, `a11y ${status} threw: ${(err as Error).message.split("\n")[0]}`)
     } finally {
@@ -5981,7 +5720,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
 // (each scenario in each scheme, then each `once` entry), balanced by these
-// run times in seconds (per scheme, CI medians of native and standalone;
+// run times in seconds (per scheme, CI medians;
 // unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
@@ -5995,15 +5734,13 @@ const cost: Record<string, number> = {
   escInDialog: 6,
   ...gauntletRun.cost,
 }
-/** Scenarios tied to the native daemon; standalone passkeys/Strict are in standalone.ts. */
-const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])
 const units = [
   ...(["light", "dark"] as const).flatMap((scheme) =>
     Object.entries(scenarios).map(([name, run]) => ({ key: name, name: `${name} (${scheme})`, run: () => run(scheme) })),
   ),
   ...Object.entries(once).map(([name, run]) => ({ key: name, name, run })),
   // The recording runs only when asked for.
-].filter((u) => (!picked || picked.includes(u.key)) && (u.key !== "film" || video) && !(standalone && NATIVE_ONLY.has(u.key)))
+].filter((u) => (!picked || picked.includes(u.key)) && (u.key !== "film" || video))
 const [part, parts] = (arg("--shard") ?? "1/1").split("/").map(Number)
 if (!(parts >= 1 && part >= 1 && part <= parts)) throw new Error("--shard wants <i>/<n> with 1 <= i <= n")
 const load = Array<number>(parts).fill(0)

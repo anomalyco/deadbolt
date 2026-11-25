@@ -113,12 +113,8 @@ enum Commands {
     },
     /// Lock the store.
     Lock,
-    /// Sync now with every device (or only the devices in --vault), or
-    /// mirror another password manager into --vault.
-    Sync {
-        #[command(subcommand)]
-        command: Option<SyncCommand>,
-    },
+    /// Sync now with every device (or only the devices in --vault).
+    Sync,
     /// List what callers asked Deadbolt for, and what the app showed or
     /// copied, newest first. Names items and fields, never values.
     Activity {
@@ -331,32 +327,6 @@ enum BrowserCommand {
         browser: Vec<browser::Browser>,
         /// Also keep an unpacked copy of the extension in DIR current with
         /// `deadbolt update` (a new or empty directory; update owns it).
-        /// Each directory registered this way is kept current with its own
-        /// build.
-        #[arg(long, value_name = "DIR")]
-        extension_dir: Option<PathBuf>,
-        /// Keep the standalone build in DIR instead: its own vault in the
-        /// browser, which pairs with this computer's Deadbolt as a device.
-        #[arg(long, requires = "extension_dir")]
-        standalone: bool,
-    },
-    /// Put the other build of the extension in a directory registered with
-    /// `browser install --extension-dir`, then reload Deadbolt in
-    /// chrome://extensions. Both builds have the same id, so the profile
-    /// keeps its place for it; each keeps its own settings.
-    #[command(group(clap::ArgGroup::new("build").required(true).args(["standalone", "native"])))]
-    Switch {
-        /// The standalone build: its own vault in the browser.
-        #[arg(long)]
-        standalone: bool,
-        /// The native build: fills from this computer's Deadbolt.
-        #[arg(long)]
-        native: bool,
-        /// The release channel to fetch it from (default: this build's).
-        #[arg(long, value_parser = ["dev", "beta", "stable"])]
-        channel: Option<String>,
-        /// The registered directory to switch (needed when there are
-        /// several).
         #[arg(long, value_name = "DIR")]
         extension_dir: Option<PathBuf>,
     },
@@ -391,36 +361,6 @@ enum VaultCommand {
     Rename { old: String, new: String },
     /// Make a vault the default.
     Default { name: String },
-}
-
-#[derive(Subcommand)]
-enum SyncCommand {
-    /// Mirror 1Password into --vault with the 1Password CLI (`op`).
-    ///
-    /// 1Password stays the source of truth: new items are added, changed
-    /// ones updated, and ones deleted or archived there deleted here if this
-    /// sync added them. Items from a 1Password export imported earlier,
-    /// items with the same content and logins with the same username and
-    /// URL are taken over; other items here are never touched. Needs the 1Password app's CLI
-    /// integration (Settings › Developer), which may ask to approve access.
-    /// Exits 3 if deadbolt is locked, before 1Password is asked anything.
-    #[command(name = "1password", visible_alias = "op")]
-    OnePassword {
-        /// The 1Password account (sign-in address, email, shorthand or id);
-        /// needed only if the CLI knows several and --vault mirrors none.
-        #[arg(long)]
-        account: Option<String>,
-        /// Mirror only this 1Password vault (by name or id); repeat for
-        /// more. Default: every vault in the account.
-        #[arg(long = "op-vault", value_name = "NAME")]
-        op_vaults: Vec<String>,
-        /// Show what would change without writing anything.
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one line, and only if something changed.
-        #[arg(short, long)]
-        quiet: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -545,15 +485,6 @@ fn notices_updates(command: &Commands) -> bool {
     )
 }
 
-/// The extension build `--standalone` picks (else the native one).
-fn extension_build(standalone: bool) -> config::ExtensionBuild {
-    if standalone {
-        config::ExtensionBuild::Standalone
-    } else {
-        config::ExtensionBuild::Native
-    }
-}
-
 /// Bare `deadbolt`'s `deadbolt app`, before the CLI's runtime exists.
 fn open_app() -> bool {
     tokio::runtime::Builder::new_current_thread()
@@ -639,27 +570,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Browser(BrowserCommand::Install {
             browser,
             extension_dir,
-            standalone,
-        }) => browser::install(
-            &browser,
-            extension_dir.as_deref(),
-            extension_build(standalone),
-            &paths.config,
-        )?,
-        Commands::Browser(BrowserCommand::Switch {
-            standalone,
-            native: _,
-            channel,
-            extension_dir,
-        }) => {
-            update::switch_extension(
-                &paths,
-                extension_build(standalone),
-                extension_dir.as_deref(),
-                channel.as_deref(),
-            )
-            .await?
-        }
+        }) => browser::install(&browser, extension_dir.as_deref(), &paths.config)?,
         Commands::Update(args) => return update::run(&paths, args).await,
         Commands::Browser(BrowserCommand::Uninstall {
             browser,
@@ -869,34 +780,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 println!("{}", serde_json::to_string(&change)?);
             }
         }
-        Commands::Sync {
-            command:
-                Some(SyncCommand::OnePassword {
-                    account,
-                    op_vaults,
-                    dry_run,
-                    quiet,
-                }),
-        } => {
-            client::ensure_running(&paths).await?;
-            let command = Command::SyncOnePassword {
-                vault,
-                account,
-                op_vaults,
-                dry_run,
-            };
-            let Reply::Mirror { report } = request(&paths, command, from_stdin).await? else {
-                bail!("unexpected reply");
-            };
-            if !quiet {
-                for line in report.lines() {
-                    println!("{line}");
-                }
-            } else if report.changed() {
-                println!("1Password: {}", report.summary());
-            }
-        }
-        Commands::Sync { command: None } => {
+        Commands::Sync => {
             client::ensure_running(&paths).await?;
             let Reply::Sync { peers } =
                 request(&paths, Command::Sync { vault }, from_stdin).await?

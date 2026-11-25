@@ -16,21 +16,15 @@
 //!
 //! # Unpacked copies of the browser extension that `deadbolt update` keeps
 //! # current (`deadbolt browser install --extension-dir <dir>` adds one,
-//! # `deadbolt browser uninstall --extension-dir <dir>` removes it), each
-//! # with the build it gets: "native" (talking to `deadbolt browser-host`)
-//! # or "standalone" (its own vault in the browser). `deadbolt browser
-//! # switch` changes a directory's build.
+//! # `deadbolt browser uninstall --extension-dir <dir>` removes it).
 //! [[extensions]]
 //! dir = "/Users/me/Deadbolt Extension"
-//! build = "native"
-//!
-//! [[extensions]]
-//! dir = "/Users/me/Deadbolt Standalone"
-//! build = "standalone"
 //! ```
 //!
-//! Older configs' single `extension_dir` and `extension_build` are read as
-//! one entry, and written back in this form the next time it changes.
+//! Older configs' single `extension_dir` is read as one entry, and written
+//! back in this form the next time it changes. The `build` each entry (or
+//! `extension_build`) named for the retired standalone extension is read
+//! and dropped.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -122,8 +116,8 @@ pub struct Config {
     /// `extensions` on load.
     #[serde(default, skip_serializing)]
     extension_dir: Option<PathBuf>,
-    #[serde(default, skip_serializing)]
-    extension_build: Option<ExtensionBuild>,
+    #[serde(default, skip_serializing, rename = "extension_build")]
+    _extension_build: Option<IgnoredAny>,
     /// The removed SSH agent's settings, read so older configs still load
     /// and dropped on the next write.
     #[serde(default, skip_serializing, rename = "ssh_agent")]
@@ -134,43 +128,30 @@ pub struct Config {
     _ssh_allow_forwarding: Option<IgnoredAny>,
 }
 
-/// An unpacked extension `deadbolt update` keeps current, and its build.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// An unpacked extension `deadbolt update` keeps current.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionDir {
     pub dir: PathBuf,
-    #[serde(default)]
-    pub build: ExtensionBuild,
+    /// The build older configs named ("native" or the retired
+    /// "standalone"), read and dropped on the next write.
+    #[serde(default, skip_serializing, rename = "build")]
+    _build: Option<IgnoredAny>,
 }
 
-/// The two builds of the browser extension (`extension/scripts/build.ts`).
-/// Both have the same extension id, so one replaces the other in a profile.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ExtensionBuild {
-    /// Fills from the daemon through `deadbolt browser-host`.
-    #[default]
-    Native,
-    /// Its own vault in the browser, a device of its own.
-    Standalone,
-}
-
-impl ExtensionBuild {
-    /// The release service target of the `extension` artifact.
-    pub fn target(self) -> &'static str {
-        match self {
-            Self::Native => "chromium",
-            Self::Standalone => "chromium-standalone",
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Standalone => "standalone",
-        }
+impl ExtensionDir {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir, _build: None }
     }
 }
+
+impl PartialEq for ExtensionDir {
+    fn eq(&self, other: &Self) -> bool {
+        self.dir == other.dir
+    }
+}
+
+impl Eq for ExtensionDir {}
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
@@ -185,11 +166,10 @@ impl Config {
     /// directory into `extensions`.
     fn parse(text: &str) -> Result<Self> {
         let mut cfg: Self = toml::from_str(text)?;
-        let build = cfg.extension_build.take().unwrap_or_default();
         if let Some(dir) = cfg.extension_dir.take()
             && !cfg.extensions.iter().any(|e| e.dir == dir)
         {
-            cfg.extensions.insert(0, ExtensionDir { dir, build });
+            cfg.extensions.insert(0, ExtensionDir::new(dir));
         }
         Ok(cfg)
     }
@@ -249,16 +229,11 @@ pub fn utc_date(secs: u64) -> String {
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}")
 }
-/// Records an extension directory `deadbolt update` keeps current, and which
-/// build it gets (replacing the build of one already registered).
-pub fn set_extension_dir(path: &Path, dir: &Path, build: ExtensionBuild) -> Result<()> {
+/// Records an extension directory `deadbolt update` keeps current.
+pub fn set_extension_dir(path: &Path, dir: &Path) -> Result<()> {
     change(path, |cfg| {
-        match cfg.extensions.iter_mut().find(|e| e.dir == dir) {
-            Some(entry) => entry.build = build,
-            None => cfg.extensions.push(ExtensionDir {
-                dir: dir.to_path_buf(),
-                build,
-            }),
+        if !cfg.extensions.iter().any(|e| e.dir == dir) {
+            cfg.extensions.push(ExtensionDir::new(dir.to_path_buf()));
         }
     })
 }
@@ -344,32 +319,32 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "touch_id = true\nextension_dir = \"/ext\"\nextension_build = \"standalone\"\n",
+            "touch_id = true\nextension_dir = \"/ext\"\nextension_build = \"standalone\"\n\n\
+             [[extensions]]\ndir = \"/more\"\nbuild = \"native\"\n",
         )
         .unwrap();
-        let standalone = ExtensionDir {
-            dir: "/ext".into(),
-            build: ExtensionBuild::Standalone,
-        };
+        let first = ExtensionDir::new("/ext".into());
+        let more = ExtensionDir::new("/more".into());
         assert_eq!(
             Config::load(&path).unwrap().extensions,
-            std::slice::from_ref(&standalone)
+            [first.clone(), more.clone()]
         );
 
-        set_extension_dir(&path, Path::new("/other"), ExtensionBuild::Native).unwrap();
+        set_extension_dir(&path, Path::new("/other")).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("extension_dir"), "{text}");
+        assert!(!text.contains("build"), "{text}");
         let cfg = Config::load(&path).unwrap();
         assert!(cfg.touch_id());
-        let native = ExtensionDir {
-            dir: "/other".into(),
-            build: ExtensionBuild::Native,
-        };
-        assert_eq!(cfg.extensions, [standalone.clone(), native.clone()]);
+        let native = ExtensionDir::new("/other".into());
+        assert_eq!(
+            cfg.extensions,
+            [first.clone(), more.clone(), native.clone()]
+        );
 
         assert!(remove_extension_dir(&path, Path::new("/ext")).unwrap());
         assert!(!remove_extension_dir(&path, Path::new("/ext")).unwrap());
-        assert_eq!(Config::load(&path).unwrap().extensions, [native]);
+        assert_eq!(Config::load(&path).unwrap().extensions, [more, native]);
     }
 
     #[test]

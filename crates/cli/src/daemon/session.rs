@@ -605,6 +605,7 @@ impl Loaded {
     }
 
     /// The vault, if still held.
+    #[cfg(test)]
     pub fn held(&self, id: &VaultId) -> Option<&Vault> {
         self.vaults.get(id)
     }

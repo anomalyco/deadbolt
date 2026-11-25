@@ -17,8 +17,7 @@
 #   desktop    macos-arm64, macos-x64: the universal Deadbolt.app zip (the
 #              updater's file, one per target as Hex's updater expects);
 #              macos-arm64-dmg, macos-x64-dmg: the universal DMG
-#   extension  chromium: the browser extension zip (native host build);
-#              chromium-standalone: the standalone build's zip
+#   extension  chromium: the browser extension zip
 #
 # RELEASE is the service origin, https://anoma.ly/release; DEADBOLT_VERSION
 # the version the files were built as and name; DEADBOLT_RELEASE_CHANNEL the
@@ -65,7 +64,6 @@ targets() {
       ;;
     extension)
       echo "chromium=deadbolt-extension-$v.zip"
-      echo "chromium-standalone=deadbolt-extension-standalone-$v.zip"
       ;;
     *)
       echo "Unknown artifact $1." >&2

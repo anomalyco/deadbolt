@@ -314,7 +314,6 @@ fn maps_a_1pux_export() {
         (version.updated, version.origin),
         (1_710_000_000, Origin::Import)
     );
-    assert!(!version.mirrored());
     assert_eq!(
         source_key(&source.id),
         Some((

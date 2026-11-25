@@ -710,7 +710,6 @@ async fn save_form_creates_or_changes_an_identity_or_card() {
                 label: "Visa •••• 4242".into(),
                 detail: None,
                 fields: Vec::new(),
-                source: None,
                 favorite: false,
                 tags: Vec::new(),
                 deleted_at: None,

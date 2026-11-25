@@ -133,35 +133,6 @@ pub(super) fn work(paths: Paths, launch: Launch, requests: Receiver<Job>, main: 
         let Some(job) = jobs.pop() else {
             continue;
         };
-        if let Job::SyncOnePassword { seq } = job {
-            let failed = move |error: std::io::Error| Done::Mirrored {
-                seq,
-                result: Err(Failure {
-                    code: None,
-                    message: format!("starting the sync: {error}"),
-                }),
-            };
-            let paths = paths.clone();
-            let thread = main.clone();
-            let spawned = std::thread::Builder::new()
-                .name("deadbolt-1password".into())
-                .spawn(move || {
-                    let done = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(runtime) => runtime.block_on(mirror(&paths, seq)),
-                        Err(error) => failed(error),
-                    };
-                    thread.send(done);
-                });
-            if let Err(error) = spawned
-                && !main.send(failed(error))
-            {
-                return;
-            }
-            continue;
-        }
         if !main.send(runtime.block_on(run(&paths, &launch, job))) {
             return;
         }
@@ -267,7 +238,6 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 result,
             }
         }
-        Job::SyncOnePassword { seq } => mirror(paths, seq).await,
         Job::Activity { seq } => crate::activity::list(paths, seq).await,
         Job::Report {
             action,
@@ -568,21 +538,6 @@ async fn import(
             changed,
         }
     })
-}
-
-async fn mirror(paths: &Paths, seq: u64) -> Done {
-    let command = Command::SyncOnePassword {
-        vault: None,
-        account: None,
-        op_vaults: Vec::new(),
-        dry_run: false,
-    };
-    let result = call(paths, command, |r| match r {
-        Reply::Mirror { report } => Some(report),
-        _ => None,
-    })
-    .await;
-    Done::Mirrored { seq, result }
 }
 
 async fn code(paths: &Paths, id: String) -> Result<Code, Failure> {

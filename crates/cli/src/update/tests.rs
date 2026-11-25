@@ -667,18 +667,6 @@ fn reads_extension_versions_and_guards_the_directory() {
     )
     .unwrap();
     assert_eq!(extension_version(&ext).as_deref(), Some("0.0.0-dev-11"));
-    assert_eq!(extension_build(&ext), None);
-    for (permissions, build) in [
-        (r#"["storage","nativeMessaging"]"#, ExtensionBuild::Native),
-        (
-            r#"["storage","offscreen","alarms"]"#,
-            ExtensionBuild::Standalone,
-        ),
-    ] {
-        let manifest = format!(r#"{{"version":"0.0.0.11","permissions":{permissions}}}"#);
-        std::fs::write(ext.join("manifest.json"), manifest).unwrap();
-        assert_eq!(extension_build(&ext), Some(build));
-    }
     // Even a Deadbolt extension isn't replaced unless update put it there.
     assert!(!extension_dir_ok(&ext));
     std::fs::write(ext.join(EXTENSION_MARKER), "manifest.json\n").unwrap();

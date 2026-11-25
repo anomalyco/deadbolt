@@ -1127,51 +1127,6 @@ describe("cards and identities typed into a form", () => {
     await checkout({ card: TYPED })
     expect(host.requests).toEqual([])
   })
-
-  test("a save waiting on the passphrase ends when the tab closes, and holds nothing after", async () => {
-    const send = host.host.send.bind(host.host)
-    host.host.send = (async (req: RequestBody) => {
-      if (req.type === "save-form") throw new HostError("passphrase_needed", "Enter your passphrase.")
-      return send(req)
-    }) as typeof host.host.send
-    let signal: AbortSignal | undefined
-    host.host.reauth = ((_body: unknown, _ask: unknown, s: AbortSignal) => {
-      signal = s
-      return new Promise((_, reject) => s.addEventListener("abort", () => reject(new HostError("cancelled", "The request was cancelled."))))
-    }) as typeof host.host.reauth
-    await checkout({ card: TYPED })
-    const saving = saver.choose(1, saver.pending(1)!.id, "save")
-    await waitFor(() => signal !== undefined)
-    expect(signal!.aborted).toBe(false)
-    saver.forgetTab(1)
-    expect(signal!.aborted).toBe(true)
-    expect(await saving).toMatchObject({ ok: false })
-    expect(saver.pending(1)).toBeUndefined()
-  })
-
-  test("the browser-only vault under Strict asks for the passphrase before saving a card", async () => {
-    const asked: unknown[] = []
-    const send = host.host.send.bind(host.host)
-    host.host.send = (async (req: RequestBody) => {
-      if (req.type === "save-form") throw new HostError("passphrase_needed", "Enter your passphrase.")
-      return send(req)
-    }) as typeof host.host.send
-    host.host.reauth = (async (body: unknown, ask: unknown) => {
-      asked.push({ body, ask })
-      return { type: "save-form", ref: "x", created: true }
-    }) as typeof host.host.reauth
-    await checkout({ card: TYPED })
-    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
-    expect(asked).toEqual([{ body: { type: "save-form", origin: "https://www.example.com", kind: "card", fields: { number: TYPED.number, expiry: TYPED.expiry, cardholder: TYPED.cardholder, brand: "Visa" } }, ask: { tabId: 1, title: "Visa •••• 5556", site: "example.com" } }])
-    // Cancelled: nothing saved, and the offer can be answered again.
-    host.host.reauth = (async () => {
-      throw new HostError("cancelled", "The request was cancelled.")
-    }) as typeof host.host.reauth
-    fake.session = {}
-    await checkout({ card: { ...TYPED, number: "5555555555554444", brand: "Mastercard" } })
-    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toEqual({ ok: false, message: "Deadbolt didn't get your passphrase. Nothing was saved." })
-    expect(saver.pending(1)).toBeDefined()
-  })
 })
 
 describe("what a form save offers", () => {

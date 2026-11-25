@@ -285,8 +285,6 @@ export class Autofill {
    * pick signs in.
    */
   signedOut?: (target: FrameTarget) => Promise<boolean>
-  /** The document whose locked row was clicked last, to focus again once unlocked. Memory only: a restarted worker returns nowhere. */
-  private unlockReturn: MenuToken | null = null
 
   constructor(
     private host: VaultBackend,
@@ -594,40 +592,6 @@ export class Autofill {
     if (!t) return
     await this.cancel(t.tabId)
     await sendToFrame(t.owner ?? t, { type: "db:close-menu", token })
-  }
-
-  /**
-   * The locked row was clicked in the menu `token` was made for: true if it
-   * was, and Deadbolt is still locked. The token starts its life again, so the
-   * same menu lists the logins once Deadbolt unlocks in the toolbar panel.
-   */
-  async unlockClicked(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
-    const t = await this.token(token, sender)
-    if (!t || this.host.status.state !== "locked") return false
-    t.createdAt = Date.now()
-    return true
-  }
-
-  /** As unlockClicked, for device.html in a tab: the menu closes, and comes back once Deadbolt unlocks (returnAfterUnlock). */
-  async menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
-    const t = await this.token(token, sender)
-    if (!t || this.host.status.state !== "locked") return false
-    this.unlockReturn = t
-    await sendToFrame(t, { type: "db:unlock-wait" })
-    await this.cancel(t.tabId)
-    await sendToFrame(t.owner ?? t, { type: "db:close-menu", token, unlock: true })
-    return true
-  }
-
-  /** Returns only to the document that requested unlock; never fills anything. */
-  async returnAfterUnlock(): Promise<boolean> {
-    const t = this.unlockReturn
-    this.unlockReturn = null
-    if (!t || Date.now() - t.createdAt > TOKEN_TTL_MS) return false
-    const tab = await chrome.tabs.update(t.tabId, { active: true }).catch(() => null)
-    if (!tab) return false
-    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {})
-    return (await sendToFrame(t, { type: "db:unlock-return" })) === true
   }
 
   async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender, width?: unknown, mode?: unknown) {
@@ -1243,7 +1207,6 @@ export class Autofill {
     this.tracks.delete(tabId)
     this.submits.delete(tabId)
     for (const [token, t] of this.tokens) if (t.tabId === tabId) this.tokens.delete(token)
-    if (this.unlockReturn?.tabId === tabId) this.unlockReturn = null
     void this.cancel(tabId)
   }
 

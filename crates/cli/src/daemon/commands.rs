@@ -13,8 +13,7 @@ use tokio::io::AsyncWriteExt;
 use super::connection::Conversation;
 use super::session::Session;
 use super::{
-    Daemon, ErrorCode, INTERRUPTED, autofill, fail, generate, items, macos_autofill, mirror,
-    pairing, sync, watchers,
+    Daemon, ErrorCode, autofill, fail, generate, items, macos_autofill, pairing, sync, watchers,
 };
 use crate::protocol::{Change, Command, Message, Reply};
 
@@ -76,14 +75,11 @@ impl Daemon {
                     | Command::AutofillIdentities
                     | Command::AutofillList { .. }
             );
-        // Nor does a sync from 1Password hold the vault open: `op` may hang,
-        // and a lock stops it before it writes anything. Nor does waiting
-        // for a send to be picked up, or for an app to start.
+        // Nor does waiting for a send to be picked up, or for an app to
+        // start.
         let busy = !matches!(
             command,
-            Command::SyncOnePassword { .. }
-                | Command::SendWait { .. }
-                | Command::AppActivate { .. }
+            Command::SendWait { .. } | Command::AppActivate { .. }
         );
         if busy {
             self.busy.fetch_add(1, Ordering::SeqCst);
@@ -357,38 +353,6 @@ impl Daemon {
                     self.sync_now.notify_one();
                 }
                 Ok(Reply::Import { report })
-            }
-            Command::SyncOnePassword {
-                vault,
-                account,
-                op_vaults,
-                dry_run,
-            } => {
-                let Ok(_syncing) = self.syncing_op.try_lock() else {
-                    bail!("already syncing from 1Password: try again when it finishes");
-                };
-                let mut interrupts = self.interrupts.subscribe();
-                // Locked fails here, before 1Password is asked anything. `op`
-                // runs outside the lock: it may wait on 1Password's prompt.
-                let known = self.with(|s| mirror::known(s, vault.as_deref()))?;
-                let fetch = mirror::fetch(self.op(), account.as_deref(), &op_vaults, &known);
-                // Dropping the fetch kills `op`.
-                let fetched = tokio::select! {
-                    fetched = fetch => fetched?,
-                    _ = interrupts.changed() => return Err(fail(ErrorCode::Locked, INTERRUPTED)),
-                    () = conv.closed() => bail!("the sync from 1Password was cancelled"),
-                };
-                let report = self.with(|s| {
-                    // A lock bumps `interrupts` before it lets go of the vault.
-                    if interrupts.has_changed().unwrap_or(true) {
-                        return Err(fail(ErrorCode::Locked, INTERRUPTED));
-                    }
-                    mirror::apply(s, &known, fetched, !dry_run)
-                })?;
-                if report.applied && report.changed() {
-                    self.sync_now.notify_one();
-                }
-                Ok(Reply::Mirror { report })
             }
             Command::SendCreate {
                 secret,

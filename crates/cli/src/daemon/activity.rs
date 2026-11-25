@@ -70,7 +70,6 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::ItemRestore { .. } => (T::Write, "item-restore"),
         C::Import { .. } => (T::Never, "import"),
         C::Generate { .. } => (T::Always, "generate"),
-        C::SyncOnePassword { .. } => (T::Never, "sync-one-password"),
         C::SiteLogins { .. } => (T::Browser, "site-logins"),
         C::SiteFill { .. } => (T::Browser, "site-fill"),
         C::SiteGenerateCheck { .. } => (T::Browser, "site-generate-check"),

@@ -6,12 +6,14 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use url::Url;
 
-use super::install::{UpdateState, check_sequence, state_dir};
-use super::protocol::{Decision, Running, Target, build_channel, decide, rollout_bucket};
+use super::install::{UpdateState, check_sequence};
+use super::protocol::{Decision, Running, Target, decide};
 use super::replace::{refuse_foreign_root, stage_beside};
 use super::service::{Manifest, SERVICE, Service};
-use crate::config::{ExtensionBuild, ExtensionDir};
-use crate::paths::Paths;
+use crate::config::ExtensionDir;
+
+/// The release service target of the `extension` artifact.
+const TARGET: &str = "chromium";
 
 /// Written into an extension directory `deadbolt update` installed, listing
 /// what it put there, so it only ever replaces its own files.
@@ -111,26 +113,8 @@ pub(super) fn unpack_extension(archive: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Which build an unpacked extension is (`extension/scripts/build.ts`): the
-/// native one asks for `nativeMessaging`, the standalone one for `offscreen`
-/// (its vault's worker); `None` for anything else.
-pub(super) fn extension_build(dir: &Path) -> Option<ExtensionBuild> {
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
-    let permissions = manifest.get("permissions")?.as_array()?;
-    let has = |name: &str| permissions.iter().any(|p| p.as_str() == Some(name));
-    if has("nativeMessaging") {
-        Some(ExtensionBuild::Native)
-    } else if has("offscreen") {
-        Some(ExtensionBuild::Standalone)
-    } else {
-        None
-    }
-}
-
 /// Checks, and unless `check` updates, the extension directories `dirs`
-/// (registered with `deadbolt browser install --extension-dir`), each with
-/// the build it was registered for (`browser switch` changes it). True when
+/// (registered with `deadbolt browser install --extension-dir`). True when
 /// an update is available for any of them. One directory failing doesn't
 /// stop the others.
 #[expect(clippy::too_many_arguments, reason = "two call sites, all distinct")]
@@ -150,7 +134,7 @@ pub(super) async fn extension(
                 "Browser extension: {SERVICE}deadbolt/extension/{channel}/{} (or register \
                  an unpacked copy with `deadbolt browser install --extension-dir <dir>` to \
                  update it here)",
-                ExtensionBuild::Native.target()
+                TARGET
             );
         }
         return Ok(false);
@@ -195,8 +179,7 @@ pub(super) async fn extension_dir(
     built: Option<&str>,
     check: bool,
 ) -> Result<bool> {
-    let ExtensionDir { dir, build } = entry;
-    let build = *build;
+    let dir = &entry.dir;
     if !extension_dir_ok(dir) {
         bail!(
             "{} holds files deadbolt didn't install there (or isn't an absolute path); \
@@ -204,131 +187,51 @@ pub(super) async fn extension_dir(
             dir.display()
         );
     }
-    // The other build in the directory (a switch) is replaced by this
-    // channel's release whatever its version, and the user asked for it, so
-    // no rollout holds it back.
-    let switching = extension_build(dir).is_some_and(|installed| installed != build);
-    let current = if switching {
-        String::new()
-    } else {
-        extension_version(dir).unwrap_or_default()
-    };
+    let current = extension_version(dir).unwrap_or_default();
     let running = Running {
         version: &current,
-        target: build.target(),
+        target: TARGET,
         distribution: "direct",
-        bucket: if switching { 0 } else { bucket },
+        bucket,
         channel: built,
     };
     let decision = decide("extension", channel, text, &running);
     if let Decision::Reject(reason) = decision {
         bail!("{url} is not a usable extension manifest ({reason})");
     }
-    let what = match build {
-        ExtensionBuild::Native => "Browser extension",
-        ExtensionBuild::Standalone => "Standalone browser extension",
-    };
     match decision {
         Decision::Install {
             version, target, ..
         } => {
             if check {
-                println!("{what} {version} is available in {}", dir.display());
+                println!(
+                    "Browser extension {version} is available in {}",
+                    dir.display()
+                );
             } else {
                 refuse_foreign_root(dir.parent().unwrap_or(dir))?;
                 update_extension(service, url, &target, dir).await?;
                 println!(
-                    "Updated the {} in {} to {version}; \
+                    "Updated the browser extension in {} to {version}; \
                      reload Deadbolt in chrome://extensions",
-                    what.to_lowercase(),
                     dir.display()
                 );
             }
             Ok(true)
         }
         Decision::None("up_to_date") => {
-            println!("{what} {current} is up to date in {}", dir.display());
+            println!(
+                "Browser extension {current} is up to date in {}",
+                dir.display()
+            );
             Ok(false)
         }
         Decision::None("no_target") => {
-            println!("The {channel} release has no {} yet", what.to_lowercase());
+            println!("The {channel} release has no browser extension yet");
             Ok(false)
         }
         _ => Ok(false),
     }
-}
-
-/// `deadbolt browser switch`: registers `build` for one extension directory
-/// (`dir`, or the only one registered) and puts the channel's release of it
-/// there now.
-pub async fn switch_extension(
-    paths: &Paths,
-    build: ExtensionBuild,
-    dir: Option<&Path>,
-    channel: Option<&str>,
-) -> Result<()> {
-    let built = build_channel();
-    let Some(channel) = channel.or(built) else {
-        bail!(
-            "this deadbolt was built from source and follows no release channel; \
-             pass --channel dev or --channel stable"
-        );
-    };
-    let state = UpdateState::open(&state_dir(paths))?;
-    let config = crate::config::Config::load(&paths.config)?;
-    let dir = match (dir, config.extensions.as_slice()) {
-        (Some(dir), _) => {
-            let dir = crate::browser::extension_path(dir)?;
-            if config.extension(&dir).is_none() {
-                bail!(
-                    "{} isn't a registered extension directory; run `deadbolt browser \
-                     install {}--extension-dir {}` first",
-                    dir.display(),
-                    if build == ExtensionBuild::Standalone {
-                        "--standalone "
-                    } else {
-                        ""
-                    },
-                    dir.display()
-                );
-            }
-            dir
-        }
-        (None, [only]) => only.dir.clone(),
-        (None, []) => bail!(
-            "no unpacked extension is registered here; run `deadbolt browser install \
-             {}--extension-dir <dir>` with a new or empty directory first",
-            if build == ExtensionBuild::Standalone {
-                "--standalone "
-            } else {
-                ""
-            }
-        ),
-        (None, several) => bail!(
-            "several extension directories are registered; pick one with \
-             --extension-dir:\n{}",
-            several
-                .iter()
-                .map(|e| format!("  {} ({})", e.dir.display(), e.build.name()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
-    };
-    crate::config::set_extension_dir(&paths.config, &dir, build)?;
-    let service = Service::new(built)?;
-    let bucket = rollout_bucket(&state.dir);
-    extension(
-        &[ExtensionDir { dir, build }],
-        &service,
-        &state,
-        channel,
-        bucket,
-        built,
-        false,
-        false,
-    )
-    .await?;
-    Ok(())
 }
 
 /// Replaces `dir` with the release's extension zip, staged beside it.

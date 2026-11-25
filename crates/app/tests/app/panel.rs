@@ -1221,7 +1221,6 @@ fn many_items() -> Vec<ItemInfo> {
             label: format!("site-{i:02}.com"),
             detail: Some("sam".into()),
             fields: Vec::new(),
-            source: None,
             favorite: false,
             tags: Vec::new(),
             deleted_at: None,

@@ -6,8 +6,8 @@
 //   bun run e2e:parallel [--jobs <n>] [any e2e/run.ts option, e.g. --deadbolt <path>]
 //
 // Alongside the shards, once per run: universal sign-in through a provider
-// (e2e/universal-providers.ts) on the same build. The native build needs a
-// real daemon for it (--deadbolt); without one it's skipped and says so.
+// (e2e/universal-providers.ts) on the same build. It needs a real daemon
+// (--deadbolt); without one it's skipped and says so.
 
 import { mkdtemp, rm } from "node:fs/promises"
 import { availableParallelism, tmpdir } from "node:os"
@@ -21,7 +21,7 @@ if (!(jobs >= 1)) throw new Error("--jobs wants a positive number")
 
 // One e2e build for every shard (`e2e/run.ts --dist`).
 const dist = await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-"))
-const build = Bun.spawnSync(["bun", "scripts/build.ts", "--e2e", dist, argv.includes("--standalone") ? "--standalone" : "--native"], { cwd: root, stdout: "inherit", stderr: "inherit" })
+const build = Bun.spawnSync(["bun", "scripts/build.ts", "--e2e", dist], { cwd: root, stdout: "inherit", stderr: "inherit" })
 if (build.exitCode !== 0) process.exit(build.exitCode ?? 1)
 
 const started = Date.now()
@@ -42,11 +42,10 @@ async function pipe(stream: ReadableStream<Uint8Array>, tag: string, lines: stri
   if (rest) out(rest)
 }
 
-const standalone = argv.includes("--standalone")
 const deadboltAt = argv.indexOf("--deadbolt")
 const deadbolt = deadboltAt >= 0 ? argv[deadboltAt + 1] : undefined
-const providers = standalone ? ["--dist", dist] : deadbolt ? ["--dist", dist, "--native", "--deadbolt", deadbolt] : null
-if (!providers) console.log("[providers] skip: the native build's provider run needs --deadbolt <path>")
+const providers = deadbolt ? ["--dist", dist, "--deadbolt", deadbolt] : null
+if (!providers) console.log("[providers] skip: the provider run needs --deadbolt <path>")
 
 await Promise.all([
   ...(providers ? [(async () => {

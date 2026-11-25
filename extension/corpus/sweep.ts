@@ -5,16 +5,13 @@
 // page or for a same-site frame), whether picking the login fills the right
 // fields, and on identifier-first sign-ins, the step after "Continue".
 //
-//   bun corpus/sweep.ts [--urls corpus/sweep-sites.txt] [--standalone]
-//                       [--dist <dir>] [--out <dir>] [--concurrency 6]
+//   bun corpus/sweep.ts [--urls corpus/sweep-sites.txt] [--dist <dir>] [--out <dir>] [--concurrency 6]
 //                       [--timeout 75] [--only <substring>] [--retry]
 //                       [--no-step2]
 //   bun corpus/sweep.ts --report [--out <dir>] [--against <other out dir>]
 //
-// Nothing real is ever typed or submitted. The native build talks to
-// e2e/fake-host.py, which lists a made-up login for every site; the
-// standalone build gets the same login saved for each site in a throwaway
-// vault. Its username is the reserved, undeliverable address step2.ts uses
+// Nothing real is ever typed or submitted. The extension talks to
+// e2e/fake-host.py, which lists a made-up login for every site. Its username is the reserved, undeliverable address step2.ts uses
 // (RFC 2606) and its password is made up. Step 2: the only submit is step 1's
 // "Continue", with that address in the identifier field, as a person would
 // after picking the login; a password step that follows is filled (by the
@@ -40,8 +37,7 @@ const arg = (name: string) => {
   return i > 0 ? process.argv[i + 1] : undefined
 }
 const root = join(import.meta.dir, "..")
-const standalone = process.argv.includes("--standalone")
-const out = arg("--out") ?? join(DEFAULT_OUT, standalone ? "sweep-standalone" : "sweep")
+const out = arg("--out") ?? join(DEFAULT_OUT, "sweep")
 const urlsFile = arg("--urls") ?? join(import.meta.dir, "sweep-sites.txt")
 const concurrency = Number(arg("--concurrency") ?? 6)
 const doStep2 = !process.argv.includes("--no-step2")
@@ -54,7 +50,6 @@ const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const USERNAME = PROBE_ADDRESS
 /** No spaces: some password boxes drop them as they're typed. */
 const PASSWORD = "Deadbolt-sweep-not-a-password-7"
-const SEED_PASSPHRASE = "sweep synthetic passphrase"
 const IDENT = new Set(["username", "email", "phone"])
 
 export type MenuOutcome = "rows" | "empty" | "none"
@@ -106,7 +101,7 @@ async function build(): Promise<string> {
   const prebuilt = arg("--dist")
   if (prebuilt) return prebuilt
   const dist = await mkdtemp(join(tmpdir(), "deadbolt-sweep-dist-"))
-  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist, standalone ? "--standalone" : "--native"], { stdout: "inherit", stderr: "inherit" })
+  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist], { stdout: "inherit", stderr: "inherit" })
   if (!built.success) throw new Error("the extension build failed")
   return dist
 }
@@ -115,20 +110,15 @@ interface Browser {
   context: BrowserContext
   worker: Worker
   dir: string
-  /** Sites the standalone vault has the login for. */
-  seeded: Set<string>
-  device?: Page
 }
 
 async function launch(dist: string, ua: string): Promise<Browser> {
   const dir = await mkdtemp(join(tmpdir(), "deadbolt-sweep-"))
-  if (!standalone) {
-    await mkdir(join(dir, "NativeMessagingHosts"))
-    await writeFile(
-      join(dir, "NativeMessagingHosts", "anomaly.deadbolt.browser.json"),
-      JSON.stringify({ name: "anomaly.deadbolt.browser", description: "fake", path: join(root, "e2e", "fake-host.py"), type: "stdio", allowed_origins: [`chrome-extension://${ID}/`] }),
-    )
-  }
+  await mkdir(join(dir, "NativeMessagingHosts"))
+  await writeFile(
+    join(dir, "NativeMessagingHosts", "anomaly.deadbolt.browser.json"),
+    JSON.stringify({ name: "anomaly.deadbolt.browser", description: "fake", path: join(root, "e2e", "fake-host.py"), type: "stdio", allowed_origins: [`chrome-extension://${ID}/`] }),
+  )
   const context = await chromium.launchPersistentContext(dir, {
     channel: "chromium",
     headless: true,
@@ -150,29 +140,7 @@ async function launch(dist: string, ua: string): Promise<Browser> {
       if (s.tab && s.url && m?.type === "db:page") verdicts.push({ frame: s.frameId, url: s.url, kind: m.kind ?? null, roles: m.roles ?? [] })
     })
   })
-  const b: Browser = { context, worker, dir, seeded: new Set() }
-  if (standalone) {
-    b.device = await context.newPage()
-    await b.device.goto(`chrome-extension://${ID}/device.html`)
-    await device(b, { type: "device-create", passphrase: SEED_PASSPHRASE, name: "personal" })
-  }
-  return b
-}
-
-async function device(b: Browser, command: Record<string, unknown>) {
-  const r = (await b.device!.evaluate((command) => chrome.runtime.sendMessage({ type: "db:device", command }), command)) as { ok: boolean; message?: string; reply?: Record<string, unknown> }
-  if (!r?.ok) throw new Error(`vault: ${command.type}: ${r?.message}`)
-  return r.reply!
-}
-
-/** Standalone: the made-up login, saved for the site of `url` (the native build's fake host lists it everywhere). */
-async function seed(b: Browser, url: string) {
-  if (!standalone) return
-  const key = site(hostOf(url))
-  if (!key || b.seeded.has(key)) return
-  b.seeded.add(key)
-  const origin = new URL(url).origin
-  await device(b, { type: "device-item-save", kind: "login", name: key, fields: [{ name: "url", value: origin }, { name: "username", value: USERNAME }, { name: "password", value: PASSWORD }] })
+  return { context, worker, dir }
 }
 
 async function closeBrowser(b: Browser) {
@@ -359,7 +327,6 @@ async function sweepPage(b: Browser, url: string, section: string, code: string)
   const work = (async () => {
     await b.context.clearCookies()
     await resetVerdicts(b)
-    await seed(b, url)
     page = await b.context.newPage()
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: clock.cap(20_000) })
@@ -389,13 +356,6 @@ async function sweepPage(b: Browser, url: string, section: string, code: string)
       }
     }
     r.finalUrl = page.url()
-    if (standalone && site(hostOf(r.finalUrl)) !== site(hostOf(url))) {
-      await seed(b, r.finalUrl)
-      // The page asked for its logins before they were there: load it again.
-      await within(page.reload({ waitUntil: "domcontentloaded", timeout: clock.cap(15_000) }), clock.cap(16_000), null)
-      await settle(page, clock)
-      frames = await probeFrames(page, code, clock)
-    }
     const summary = summarize(frames)
     const otpOnly = !summary.hasPassword && !summary.hasIdentifier && summary.fields.some((f) => f.label?.role === "otp" || f.role === "otp")
     // An identifier box alone counts only on a page that's about signing in (as crawl.ts judges it): not a newsletter box.
@@ -541,7 +501,7 @@ async function sweepPage(b: Browser, url: string, section: string, code: string)
   }
   const failed = r.status === "ok" && (!r.detected || r.menu !== "rows" || (r.fill && r.fill !== "ok") || (r.step2 && /no-menu|no-fill|not-detected/.test(r.step2.outcome)))
   if (page && (failed || r.status === "no-fields")) r.screenshot = await shot(page, nameOf(url))
-  for (const p of b.context.pages()) if (p !== b.device) await within(p.close(), 3000, undefined)
+  for (const p of b.context.pages()) await within(p.close(), 3000, undefined)
   r.ms = Date.now() - started
   return r
 }
@@ -572,7 +532,7 @@ async function sweep() {
         } catch {}
   const redo = (r: SweepResult) => retry && (r.status === "error" || r.status === "timeout")
   const queue = pages.filter((p) => !done.has(p.url) || redo(done.get(p.url)!))
-  console.log(`${pages.length} pages, ${pages.length - queue.length} already done, ${queue.length} to sweep (${standalone ? "standalone" : "native"}) -> ${out}`)
+  console.log(`${pages.length} pages, ${pages.length - queue.length} already done, ${queue.length} to sweep -> ${out}`)
 
   const plain = await chromium.launch({ channel: "chromium", headless: true })
   const ua = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${plain.version()} Safari/537.36`
@@ -639,7 +599,7 @@ async function sweep() {
   }
   await Promise.all(Array.from({ length: concurrency }, worker))
   await writes
-  console.log(`done in ${Math.round((Date.now() - t0) / 1000)}s; \`bun corpus/sweep.ts --report${standalone ? " --standalone" : ""}\` for the report`)
+  console.log(`done in ${Math.round((Date.now() - t0) / 1000)}s; \`bun corpus/sweep.ts --report\` for the report`)
 }
 
 // ---- The report -------------------------------------------------------------------
@@ -703,7 +663,7 @@ async function report() {
   const row = (name: string, now: string, then?: string) => lines.push(`| ${name} | ${then !== undefined ? `${then} | ` : ""}${now} |`)
   const a = rates(rs)
   const b = rates(before)
-  lines.push(`# Real-site sweep (${standalone ? "standalone" : "native"})`, "", `${new Date().toISOString()} · ${rs.length} pages · \`${out}\``, "")
+  lines.push("# Real-site sweep", "", `${new Date().toISOString()} · ${rs.length} pages · \`${out}\``, "")
   lines.push(against ? "| Measure | Before | After |\n| --- | --- | --- |" : "| Measure | Value |\n| --- | --- |")
   const cell = (x: ReturnType<typeof rates>, k: keyof ReturnType<typeof rates>, of: keyof ReturnType<typeof rates>) => `${x[k]} (${pct(x[k], x[of])})`
   row("Pages swept", String(a.all), against ? String(b.all) : undefined)

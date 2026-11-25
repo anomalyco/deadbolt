@@ -6,7 +6,7 @@ Status: alpha. Every push to `dev` ships a build; there is no stable release yet
 
 ## Install
 
-Deadbolt comes as a CLI, a desktop app and a browser extension. Install the app or CLI, create a vault, then add the extension and your other devices. The standalone extension can also run on its own.
+Deadbolt comes as a CLI, a desktop app and a browser extension. Install the app or CLI, create a vault, then add the extension and your other devices.
 
 ### The app and CLI
 
@@ -57,14 +57,9 @@ In the app, the new device's **Join from another device** does the same. A code 
 
 ### The browser extension
 
-The extension works in Chromium-based browsers: Chrome, Brave, Arc, Edge, Chromium and Helium. It isn't in the Chrome Web Store yet, so you load it unpacked. It comes in two builds:
+The extension works in Chromium-based browsers: Chrome, Brave, Arc, Edge, Chromium and Helium. It isn't in the Chrome Web Store yet, so you load it unpacked. It fills from the Deadbolt app or CLI on the same computer.
 
-- **Regular:** fills from the Deadbolt app or CLI on the same computer.
-- **Standalone:** its own Deadbolt device, with its own copy of the vault. No app or CLI needed.
-
-Both builds have the same extension ID, so use one of them per browser profile.
-
-**Regular build.** With Deadbolt installed, connect your browsers and pick a new, empty folder for the extension:
+With Deadbolt installed, connect your browsers and pick a new, empty folder for the extension:
 
 ```sh
 deadbolt browser install --extension-dir ~/deadbolt-extension
@@ -77,22 +72,7 @@ Then load it:
 2. Click **Load unpacked** and choose the folder.
 3. After each `deadbolt update`, click reload on Deadbolt there.
 
-**Standalone build.**
-
-1. Download [the zip](https://anoma.ly/release/deadbolt/extension/dev/chromium-standalone) and unzip it.
-2. In `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the unzipped folder.
-3. Choose **Pair with an existing device** (then run `deadbolt approve <code>` on a device with your vault) or **Create a new vault**.
-
-An unpacked extension can't update itself. To update by hand, download the zip again and put it in place of the old folder. With the CLI installed, let it keep a folder current instead, and load that folder:
-
-```sh
-deadbolt browser install --standalone --extension-dir ~/deadbolt-extension
-deadbolt update        # downloads it now, and every later release
-```
-
-A folder registered for one build can switch to the other with `deadbolt browser switch --standalone` (or `--native`); then reload Deadbolt in `chrome://extensions`.
-
-Found a problem? In the standalone build, use **Settings → Report an issue**; otherwise [open an issue](https://github.com/anomalyco/deadbolt/issues).
+Found a problem? [Open an issue](https://github.com/anomalyco/deadbolt/issues).
 
 ### Updating
 

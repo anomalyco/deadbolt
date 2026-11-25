@@ -35,51 +35,6 @@ fn field_debug_redacts_values() {
 }
 
 #[test]
-fn mirror_reports_read_as_lines() {
-    let item = |action, title: &str, reason: Option<&str>| MirrorItem {
-        action,
-        title: title.into(),
-        reason: reason.map(Into::into),
-    };
-    let mut report = MirrorReport {
-        applied: true,
-        unchanged: 40,
-        items: vec![
-            item(MirrorAction::Add, "Bank", None),
-            item(MirrorAction::Update, "GitHub", Some("password")),
-            item(MirrorAction::Update, "Wi-Fi", Some("notes")),
-            item(MirrorAction::Skip, "Scan", Some("document")),
-        ],
-        warnings: vec![],
-        dropped: vec![Tally {
-            count: 2,
-            one: "attachment".into(),
-            many: "attachments".into(),
-        }],
-    };
-    assert_eq!(report.summary(), "2 updated, 1 added");
-    assert_eq!(
-        report.lines(),
-        [
-            "2 updated, 1 added (40 unchanged, 1 skipped)",
-            "  add     Bank",
-            "  update  GitHub (password)",
-            "  update  Wi-Fi (notes)",
-            "  skip    Scan (document)",
-            "not mirrored: 2 attachments",
-        ]
-    );
-    assert!(report.changed());
-    report.applied = false;
-    assert_eq!(report.summary(), "2 would update, 1 would add");
-    report.items.retain(|i| i.action == MirrorAction::Skip);
-    assert!(!report.changed());
-    assert_eq!(report.summary(), "Nothing to do");
-    report.applied = true;
-    assert_eq!(report.summary(), "Up to date");
-}
-
-#[test]
 fn sign_in_providers_are_ids_or_one_line() {
     for (text, id) in [
         ("google", "google"),
@@ -370,7 +325,6 @@ fn names_match_the_wire() {
         r#"{"cmd":"vault-list"}"#,
         r#"{"cmd":"touch-id-set","enabled":true}"#,
         r#"{"cmd":"unlock","passphrase":"hunter22","timeout_secs":null}"#,
-        r#"{"cmd":"sync-one-password","vault":null,"account":null,"op_vaults":[],"dry_run":true}"#,
         r#"{"cmd":"autofill-status"}"#,
         r#"{"cmd":"send-list"}"#,
     ] {
