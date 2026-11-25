@@ -28,6 +28,21 @@ use crate::autofill::{self, AutofillCommand, AutofillReply, DaemonCallError};
 const SUN_PATH_MAX: usize = 103;
 /// The shortest deadline a call gets, however small its timeout.
 const MIN_TIMEOUT: Duration = Duration::from_millis(50);
+/// The longest deadline a call gets, however large its timeout: longer than
+/// any Touch ID sheet stays up.
+const MAX_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Swift's timeout in seconds, as a deadline from now that can't overflow:
+/// NaN, zero and negative get the shortest, anything over five minutes
+/// (infinity included) the longest.
+fn timeout_of(secs: f64) -> Duration {
+    if secs.is_nan() || secs <= 0.0 {
+        return MIN_TIMEOUT;
+    }
+    Duration::try_from_secs_f64(secs)
+        .unwrap_or(MAX_TIMEOUT)
+        .clamp(MIN_TIMEOUT, MAX_TIMEOUT)
+}
 
 /// Cancels a call in flight from any thread, such as when the AutoFill
 /// sheet goes away. A handle cancelled before its call starts fails it
@@ -140,13 +155,10 @@ pub fn autofill_call(
     handle: Option<Arc<CallHandle>>,
     daemon: Option<String>,
 ) -> CallOutcome {
-    let timeout = Duration::try_from_secs_f64(timeout_secs)
-        .unwrap_or(MIN_TIMEOUT)
-        .max(MIN_TIMEOUT);
     match send(
         Path::new(&socket_path),
         command,
-        timeout,
+        timeout_of(timeout_secs),
         handle.as_deref(),
         daemon.as_deref().map(Path::new),
     ) {
@@ -169,7 +181,9 @@ fn send(
     if len == 0 || len > SUN_PATH_MAX {
         return Err(unavailable("AutoFill socket path exceeds sun_path limit"));
     }
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(DaemonCallError::TimedOut)?;
     let stream =
         UnixStream::connect(path).map_err(|_| unavailable("Deadbolt's daemon is not running"))?;
     // A write to a daemon that hung up fails with EPIPE rather than killing
@@ -580,6 +594,37 @@ mod tests {
                 "{error:?}"
             );
         }
+    }
+
+    /// Whatever number Swift passes, the deadline neither panics nor waits
+    /// past five minutes.
+    #[test]
+    fn any_timeout_is_a_bounded_deadline() {
+        assert_eq!(timeout_of(1e12), MAX_TIMEOUT);
+        assert_eq!(timeout_of(f64::INFINITY), MAX_TIMEOUT);
+        assert_eq!(timeout_of(f64::MAX), MAX_TIMEOUT);
+        assert_eq!(timeout_of(f64::NAN), MIN_TIMEOUT);
+        assert_eq!(timeout_of(-1.0), MIN_TIMEOUT);
+        assert_eq!(timeout_of(0.0), MIN_TIMEOUT);
+        assert_eq!(timeout_of(2.5), Duration::from_millis(2500));
+
+        let (_dir, path, _server) = daemon(Some(
+            "{\"type\":\"ok\",\"reply\":{\"reply\":\"autofill-status\",\"initialized\":true,\"unlocked\":false,\"touch_id_ready\":true,\"touch_id_reset\":false,\"can_verify\":false}}\n",
+        ));
+        let socket = path.display().to_string();
+        let outcome = autofill_call(socket, status(), 1e12, None, None);
+        assert!(matches!(outcome, CallOutcome::Replied(_)), "{outcome:?}");
+        let (_dir, path, _server) = daemon(None);
+        let started = Instant::now();
+        let outcome = autofill_call(path.display().to_string(), status(), f64::NAN, None, None);
+        assert!(
+            matches!(outcome, CallOutcome::Failed(DaemonCallError::TimedOut)),
+            "{outcome:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // A deadline past the clock's end is a timeout, not a panic.
+        let error = send(&path, status(), Duration::MAX, None, None).unwrap_err();
+        assert_eq!(error, DaemonCallError::TimedOut);
     }
 
     #[test]
