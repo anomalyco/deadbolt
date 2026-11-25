@@ -1,269 +1,37 @@
 // The messages between the extension and `deadbolt browser-host`, as
-// specified in docs/autofill.md. The browser does the framing (a native-endian
-// u32 length, then UTF-8 JSON); this file is the JSON.
+// specified in docs/autofill.md. Their types and constants are generated from
+// crates/proto into ./gen/proto.ts (`bun run gen:proto`); this file adds the
+// TypeScript-only helpers and checks what the host sends.
 
-export const NATIVE_HOST = "anomaly.deadbolt.browser"
-export const PROTOCOL = 3
+import type { Account, Body, CardField, Change, CheckStatus, ErrorCode, FormCard, FormField, FormIdentity, HostStatus, IdentityField, Passkey, SignIn } from "./gen/proto"
+import { CARD_FIELDS, IDENTITY_FIELDS } from "./gen/proto"
 
-export type Want = "username" | "password" | "totp"
-export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
-export type CheckStatus = "new" | "update" | "same"
-export type Change = "locked" | "unlocked" | "items" | "stopped" | "started"
-/** `passphrase_needed` and `wrong_passphrase` came only from the retired browser-only vault; the native host never sends them. */
-export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "forbidden" | "failed" | "passphrase_needed" | "wrong_passphrase"
-export type UserVerification = "required" | "preferred" | "discouraged"
-export type FormKind = "identity" | "card"
-
-/** An identity's fields a form may ask for, named after the HTML autocomplete tokens (`city` is `address-level2`, `region` `address-level1`). */
-export const IDENTITY_FIELDS = [
-  "honorific", "given-name", "additional-name", "family-name", "nickname", "organization", "job-title", "email", "phone",
-  "address-line1", "address-line2", "address-line3", "city", "region", "postal-code", "country", "birthday",
-] as const
-/** A card's fields a form may ask for. `number` and `cvv` raise Touch ID in the daemon when it's on; `expiry` is `YYYY-MM`. */
-export const CARD_FIELDS = ["cardholder", "number", "expiry", "cvv", "brand"] as const
-export type IdentityField = (typeof IDENTITY_FIELDS)[number]
-export type CardField = (typeof CARD_FIELDS)[number]
-export type FormField = IdentityField | CardField
+export * from "./gen/proto"
 
 /** A submitted password: as typed, or the one `generate` made, by its id (the daemon holds it). */
 export type PasswordValue = { password: string; generated?: never } | { generated: string; password?: never }
 
-/** What a page says about a new-password field: its `passwordrules`, length limits and the characters its `pattern` takes. */
-export interface FieldRules {
-  rules?: string
-  minLength?: number
-  maxLength?: number
-  allowed?: string
-}
-
-export type Request =
-  | { id: number; type: "hello" }
-  | { id: number; type: "list"; origin: string }
-  | { id: number; type: "fill"; origin: string; ref: string; want: Want[] }
-  | ({ id: number; type: "generate"; origin: string } & FieldRules)
-  | ({ id: number; type: "generate-check"; origin: string } & FieldRules)
-  | { id: number; type: "generate-keep"; origin: string; generated: string }
-  | { id: number; type: "generate-drop"; origin: string; generated: string }
-  | ({ id: number; type: "check"; origin: string; username?: string } & PasswordValue)
-  | {
-      id: number
-      type: "save"
-      origin: string
-      ref?: string
-      entry: ({ title: string; url: string; username: string } & PasswordValue) | { title: string; url: string; signIn: { provider: string; account: string } }
-    }
-  | { id: number; type: "forms"; origin: string; kinds: FormKind[] }
-  | { id: number; type: "fill-form"; origin: string; ref: string; fields: FormField[] }
-  /**
-   * Keeps an identity or card the user typed into a form and chose to save:
-   * a new one, or the changed fields of `ref`. Never a card's `cvv`; an
-   * update never changes a card's `number`. `match` (the browser-only vault,
-   * capability `save-form-match`): a card update's typed number, only
-   * compared with the card's (another is `not_found`), never kept.
-   */
-  | { id: number; type: "save-form"; origin: string; kind: FormKind; ref?: string; fields: Partial<Record<FormField, string>>; match?: { number: string } }
-  | { id: number; type: "passkey-list"; origin: string; rpId?: string }
-  | {
-      id: number
-      type: "passkey-create"
-      origin: string
-      rpId?: string
-      challenge: string
-      user: { id: string; name: string; displayName?: string }
-      exclude: string[]
-      userVerification: UserVerification
-    }
-  | { id: number; type: "passkey-get"; origin: string; rpId?: string; ref: string; challenge: string; userVerification: UserVerification }
-  | { id: number; type: "passkey-cancel"; request: number }
-  /** Appends one line to the learning log of `session` (see src/learn.ts). No values, ever. */
-  | { id: number; type: "learn"; session: string; line: Record<string, unknown> }
-  /** Part of `session`'s log from byte `offset`, whole lines (capability `learn-files`). */
-  | { id: number; type: "learn-read"; session: string; offset?: number }
-  /** Deletes `session`'s log (capability `learn-files`). */
-  | { id: number; type: "learn-delete"; session: string }
-
-export type RequestBody = Request extends infer R ? (R extends { id: number } ? Omit<R, "id"> : never) : never
-
-export interface Account {
-  ref: string
-  vault: string
-  title: string
-  username?: string
-  hasPassword: boolean
-  hasTotp: boolean
-  urls: string[]
-  /** A "Sign in with Google" login: the provider (a known id such as `google`, or a name), and the linked account's username or title. */
-  signIn?: SignIn
-}
-
-export interface SignIn {
-  provider: string
-  account?: string
-}
-
-export interface HelloReply {
-  type: "hello"
-  protocol: number
-  version: string
-  status: HostStatus
-  detail?: string
-  capabilities: string[]
-}
-export interface ListReply {
-  type: "list"
-  site: string
-  accounts: Account[]
-}
-export interface FillReply {
-  type: "fill"
-  username?: string
-  password?: string
-  totp?: string
-}
-export interface GenerateReply {
-  type: "generate"
-  password: string
-  /** Names it in check and save. */
-  generated: string
-}
-/** `generate-check`, `generate-keep` and `generate-drop` say only that they went through. */
-export interface DoneReply<T extends "generate-check" | "generate-keep" | "generate-drop"> {
-  type: T
-}
-export interface CheckReply {
-  type: "check"
-  status: CheckStatus
-  matches: string[]
-}
-export interface SaveReply {
-  type: "save"
-  ref: string
-  created: boolean
-}
-/** A passkey saved for the relying party; never its private key. */
-export interface Passkey {
-  ref: string
-  vault: string
-  credentialId: string
-  username?: string
-  created?: string
-}
-export interface PasskeysReply {
-  type: "passkeys"
-  rpId: string
-  canVerify: boolean
-  /**
-   * The browser-only vault only: whether its lock preset (Strict) asks for the
-   * passphrase before a ceremony the site doesn't discourage verifying, as the
-   * worker holds it. The native daemon leaves it out.
-   */
-  asksPassphrase?: boolean
-  passkeys: Passkey[]
-}
-/** Binary fields are base64url, as the page gets them. */
-export interface PasskeyCreatedReply {
-  type: "passkey-created"
-  ref: string
-  credentialId: string
-  clientDataJSON: string
-  attestationObject: string
-  authenticatorData: string
-  publicKey: string
-  verified: boolean
-}
-export interface PasskeyAssertionReply {
-  type: "passkey-assertion"
-  credentialId: string
-  clientDataJSON: string
-  authenticatorData: string
-  signature: string
-  userHandle: string
-  verified: boolean
-}
-export interface PasskeyCancelledReply {
-  type: "passkey-cancelled"
-  found: boolean
-}
-export interface LearnedReply {
-  type: "learned"
-}
-/** `next`: where the rest of the log starts, or null at its end. */
-export interface LearnTextReply {
-  type: "learn-text"
-  text: string
-  next: number | null
-}
-export interface LearnDeletedReply {
-  type: "learn-deleted"
-  found: boolean
-}
-/** An identity a form can be filled from: no values, only which fields it has. */
-export interface FormIdentity {
-  ref: string
-  vault: string
-  title: string
-  /** "Alex Mercer · 123 Main St, Brooklyn"; may be empty. */
-  summary: string
-  fields: IdentityField[]
-}
-/** A card a form can be filled from: never its number or code. */
-export interface FormCard {
-  ref: string
-  vault: string
-  title: string
-  brand?: string
-  last4: string
-  /** `YYYY-MM`. */
-  expiry?: string
-  cardholder?: string
-  /** The identity whose address is its billing address. */
-  billing?: string
-  fields: CardField[]
-}
-export interface FormsReply {
-  type: "forms"
-  identities: FormIdentity[]
-  cards: FormCard[]
-  /** Whether filling a card's number or code now raises Touch ID. */
-  canVerify: boolean
-}
-export interface FillFormReply {
-  type: "fill-form"
-  /** Only the fields asked for that the item has. */
-  values: Partial<Record<FormField, string>>
-  /** Whether Touch ID verified the user for this fill. */
-  verified: boolean
-}
-export interface SaveFormReply {
-  type: "save-form"
-  ref: string
-  created: boolean
-}
-export interface ErrorReply {
-  type: "error"
-  code: ErrorCode
-  message: string
-}
-
-export type Reply =
-  | HelloReply
-  | ListReply
-  | FillReply
-  | GenerateReply
-  | DoneReply<"generate-check" | "generate-keep" | "generate-drop">
-  | CheckReply
-  | SaveReply
-  | FormsReply
-  | FillFormReply
-  | SaveFormReply
-  | PasskeysReply
-  | PasskeyCreatedReply
-  | PasskeyAssertionReply
-  | PasskeyCancelledReply
-  | LearnedReply
-  | LearnTextReply
-  | LearnDeletedReply
-  | ErrorReply
+/** What the host answers a request with: everything it sends but a pushed `changed`. */
+export type Reply = Exclude<Body, { type: "changed" }>
+/** The reply of one type. */
+export type ReplyOf<T extends Reply["type"]> = Extract<Reply, { type: T }>
+export type HelloReply = ReplyOf<"hello">
+export type ListReply = ReplyOf<"list">
+export type FillReply = ReplyOf<"fill">
+export type GenerateReply = ReplyOf<"generate">
+export type CheckReply = ReplyOf<"check">
+export type SaveReply = ReplyOf<"save">
+export type FormsReply = ReplyOf<"forms">
+export type FillFormReply = ReplyOf<"fill-form">
+export type SaveFormReply = ReplyOf<"save-form">
+export type PasskeysReply = ReplyOf<"passkeys">
+export type PasskeyCreatedReply = ReplyOf<"passkey-created">
+export type PasskeyAssertionReply = ReplyOf<"passkey-assertion">
+export type PasskeyCancelledReply = ReplyOf<"passkey-cancelled">
+export type LearnedReply = ReplyOf<"learned">
+export type LearnTextReply = ReplyOf<"learn-text">
+export type LearnDeletedReply = ReplyOf<"learn-deleted">
+export type ErrorReply = ReplyOf<"error">
 
 /** What a request of each type is answered with, besides an error. */
 export interface ReplyFor {
@@ -271,9 +39,9 @@ export interface ReplyFor {
   list: ListReply
   fill: FillReply
   generate: GenerateReply
-  "generate-check": DoneReply<"generate-check">
-  "generate-keep": DoneReply<"generate-keep">
-  "generate-drop": DoneReply<"generate-drop">
+  "generate-check": ReplyOf<"generate-check">
+  "generate-keep": ReplyOf<"generate-keep">
+  "generate-drop": ReplyOf<"generate-drop">
   check: CheckReply
   save: SaveReply
   forms: FormsReply
@@ -315,10 +83,26 @@ export type HostMessage =
   | { kind: "reply"; id: number | string | null; reply: Reply }
   | { kind: "changed"; change: Change }
 
-const STATUSES: HostStatus[] = ["ready", "locked", "not-set-up", "unavailable"]
-const CHECKS: CheckStatus[] = ["new", "update", "same"]
-const CHANGES: Change[] = ["locked", "unlocked", "items", "stopped", "started"]
-const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "weak", "exists", "cancelled", "forbidden", "failed", "passphrase_needed", "wrong_passphrase"]
+/** A check for a member of a generated union. Each set must name every member, so a new one in crates/proto fails the typecheck until it's listed here. */
+const memberOf =
+  <T extends string>(set: Record<T, true>) =>
+  (v: unknown): v is T =>
+    typeof v === "string" && Object.hasOwn(set, v)
+const isStatus = memberOf<HostStatus>({ ready: true, locked: true, "not-set-up": true, unavailable: true })
+const isCheck = memberOf<CheckStatus>({ new: true, update: true, same: true })
+const isChange = memberOf<Change>({ locked: true, unlocked: true, items: true, stopped: true, started: true })
+const isCode = memberOf<ErrorCode>({
+  forbidden: true,
+  locked: true,
+  not_found: true,
+  domain_mismatch: true,
+  bad_request: true,
+  rate_limited: true,
+  exists: true,
+  cancelled: true,
+  weak: true,
+  failed: true,
+})
 const REF = /^[0-9a-f]{64}:[0-9a-f]{32}$/
 const B64URL = /^[A-Za-z0-9_-]*$/
 
@@ -420,8 +204,7 @@ function signInOf(v: unknown): { signIn?: SignIn } {
 export function parseHostMessage(raw: unknown): HostMessage | null {
   if (!isObject(raw) || typeof raw.type !== "string") return null
   if (raw.type === "changed") {
-    const change = raw.change as Change
-    return CHANGES.includes(change) ? { kind: "changed", change } : null
+    return isChange(raw.change) ? { kind: "changed", change: raw.change } : null
   }
   const id = typeof raw.id === "number" || typeof raw.id === "string" ? raw.id : raw.id === null ? null : undefined
   if (id === undefined) return null
@@ -432,13 +215,12 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
 export function parseReply(raw: Record<string, unknown>): Reply | null {
   switch (raw.type) {
     case "hello": {
-      const status = raw.status as HostStatus
-      if (!STATUSES.includes(status) || typeof raw.protocol !== "number") return null
+      if (!isStatus(raw.status) || typeof raw.protocol !== "number") return null
       return {
         type: "hello",
         protocol: raw.protocol,
         version: str(raw.version, 200) ?? "",
-        status,
+        status: raw.status,
         detail: str(raw.detail, 1000),
         capabilities: strings(raw.capabilities),
       }
@@ -460,9 +242,8 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
     case "generate-drop":
       return { type: raw.type }
     case "check": {
-      const status = raw.status as CheckStatus
-      if (!CHECKS.includes(status)) return null
-      return { type: "check", status, matches: strings(raw.matches).filter(isRef) }
+      if (!isCheck(raw.status)) return null
+      return { type: "check", status: raw.status, matches: strings(raw.matches).filter(isRef) }
     }
     case "save":
       return isRef(raw.ref) ? { type: "save", ref: raw.ref, created: raw.created === true } : null
@@ -489,7 +270,7 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
     case "passkeys": {
       if (!Array.isArray(raw.passkeys) || typeof raw.rpId !== "string") return null
       const passkeys = raw.passkeys.map(passkey).filter((p): p is Passkey => p !== null)
-      return { type: "passkeys", rpId: raw.rpId, canVerify: raw.canVerify === true, ...(raw.asksPassphrase === true ? { asksPassphrase: true } : {}), passkeys }
+      return { type: "passkeys", rpId: raw.rpId, canVerify: raw.canVerify === true, passkeys }
     }
     case "passkey-created": {
       const f = b64Fields(raw, ["credentialId", "clientDataJSON", "attestationObject", "authenticatorData", "publicKey"] as const)
@@ -508,8 +289,7 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
     case "learn-deleted":
       return { type: "learn-deleted", found: raw.found === true }
     case "error": {
-      const code = CODES.includes(raw.code as ErrorCode) ? (raw.code as ErrorCode) : "failed"
-      return { type: "error", code, message: str(raw.message, 1000) ?? "" }
+      return { type: "error", code: isCode(raw.code) ? raw.code : "failed", message: str(raw.message, 1000) ?? "" }
     }
     default:
       return null

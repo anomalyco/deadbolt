@@ -41,11 +41,18 @@ jobs:
       # Same steps as `bun run check`; cargo-deny stays in its dedicated job below.
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      # The extension's protocol types are generated from crates/proto: regenerate
+      # them and fail on any drift (fix with `bun run gen:proto`).
+      - if: runner.os == 'Linux'
+        run: |
+          cargo +stable run -q -p deadbolt-proto --bin gen-ts --locked -- extension/src/gen/proto.ts
+          git diff --exit-code extension/src/gen/proto.ts
       - run: cargo +stable test --workspace --locked
       - if: runner.os == 'Linux'
         run: cargo +stable check -p deadbolt-net --features private-relay-fixture --locked
 
-  # The Rust that runs in browsers: the vault core and Send.
+  # The Rust that runs in browsers: the vault core and Send, and the wire
+  # schemas the extension shares.
   wasm:
     name: Browser cores (wasm32)
     if: github.event_name != 'schedule'
@@ -55,7 +62,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: rustup target add wasm32-unknown-unknown --toolchain stable
-      - run: cargo +stable clippy -p deadbolt-core -p deadbolt-send -p deadbolt-send-web --target wasm32-unknown-unknown --locked -- -D warnings
+      - run: cargo +stable clippy -p deadbolt-proto -p deadbolt-core -p deadbolt-send -p deadbolt-send-web --target wasm32-unknown-unknown --locked -- -D warnings
 
   extension:
     name: Browser extension

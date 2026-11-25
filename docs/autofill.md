@@ -2206,6 +2206,10 @@ login's; only their words change.
 
 ## Host messages
 
+The messages are `deadbolt_proto::browser` (crates/proto), the one schema
+for both sides: the extension's types in `extension/src/gen/proto.ts` are
+generated from it (`bun run gen:proto`), and CI fails when they drift.
+
 Every message is a frame: a 32-bit length in native byte order, then that
 many bytes of UTF-8 JSON. The extension connects with
 `chrome.runtime.connectNative("anomaly.deadbolt.browser")` and keeps the port open.

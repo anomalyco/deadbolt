@@ -41,7 +41,7 @@ pub enum Command {
         enabled: bool,
     },
     Lock,
-    /// Streams [`crate::protocol::Change`]s until the client hangs up or the
+    /// Streams [`crate::daemon::Change`]s until the client hangs up or the
     /// daemon stops.
     /// `app` marks the desktop app's main window, which `app-activate`
     /// brings forward.
@@ -182,11 +182,11 @@ pub enum Command {
         query: Vec<String>,
     },
     /// Imports another password manager's export (the text of the file, see
-    /// [`crate::export`]); the daemon detects the format. Items already in the
+    /// `deadbolt_client::export`); the daemon detects the format. Items already in the
     /// vault, or earlier in the export, are skipped as duplicates. With
     /// `apply` it creates all new items or none, in as few entries as fit;
     /// without, it writes nothing. Replies `import`.
-    /// A `.1pux`'s attachments come in `files` ([`crate::export`]).
+    /// A `.1pux`'s attachments come in `files` (`deadbolt_client::export`).
     Import {
         vault: Option<String>,
         export: Zeroizing<String>,
@@ -340,8 +340,8 @@ pub enum Command {
         kinds: Vec<FormKind>,
     },
     /// Forms: the values of `fields` (see
-    /// [`crate::protocol::IDENTITY_FORM_FIELDS`] and
-    /// [`crate::protocol::CARD_FORM_FIELDS`]) that the identity or card `item`
+    /// [`crate::daemon::IDENTITY_FORM_FIELDS`] and
+    /// [`crate::daemon::CARD_FORM_FIELDS`]) that the identity or card `item`
     /// has, for the
     /// page at `origin` (the same origin rules as `form-items`). A card's
     /// number or security code (`cvv`) verifies the user each time: Touch ID
@@ -402,7 +402,7 @@ pub enum Command {
         field: String,
     },
     /// Secrets for commands: the values `refs` name
-    /// (`deadbolt://[vault/]item/field`, see [`crate::protocol::Reference`]),
+    /// (`deadbolt://[vault/]item/field`, see [`crate::daemon::Reference`]),
     /// for `purpose`. Each item is a title or short id that must match
     /// exactly one item; a one-time password field gives its current code.
     /// Replies `secrets`, in reference order.

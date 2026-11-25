@@ -51,7 +51,8 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/menu.ts`            | The in-page surface: account list, generated password, fill pill, save offer |
 | `src/popup.ts`           | Toolbar popup: logins, offers, passkeys, Record                              |
 | `src/ui/motion.ts`       | Springs (CSS `linear()` and retargeting), rolled labels                      |
-| `src/protocol.ts`        | Host message types and parsing                                               |
+| `src/gen/proto.ts`       | Host message types, generated from crates/proto (`bun run gen:proto`)        |
+| `src/protocol.ts`        | Reply helpers and checks on what the host sends                              |
 | `src/signin.ts`          | "Sign in with" providers: names, hosts, button words                         |
 | `src/messages.ts`        | Messages inside the extension                                                |
 | `static/`                | Manifest, pages, CSS (Rune's OpenCode theme), Inter and IBM Plex Mono, icons |

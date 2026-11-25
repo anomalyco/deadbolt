@@ -3,6 +3,7 @@
 //! didn't ask for.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use super::Secret;
 
@@ -58,8 +59,9 @@ pub struct OneTimeCodeIdentity {
     pub rank: i64,
 }
 /// What a site asks of user verification in a passkey ceremony.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(rename = "UserVerification")]
 pub enum Verify {
     Required,
     Preferred,
@@ -108,8 +110,9 @@ pub struct LoginRef {
 }
 
 /// A value autofill can ask for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(rename = "Want")]
 pub enum Fill {
     Username,
     Password,
@@ -137,29 +140,34 @@ pub struct SiteLogin {
 /// A "Sign in with Google" login: the provider and, if the login it signs
 /// in with is in one of the user's vaults, that login's username, else its
 /// title. Never any other value of that login.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct SignIn {
     /// The provider's id (`google`, see
-    /// [`crate::protocol::SIGN_IN_PROVIDERS`]) or, for one
+    /// [`crate::daemon::SIGN_IN_PROVIDERS`]) or, for one
     /// this version doesn't know, its name as given.
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub account: Option<String>,
 }
 /// What a fill asked for and the login has.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct SiteValues {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub password: Option<Secret>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub totp: Option<Secret>,
 }
 
 /// How a login typed into a page compares with the saved ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(rename = "CheckStatus")]
 pub enum SiteStatus {
     /// No saved login for the site has that username.
     New,

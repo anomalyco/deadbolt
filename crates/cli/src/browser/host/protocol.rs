@@ -1,28 +1,24 @@
-//! Native messaging host wire types, framing, rate limiting, and validation.
+//! Native messaging host framing, rate limiting, and validation. The
+//! messages themselves are [`deadbolt_proto::browser`]'s.
 
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
-use super::super::passkeys;
 use crate::client;
 use crate::protocol::{
-    CARD_FORM_FIELDS, ErrorCode, Fill, FormCard, FormIdentity, FormKind, IDENTITY_FORM_FIELDS,
-    LoginRef, Secret, SignIn, SiteField, SiteStatus, SiteValues,
+    CARD_FORM_FIELDS, ErrorCode, FormKind, IDENTITY_FORM_FIELDS, LoginRef, SiteField,
 };
 use crate::site::Site;
 
-/// The version of this message set, in `hello`.
-pub const PROTOCOL: u32 = 3;
-/// The largest request read; anything bigger is skipped and refused.
-pub const MAX_REQUEST: usize = 64 * 1024;
-/// The browser's limit on a message from the host.
-pub const MAX_REPLY: usize = 1024 * 1024;
+pub(in super::super) use deadbolt_proto::browser::{
+    Body, Envelope, ErrorCode as Code, FieldRules, MAX_REPLY, MAX_REQUEST, Request, format_ref,
+};
 
 /// The longest item name the vault takes.
 pub(super) const MAX_TITLE: usize = 128;
@@ -75,119 +71,16 @@ pub(super) struct Head {
     pub(super) id: Value,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-pub(super) enum Request {
-    Hello,
-    List {
-        origin: String,
-    },
-    Fill {
-        origin: String,
-        #[serde(rename = "ref")]
-        login: String,
-        want: Vec<Fill>,
-    },
-    Generate {
-        origin: String,
-        #[serde(flatten)]
-        field: Field,
-    },
-    GenerateCheck {
-        origin: String,
-        #[serde(flatten)]
-        field: Field,
-    },
-    GenerateKeep {
-        origin: String,
-        generated: String,
-    },
-    GenerateDrop {
-        origin: String,
-        generated: String,
-    },
-    Check {
-        origin: String,
-        username: Option<String>,
-        password: Option<Secret>,
-        generated: Option<String>,
-    },
-    Save {
-        origin: String,
-        entry: Entry,
-        #[serde(rename = "ref")]
-        login: Option<String>,
-    },
-    /// The identities and cards a form on the page can be filled from.
-    Forms {
-        origin: String,
-        kinds: Vec<FormKind>,
-    },
-    /// Some fields of one identity or card.
-    FillForm {
-        origin: String,
-        #[serde(rename = "ref")]
-        item: String,
-        fields: Vec<String>,
-    },
-    /// Saves an identity or card the user typed into a form and chose to
-    /// keep: a new one, or changed fields of the one `ref` names. Never a
-    /// card's security code.
-    SaveForm {
-        origin: String,
-        kind: FormKind,
-        #[serde(rename = "ref")]
-        item: Option<String>,
-        fields: std::collections::BTreeMap<String, Secret>,
-    },
-    PasskeyList(passkeys::List),
-    PasskeyCreate(passkeys::Create),
-    PasskeyGet(passkeys::Get),
-    PasskeyCancel(passkeys::Cancel),
-    /// One line for the log of a recording (Record). The extension
-    /// sends form shapes only, never values; the host just appends it.
-    Learn {
-        session: String,
-        line: serde_json::Map<String, Value>,
-    },
-    /// Part of a session's log, from byte `offset`, for the popup's Download.
-    LearnRead {
-        session: String,
-        #[serde(default)]
-        offset: u64,
-    },
-    /// Deletes a session's log, for the popup's Delete.
-    LearnDelete {
-        session: String,
-    },
-}
-
-/// A new-password field's rules, as the extension words them.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Field {
-    pub(super) rules: Option<String>,
-    pub(super) min_length: Option<usize>,
-    pub(super) max_length: Option<usize>,
-    pub(super) allowed: Option<String>,
-}
-
-impl Field {
-    pub(super) fn check(self) -> Result<SiteField, Refusal> {
-        if self.rules.as_ref().is_some_and(|r| r.len() > MAX_RULES)
-            || self.allowed.as_ref().is_some_and(|a| a.len() > MAX_RULES)
-        {
-            return Err(Refusal::bad(format!(
-                "rules and allowed are at most {MAX_RULES} bytes"
-            )));
-        }
-        Ok(SiteField {
-            rules: self.rules,
-            min_length: self.min_length,
-            max_length: self.max_length,
-            allowed: self.allowed,
-        })
+/// A new-password field's rules, checked.
+pub(super) fn field_rules(field: FieldRules) -> Result<SiteField, Refusal> {
+    if field.rules.as_ref().is_some_and(|r| r.len() > MAX_RULES)
+        || field.allowed.as_ref().is_some_and(|a| a.len() > MAX_RULES)
+    {
+        return Err(Refusal::bad(format!(
+            "rules and allowed are at most {MAX_RULES} bytes"
+        )));
     }
+    Ok(field.into())
 }
 
 /// A generated password's id, as `generate` gave it.
@@ -196,188 +89,6 @@ pub(super) fn generated_id(id: &str) -> Result<String, Refusal> {
         return Err(Refusal::bad("generated is 1 to 64 bytes"));
     }
     Ok(id.to_string())
-}
-
-#[derive(Deserialize)]
-pub(super) struct Entry {
-    pub(super) title: String,
-    pub(super) url: String,
-    #[serde(default)]
-    pub(super) username: String,
-    pub(super) password: Option<Secret>,
-    pub(super) generated: Option<String>,
-    /// In place of a password: a login that signs in with a provider login.
-    #[serde(rename = "signIn")]
-    pub(super) sign_in: Option<EntrySignIn>,
-}
-
-/// A save's provider link: the provider's id and the login (a ref) it signs in with.
-#[derive(Deserialize)]
-pub(super) struct EntrySignIn {
-    pub(super) provider: String,
-    pub(super) account: String,
-}
-
-#[derive(Serialize)]
-pub(in super::super) struct Envelope {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(in super::super) id: Option<Value>,
-    #[serde(flatten)]
-    pub(in super::super) body: Body,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-pub(in super::super) enum Body {
-    #[serde(rename_all = "camelCase")]
-    Hello {
-        protocol: u32,
-        version: String,
-        status: &'static str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-        capabilities: [&'static str; 10],
-    },
-    List {
-        site: String,
-        accounts: Vec<Account>,
-    },
-    Fill {
-        #[serde(flatten)]
-        values: SiteValues,
-    },
-    Generate {
-        password: Secret,
-        generated: String,
-    },
-    GenerateCheck,
-    GenerateKeep,
-    GenerateDrop,
-    Check {
-        status: SiteStatus,
-        matches: Vec<String>,
-    },
-    Save {
-        #[serde(rename = "ref")]
-        login: String,
-        created: bool,
-    },
-    Error {
-        code: Code,
-        message: String,
-    },
-    Changed {
-        change: &'static str,
-    },
-    #[serde(rename_all = "camelCase")]
-    Forms {
-        identities: Vec<IdentityEntry>,
-        cards: Vec<CardEntry>,
-        /// Whether filling a card's number or code now raises Touch ID.
-        can_verify: bool,
-    },
-    FillForm {
-        values: std::collections::BTreeMap<String, Secret>,
-        verified: bool,
-    },
-    SaveForm {
-        #[serde(rename = "ref")]
-        item: String,
-        created: bool,
-    },
-    Passkeys(passkeys::Listed),
-    PasskeyCreated(passkeys::Created),
-    PasskeyAssertion(passkeys::Assertion),
-    PasskeyCancelled {
-        found: bool,
-    },
-    Learned,
-    LearnText {
-        text: String,
-        next: Option<u64>,
-    },
-    LearnDeleted {
-        found: bool,
-    },
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(in super::super) struct Account {
-    #[serde(rename = "ref")]
-    pub(super) login: String,
-    pub(super) vault: String,
-    pub(super) title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) username: Option<String>,
-    pub(super) has_password: bool,
-    pub(super) has_totp: bool,
-    pub(super) urls: Vec<String>,
-    /// `{provider, account?}` for a "Sign in with Google" login.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) sign_in: Option<SignIn>,
-}
-
-/// An identity in the `forms` reply, without values.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(in super::super) struct IdentityEntry {
-    #[serde(rename = "ref")]
-    item: String,
-    vault: String,
-    title: String,
-    summary: String,
-    fields: Vec<String>,
-}
-
-impl From<FormIdentity> for IdentityEntry {
-    fn from(i: FormIdentity) -> Self {
-        Self {
-            item: format_ref(&i.item),
-            vault: i.vault,
-            title: i.title,
-            summary: i.summary,
-            fields: i.fields,
-        }
-    }
-}
-
-/// A card in the `forms` reply: never its number or code.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(in super::super) struct CardEntry {
-    #[serde(rename = "ref")]
-    item: String,
-    vault: String,
-    title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    brand: Option<String>,
-    last4: String,
-    /// `YYYY-MM`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expiry: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cardholder: Option<String>,
-    /// The ref of the identity that is its billing address.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    billing: Option<String>,
-    fields: Vec<String>,
-}
-
-impl From<FormCard> for CardEntry {
-    fn from(c: FormCard) -> Self {
-        Self {
-            item: format_ref(&c.item),
-            vault: c.vault,
-            title: c.title,
-            brand: c.brand,
-            last4: c.last4,
-            expiry: c.expiry,
-            cardholder: c.cardholder,
-            billing: c.billing.as_ref().map(format_ref),
-            fields: c.fields,
-        }
-    }
 }
 
 /// The kinds a `forms` request asks for: one or both, once each.
@@ -403,24 +114,6 @@ pub(super) fn form_fields(mut fields: Vec<String>) -> Result<Vec<String>, Refusa
         ));
     }
     Ok(fields)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(in super::super) enum Code {
-    Forbidden,
-    Locked,
-    NotFound,
-    DomainMismatch,
-    BadRequest,
-    RateLimited,
-    /// A passkey the registration excluded is already saved.
-    Exists,
-    /// A passkey ceremony stopped by `passkey-cancel`.
-    Cancelled,
-    /// A site's rules allow only weak generated passwords.
-    Weak,
-    Failed,
 }
 
 pub(in super::super) struct Refusal {
@@ -522,10 +215,6 @@ pub(in super::super) fn parse_ref(text: &str) -> Result<LoginRef, Refusal> {
         }),
         _ => Err(Refusal::bad("invalid ref")),
     }
-}
-
-pub(in super::super) fn format_ref(login: &LoginRef) -> String {
-    format!("{}:{}", login.vault, login.item)
 }
 
 /// One frame: the length prefix and the JSON. A reply over the browser's

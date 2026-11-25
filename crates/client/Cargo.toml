@@ -1,6 +1,6 @@
 [package]
 name = "deadbolt-client"
-description = "The daemon's control protocol, its file locations, and a client that starts and talks to it."
+description = "The daemon's file locations, and a client that starts and talks to it over the control protocol (deadbolt-proto)."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 deadbolt-core = { path = "../core" }
+deadbolt-proto = { path = "../proto" }
 blake3 = "1.8"
 data-encoding = "2.11.1"
 nix = { version = "0.31", default-features = false, features = ["socket"] }

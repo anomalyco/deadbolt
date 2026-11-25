@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use zeroize::Zeroizing;
 
 use super::{
@@ -14,10 +15,10 @@ use super::{
     VaultInfo,
 };
 
-/// A secret on the wire: wiped on drop; Debug leaves it out.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Secret(Zeroizing<String>);
+/// A secret on the wire: wiped on drop; Debug leaves it out. A newtype, so
+/// its JSON is the string itself.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Secret(#[ts(as = "String")] Zeroizing<String>);
 
 impl Secret {
     pub fn new(value: impl Into<String>) -> Self {

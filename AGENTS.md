@@ -7,6 +7,7 @@ internal APIs directly and update their callers.
 - `crates/core`: signed vault log, membership and item rules.
 - `crates/store`: encrypted redb persistence and passphrase derivation.
 - `crates/net`: iroh transport, membership gates, sync and pairing.
+- `crates/proto`: the wire schemas, pure data: the daemon control protocol (`daemon`, re-exported as `deadbolt_client::protocol`) and the extension's native messaging (`browser`). `bun run gen:proto` writes the browser types to `extension/src/gen/proto.ts`; CI fails when it's stale.
 - `crates/cli`: commands, background daemon, control socket, deterministic simulator and `deadbolt update` (`src/update.rs`, docs/releasing.md "Updater").
 - `crates/app`: the Rune desktop app, its own binary `deadbolt-ui` (`src/main.rs`; Deadbolt.app's `Contents/MacOS/Deadbolt`). `deadbolt` is always headless and never links it; `deadbolt app` finds and opens `deadbolt-ui`, `deadbolt ui` runs it with Rune's flags (docs/app.md).
 - `crates/enclave`: the macOS Touch ID helper (`deadbolt-enclave`, Swift) and its SHA-256 pin, built once for both `deadbolt` and `deadbolt-ui` (docs/touch-id.md).
