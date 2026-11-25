@@ -9,7 +9,6 @@ where detection disagrees with what the pages declare. Not part of
 bun corpus/crawl.ts --top 50            # shake-out run
 bun corpus/crawl.ts --top 1000          # resumable: rerun to continue
 bun corpus/report.ts                    # report.md, report.json, contact.html
-bun corpus/compare.ts                   # engine vs detect.ts: compare.md, compare.json
 ```
 
 `corpus/frame-logins.txt` lists sign-ins whose form is in a frame of the
@@ -21,8 +20,7 @@ detector's kind and roles) and fails unless each has a frame login the
 inline menu serves. `--all` lists the frames of every crawled page instead.
 
 `bun corpus/sweep.ts` is the real-site sweep: the extension itself (an e2e
-build, native with `e2e/fake-host.py` or `--standalone` with a throwaway
-vault) on the pages in `corpus/sweep-sites.txt` (about 330 sign-ins: banks,
+build, talking to `e2e/fake-host.py`) on the pages in `corpus/sweep-sites.txt` (about 330 sign-ins: banks,
 email, dev tools, shopping, SaaS, streaming, government, the crawl's reached
 pages and its hard list). On each page it checks what a person gets: whether
 a frame reports a login form, whether clicking the field opens the menu with
@@ -71,13 +69,6 @@ Needs Playwright's Chromium (`bunx playwright-core install chromium`).
 - `labels.ts`: weak labels from the page's own markup (autocomplete tokens,
   then `type=password`/`email`, then name/id hints) and how they compare with
   the detector's roles. They are hints, not ground truth.
-- `snapshot.ts`: collects the autofill engine's value-free Snapshot
-  (`crates/autofill`) in each frame; `crawl.ts` saves one per page as
-  `snapshots/<page>.json`, and each probed input carries its snapshot `fid`.
-- `compare.ts`: replays `snapshots/` with
-  `cargo run -p deadbolt-autofill --bin replay` and compares the engine with
-  the recorded `scanPage()` result and the weak labels: page kind, field
-  roles, and on each disagreement which one matches the markup.
 - `step2.ts` (`--step2`): on identifier-first pages, types the reserved,
   undeliverable `deadbolt.corpus@example.com` (RFC 2606) into the identifier
   field and presses the detected submit control once per site, then records
