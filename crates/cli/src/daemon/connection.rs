@@ -172,49 +172,47 @@ impl Daemon {
             closed,
         };
         let mut stop = false;
-        let screened = match &request {
-            Ok(request) => self.screen(peer.as_ref().ok(), &request.command),
-            Err(_) => None,
-        };
-        let result = match (request, screened) {
-            (Ok(_), Some(screened)) => screened,
-            (
-                Ok(Request {
-                    v,
-                    command: Command::Watch { app },
-                    ..
-                }),
-                None,
-            ) if v == protocol() && socket == macos_autofill::SocketKind::Control => {
-                return self.watch(&conversation, app).await;
+        // The protocol first, then (in `answer`) the socket's access rules,
+        // and only then a run's screen: a request either of them refuses
+        // never reaches a run's capability, so it can't use one up.
+        let result = match request {
+            Err(error) => Err(error),
+            Ok(request)
+                if request.v != protocol()
+                    && !matches!(request.command, Command::Status | Command::Stop) =>
+            {
+                Err(fail(
+                    ErrorCode::Version,
+                    format!(
+                        "the daemon speaks protocol {}, not {}; run `deadbolt debug daemon stop`",
+                        protocol(),
+                        request.v
+                    ),
+                ))
             }
-            (Ok(request), None) => {
-                let asked_stop = matches!(request.command, Command::Stop);
-                let always = matches!(request.command, Command::Status | Command::Stop);
-                if request.v != protocol() && !always {
-                    Err(fail(
-                        ErrorCode::Version,
-                        format!(
-                            "the daemon speaks protocol {}, not {}; run `deadbolt debug daemon stop`",
-                            protocol(),
-                            request.v
-                        ),
-                    ))
-                } else {
-                    let (result, entry) = self
-                        .clone()
-                        .answer(socket, peer, request, &conversation)
-                        .await;
-                    // Recorded before the reply goes: a client that never
-                    // reads it, or the daemon stopping, can't lose the entry.
-                    if let Some(entry) = entry {
-                        self.record(entry);
-                    }
-                    stop = asked_stop && result.is_ok();
-                    result
+            Ok(Request {
+                command: Command::Watch { app },
+                ..
+            }) if socket == macos_autofill::SocketKind::Control => {
+                match self.screen(peer.as_ref().ok(), &Command::Watch { app }) {
+                    Some(screened) => screened,
+                    None => return self.watch(&conversation, app).await,
                 }
             }
-            (Err(error), _) => Err(error),
+            Ok(request) => {
+                let asked_stop = matches!(request.command, Command::Stop);
+                let (result, entry) = self
+                    .clone()
+                    .answer(socket, peer, request, &conversation)
+                    .await;
+                // Recorded before the reply goes: a client that never
+                // reads it, or the daemon stopping, can't lose the entry.
+                if let Some(entry) = entry {
+                    self.record(entry);
+                }
+                stop = asked_stop && result.is_ok();
+                result
+            }
         };
         let message = match result {
             Ok(reply) => Message::Ok { reply },

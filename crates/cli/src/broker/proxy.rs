@@ -37,6 +37,9 @@ use super::redact::Redactor;
 
 pub type Body = BoxBody<Bytes, io::Error>;
 
+/// How long a connection may take to send a request's head.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Why a request isn't forwarded. The reason is fixed text: nothing of the
 /// request, and never a secret, is echoed.
 #[derive(Debug)]
@@ -332,8 +335,12 @@ impl Broker {
             let broker = self.clone();
             async move { Ok::<_, Infallible>(broker.handle(allowed, request).await) }
         });
+        // A refused client gets its one answer and the socket closes; nobody
+        // holds a connection open without sending its head.
         let served = http1::Builder::new()
             .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT)
+            .keep_alive(allowed)
             .serve_connection(TokioIo::new(stream), service)
             .await;
         if let Err(error) = served {
@@ -370,6 +377,12 @@ impl Broker {
         }
         if !hygiene::path_allowed(&route.prefixes, &route.globs, rest) {
             return Err(Refusal::forbidden("the path is outside the route's scope"));
+        }
+        let scoped = !(route.prefixes.is_empty() && route.globs.is_empty());
+        if scoped && hygiene::names_another_object(request.headers()) {
+            return Err(Refusal::forbidden(
+                "a copy or rename source isn't allowed on a path-scoped route",
+            ));
         }
         hygiene::check_headers(request.headers(), route.secret_header())
             .map_err(Refusal::bad_request)?;
@@ -413,6 +426,12 @@ impl Broker {
         for name in [header::HOST, header::CONTENT_LENGTH, header::EXPECT] {
             headers.remove(name);
         }
+        // The redactor reads the answer as it comes: compressed, a reflected
+        // secret would pass it unseen.
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
         let (url, body) = match &route.auth {
             Auth::Bearer { header, real, .. } => {
                 headers.remove(header::AUTHORIZATION);
@@ -448,6 +467,17 @@ impl Broker {
             return Err(Refusal {
                 status: StatusCode::BAD_GATEWAY,
                 why: "the upstream answered with a redirect, which the broker doesn't follow",
+            });
+        }
+        let encoded = response
+            .headers()
+            .get_all(header::CONTENT_ENCODING)
+            .iter()
+            .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"));
+        if encoded {
+            return Err(Refusal {
+                status: StatusCode::BAD_GATEWAY,
+                why: "the upstream answered compressed, which the broker can't redact",
             });
         }
         Ok(route.relay(response))

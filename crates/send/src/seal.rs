@@ -46,13 +46,22 @@ fn nonce(prefix: &[u8], last: bool, index: u64) -> [u8; 24] {
 }
 
 /// Seals `plaintext` under the content key `key`, behind `header`.
+/// Refuses a plaintext whose bundle would be over [`MAX_SEALED_LEN`], which
+/// no receiver would accept.
 pub fn seal(key: &[u8; 32], header: &PolicyHeader, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let chunks = plaintext.len().div_ceil(CHUNK_LEN).max(1);
+    let len = sealed_len(plaintext.len(), chunks);
+    if len.is_none_or(|len| len > MAX_SEALED_LEN) {
+        return Err(Error::TooLarge {
+            len: len.unwrap_or(usize::MAX),
+            max: MAX_SEALED_LEN,
+        });
+    }
     let cipher = cipher(key);
     let head = header.encode();
     let mut prefix = [0u8; PREFIX_LEN];
     getrandom::fill(&mut prefix).map_err(|e| Error::Rng(e.to_string()))?;
-    let chunks = plaintext.len().div_ceil(CHUNK_LEN).max(1);
-    let mut out = Vec::with_capacity(SEAL_OVERHEAD + plaintext.len() + chunks * TAG_LEN);
+    let mut out = Vec::with_capacity(len.unwrap_or_default());
     out.extend_from_slice(&head);
     out.extend_from_slice(&prefix);
     for index in 0..chunks {
@@ -68,6 +77,15 @@ pub fn seal(key: &[u8; 32], header: &PolicyHeader, plaintext: &[u8]) -> Result<V
         out.extend_from_slice(&tag);
     }
     Ok(out)
+}
+
+/// The sealed length of `plaintext_len` bytes in `chunks` chunks, `None`
+/// past `usize`.
+fn sealed_len(plaintext_len: usize, chunks: usize) -> Option<usize> {
+    chunks
+        .checked_mul(TAG_LEN)?
+        .checked_add(plaintext_len)?
+        .checked_add(SEAL_OVERHEAD)
 }
 
 /// Opens what [`seal`] sealed, returning its authenticated header. Fails on
@@ -148,6 +166,25 @@ mod tests {
             assert_eq!(header, HEADER);
             assert_eq!(*opened, plaintext, "len {len}");
         }
+    }
+
+    #[test]
+    fn a_bundle_over_the_limit_is_never_sealed() {
+        // The largest plaintext whose bundle fits, and one byte more.
+        let fits = |len: usize| sealed_len(len, len.div_ceil(CHUNK_LEN).max(1)).unwrap();
+        let mut largest = MAX_SEALED_LEN - SEAL_OVERHEAD;
+        while fits(largest) > MAX_SEALED_LEN {
+            largest -= 1;
+        }
+        let sealed = seal(&KEY, &HEADER, &vec![0u8; largest]).unwrap();
+        assert_eq!(sealed.len(), fits(largest));
+        assert!(open(&KEY, &sealed).is_ok());
+        let err = seal(&KEY, &HEADER, &vec![0u8; largest + 1]).unwrap_err();
+        assert!(
+            matches!(err, Error::TooLarge { len, max } if len > max && max == MAX_SEALED_LEN),
+            "{err}"
+        );
+        assert_eq!(sealed_len(usize::MAX, usize::MAX / CHUNK_LEN + 1), None);
     }
 
     #[test]

@@ -68,6 +68,21 @@ pub fn owner_in_subtree(root: u32, connection: LoopbackConnection) -> Option<u32
     walk(root, |pid| socket.held_by(pid))
 }
 
+/// Like [`owner_in_subtree`], but the owner must pass `confirm` and then,
+/// asked again of the same socket, still hold it: whatever `confirm` read
+/// about the owner (its start time, its ancestry) is about the process that
+/// holds the socket now, not one whose pid was reused mid-check. The socket
+/// is found once.
+pub fn owner_in_subtree_confirmed(
+    root: u32,
+    connection: LoopbackConnection,
+    confirm: &mut dyn FnMut(u32) -> bool,
+) -> Option<u32> {
+    let socket = Socket::find(connection)?;
+    let owner = walk(root, |pid| socket.held_by(pid))?;
+    (confirm(owner) && socket.held_by(owner)).then_some(owner)
+}
+
 /// Whether `pid` holds the client end of `connection`.
 pub fn holds(pid: u32, connection: LoopbackConnection) -> bool {
     Socket::find(connection).is_some_and(|socket| socket.held_by(pid))
@@ -682,6 +697,21 @@ mod tests {
         assert_eq!(owner_in_subtree(child_pid, connection), Some(child_pid));
         // It is this process's descendant, so this tree finds it too.
         assert_eq!(owner_in_subtree(me, connection), Some(child_pid));
+        // The owner is handed to the check, and refused if it fails it.
+        let mut asked = Vec::new();
+        let mut confirm = |pid| {
+            asked.push(pid);
+            true
+        };
+        assert_eq!(
+            owner_in_subtree_confirmed(me, connection, &mut confirm),
+            Some(child_pid)
+        );
+        assert_eq!(asked, [child_pid]);
+        assert_eq!(
+            owner_in_subtree_confirmed(me, connection, &mut |_| false),
+            None
+        );
         assert!(subtree(me).contains(&child_pid));
         assert!(!subtree(outsider.id()).contains(&child_pid));
 

@@ -32,6 +32,18 @@ const SINGLE: [&str; 9] = [
     "x-amz-decoded-content-length",
 ];
 
+/// S3 headers that name a second object to read (CopyObject, UploadPartCopy,
+/// RenameObject): the route's path scope can't see it, so a scoped route
+/// refuses them.
+const SOURCE_HEADERS: [&str; 2] = ["x-amz-copy-source", "x-amz-rename-source"];
+
+/// Whether the request names an object besides its path's.
+pub fn names_another_object(headers: &HeaderMap) -> bool {
+    SOURCE_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name))
+}
+
 /// Headers the broker sets itself, which can't carry a route's secret.
 pub fn is_reserved(name: &str) -> bool {
     HOP_BY_HOP.contains(&name)
@@ -67,7 +79,7 @@ fn clean(text: &str, escaped: impl Fn(u8) -> bool) -> Result<(), &'static str> {
                 };
                 let byte = hi << 4 | lo;
                 if byte < 0x20 || byte == 0x7f || !escaped(byte) {
-                    return Err("an escaped dot, slash, backslash or control character");
+                    return Err("an escaped dot, slash, backslash, semicolon or control character");
                 }
                 i += 3;
             }
@@ -81,12 +93,13 @@ fn clean(text: &str, escaped: impl Fn(u8) -> bool) -> Result<(), &'static str> {
 
 /// A canonical path: starts with `/`, no empty, `.` or `..` segment (a
 /// trailing `/` aside), no `;` parameters, and no escape that decodes to
-/// `.`, `/`, `\\` or a control character.
+/// `.`, `/`, `\\`, `;` or a control character: an upstream that decodes
+/// once more (`%3b` to a `;` matrix parameter) mustn't see another path.
 pub fn check_path(path: &str) -> Result<(), &'static str> {
     let Some(rest) = path.strip_prefix('/') else {
         return Err("not absolute");
     };
-    clean(path, |b| !matches!(b, b'.' | b'/' | b'\\'))?;
+    clean(path, |b| !matches!(b, b'.' | b'/' | b'\\' | b';'))?;
     if path.contains(';') {
         return Err("a ;-parameter");
     }
@@ -251,6 +264,8 @@ mod tests {
             "/v1/%0a",
             "/v1\\admin",
             "/v1;x=1",
+            "/v1/secret%3b.json",
+            "/v1/secret%3B.json",
             "/v1/%zz",
             "/v1/%2",
             "/v1#frag",

@@ -51,9 +51,30 @@ pub struct Facts {
     pub start: Start,
 }
 
+/// A parent whose facts can't be read, as `hidepid` explains it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(target_os = "linux", test)),
+    expect(dead_code, reason = "only Linux's hidepid proves a hidden parent")
+)]
+pub enum Hidden {
+    /// Hidden, and no visible process started it: the walk has reached the
+    /// system's processes.
+    System,
+    /// Hidden, started by this visible process, where the walk goes on.
+    Parent(u32),
+}
+
 /// Reads [`Facts`] by pid; the OS in the daemon, a table in tests.
 pub trait ProcessFacts {
     fn facts(&self, pid: u32) -> Option<Facts>;
+
+    /// Why `parent`, whose facts didn't read, is out of sight while its
+    /// child `(child, child_start)` still names it: `None` unless that's
+    /// proven (Linux's `hidepid`).
+    fn hidden(&self, _parent: u32, _child: u32, _child_start: Start) -> Option<Hidden> {
+        None
+    }
 }
 
 /// The running system's processes.
@@ -81,10 +102,21 @@ impl ProcessFacts for OsProcesses {
     fn facts(&self, pid: u32) -> Option<Facts> {
         // `stat` finds the name's end with `rfind(')')`, so a name holding
         // spaces or parentheses can't shift the fields after it.
+        // A thread-group leader that exited while its other threads run is
+        // a zombie, still alive: `stat` reads it through them.
         let stat = deadbolt_client::peer::linux::stat(pid)?;
         Some(Facts {
             ppid: stat.ppid,
             start: (stat.start_ticks, 0),
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn hidden(&self, parent: u32, child: u32, child_start: Start) -> Option<Hidden> {
+        use deadbolt_client::peer::linux;
+        Some(match linux::hidden_parent(parent, child, child_start.0)? {
+            linux::Hidden::SystemBoundary => Hidden::System,
+            linux::Hidden::VisibleParent(pid) => Hidden::Parent(pid),
         })
     }
 
@@ -117,6 +149,14 @@ pub enum Taint<'a> {
     Unknown,
 }
 
+/// Why a run wasn't ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unregister {
+    NoSuchRun,
+    /// The id is a run's, but the caller isn't its process.
+    NotItsProcess,
+}
+
 /// The runs registered now.
 #[derive(Debug, Default)]
 pub struct TaintTable {
@@ -147,15 +187,26 @@ impl TaintTable {
     }
 
     /// Ends the run `run_id` names, comparing it with every entry in
-    /// constant time, and returns it.
-    pub fn unregister(&mut self, run_id: &[u8; 16]) -> Option<TaintEntry> {
+    /// constant time, and returns it. Only the run's own process, `caller`
+    /// by `(pid, start)`, may end it: the id alone, leaked to another
+    /// process, isn't enough.
+    pub fn unregister(
+        &mut self,
+        run_id: &[u8; 16],
+        caller: Option<(u32, Start)>,
+    ) -> Result<TaintEntry, Unregister> {
         let mut found = None;
         for (index, entry) in self.entries.iter().enumerate() {
             if bool::from(entry.run_id.ct_eq(run_id)) {
                 found = Some(index);
             }
         }
-        found.map(|i| self.entries.swap_remove(i))
+        let index = found.ok_or(Unregister::NoSuchRun)?;
+        let entry = &self.entries[index];
+        if caller != Some((entry.root_pid, entry.root_start)) {
+            return Err(Unregister::NotItsProcess);
+        }
+        Ok(self.entries.swap_remove(index))
     }
 
     /// Drops the runs whose process is gone (exited, or its pid reused).
@@ -200,8 +251,30 @@ impl TaintTable {
                 return Taint::Unknown;
             }
             let Some(parent) = facts.facts(me.ppid) else {
-                // Exited between reads, or out of sight: the walk ends.
-                return Taint::Clean;
+                // init, or a process `hidepid` hides, ends the walk. A parent
+                // that is merely unreadable (exited between reads, a zombie
+                // leader) proves nothing: unknown, not clean.
+                if me.ppid == 1 {
+                    return Taint::Clean;
+                }
+                match facts.hidden(me.ppid, pid, me.start) {
+                    Some(Hidden::System) => return Taint::Clean,
+                    Some(Hidden::Parent(visible)) => {
+                        if !seen.insert(visible) {
+                            return Taint::Unknown;
+                        }
+                        let Some(grand) = facts.facts(visible) else {
+                            return Taint::Unknown;
+                        };
+                        if grand.start > me.start {
+                            return Taint::Clean;
+                        }
+                        pid = visible;
+                        me = grand;
+                        continue;
+                    }
+                    None => return Taint::Unknown,
+                }
             };
             if parent.start > me.start {
                 // The pid is someone new's; the real parent is gone.
@@ -276,15 +349,20 @@ impl Daemon {
     pub(super) fn screen(&self, peer: Option<&Peer>, command: &Command) -> Option<Result<Reply>> {
         let mut taints = self.taints.lock().unwrap_or_else(|e| e.into_inner());
         if let Command::RunUntaint { run } = command {
+            let caller = peer.and_then(|p| Some((p.pid, caller_start(p, &OsProcesses)?)));
             let ended = deadbolt_engine::unhex::<16>(run.expose())
-                .ok()
-                .and_then(|run| taints.unregister(&run));
+                .map_err(|_| Unregister::NoSuchRun)
+                .and_then(|run| taints.unregister(&run, caller));
             return Some(match ended {
-                Some(entry) => {
+                Ok(entry) => {
                     tracing::debug!(lasted = ?entry.created_at.elapsed(), "a run ended");
                     Ok(Reply::Done)
                 }
-                None => Err(fail(ErrorCode::NotFound, "no such run")),
+                Err(Unregister::NotItsProcess) => Err(fail(
+                    ErrorCode::Forbidden,
+                    "only the run's own process may end it",
+                )),
+                Err(Unregister::NoSuchRun) => Err(fail(ErrorCode::NotFound, "no such run")),
             });
         }
         let taint_run = matches!(command, Command::RunTaint);
@@ -339,6 +417,9 @@ impl Daemon {
         }
     }
 }
+
+#[cfg(test)]
+mod screen_tests;
 
 #[cfg(test)]
 mod tests {
@@ -415,11 +496,90 @@ mod tests {
         let run = table.register(20, (20, 0), None).unwrap();
         let mut wrong = run;
         wrong[0] ^= 1;
-        assert!(table.unregister(&wrong).is_none());
+        let root = Some((20, (20, 0)));
+        assert_eq!(
+            table.unregister(&wrong, root).unwrap_err(),
+            Unregister::NoSuchRun
+        );
         assert!(tainted(&table, &facts, 30));
-        assert_eq!(table.unregister(&run).unwrap().root_pid, 20);
+        assert_eq!(table.unregister(&run, root).unwrap().root_pid, 20);
         assert!(table.is_empty());
         assert!(!tainted(&table, &facts, 30));
+    }
+
+    /// The run id is the run's process's to use: another process that learned
+    /// it (its child, a reused pid, nobody the daemon could read) can't end
+    /// the run and leave its descendants untainted.
+    #[test]
+    fn only_the_runs_own_process_ends_it() {
+        let facts = tree();
+        let mut table = TaintTable::default();
+        let run = table.register(20, (20, 0), None).unwrap();
+        for caller in [Some((30, (30, 0))), Some((20, (500, 0))), None] {
+            assert_eq!(
+                table.unregister(&run, caller).unwrap_err(),
+                Unregister::NotItsProcess,
+                "{caller:?}"
+            );
+            assert!(tainted(&table, &facts, 30));
+        }
+        assert!(table.unregister(&run, Some((20, (20, 0)))).is_ok());
+        assert!(table.is_empty());
+    }
+
+    /// A parent that can't be read and isn't init is no proof the walk ended:
+    /// on Linux a thread-group leader that exited while its threads run is a
+    /// zombie that `/proc` once read as gone, and a run's child could hide
+    /// behind it.
+    #[test]
+    fn an_unreadable_parent_other_than_init_is_unknown() {
+        let mut table = TaintTable::default();
+        table.register(20, (20, 0), None).unwrap();
+        // 30's parent 25 (a zombie leader under the run) reads as nothing.
+        let facts = Table::new(&[(1, 0, 1), (20, 1, 20), (30, 25, 30)]);
+        assert!(matches!(
+            table.check_ancestry(&facts, 30, (30, 0)),
+            Taint::Unknown
+        ));
+        // Reparented to init, a missing pid 1 still ends the walk clean.
+        let orphan = Table::new(&[(20, 10, 20), (30, 1, 30)]);
+        assert!(matches!(
+            table.check_ancestry(&orphan, 30, (30, 0)),
+            Taint::Clean
+        ));
+    }
+
+    /// `hidepid`: a hidden parent the OS proves is the system's ends the
+    /// walk; one a visible process started is walked through.
+    #[test]
+    fn a_hidden_parent_is_walked_through_or_ends_at_the_system() {
+        struct Hiding(Table, Option<Hidden>);
+        impl ProcessFacts for Hiding {
+            fn facts(&self, pid: u32) -> Option<Facts> {
+                self.0.facts(pid)
+            }
+            fn hidden(&self, parent: u32, child: u32, start: Start) -> Option<Hidden> {
+                (parent == 25 && child == 30 && start == (30, 0)).then_some(self.1?)
+            }
+        }
+        let mut table = TaintTable::default();
+        table.register(20, (20, 0), None).unwrap();
+        let rows = || Table::new(&[(1, 0, 1), (20, 1, 20), (30, 25, 30)]);
+        let through = Hiding(rows(), Some(Hidden::Parent(20)));
+        assert!(matches!(
+            table.check_ancestry(&through, 30, (30, 0)),
+            Taint::Run(_)
+        ));
+        let system = Hiding(rows(), Some(Hidden::System));
+        assert!(matches!(
+            table.check_ancestry(&system, 30, (30, 0)),
+            Taint::Clean
+        ));
+        let unproven = Hiding(rows(), None);
+        assert!(matches!(
+            table.check_ancestry(&unproven, 30, (30, 0)),
+            Taint::Unknown
+        ));
     }
 
     #[test]

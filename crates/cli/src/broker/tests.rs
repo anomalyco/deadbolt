@@ -23,6 +23,8 @@ use super::config::{BrokerAuth, BrokerConfig, BrokerRoute};
 use super::hygiene;
 use crate::daemon::taint::{OsProcesses, ProcessFacts};
 
+mod hardening;
+
 const TOKEN: &str = "sk-real-token-0123456789abcdef";
 const PLACEHOLDER: &str = "db_ph_0123456789abcdef0123456789abcdef";
 const ACCESS_KEY: &str = "AKIAREALKEY000000001";
@@ -120,6 +122,37 @@ async fn respond(
             .headers_mut()
             .insert("x-echo", sent.parse().unwrap());
         *response.body_mut() = Full::new(Bytes::from(format!("you sent: {sent}")));
+    } else if path.ends_with("/echo64") {
+        // Reflected the way a debug page or JWT-ish blob would: in base64,
+        // inside a longer value.
+        let sent = seen.header("authorization").unwrap_or_default();
+        let blob = format!("{{\"auth\":\"{sent}\"}}");
+        response.headers_mut().insert(
+            "x-echo",
+            data_encoding::BASE64URL_NOPAD
+                .encode(blob.as_bytes())
+                .parse()
+                .unwrap(),
+        );
+        *response.body_mut() = Full::new(Bytes::from(format!(
+            "auth={}",
+            data_encoding::BASE64.encode(sent.as_bytes())
+        )));
+    } else if path.ends_with("/leak") {
+        // The secret key, URL-encoded with lower-case hex.
+        let lower: String = SECRET_KEY
+            .bytes()
+            .map(|b| match b {
+                b'/' => "%2f".to_string(),
+                b'+' => "%2b".to_string(),
+                b => (b as char).to_string(),
+            })
+            .collect();
+        *response.body_mut() = Full::new(Bytes::from(format!("key={lower}")));
+    } else if path.ends_with("/gzip") {
+        response
+            .headers_mut()
+            .insert("content-encoding", "gzip".parse().unwrap());
     } else if path.starts_with("/bucket") {
         if verify_sigv4(&seen) {
             *response.body_mut() = Full::new(Bytes::from_static(b"signed"));
