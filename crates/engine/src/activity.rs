@@ -91,6 +91,8 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::BreachChecksSet { .. } => (T::Never, "breach-checks-set"),
         C::SshGenerate { .. } => (T::Always, "ssh-generate"),
         C::SshInspect { .. } => (T::Always, "ssh-inspect"),
+        C::RunTaint => (T::Always, "run-taint"),
+        C::RunUntaint { .. } => (T::Always, "run-untaint"),
     }
 }
 

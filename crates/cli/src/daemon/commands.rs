@@ -490,6 +490,9 @@ impl Daemon {
             command @ (Command::PasskeyList { .. }
             | Command::PasskeyCreate { .. }
             | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,
+            Command::RunTaint | Command::RunUntaint { .. } => {
+                bail!("runs are answered with the caller")
+            }
             Command::Resolve { .. }
             | Command::Health { .. }
             | Command::HealthIgnore { .. }

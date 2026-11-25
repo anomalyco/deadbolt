@@ -9,7 +9,8 @@
 //!   authenticator; [`generate`]: passwords made for a page's field;
 //!   [`secrets`]: secret references for commands; [`ssh_keys`]: SSH keys
 //!   made, imported and described; [`activity`]: the Activity entries a
-//!   request makes, and the [`activity::Ledger`] keeping them in budget.
+//!   request makes, and the [`activity::Ledger`] keeping them in budget;
+//!   [`cap`]: the capabilities a caller holds, which a lock wipes.
 //!
 //! The host owns everything else: the sealed store on disk, the network,
 //! the control socket, prompts and timers. Time comes in through a
@@ -18,6 +19,7 @@
 
 pub mod activity;
 pub mod autofill;
+pub mod cap;
 pub mod clock;
 pub mod forms;
 pub mod generate;
