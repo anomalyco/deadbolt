@@ -1661,6 +1661,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "deadbolt-core",
+ "deadbolt-send",
  "getrandom 0.4.3",
  "hmac",
  "quick-xml 0.42.0",

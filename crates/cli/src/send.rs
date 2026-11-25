@@ -16,8 +16,8 @@ use clap::{ArgMatches, Args, FromArgMatches, Subcommand};
 use data_encoding::{BASE64, HEXLOWER};
 use deadbolt_net::{QrStyle, render_qr};
 use deadbolt_send::{
-    Bundle, Entry, Group, LINK_BASE, MAX_SEALED_LEN, Node, SendTicket, SenderAddr, random_secret,
-    seal,
+    Bundle, Entry, Group, LINK_BASE, MAX_SEALED_LEN, Node, PolicyHeader, SEAL_OVERHEAD, SendTicket,
+    SenderAddr, random_secret, seal,
 };
 use zeroize::Zeroizing;
 
@@ -389,8 +389,8 @@ pub async fn send(
     };
     let plaintext = bundle.encode();
     drop(bundle);
-    // Sealing adds 16 bytes per 64 KiB chunk and a 15-byte prefix.
-    if plaintext.len() + plaintext.len() / 4096 + 64 > MAX_SEALED_LEN {
+    // Sealing adds 16 bytes per 64 KiB chunk, a header and a prefix.
+    if plaintext.len() + plaintext.len() / 4096 + SEAL_OVERHEAD + 64 > MAX_SEALED_LEN {
         bail!(
             "too large to send: {} bytes, at most about {MAX_MB} MB",
             plaintext.len(),
@@ -398,7 +398,13 @@ pub async fn send(
     }
     let key = random_secret()?;
     let secret = random_secret()?;
-    let sealed = seal(&key, &plaintext)?;
+    // The daemon counts opens and enforces its own expiry; the header carries
+    // the same policy, authenticated, to the receiver.
+    let header = PolicyHeader {
+        expires_unix: config::now().saturating_add(ttl.as_secs()),
+        multi_open: args.opens > 1,
+    };
+    let sealed = seal(&key, &header, &plaintext)?;
     drop(plaintext);
 
     let label = args.title.clone().unwrap_or_else(|| label(&names));
