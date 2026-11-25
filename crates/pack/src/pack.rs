@@ -10,6 +10,8 @@
 //! trailer  = BLAKE3(every prior byte)                                   = pack_hash
 //! Index    = sorted (key_hash 16 || head_off u64_be || head_len u32_be || secret_off u64_be || secret_len u32_be)
 //!            key_hash = BLAKE3-keyed(K_ix, key)[..16], for an item id, a site or an rp id
+//!            no (key_hash, head_off) twice; the items' records tile the bytes from the
+//!            index's end to the trailer, each Secret right after its Head
 //! ```
 //!
 //! Meta is opaque here (the checkpoint's frontier and clocks belong to the
@@ -216,7 +218,19 @@ pub fn encode(input: &PackInput, epoch_key: &[u8; KEY_LEN]) -> Result<EncodedPac
     if input.items.iter().any(|item| item.keys.is_empty()) {
         return Err(Error::InvalidInput("every pack item needs a lookup key"));
     }
-    let entries: usize = input.items.iter().map(|item| item.keys.len()).sum();
+    // One index entry per distinct key of an item: a key given twice would
+    // otherwise find the item twice.
+    let item_keys: Vec<Vec<&[u8]>> = input
+        .items
+        .iter()
+        .map(|item| {
+            let mut keys: Vec<&[u8]> = item.keys.iter().map(Vec::as_slice).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            keys
+        })
+        .collect();
+    let entries: usize = item_keys.iter().map(Vec::len).sum();
     let index_body = entries
         .checked_mul(ENTRY_LEN)
         .ok_or(Error::InvalidInput("index too large"))?;
@@ -257,8 +271,8 @@ pub fn encode(input: &PackInput, epoch_key: &[u8; KEY_LEN]) -> Result<EncodedPac
     let keys = PackKeys::derive(epoch_key, &input.vault, &input.epoch, &id);
 
     let mut index: Vec<([u8; KEY_HASH_LEN], &Layout)> = Vec::with_capacity(entries);
-    for (item, at) in input.items.iter().zip(&layout) {
-        index.extend(item.keys.iter().map(|key| (keys.key_hash(key), at)));
+    for (item, at) in item_keys.iter().zip(&layout) {
+        index.extend(item.iter().map(|key| (keys.key_hash(key), at)));
     }
     index.sort_by_key(|(hash, at)| (*hash, at.head_off));
     let mut index_plain = Zeroizing::new(Vec::with_capacity(index_body));
