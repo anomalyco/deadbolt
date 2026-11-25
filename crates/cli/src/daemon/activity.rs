@@ -53,14 +53,25 @@ impl Daemon {
         conv: &Conversation,
     ) -> (Result<Reply>, Option<ActivityEntry>) {
         let daemon = self.clone();
+        let kernel = peer.as_ref().ok().copied();
         let mut caller = tokio::task::spawn_blocking(move || daemon.callers.identify(peer))
             .await
             .unwrap_or_else(|_| caller::nobody());
         let draft = draft(&request.command, caller.class);
         let command = request.command;
-        let mut result = match super::macos_autofill::check_access(socket, &caller, &command) {
-            Err(error) => Err(error),
-            Ok(()) => match command {
+        // A run's screen answers what it stops; a refusal there (a process
+        // inside a run reaching for a secret) is an entry, its own runs'
+        // registrations aren't.
+        let mut recorded = true;
+        let screened = match super::macos_autofill::check_access(socket, &caller, &command) {
+            Err(error) => Some(Err(error)),
+            Ok(()) => self.screen(kernel.as_ref(), &command).inspect(|screened| {
+                recorded = screened.is_err();
+            }),
+        };
+        let mut result = match screened {
+            Some(result) => result,
+            None => match command {
                 command @ Command::ActivityReport { .. } => self.report(&caller, command),
                 Command::Resolve { refs, purpose } => self.resolve(&caller, &refs, purpose),
                 command @ (Command::Health { .. }
@@ -81,7 +92,7 @@ impl Daemon {
             status.caller = caller.clone();
         }
         let entry = draft
-            .filter(|draft| draft.recorded(&result))
+            .filter(|draft| recorded && draft.recorded(&result))
             .map(|draft| draft.finish(caller, session::now(), &result));
         (result, entry)
     }

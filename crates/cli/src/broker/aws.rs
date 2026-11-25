@@ -45,7 +45,9 @@ pub fn credential_key(authorization: &str) -> Option<&str> {
         .and_then(|credential| credential.split('/').next())
 }
 
-/// A query's parameters, decoded.
+/// A query's parameters, decoded. A parameter named `X-Amz-*` once decoded
+/// (`%58-Amz-Security-Token`, `x-amz-%65xpires`) is refused: those are a
+/// presigned URL's, and the broker signs with headers only.
 fn parameters(query: &str) -> Result<Vec<(String, String)>, Refusal> {
     let text = |part: &str| {
         String::from_utf8(hygiene::decode(part))
@@ -56,7 +58,14 @@ fn parameters(query: &str) -> Result<Vec<(String, String)>, Refusal> {
         .filter(|pair| !pair.is_empty())
         .map(|pair| {
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-            Ok((text(name)?, text(value)?))
+            let name = text(name)?;
+            if name
+                .get(..6)
+                .is_some_and(|start| start.eq_ignore_ascii_case("x-amz-"))
+            {
+                return Err(Refusal::forbidden("presigned requests aren't brokered"));
+            }
+            Ok((name, text(value)?))
         })
         .collect()
 }
@@ -77,7 +86,8 @@ pub struct Target<'a> {
     pub query: Option<&'a str>,
 }
 
-/// An `aws-chunked` body's payload and trailers (names lower case).
+/// An `aws-chunked` body's payload and trailers (names lower case). The
+/// trailers must end with an empty line, and nothing may follow it.
 pub fn decode_aws_chunked(body: &[u8]) -> Result<Unchunked, &'static str> {
     let mut payload = Vec::with_capacity(body.len());
     let mut trailers = Vec::new();
@@ -91,7 +101,9 @@ pub fn decode_aws_chunked(body: &[u8]) -> Result<Unchunked, &'static str> {
             .ok_or("an aws-chunked chunk size isn't hex")?;
         rest = after;
         if size == 0 {
-            while let Some((field, after)) = line(rest) {
+            loop {
+                let (field, after) =
+                    line(rest).ok_or("an aws-chunked body doesn't end with an empty line")?;
                 rest = after;
                 if field.is_empty() {
                     break;
@@ -102,6 +114,9 @@ pub fn decode_aws_chunked(body: &[u8]) -> Result<Unchunked, &'static str> {
                     .split_once(':')
                     .ok_or("an aws-chunked trailer isn't name:value")?;
                 trailers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+            }
+            if !rest.is_empty() {
+                return Err("bytes follow an aws-chunked body's end");
             }
             return Ok((payload, trailers));
         }
@@ -143,15 +158,7 @@ impl SigV4 {
     /// Whether the caller signed with this run's placeholder key, in an
     /// `Authorization` header (presigned URLs aren't brokered).
     pub fn check_caller(&self, headers: &HeaderMap, query: Option<&str>) -> Result<(), Refusal> {
-        let presigned = query.is_some_and(|query| {
-            query.split('&').any(|pair| {
-                pair.get(..6)
-                    .is_some_and(|name| name.eq_ignore_ascii_case("x-amz-"))
-            })
-        });
-        if presigned {
-            return Err(Refusal::forbidden("presigned requests aren't brokered"));
-        }
+        parameters(query.unwrap_or_default())?;
         let key = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -188,7 +195,16 @@ impl SigV4 {
             let (payload, trailers) = decode_aws_chunked(&body).map_err(Refusal::bad_request)?;
             let declared = headers
                 .get("x-amz-decoded-content-length")
-                .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
+                .map(|value| {
+                    value
+                        .to_str()
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .ok_or(Refusal::bad_request(
+                            "x-amz-decoded-content-length isn't a length",
+                        ))
+                })
+                .transpose()?;
             if declared.is_some_and(|length| length != payload.len()) {
                 return Err(Refusal::bad_request(
                     "x-amz-decoded-content-length doesn't match the body",
@@ -329,5 +345,40 @@ mod tests {
         for bad in [&b"zz\r\nx"[..], b"5\r\nhel", b"5\r\nhelloXX0\r\n\r\n", b"5"] {
             assert!(decode_aws_chunked(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn an_aws_chunked_body_must_end_cleanly() {
+        for bad in [
+            // No empty line after the last chunk or its trailers.
+            &b"5\r\nhello\r\n0\r\n"[..],
+            b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:AAAA\r\n",
+            // Bytes smuggled after the end.
+            b"5\r\nhello\r\n0\r\n\r\nGET /admin HTTP/1.1\r\n\r\n",
+            b"5\r\nhello\r\n0\r\n\r\nx",
+        ] {
+            assert!(decode_aws_chunked(bad).is_err(), "{bad:?}");
+        }
+        assert!(decode_aws_chunked(b"5\r\nhello\r\n0\r\n\r\n").is_ok());
+    }
+
+    #[test]
+    fn x_amz_query_parameters_are_refused_however_they_are_escaped() {
+        for query in [
+            "X-Amz-Credential=x",
+            "%58-Amz-Security-Token=x",
+            "x-amz-%65xpires=60",
+            "a=1&%78%2D%61%6D%7A%2Dsignature=00",
+        ] {
+            let refused = parameters(query).unwrap_err();
+            assert_eq!(refused.status, hyper::StatusCode::FORBIDDEN, "{query}");
+        }
+        assert_eq!(
+            parameters("list-type=2&prefix=a%2Fb").unwrap(),
+            [
+                ("list-type".to_string(), "2".to_string()),
+                ("prefix".to_string(), "a/b".to_string())
+            ]
+        );
     }
 }

@@ -123,8 +123,10 @@ pub struct CapGrant {
 }
 
 impl CapGrant {
+    /// Past its expiry, or the clock is before it was issued: a clock set
+    /// back can't stretch a grant's life, so it fails closed.
     fn expired(&self, now_ms: u64) -> bool {
-        now_ms >= self.expires_ms
+        now_ms < self.issued_ms || now_ms >= self.expires_ms
     }
 
     fn exhausted(&self) -> bool {
@@ -380,6 +382,31 @@ mod tests {
         // Evicted as it was found.
         assert_eq!(
             caps.authorize(&at(0), &id, &CapCheck::Meta),
+            Err(CapError::Invalid)
+        );
+    }
+
+    #[test]
+    fn a_clock_set_back_ends_a_grant_instead_of_stretching_it() {
+        let mut caps = CapTable::new();
+        let id = caps
+            .mint(
+                &at(10_000),
+                CapVerb::Meta,
+                "run",
+                1_000,
+                None,
+                GestureKind::CliForeground,
+            )
+            .unwrap();
+        assert!(caps.authorize(&at(10_500), &id, &CapCheck::Meta).is_ok());
+        assert_eq!(caps.active_count(&at(9_999)), 0);
+        assert_eq!(
+            caps.authorize(&at(9_999), &id, &CapCheck::Meta),
+            Err(CapError::Expired)
+        );
+        assert_eq!(
+            caps.authorize(&at(10_500), &id, &CapCheck::Meta),
             Err(CapError::Invalid)
         );
     }

@@ -46,9 +46,14 @@ loopback host.
 
 ## How it works
 
-1. `deadbolt run` resolves every reference. It then registers itself with
-   the daemon (taint), so the broker and the command both run inside the
-   run.
+1. `deadbolt run` hardens itself the way the broker does (step 3) before
+   it resolves every reference. It then registers itself with the daemon
+   (taint), so the broker and the command both run inside the run. Only
+   this process, by `(pid, start time)`, can end the run: its id alone
+   isn't enough. Once the broker has the config, `deadbolt run` drops the
+   secrets only routes use, so it keeps (and masks in the command's
+   output) only the ones the command's variables hold. The command
+   inherits the zero core-dump limit.
 2. It starts `deadbolt broker --fd 0` with an empty environment, in its own
    process group, and writes a JSON config with the secrets and its own
    `(pid, start time)` to the broker's stdin.
@@ -60,7 +65,12 @@ loopback host.
    run's process and its descendants (`deadbolt_os::net`). On macOS it
    uses `proc_listchildpids` and `PROC_PIDFDSOCKETINFO`. On Linux it reads
    `/proc/net/tcp` and `/proc/<pid>/fd`. A connection from any other
-   process gets `403` before its request is read. This also covers a
+   process gets `403` before its request is read, and the connection
+   closes after that one answer. The owner found is then named by `(pid,
+   start time)`, its ancestry is walked back to the run by start time,
+   and it must still hold the socket afterwards, so a pid that exits and
+   is reused mid-check isn't let in. Any connection must send a request's
+   head within 10 s. This also covers a
    process of the same user that read the placeholder from `ps eww`. The
    lookup checks a few pids rather than every process on the system. On a
    Mac it takes about 10–30 µs. On Linux it is one exact `NETLINK_SOCK_DIAG`
@@ -70,10 +80,14 @@ loopback host.
 5. Each request is checked before its body is read:
    - The request target must be in origin form.
    - The path must be canonical. The broker refuses `//`, `.` or `..`
-     segments, `%2e`, `%2f`, `%5c`, `%00`, control characters,
+     segments, `%2e`, `%2f`, `%5c`, `%3b`, `%00`, control characters,
      backslashes and `;` parameters.
    - The query must be clean.
    - The route must allow the method and the path.
+   - A route with `prefix=` or `glob=` refuses `x-amz-copy-source` and
+     `x-amz-rename-source` outright: they name a second object (another
+     bucket's, a version) that the path scope can't see. Copy and rename
+     need a route with no path scope.
    - `Authorization`, `Host`, `Content-Length`, `Transfer-Encoding` and
      the signing headers may appear at most once each.
    - The caller must present the route's placeholder. The broker compares it
@@ -85,12 +99,20 @@ loopback host.
    token and host. They then sign the request again with the real key for
    the route's region and service, over the SHA-256 of the buffered body.
    `aws-chunked` bodies (`STREAMING-...`) are decoded first, and their
-   `x-amz-checksum-*` trailers become signed headers. Presigned URLs are
-   refused.
+   `x-amz-checksum-*` trailers become signed headers. The body must end
+   with an empty line and nothing after it, and an
+   `x-amz-decoded-content-length` that isn't a number is `400`. Presigned
+   URLs are refused: any query parameter named `X-Amz-*` once
+   percent-decoded.
 7. Redirects are never followed: any 3xx except 304 becomes `502`, without
-   its `Location`. A real secret reflected in a response header or body
-   comes back as `*`s of the same length, so `Content-Length` stays
-   correct.
+   its `Location`. The upstream is always asked for `Accept-Encoding:
+   identity`, and a compressed answer is `502`. A real secret reflected in
+   a response header or body comes back as `*`s of the same length, so
+   `Content-Length` stays correct. That covers the secret, its URL
+   encoding in either case of hex, and its base64 in the standard and
+   URL-safe alphabets, also inside a longer encoded value (`base64("Bearer
+   " + token)`). There, the one or two characters it shares with its
+   neighbours stay.
 8. The broker exits when the command ends (`deadbolt run` stops it) or
    when the run's process is gone (it checks every 250 ms).
 

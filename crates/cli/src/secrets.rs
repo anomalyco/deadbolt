@@ -358,6 +358,16 @@ async fn pump(
 /// its environment and exits with its code (128 + the signal if one ended
 /// it).
 pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitCode> {
+    // Before a secret is in memory: no core dump, not dumpable (Linux),
+    // no debugger (macOS, release builds). The command gets none of it
+    // but the core limit: Linux resets dumpable on its `execve`, macOS
+    // drops `PT_DENY_ATTACH` on the fork.
+    let hardening = deadbolt_os::mem::harden_process(deadbolt_os::mem::HardeningOptions {
+        deny_debugger: !cfg!(any(debug_assertions, test)),
+    });
+    for (protection, outcome) in hardening.failures() {
+        tracing::warn!("deadbolt run: {protection}: {outcome}");
+    }
     let mut vars = environment(&args)?;
     let routes = args
         .route
@@ -386,7 +396,7 @@ pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitC
             refs.push(r.clone());
         }
     }
-    let values = resolve(paths, refs, Purpose::Run, from_stdin).await?;
+    let mut values = resolve(paths, refs, Purpose::Run, from_stdin).await?;
     let (program, rest) = args
         .command
         .split_first()
@@ -403,6 +413,10 @@ pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitC
             None
         } else {
             let running = launch::launch(launch::config(&routes, &values)?).await?;
+            // The broker has its secrets now. Those only it uses go: the
+            // command never sees them, so its output can't hold them, and
+            // they aren't left in this process to mask.
+            only_in_env(&mut values, &vars);
             let url = format!("http://127.0.0.1:{}", running.port);
             vars.insert(
                 launch::BROKER_URL.to_string(),
@@ -427,6 +441,14 @@ pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitC
         tracing::debug!("ending the run: {error:#}");
     }
     result
+}
+
+/// Drops (and so wipes) the values no variable in `vars` references.
+fn only_in_env(values: &mut HashMap<String, ResolvedSecret>, vars: &IndexMap<String, EnvValue>) {
+    values.retain(|reference, _| {
+        vars.values()
+            .any(|value| matches!(value, EnvValue::Reference(r) if r == reference))
+    });
 }
 
 /// Registers this process as a run's (`run-taint`); the id ends it.
@@ -775,6 +797,47 @@ pub async fn read(paths: &Paths, args: ReadArgs, from_stdin: bool) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A secret only `--route` names goes to the broker and no further:
+    /// `deadbolt run` keeps (and masks) only what the command's variables use.
+    #[test]
+    fn secrets_only_the_broker_uses_are_dropped() {
+        let secret = |value: &str| ResolvedSecret {
+            vault: "v".into(),
+            item: "i".into(),
+            title: "t".into(),
+            field: "f".into(),
+            value: Secret::new(value),
+            file: false,
+        };
+        let mut values: HashMap<String, ResolvedSecret> = [
+            ("deadbolt://v/env/f", "env-secret-0123"),
+            ("deadbolt://v/both/f", "both-secret-0123"),
+            ("deadbolt://v/route/f", "route-secret-0123"),
+        ]
+        .into_iter()
+        .map(|(r, v)| (r.to_string(), secret(v)))
+        .collect();
+        let mut vars = IndexMap::new();
+        for (name, reference) in [("A", "deadbolt://v/env/f"), ("B", "deadbolt://v/both/f")] {
+            vars.insert(name.to_string(), EnvValue::Reference(reference.into()));
+        }
+        vars.insert(
+            "API_KEY".into(),
+            EnvValue::Literal(Zeroizing::new("db_ph_placeholder".into())),
+        );
+        only_in_env(&mut values, &vars);
+        let mut kept: Vec<&str> = values.keys().map(String::as_str).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, ["deadbolt://v/both/f", "deadbolt://v/env/f"]);
+        let mut masker = Masker::new(values.values().map(|s| s.value.expose()));
+        let mut out = masker.push(b"route-secret-0123 env-secret-0123");
+        out.extend(masker.finish());
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "route-secret-0123 <concealed by deadbolt>"
+        );
+    }
 
     fn masked(values: &[&str], chunks: &[&str]) -> String {
         let mut masker = Masker::new(values.iter().copied());

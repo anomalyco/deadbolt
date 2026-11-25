@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use deadbolt_os::mem::{HardeningOptions, harden_process};
-use deadbolt_os::net::{LoopbackConnection, owner_in_subtree};
+use deadbolt_os::net::{LoopbackConnection, owner_in_subtree_confirmed};
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use zeroize::Zeroizing;
@@ -41,7 +41,7 @@ use zeroize::Zeroizing;
 use config::BrokerConfig;
 use proxy::Broker;
 
-use crate::daemon::taint::{OsProcesses, ProcessFacts};
+use crate::daemon::taint::{OsProcesses, ProcessFacts, Start};
 
 /// `deadbolt broker`, which `main` hands over before anything else runs.
 pub const COMMAND: &str = "broker";
@@ -60,17 +60,75 @@ pub struct Lineage {
 impl Lineage {
     /// Whether the run's process is still the one that started the broker.
     pub fn root_alive(&self) -> bool {
-        let facts = OsProcesses.facts(self.root_pid);
-        match self.root_start {
-            Some(start) => facts.is_some_and(|facts| facts.start == start),
-            None => facts.is_some(),
-        }
+        self.root_alive_in(&OsProcesses)
     }
 
     /// Whether the client end of `connection` is held by the run's process
-    /// or one of its descendants.
+    /// or one of its descendants. The owner the tree walk found is named by
+    /// `(pid, start)`, its ancestry is walked back to the run by start time,
+    /// and only then is it asked again whether it holds the socket: a pid
+    /// that exited and was reused while this looked is never let in.
     pub fn allows(&self, connection: LoopbackConnection) -> bool {
-        self.root_alive() && owner_in_subtree(self.root_pid, connection).is_some()
+        self.allows_with(&OsProcesses, |root, confirm| {
+            owner_in_subtree_confirmed(root, connection, confirm)
+        })
+    }
+
+    /// `find` is [`owner_in_subtree_confirmed`] for one connection: the
+    /// owner, once it passes the check it's given and still holds the socket.
+    fn allows_with(
+        &self,
+        facts: &impl ProcessFacts,
+        find: impl FnOnce(u32, &mut dyn FnMut(u32) -> bool) -> Option<u32>,
+    ) -> bool {
+        if !self.root_alive_in(facts) {
+            return false;
+        }
+        let mut owner_start = None;
+        let owner = find(self.root_pid, &mut |owner| {
+            let Some(start) = facts.facts(owner).map(|f| f.start) else {
+                return false;
+            };
+            owner_start = Some(start);
+            self.descends(facts, owner, start)
+        });
+        owner
+            .zip(owner_start)
+            .is_some_and(|(owner, start)| facts.facts(owner).is_some_and(|f| f.start == start))
+            && self.root_alive_in(facts)
+    }
+
+    fn root_alive_in(&self, facts: &impl ProcessFacts) -> bool {
+        let found = facts.facts(self.root_pid);
+        match self.root_start {
+            Some(start) => found.is_some_and(|found| found.start == start),
+            None => found.is_some(),
+        }
+    }
+
+    /// Whether `(pid, start)` is the run's process or descends from it, each
+    /// parent started no later than its child.
+    fn descends(&self, facts: &impl ProcessFacts, mut pid: u32, mut start: Start) -> bool {
+        for _ in 0..deadbolt_os::net::MAX_SUBTREE {
+            if pid == self.root_pid {
+                return self.root_start.is_none_or(|root| root == start);
+            }
+            let Some(me) = facts.facts(pid).filter(|f| f.start == start) else {
+                return false;
+            };
+            if me.ppid <= 1 || me.ppid == pid {
+                return false;
+            }
+            let Some(parent) = facts.facts(me.ppid) else {
+                return false;
+            };
+            if parent.start > start {
+                return false;
+            }
+            pid = me.ppid;
+            start = parent.start;
+        }
+        false
     }
 }
 
@@ -110,9 +168,14 @@ fn fd_arg(args: &[OsString]) -> Result<u32> {
 /// at /dev/null, closing the pipe; another fd stays open, drained.
 fn read_frame(fd: u32) -> Result<Zeroizing<Vec<u8>>> {
     let mut frame = Zeroizing::new(Vec::with_capacity(64 * 1024));
-    // A File reads unbuffered: no copy of the secrets is left in a buffer.
-    let file =
-        std::fs::File::open(format!("/dev/fd/{fd}")).with_context(|| format!("opening fd {fd}"))?;
+    // A File reads unbuffered: no copy of the secrets is left in a buffer
+    // (`std::io::stdin()` would keep one in its own).
+    let file = if fd == 0 {
+        use std::os::fd::AsFd;
+        std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?)
+    } else {
+        open_fd(fd)?
+    };
     file.take(MAX_FRAME + 1)
         .read_to_end(&mut frame)
         .context("reading the config")?;
@@ -124,6 +187,17 @@ fn read_frame(fd: u32) -> Result<Zeroizing<Vec<u8>>> {
         bail!("the config is over {MAX_FRAME} bytes");
     }
     Ok(frame)
+}
+
+/// Fd `fd` as a file: `/dev/fd`, or `/proc/self/fd` on a Linux without it.
+fn open_fd(fd: u32) -> Result<std::fs::File> {
+    let dev = std::path::PathBuf::from(format!("/dev/fd/{fd}"));
+    let path = if cfg!(target_os = "linux") && !dev.exists() {
+        std::path::PathBuf::from(format!("/proc/self/fd/{fd}"))
+    } else {
+        dev
+    };
+    std::fs::File::open(&path).with_context(|| format!("opening fd {fd}"))
 }
 
 fn start(args: &[OsString]) -> Result<()> {

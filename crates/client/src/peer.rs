@@ -294,23 +294,55 @@ pub mod linux {
         pub start_ticks: u64,
     }
 
+    /// A live process's stat, `None` once it is dead. A thread-group leader
+    /// that called `pthread_exit` shows `Z` while its other threads run:
+    /// the process is alive, keeps its pid, parent and start time, and its
+    /// children still name it, so it reads as alive.
     pub fn stat(pid: u32) -> Option<Stat> {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat_in(Path::new("/proc"), pid)
+    }
+
+    pub(super) fn stat_in(proc: &Path, pid: u32) -> Option<Stat> {
+        let text = fs::read_to_string(proc.join(format!("{pid}/stat"))).ok()?;
+        let (state, stat) = parse_stat(&text)?;
+        match state {
+            "X" => None,
+            "Z" if !live_thread(proc, pid) => None,
+            _ => Some(stat),
+        }
+    }
+
+    /// Whether any of `pid`'s threads is still running.
+    fn live_thread(proc: &Path, pid: u32) -> bool {
+        let Ok(tasks) = fs::read_dir(proc.join(format!("{pid}/task"))) else {
+            return false;
+        };
+        tasks.filter_map(Result::ok).any(|task| {
+            fs::read_to_string(task.path().join("stat"))
+                .ok()
+                .and_then(|text| parse_stat(&text).map(|(state, _)| state != "Z" && state != "X"))
+                .unwrap_or(false)
+        })
+    }
+
+    /// A `stat` line's state and fields.
+    fn parse_stat(text: &str) -> Option<(&str, Stat)> {
         let open = text.find('(')?;
         let close = text.rfind(')')?;
         let name = text.get(open + 1..close)?.to_string();
         // After the name: state ppid pgrp session tty_nr ... starttime (22nd).
         let rest: Vec<&str> = text.get(close + 1..)?.split_whitespace().collect();
-        if matches!(rest.first(), Some(&"Z" | &"X")) {
-            return None;
-        }
-        Some(Stat {
-            name,
-            ppid: rest.get(1)?.parse().ok()?,
-            session: rest.get(3)?.parse().ok()?,
-            tty_nr: rest.get(4)?.parse().ok()?,
-            start_ticks: rest.get(19)?.parse().ok()?,
-        })
+        let state = *rest.first()?;
+        Some((
+            state,
+            Stat {
+                name,
+                ppid: rest.get(1)?.parse().ok()?,
+                session: rest.get(3)?.parse().ok()?,
+                tty_nr: rest.get(4)?.parse().ok()?,
+                start_ticks: rest.get(19)?.parse().ok()?,
+            },
+        ))
     }
 
     pub fn exe(pid: u32) -> Option<PathBuf> {
@@ -353,7 +385,7 @@ pub mod linux {
             .collect()
     }
 
-    pub(super) enum Hidden {
+    pub enum Hidden {
         SystemBoundary,
         VisibleParent(u32),
     }
@@ -404,7 +436,7 @@ pub mod linux {
     /// on this hidepid mount, and still parent the same child after the scan.
     /// Both EPERM (root sshd) and a successful signal-zero probe (the hidden
     /// user-owned sshd session process) establish existence, not ancestry.
-    fn hidden_parent(parent: u32, child: u32, child_start: u64) -> Option<Hidden> {
+    pub fn hidden_parent(parent: u32, child: u32, child_start: u64) -> Option<Hidden> {
         let pid = rustix::process::Pid::from_raw(parent as i32)?;
         let hidden = matches!(
             rustix::process::test_kill_process(pid),
@@ -547,6 +579,46 @@ mod tests {
         );
         assert_eq!(super::linux::args(b"ls\0\0"), ["ls", ""]);
         assert!(super::linux::args(b"").is_empty());
+    }
+
+    /// A leader that exited while another thread runs is a zombie in
+    /// `/proc/<pid>/stat` but alive in `/proc/<pid>/task`: it reads as alive,
+    /// with its parent and start time. Only when every thread is gone is it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_zombie_leader_with_a_live_thread_is_alive() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let proc = dir.path();
+        let line = |pid: u32, state: &str| {
+            format!(
+                "{pid} (we (ird) name) {state} 20 7 7 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 2 0 4242 0 0"
+            )
+        };
+        let write = |path: String, text: String| {
+            let path = proc.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("30/stat".into(), line(30, "Z"));
+        write("30/task/30/stat".into(), line(30, "Z"));
+        write("30/task/31/stat".into(), line(31, "S"));
+        let alive = super::linux::stat_in(proc, 30).expect("a live thread keeps it alive");
+        assert_eq!((alive.ppid, alive.start_ticks), (20, 4242));
+        assert_eq!(alive.name, "we (ird) name");
+
+        write("30/task/31/stat".into(), line(31, "X"));
+        assert!(
+            super::linux::stat_in(proc, 30).is_none(),
+            "every thread dead"
+        );
+        write("40/stat".into(), line(40, "Z"));
+        assert!(super::linux::stat_in(proc, 40).is_none(), "no task dir");
+        write("50/stat".into(), line(50, "X"));
+        write("50/task/51/stat".into(), line(51, "S"));
+        assert!(super::linux::stat_in(proc, 50).is_none(), "dead is dead");
+        write("60/stat".into(), line(60, "R"));
+        assert_eq!(super::linux::stat_in(proc, 60).unwrap().ppid, 20);
     }
 
     #[cfg(target_os = "linux")]
