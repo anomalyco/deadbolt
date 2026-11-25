@@ -26,8 +26,8 @@ zip = { version = "9.1", default-features = false, features = ["deflate-flate2-z
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
+deadbolt-os = { path = "../os" }
 security-framework = "3.7"
-nix = { version = "0.31", default-features = false, features = ["event"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["rt"] }

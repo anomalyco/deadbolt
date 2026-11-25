@@ -23,7 +23,7 @@ mod tests {
 
     /// Release builds take `deadbolt-enclave` from `scripts/build-enclave.sh`,
     /// not `build.rs`, so both compile every Swift source in the helper, or a
-    /// release ships a helper missing part of it (caller identity, say).
+    /// release ships a helper missing part of it.
     #[test]
     fn the_release_helper_builds_every_swift_source() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -35,7 +35,7 @@ mod tests {
             .filter(|name| name.ends_with(".swift"))
             .collect();
         sources.sort();
-        assert!(sources.len() >= 2, "{sources:?}");
+        assert!(!sources.is_empty(), "{sources:?}");
         for name in &sources {
             assert!(
                 script.contains(&format!("\"$src/{name}\"")),

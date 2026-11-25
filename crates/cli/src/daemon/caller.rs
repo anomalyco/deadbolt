@@ -12,6 +12,8 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(any(test, target_os = "macos"))]
 use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 
 use deadbolt_client::peer::{APP_ID, AUTOFILL_ID, CodeSignature, DAEMON_ID, Peer, Process};
 use tracing::warn;
@@ -31,7 +33,7 @@ pub struct Callers {
     autofill: Option<PathBuf>,
     /// Their signatures, read with the first peer.
     #[cfg(target_os = "macos")]
-    own: Mutex<Option<Own>>,
+    own: OnceLock<Own>,
     /// Original process facts, never request claims. An exec changes the
     /// audit token. An exit invalidates the entry even on inherited sockets.
     #[cfg(target_os = "macos")]
@@ -71,7 +73,7 @@ impl<const LIMIT: usize> LivePeers<LIMIT> {
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Own {
     exe: Option<CodeSignature>,
     app: Option<CodeSignature>,
@@ -108,6 +110,10 @@ pub enum Evidence<'a> {
     },
     /// Nothing verified: on Linux, `/proc` names a peer's executable, but a
     /// process can swap what it runs before the daemon looks.
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(dead_code, reason = "a live macOS peer always has its code read")
+    )]
     None,
 }
 
@@ -123,7 +129,7 @@ impl Callers {
             #[cfg(target_os = "macos")]
             exe,
             #[cfg(target_os = "macos")]
-            own: Mutex::default(),
+            own: OnceLock::new(),
             #[cfg(target_os = "macos")]
             live: Mutex::default(),
             #[cfg(test)]
@@ -139,8 +145,9 @@ impl Callers {
             .insert(peer, info);
     }
 
-    /// How the daemon sees `peer`. Blocking: on macOS it runs
-    /// `deadbolt-enclave identify` against the connecting audit token.
+    /// How the daemon sees `peer`. Blocking: on macOS it asks
+    /// Security.framework about the connecting audit token, and the kernel
+    /// about its process and parents.
     pub fn identify(&self, peer: io::Result<Peer>) -> CallerInfo {
         match peer {
             Ok(peer) => self.lookup(peer),
@@ -192,43 +199,18 @@ impl Callers {
 
     #[cfg(target_os = "macos")]
     fn read(&self, peer: Peer) -> CallerInfo {
-        let helper = match super::biometric::helper() {
-            Ok(helper) => helper,
-            Err(error) => {
-                warn!("can't identify callers: {error:#}");
-                return unverified(Some(peer), "identification helper unavailable");
+        use deadbolt_client::peer::macos;
+        let Some(found) = peer.token.and_then(macos::identify) else {
+            return unverified(Some(peer), "exited process");
+        };
+        let own = self.own.get_or_init(|| {
+            let file = |path: &Option<PathBuf>| path.as_deref().and_then(macos::file_signature);
+            Own {
+                exe: file(&self.exe),
+                app: file(&self.app),
+                autofill: file(&self.autofill),
             }
-        };
-        let own = self.own.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let files: Vec<PathBuf> = match own {
-            Some(_) => Vec::new(),
-            None => self
-                .exe
-                .iter()
-                .chain(&self.app)
-                .chain(&self.autofill)
-                .cloned()
-                .collect(),
-        };
-        let found = match deadbolt_client::peer::identify(&helper, peer.token, &files) {
-            Ok(Some(found)) => found,
-            Ok(None) => return unverified(Some(peer), "exited process"),
-            Err(error) => {
-                warn!("identifying a caller: {error}");
-                return unverified(Some(peer), "identification helper failed");
-            }
-        };
-        let own = own.unwrap_or_else(|| {
-            let mut files = found.files.iter().cloned();
-            let own = Own {
-                exe: self.exe.as_ref().and_then(|_| files.next().flatten()),
-                app: self.app.as_ref().and_then(|_| files.next().flatten()),
-                autofill: self.autofill.as_ref().and_then(|_| files.next().flatten()),
-            };
-            *self.own.lock().unwrap_or_else(|e| e.into_inner()) = Some(own.clone());
-            own
         });
-        let process = found.process.unwrap_or_default();
         fn known<'a>(
             path: &'a Option<PathBuf>,
             file: &'a Option<CodeSignature>,
@@ -238,17 +220,14 @@ impl Callers {
                 file: file.as_ref(),
             })
         }
-        let evidence = match &found.code {
-            Some(code) => Evidence::Signature {
-                code,
-                exe: known(&self.exe, &own.exe),
-                app: known(&self.app, &own.app),
-                autofill: known(&self.autofill, &own.autofill),
-                team: deadbolt_client::peer::team(),
-            },
-            None => Evidence::None,
+        let evidence = Evidence::Signature {
+            code: &found.code,
+            exe: known(&self.exe, &own.exe),
+            app: known(&self.app, &own.app),
+            autofill: known(&self.autofill, &own.autofill),
+            team: deadbolt_client::peer::team(),
         };
-        info(peer, &evidence, process)
+        info(peer, &evidence, found.process)
     }
 
     /// Labels only, from `/proc`: never the app or the browser host, so
@@ -825,53 +804,45 @@ pub(super) mod tests {
     #[test]
     fn the_daemon_check_wants_that_very_binary() {
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
-        let helper = super::super::biometric::helper().unwrap();
         let me = crate::caller::own_exe().unwrap();
-        deadbolt_client::peer::check(&ours, &helper, &me).unwrap();
+        deadbolt_client::peer::check(&ours, &me).unwrap();
         let other = std::fs::canonicalize("/bin/sh").unwrap();
-        let refused = deadbolt_client::peer::check(&ours, &helper, &other).unwrap_err();
+        let refused = deadbolt_client::peer::check(&ours, &other).unwrap_err();
         assert!(refused.contains("not /bin/sh"), "{refused}");
 
         let dir = tempfile::tempdir().unwrap();
         let copy = dir.path().join("deadbolt");
         std::fs::copy(&me, &copy).unwrap();
-        let refused = deadbolt_client::peer::check(&ours, &helper, &copy).unwrap_err();
+        let refused = deadbolt_client::peer::check(&ours, &copy).unwrap_err();
         assert!(refused.contains("not "), "a copy is refused: {refused}");
-
-        let gone = dir.path().join("deadbolt-enclave");
-        let refused = deadbolt_client::peer::check(&ours, &gone, &me).unwrap_err();
-        assert!(
-            refused.contains(&format!("{} is missing", gone.display())),
-            "{refused}"
-        );
     }
 
-    /// The helper looks code up by the whole audit token: once a pid
-    /// version is gone, the token names nobody, even if the pid lives on.
+    /// A peer is looked up by its whole audit token: once a pid version is
+    /// gone, the token names nobody, even if the pid lives on. Our own test
+    /// binary, as the daemon's own `deadbolt` outside a bundle, is a caller
+    /// identified by its signature.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_helper_refuses_a_token_from_another_pid_version() {
+    fn a_token_from_another_pid_version_is_an_exited_process() {
         let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         let me = Peer::of(&ours).unwrap();
         drop(theirs);
         assert_eq!(me.pid, std::process::id());
-        let helper = super::super::biometric::helper().unwrap();
-        let found = deadbolt_client::peer::identify(&helper, me.token, &[])
-            .unwrap()
-            .expect("our own token names us");
-        let process = found.process.unwrap();
-        assert!(process.ancestry_complete);
-        assert_eq!(process.ancestry.last().unwrap().pid, 1);
-        assert!(found.code.unwrap().cdhash.is_some());
-        assert!(!process.args.is_empty());
+        let callers = Callers::new();
+        let found = callers.identify(Ok(me));
+        assert!(found.identified, "{found:?}");
+        assert_eq!(found.check, Check::Signature);
+        assert_eq!(found.class, CallerClass::Caller);
+        assert!(found.signature.unwrap().cdhash.is_some());
+        assert_eq!(found.ancestry.last().unwrap().pid, 1);
 
         let mut token = me.token.unwrap();
         token[7] = token[7].wrapping_add(1);
-        assert!(
-            deadbolt_client::peer::identify(&helper, Some(token), &[])
-                .unwrap()
-                .is_none()
-        );
+        let stale = Peer::from_token(token);
+        let gone = Callers::new().identify(Ok(stale));
+        assert!(!gone.identified);
+        assert_eq!(gone.label, "exited process");
+        assert_eq!(gone.signature, None);
     }
 
     #[cfg(target_os = "macos")]

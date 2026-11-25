@@ -10,7 +10,6 @@
 //   deadbolt-enclave seal
 //   deadbolt-enclave unseal [--non-interactive] [--reason <text>]
 //   deadbolt-enclave group-container <group-id> <daemon-exe>
-//   deadbolt-enclave identify          (identify.swift)
 //
 // Exit codes:
 //   0  success
@@ -20,7 +19,6 @@
 //   12 enrolled Touch ID fingerprint set changed (`stateHash` mismatch)
 //   13 malformed or tampered sealed token
 //   14 unexpected error (never wipes enrollment)
-//   15 identify: no process has that audit token (it exited)
 
 import CryptoKit
 import CryptoTokenKit
@@ -488,7 +486,7 @@ private enum EnclaveHelper {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         guard let cmd = args.first else {
-            fail(.usage, "usage: deadbolt-enclave <status|seal|unseal|identify>")
+            fail(.usage, "usage: deadbolt-enclave <status|seal|unseal|group-container>")
         }
 
         switch cmd {
@@ -514,11 +512,6 @@ private enum EnclaveHelper {
             }
             runSeal(requireBiometry: true)
             #endif
-        case "identify":
-            guard args.count == 1 else {
-                fail(.usage, "identify takes no arguments")
-            }
-            runIdentify()
         case "group-container":
             guard args.count == 3 else {
                 fail(.usage, "usage: deadbolt-enclave group-container <group-id> <daemon-exe>")

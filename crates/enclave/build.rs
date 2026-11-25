@@ -49,10 +49,7 @@ fn emit_empty_enclave_env() {
     reason = "build script reads Cargo TARGET env to compile the macOS Secure Enclave helper"
 )]
 fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
-    let swift_srcs = [
-        PathBuf::from("swift/enclave.swift"),
-        PathBuf::from("swift/identify.swift"),
-    ];
+    let swift_srcs = [PathBuf::from("swift/enclave.swift")];
     let build_rs = PathBuf::from("build.rs");
     let plist_path = PathBuf::from("swift/Info.plist");
     let out_dir =

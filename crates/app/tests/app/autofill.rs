@@ -77,7 +77,7 @@ impl AutofillDaemonHarness {
             autofill_socket.display()
         );
 
-        // Stage a real `Deadbolt.app` layout so `deadbolt-enclave identify`
+        // Stage a real `Deadbolt.app` layout so the daemon's caller check
         // classifies `Contents/MacOS/Deadbolt` as `CallerClass::App` and
         // `Contents/PlugIns/DeadboltAutoFill.appex` as `CallerClass::AutoFill`
         // by kernel audit token + ad-hoc cdhash, and `PeerCheck.verifyDaemon`

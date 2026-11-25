@@ -1421,6 +1421,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "data-encoding",
  "deadbolt-core",
+ "deadbolt-os",
  "nix",
  "rustix 1.1.6",
  "security-framework",
@@ -1481,6 +1482,17 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "deadbolt-os"
+version = "0.0.0"
+dependencies = [
+ "core-foundation 0.10.1",
+ "libc",
+ "security-framework",
+ "security-framework-sys",
+ "tempfile",
 ]
 
 [[package]]

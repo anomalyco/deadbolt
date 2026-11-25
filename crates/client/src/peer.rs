@@ -1,33 +1,22 @@
 //! Who holds the other end of a Unix socket, from the kernel rather than
 //! from anything the peer says. macOS gives the audit token
-//! (`LOCAL_PEERTOKEN`), and Deadbolt's Swift helper looks the running code's
-//! signature up by it (`deadbolt-enclave identify`, `identify.swift` in the
-//! CLI). Linux gives `SO_PEERCRED`, and `/proc` the rest.
+//! (`LOCAL_PEERTOKEN`), by which Security.framework looks the running code's
+//! signature up, in process (`peer/macos.rs`). Linux gives `SO_PEERCRED`, and
+//! `/proc` the rest.
 
 use std::io;
-#[cfg(target_os = "macos")]
-use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
-#[cfg(target_os = "macos")]
-use std::process::{Command, Stdio};
-
-use serde::Deserialize;
 
 use crate::protocol::{Ancestor, Signature};
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 /// A cache hit still has to name living code with that exact pid version.
 #[cfg(target_os = "macos")]
 pub fn live_token(token: &[u32; 8]) -> bool {
-    use core_foundation::{base::TCFType, data::CFData};
-    use security_framework::os::macos::code_signing::{Flags, GuestAttributes, SecCode};
-    let bytes = token.map(u32::to_ne_bytes);
-    let data = CFData::from_buffer(bytes.as_flattened());
-    let mut attrs = GuestAttributes::new();
-    attrs.set_audit_token(data.as_concrete_TypeRef());
-    SecCode::copy_guest_with_attribues(None, &attrs, Flags::NONE).is_ok()
+    macos::live_token(token)
 }
 
 /// The kernel's word for a socket's peer, taken when it connected.
@@ -36,7 +25,7 @@ pub struct Peer {
     pub pid: u32,
     pub uid: u32,
     /// The audit token (macOS), which names the process even after its pid
-    /// is reused: the helper refuses a token whose process is gone.
+    /// is reused: Security.framework refuses a token whose process is gone.
     pub token: Option<[u32; 8]>,
     /// The token's pid version (macOS), or the start time in clock ticks
     /// (Linux, read from `/proc` after the fact).
@@ -100,15 +89,17 @@ pub fn uid(_socket: &impl AsFd) -> io::Result<u32> {
     Err(io::Error::other("peer credentials are not supported here"))
 }
 
-/// A code signature as the helper read it, from a running process or a file.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// A code signature as Security.framework read it, from a running process
+/// or a file.
+#[derive(Debug, Clone, Default)]
 pub struct CodeSignature {
+    /// The main executable, inside the bundle for an app.
     pub path: Option<String>,
     pub signing_id: Option<String>,
     /// Only when the signature chains to Apple for this team.
     pub team_id: Option<String>,
+    /// The code directory hash, lowercase hex.
     pub cdhash: Option<String>,
-    #[serde(default)]
     pub valid: bool,
 }
 
@@ -150,8 +141,7 @@ impl CodeSignature {
 
 /// What the peer's process says about itself, read by pid. Labels only:
 /// the process can change its own arguments, and its parents come and go.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default)]
 pub struct Process {
     pub ppid: Option<u32>,
     /// Unix seconds.
@@ -166,110 +156,6 @@ pub struct Process {
     pub ancestry_complete: bool,
     /// The executable (Linux; on macOS it's the signature's `path`).
     pub exe: Option<String>,
-}
-
-/// `deadbolt-enclave identify`'s answer.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct Identified {
-    /// The running code, for a token.
-    pub code: Option<CodeSignature>,
-    pub process: Option<Process>,
-    /// One per file asked about, `None` for those that aren't signed code.
-    pub files: Vec<Option<CodeSignature>>,
-}
-
-/// Runs `helper identify` on `token` (if any) and `files`. `Ok(None)` when
-/// the token's process is gone, so the token named nobody alive.
-#[cfg(target_os = "macos")]
-pub fn identify(
-    helper: &Path,
-    token: Option<[u32; 8]>,
-    files: &[PathBuf],
-) -> Result<Option<Identified>, String> {
-    const GONE: i32 = 15;
-    let mut input = serde_json::Map::new();
-    if let Some(token) = token {
-        input.insert("token".into(), serde_json::json!(token));
-    }
-    input.insert("files".into(), serde_json::json!(files));
-    let input = serde_json::Value::Object(input);
-    let mut child = Command::new(helper)
-        .arg("identify")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("running {}: {e}", helper.display()))?;
-    let written = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("no stdin"))
-        .and_then(|mut stdin| stdin.write_all(input.to_string().as_bytes()));
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        if let Some(stdout) = stdout.as_mut() {
-            drop(stdout.read_to_end(&mut out));
-        }
-        if let Some(stderr) = stderr.as_mut() {
-            drop(stderr.read_to_end(&mut err));
-        }
-        (out, err)
-    });
-    let status = wait_helper(&mut child).map_err(|e| {
-        drop(child.kill());
-        drop(child.wait());
-        format!("waiting for deadbolt-enclave: {e}")
-    })?;
-    let (out, err) = reader
-        .join()
-        .map_err(|_| "reading deadbolt-enclave".to_string())?;
-    written.map_err(|e| format!("writing to deadbolt-enclave: {e}"))?;
-    match status.code() {
-        Some(0) => serde_json::from_slice(&out)
-            .map(Some)
-            .map_err(|e| format!("reading deadbolt-enclave identify: {e}")),
-        Some(GONE) => Ok(None),
-        _ => Err(format!(
-            "deadbolt-enclave identify failed ({status}): {}",
-            String::from_utf8_lossy(&err).trim()
-        )),
-    }
-}
-
-/// Block on the child exiting, retaining the timeout without a polling tick.
-#[cfg(target_os = "macos")]
-fn wait_helper(child: &mut std::process::Child) -> io::Result<std::process::ExitStatus> {
-    use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
-    let queue = Kqueue::new()?;
-    let exit = KEvent::new(
-        child.id() as usize,
-        EventFilter::EVFILT_PROC,
-        EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
-        FilterFlag::NOTE_EXIT,
-        0,
-        0,
-    );
-    // Register before checking try_wait, so a quick exit cannot be missed.
-    let registered = queue.kevent(&[exit], &mut [], None);
-    if let Some(status) = child.try_wait()? {
-        return Ok(status);
-    }
-    registered?;
-    let timeout = nix::libc::timespec {
-        tv_sec: 5,
-        tv_nsec: 0,
-    };
-    if queue.kevent(&[], &mut [exit], Some(timeout))? == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "identification timed out",
-        ));
-    }
-    child.wait()
 }
 
 /// The Apple team that signed this build, compiled in (`build.rs`); `None`
@@ -298,12 +184,12 @@ pub fn app_group() -> Option<String> {
 /// Checks that `socket`'s peer is the daemon at `expected` (this client's own
 /// binary, or its bundle's helper), before a passphrase goes to it.
 ///
-/// On macOS, `helper` (`deadbolt-enclave`) looks the peer's code up by its
-/// audit token: it must run from `expected` itself, not a copy elsewhere, and
-/// be Deadbolt's daemon by signature (`daemon_is`). On Linux nothing tells two
-/// processes of one user apart, so this checks only that the peer runs as
-/// this user; the socket's 0700 directory is what keeps others out.
-pub fn check(socket: &impl AsFd, helper: &Path, expected: &Path) -> Result<(), String> {
+/// On macOS the peer's code is looked up by its audit token: it must run from
+/// `expected` itself, not a copy elsewhere, and be Deadbolt's daemon by
+/// signature (`daemon_is`). On Linux nothing tells two processes of one user
+/// apart, so this checks only that the peer runs as this user; the socket's
+/// 0700 directory is what keeps others out.
+pub fn check(socket: &impl AsFd, expected: &Path) -> Result<(), String> {
     let peer = Peer::of(socket).map_err(|e| format!("reading the daemon's credentials: {e}"))?;
     if peer.uid != rustix::process::getuid().as_raw() {
         return Err(format!(
@@ -313,17 +199,13 @@ pub fn check(socket: &impl AsFd, helper: &Path, expected: &Path) -> Result<(), S
     }
     #[cfg(target_os = "macos")]
     {
-        if !helper.is_file() {
-            return Err(missing_helper(helper));
-        }
         let expected = expected
             .canonicalize()
             .map_err(|e| format!("locating {}: {e}", expected.display()))?;
-        let Some(found) = identify(helper, peer.token, std::slice::from_ref(&expected))? else {
+        let Some(code) = peer.token.as_ref().and_then(macos::running) else {
             return Err(format!("the daemon (pid {}) exited", peer.pid));
         };
-        let code = found.code.unwrap_or_default();
-        let file = found.files.into_iter().next().flatten();
+        let file = macos::file_signature(&expected);
         daemon_is(&code, file.as_ref(), &expected, team()).map_err(|why| {
             format!(
                 "the daemon (pid {}) {why}; run `deadbolt debug daemon stop`",
@@ -333,7 +215,7 @@ pub fn check(socket: &impl AsFd, helper: &Path, expected: &Path) -> Result<(), S
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (helper, expected);
+        let _ = expected;
         Ok(())
     }
 }
@@ -341,7 +223,7 @@ pub fn check(socket: &impl AsFd, helper: &Path, expected: &Path) -> Result<(), S
 /// What Deadbolt says when its `deadbolt-enclave` isn't where it belongs.
 pub fn missing_helper(helper: &Path) -> String {
     format!(
-        "{} is missing: Deadbolt uses it to check who it talks to, and for Touch ID. \
+        "{} is missing: Deadbolt uses it for Touch ID. \
          Reinstall Deadbolt so deadbolt-enclave sits beside deadbolt",
         helper.display()
     )
@@ -370,7 +252,7 @@ pub fn daemon_is(
 
 #[cfg(target_os = "linux")]
 pub mod linux {
-    //! `/proc`, for what macOS's helper reads with `proc_pidinfo`.
+    //! `/proc`, for what macOS reads with `proc_pidinfo`.
 
     use std::{
         collections::HashSet,
