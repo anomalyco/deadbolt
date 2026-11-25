@@ -290,7 +290,7 @@ impl Engine {
         let result = vault.transact(
             |vault| change(vault, &author),
             |vault, frames| {
-                store.append(id, &mut frames.iter().map(|f| f.encode()))?;
+                store.append(id, &mut frames.iter().copied())?;
                 changes.committed(id, vault, frames);
                 Ok(())
             },
@@ -521,7 +521,7 @@ impl Engine {
         }
         let result = self
             .store
-            .append(id, &mut vault.frames().map(Frame::encode));
+            .append(id, &mut vault.frames());
         self.check_append(result)?;
         self.vaults.insert(id, vault);
         self.save_removed(&id)?;

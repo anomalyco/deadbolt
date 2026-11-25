@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId, VaultWrite};
+use deadbolt_core::v2::{DeviceKeys, Frame};
+use deadbolt_core::{Author, DeviceId, Vault, VaultId, VaultWrite};
 use deadbolt_engine::{Engine, VaultStore};
 use deadbolt_net::application;
 pub use deadbolt_net::application::{Addr, Hint, clean_name};
 use deadbolt_net::{Node, PeerAddr};
-use deadbolt_store::{KdfParams, Unlocked};
+use crate::disk::{KdfParams, Unlocked};
 use zeroize::Zeroizing;
 
 use crate::config::SystemClock;
@@ -20,24 +21,27 @@ pub use crate::config::now;
 pub use deadbolt_engine::store::{get_json, set_json};
 pub use deadbolt_engine::{Changes, hex, unhex};
 
-/// `store.redb` as the engine's [`VaultStore`].
+/// The transport key iroh runs on for the device seeded `seed`: its signing
+/// key, so a peer's transport id is its device id. A `DeviceCard` also
+/// names a separate `D_net`, which transport doesn't use yet.
+pub fn node_key(seed: &[u8; 32]) -> [u8; 32] {
+    *DeviceKeys::from_seed(seed).sign_key().to_bytes()
+}
+
+/// The sealed device directory as the engine's [`VaultStore`].
 pub struct NativeStore(Arc<Unlocked>);
 
 impl VaultStore for NativeStore {
-    fn device_secret(&self) -> &[u8; 32] {
-        self.0.device_secret()
+    fn device_seed(&self) -> &[u8; 32] {
+        self.0.device_seed()
     }
 
-    fn for_each_entry(&self, each: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> {
-        for entry in self.0.iter_all()? {
-            each(&entry?)?;
-        }
-        Ok(())
+    fn for_each_frame(&self, each: &mut dyn FnMut(VaultId, &[u8]) -> Result<()>) -> Result<()> {
+        self.0.for_each_frame(each)
     }
 
-    fn append(&self, entries: &mut dyn Iterator<Item = Zeroizing<Vec<u8>>>) -> Result<()> {
-        self.0.append_batch(entries)?;
-        Ok(())
+    fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = &Frame>) -> Result<()> {
+        Ok(self.0.append_frames(vault, frames)?)
     }
 
     fn meta_get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -50,8 +54,8 @@ impl VaultStore for NativeStore {
 
     fn uncertain(&self, error: &anyhow::Error) -> Option<String> {
         error
-            .downcast_ref::<deadbolt_store::Error>()
-            .and_then(deadbolt_store::Error::append_diagnostic)
+            .downcast_ref::<crate::disk::Error>()
+            .and_then(crate::disk::Error::append_diagnostic)
     }
 }
 
@@ -85,24 +89,20 @@ impl Loaded {
         device_name: &str,
         params: KdfParams,
     ) -> Result<Self> {
-        Self::setup_with(
-            dir,
-            passphrase,
-            device_name,
-            params,
-            DeviceSecret::generate(),
-        )
+        let mut seed = Zeroizing::new([0u8; 32]);
+        getrandom::fill(seed.as_mut_slice())?;
+        Self::setup_with(dir, passphrase, device_name, params, &seed)
     }
 
-    /// Creates the store for an existing device key. Blocking (Argon2).
+    /// Creates the store for an existing device seed. Blocking (Argon2).
     pub fn setup_with(
         dir: &Path,
         passphrase: &[u8],
         device_name: &str,
         params: KdfParams,
-        secret: DeviceSecret,
+        seed: &[u8; 32],
     ) -> Result<Self> {
-        let store = deadbolt_store::init_with_params(dir, passphrase, &secret.to_bytes(), params)?;
+        let store = crate::disk::init_with_params(dir, passphrase, seed, params)?;
         let store = Arc::new(store);
         let engine = Engine::create(
             Box::new(NativeStore(store.clone())),
@@ -114,7 +114,7 @@ impl Loaded {
 
     /// Unlocks the store and rebuilds every vault. Blocking (Argon2).
     pub fn open(dir: &Path, passphrase: &[u8]) -> Result<Self> {
-        let store = deadbolt_store::unlock(dir, passphrase)?;
+        let store = crate::disk::unlock(dir, passphrase)?;
         Self::from_unlocked(store)
     }
 
@@ -162,10 +162,10 @@ impl application::State for Loaded {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T, application::Error>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &Author) -> Result<T, application::Error>,
     ) -> Result<T> {
         self.engine
-            .update(id, |vault, secret| Ok(change(vault, secret)?))
+            .update(id, |vault, author| Ok(change(vault, author)?))
     }
 
     fn learn(
@@ -284,9 +284,9 @@ pub(super) mod tests {
             .read(true)
             .write(true)
             .create_new(true)
-            .open(dir.join(deadbolt_store::DB_FILE))
+            .open(dir.join(crate::disk::DB_FILE))
             .unwrap();
-        let store = deadbolt_store::init_with_backend(
+        let store = crate::disk::init_with_backend(
             LostSyncAck {
                 file: redb::backends::FileBackend::new(file).unwrap(),
                 remaining: remaining.clone(),
@@ -396,8 +396,8 @@ pub(super) mod tests {
             })
             .unwrap_err();
         assert!(matches!(
-            error.downcast_ref::<deadbolt_store::Error>(),
-            Some(deadbolt_store::Error::AppendUncertain(_))
+            error.downcast_ref::<crate::disk::Error>(),
+            Some(crate::disk::Error::AppendUncertain(_))
         ));
         assert!(loaded.resolve(None).is_err());
         assert!(loaded.held(&id).is_none());
@@ -623,7 +623,7 @@ pub(super) mod tests {
     fn restart_discovers_vault_from_committed_log() {
         let dir = tempfile::tempdir().unwrap();
         let secret = DeviceSecret::from_bytes(&[1; 32]);
-        let store = deadbolt_store::init_with_params(
+        let store = crate::disk::init_with_params(
             dir.path(),
             b"test",
             &secret.to_bytes(),

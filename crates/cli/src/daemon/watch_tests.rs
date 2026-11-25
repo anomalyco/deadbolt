@@ -20,7 +20,7 @@ use super::tests::test_paths;
 use super::{Daemon, MAX_LINE, items, sync, watchers};
 use crate::protocol::{Change, Command, FieldInput, Message, PROTOCOL_VERSION, Reply, Request};
 
-const KDF: deadbolt_store::KdfParams = deadbolt_store::KdfParams {
+const KDF: crate::disk::KdfParams = crate::disk::KdfParams {
     m_cost_kib: 64,
     t_cost: 1,
     p_cost: 1,

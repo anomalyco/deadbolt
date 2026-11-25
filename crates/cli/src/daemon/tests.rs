@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use zeroize::Zeroizing;
 
 fn locked_daemon(dir: &std::path::Path) -> Arc<Daemon> {
-    Daemon::new(test_paths(dir), true, deadbolt_store::KdfParams::DEFAULT)
+    Daemon::new(test_paths(dir), true, crate::disk::KdfParams::DEFAULT)
 }
 
 pub(super) fn test_paths(dir: &std::path::Path) -> Paths {
@@ -272,7 +272,7 @@ async fn quarantine_unlock_authenticates_and_replays_without_a_separate_lock() {
         let daemon = locked_daemon(dir.path());
         let (mut loaded, fault) = session::tests::fault_store(dir.path(), [7; 32]);
         let id = loaded.create_vault("personal").unwrap();
-        let key = deadbolt_store::generate_biometric_key().unwrap();
+        let key = crate::disk::generate_biometric_key().unwrap();
         loaded
             .store
             .set_biometric(&key, &make_valid_biometric_token(session::now()))
@@ -374,7 +374,7 @@ async fn locking_wakes_membership_waiters_with_the_locked_error() {
         dir.path(),
         b"test",
         "device",
-        deadbolt_store::KdfParams {
+        crate::disk::KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
             p_cost: 1,
@@ -460,11 +460,11 @@ async fn line_limit_preserves_answers_and_rejects_unterminated_oversize() {
 async fn local_item_commands_work_immediately_after_unlock_with_offline_peers() {
     let dir = tempfile::tempdir().unwrap();
     let key = [51; 32];
-    let store = deadbolt_store::init_with_params(
+    let store = crate::disk::init_with_params(
         dir.path(),
         b"test",
         &key,
-        deadbolt_store::KdfParams {
+        crate::disk::KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
             p_cost: 1,
@@ -621,7 +621,7 @@ async fn touch_id_set_off_clears_slot_and_updates_status() {
         dir.path(),
         b"test",
         "device",
-        deadbolt_store::KdfParams {
+        crate::disk::KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
             p_cost: 1,
@@ -630,7 +630,7 @@ async fn touch_id_set_off_clears_slot_and_updates_status() {
     .unwrap();
     let now = session::now();
     let token = make_valid_biometric_token(now);
-    let bio_key = deadbolt_store::generate_biometric_key().unwrap();
+    let bio_key = crate::disk::generate_biometric_key().unwrap();
     loaded.store.set_biometric(&bio_key, &token).unwrap();
     drop(loaded);
 
@@ -641,7 +641,7 @@ async fn touch_id_set_off_clears_slot_and_updates_status() {
     // While another handle holds `store.redb` open, `daemon.status()` still
     // reports `touch_id_ready = true` from in-memory metadata without
     // opening the store or hitting `Error::InUse`.
-    let held = deadbolt_store::unlock(dir.path(), b"test").unwrap();
+    let held = crate::disk::unlock(dir.path(), b"test").unwrap();
     let before = daemon.status();
     assert!(before.touch_id_available);
     assert!(before.touch_id_enabled);
@@ -652,7 +652,7 @@ async fn touch_id_set_off_clears_slot_and_updates_status() {
     daemon.set_touch_id(false).await.unwrap();
     assert!(!Config::load(&daemon.paths.config).unwrap().touch_id());
     assert!(
-        deadbolt_store::biometric_token(dir.path())
+        crate::disk::biometric_token(dir.path())
             .unwrap()
             .is_none()
     );
@@ -666,7 +666,7 @@ async fn touch_id_set_off_clears_slot_and_updates_status() {
 #[tokio::test]
 async fn touch_id_coalesces_overlapping_requests_and_cancels_on_passphrase_unlock() {
     let dir = tempfile::tempdir().unwrap();
-    let fast = deadbolt_store::KdfParams {
+    let fast = crate::disk::KdfParams {
         m_cost_kib: 64,
         t_cost: 1,
         p_cost: 1,
@@ -674,7 +674,7 @@ async fn touch_id_coalesces_overlapping_requests_and_cancels_on_passphrase_unloc
     let loaded = Loaded::setup(dir.path(), b"test", "device", fast).unwrap();
     let now = session::now();
     let token = make_valid_biometric_token(now);
-    let bio_key = deadbolt_store::generate_biometric_key().unwrap();
+    let bio_key = crate::disk::generate_biometric_key().unwrap();
     loaded.store.set_biometric(&bio_key, &token).unwrap();
     drop(loaded);
 
@@ -740,7 +740,7 @@ async fn touch_id_coalesces_overlapping_requests_and_cancels_on_passphrase_unloc
     }));
     assert!(daemon.unlock_biometric(None).await.is_err());
     assert!(
-        deadbolt_store::biometric_token(dir.path())
+        crate::disk::biometric_token(dir.path())
             .unwrap()
             .is_some(),
         "cancelled flight must not clear biometric slot"
@@ -799,7 +799,7 @@ async fn touch_id_coalesces_overlapping_requests_and_cancels_on_passphrase_unloc
 #[tokio::test]
 async fn every_passphrase_check_shares_one_backoff() {
     let dir = tempfile::tempdir().unwrap();
-    let fast = deadbolt_store::KdfParams {
+    let fast = crate::disk::KdfParams {
         m_cost_kib: 64,
         t_cost: 1,
         p_cost: 1,
@@ -839,14 +839,14 @@ async fn every_passphrase_check_shares_one_backoff() {
 #[tokio::test]
 async fn an_unverified_unlock_only_shortens_the_idle_timeout() {
     let dir = tempfile::tempdir().unwrap();
-    let fast = deadbolt_store::KdfParams {
+    let fast = crate::disk::KdfParams {
         m_cost_kib: 64,
         t_cost: 1,
         p_cost: 1,
     };
     let loaded = Loaded::setup(dir.path(), b"test", "device", fast).unwrap();
     let token = make_valid_biometric_token(session::now());
-    let bio_key = deadbolt_store::generate_biometric_key().unwrap();
+    let bio_key = crate::disk::generate_biometric_key().unwrap();
     loaded.store.set_biometric(&bio_key, &token).unwrap();
     drop(loaded);
     let daemon = Daemon::new(test_paths(dir.path()), true, fast);

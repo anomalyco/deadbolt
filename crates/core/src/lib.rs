@@ -46,7 +46,9 @@ pub use error::{DecodeError, Error};
 pub use id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 pub use item::{Field, FieldType, ItemError, Schema, SchemaField, schema, schemas};
 pub use ops::{Change, DataOp, Source, valid_name};
-pub use vault::{Author, Deleted, Heads, Item, MAX_FRAMES, Touch, Vault, VaultWrite};
+pub use vault::{
+    Author, Deleted, Heads, Item, MAX_FRAME_LEN, MAX_FRAMES, Touch, Vault, VaultWrite,
+};
 
 #[cfg(test)]
 mod vault_tests;

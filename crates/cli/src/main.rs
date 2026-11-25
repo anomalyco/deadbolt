@@ -9,12 +9,14 @@ mod client;
 mod config;
 mod daemon;
 mod desktop;
+mod disk;
 mod health;
 mod import;
 mod items;
 mod mcp;
 mod prompt;
 mod receive;
+mod recovery;
 mod secrets;
 mod send;
 use deadbolt_core::site;
@@ -662,13 +664,16 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if !status.initialized {
                 setup(&paths, device_name, from_stdin).await?;
             }
-            let Reply::Vault { vault } =
-                request(&paths, Command::VaultCreate { name }, from_stdin).await?
+            let Reply::VaultCreated {
+                vault,
+                recovery_kit,
+            } = request(&paths, Command::VaultCreate { name }, from_stdin).await?
             else {
                 bail!("unexpected reply");
             };
             let default = if vault.default { " (default)" } else { "" };
             println!("created vault {}{default}", vault.name);
+            print!("{}", recovery::kit_text(&vault.id, recovery_kit.expose()).as_str());
         }
         Commands::Join { device_name } => {
             let status = client::ensure_running(&paths).await?;

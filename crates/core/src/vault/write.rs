@@ -20,8 +20,11 @@ use super::{Vault, view};
 const OPS_PER_FRAME: usize = 4000;
 /// Bytes of ops per data frame, about.
 const BYTES_PER_FRAME: usize = 1024 * 1024;
-/// The largest one op may be: a frame's body, less Padmé padding's 12%.
-const MAX_OP_LEN: usize = v2::MAX_BODY_LEN / 8 * 7;
+/// The largest one op may be, leaving room for padding and the frame's header.
+const MAX_OP_LEN: usize = 14 * 1024 * 1024;
+/// The largest frame a vault writes, encoded: what one sync message and one
+/// log record hold.
+pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 /// Who signs a write, and when (Unix milliseconds on this device's clock).
 pub struct Author {
@@ -312,6 +315,13 @@ impl<'a> VaultWrite<'a> {
         let frame = payload
             .seal(author.keys.sign_key(), self.id, seq, prev, epoch, &key)
             .map_err(frame_err)?;
+        let len = frame.encode().len();
+        if len > MAX_FRAME_LEN {
+            return Err(Error::TooLarge {
+                len,
+                max: MAX_FRAME_LEN,
+            });
+        }
         let id = frame.id();
         self.stage(vec![frame])?;
         Ok(id)

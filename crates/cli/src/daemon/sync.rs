@@ -30,9 +30,10 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
 pub const STARTUP_TIMEOUT: Duration = SYNC_TIMEOUT.saturating_mul(2);
 const STARTUP_RETRY: Duration = Duration::from_secs(1);
 
-// Every entry core commits fits one sync frame, and a peer serving a session we
+// Every frame core commits fits one sync frame, and a peer serving a session we
 // opened never gives up before we do.
-const _: () = assert!(deadbolt_core::MAX_ENTRY_LEN + 1 == deadbolt_net::DEFAULT_MAX_FRAME_LEN);
+const _: () = assert!(deadbolt_core::MAX_FRAME_LEN <= deadbolt_net::DEFAULT_MAX_FRAME_LEN);
+const _: () = assert!(deadbolt_core::MAX_FRAME_LEN <= deadbolt_pack::log::MAX_RECORD);
 const _: () = assert!(SYNC_TIMEOUT.as_secs() * 2 <= deadbolt_net::INBOUND_SYNC_TIMEOUT.as_secs());
 
 pub struct Handler(pub Arc<Daemon>);
@@ -438,7 +439,7 @@ mod tests {
         assert_eq!(start.elapsed(), STARTUP_TIMEOUT);
     }
 
-    const FAST: deadbolt_store::KdfParams = deadbolt_store::KdfParams {
+    const FAST: crate::disk::KdfParams = crate::disk::KdfParams {
         m_cost_kib: 64,
         t_cost: 1,
         p_cost: 1,
@@ -1103,11 +1104,11 @@ mod tests {
     fn startup_does_not_accept_data() {
         let dir = tempfile::tempdir().unwrap();
         let secret = DeviceSecret::from_bytes(&[1; 32]);
-        let store = deadbolt_store::init_with_params(
+        let store = crate::disk::init_with_params(
             dir.path(),
             b"test",
             &secret.to_bytes(),
-            deadbolt_store::KdfParams {
+            crate::disk::KdfParams {
                 m_cost_kib: 64,
                 t_cost: 1,
                 p_cost: 1,

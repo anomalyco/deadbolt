@@ -45,12 +45,12 @@ impl State {
     pub fn new(store: &dyn VaultStore) -> Self {
         let mut reuse_key = Zeroizing::new(blake3::derive_key(
             "deadbolt health reuse fallback v1",
-            store.device_secret(),
+            store.device_seed(),
         ));
         if let Err(err) = getrandom::fill(reuse_key.as_mut_slice()) {
             warn!("OS RNG failed for health reuse key, using device-derived fallback: {err}");
         }
-        let hibp_key = Zeroizing::new(blake3::derive_key(HIBP_KDF_CONTEXT, store.device_secret()));
+        let hibp_key = Zeroizing::new(blake3::derive_key(HIBP_KDF_CONTEXT, store.device_seed()));
         Self {
             reuse_key,
             hibp_key,

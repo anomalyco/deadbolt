@@ -30,7 +30,7 @@ use crate::v2::{
 
 pub use sync::Heads;
 pub use view::{Deleted, Item};
-pub use write::{Author, VaultWrite};
+pub use write::{Author, MAX_FRAME_LEN, VaultWrite};
 
 /// The most frames one vault accepts: a bound on what a member can make
 /// every device hold.

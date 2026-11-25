@@ -273,7 +273,7 @@ impl Daemon {
         {
             return Ok(false);
         }
-        if !deadbolt_store::is_initialized(&self.paths.data) {
+        if !crate::disk::is_initialized(&self.paths.data) {
             return Err(fail(
                 ErrorCode::NotInitialized,
                 "this device is not set up; open Deadbolt to set it up",
@@ -568,10 +568,11 @@ impl Daemon {
                         let made = shared_passkeys::register_hash(&new, false, &created)
                             .map_err(map_passkey_error)?;
                         let vault = s.resolve(None)?;
-                        let entry = s.update(vault, |v, secret| {
-                            Ok(v.write(secret, vec![made.create.clone()])?)
+                        let entry = s.update(vault, |v, author| {
+                            Ok(v.create_items(author, vec![made.create.clone()])?.0)
                         })?;
-                        let passkey = login_ref(&vault, &ItemId::of_create(&entry.hash(), 0));
+                        let id = entry.first().copied().context("the passkey was not created")?;
+                        let passkey = login_ref(&vault, &id);
                         Ok((made, passkey, identities_hash(s)))
                     })?;
                     self.sync_now.notify_one();
@@ -617,10 +618,11 @@ impl Daemon {
                     let made = shared_passkeys::register_hash(&new, verified, &created)
                         .map_err(map_passkey_error)?;
                     let vault = s.resolve(None)?;
-                    let entry = s.update(vault, |v, secret| {
-                        Ok(v.write(secret, vec![made.create.clone()])?)
+                    let entry = s.update(vault, |v, author| {
+                        Ok(v.create_items(author, vec![made.create.clone()])?.0)
                     })?;
-                    let passkey = login_ref(&vault, &ItemId::of_create(&entry.hash(), 0));
+                    let id = entry.first().copied().context("the passkey was not created")?;
+                    let passkey = login_ref(&vault, &id);
                     Ok((made, passkey, identities_hash(s)))
                 })?;
                 self.sync_now.notify_one();

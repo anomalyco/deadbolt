@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use deadbolt_core::VaultId;
+use deadbolt_core::v2::Frame;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
@@ -25,7 +26,7 @@ pub trait VaultStore: Send + Sync {
 
     /// Appends `frames` to `vault` durably, all or none. An error may
     /// leave the outcome unknown; [`VaultStore::uncertain`] says when.
-    fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = Vec<u8>>) -> Result<()>;
+    fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = &Frame>) -> Result<()>;
 
     fn meta_get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>>;
 
@@ -76,8 +77,8 @@ impl VaultStore for MemoryStore {
         frames.iter().try_for_each(|(vault, frame)| each(*vault, frame))
     }
 
-    fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = Vec<u8>>) -> Result<()> {
-        let staged: Vec<_> = frames.map(|f| (vault, f)).collect();
+    fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = &Frame>) -> Result<()> {
+        let staged: Vec<_> = frames.map(|f| (vault, f.encode())).collect();
         self.frames
             .lock()
             .unwrap_or_else(|e| e.into_inner())

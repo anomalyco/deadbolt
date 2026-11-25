@@ -197,6 +197,12 @@ pub enum Reply {
     Vault {
         vault: VaultInfo,
     },
+    /// `vault-create`: the new vault and its 24-word recovery kit, which
+    /// the daemon keeps no copy of.
+    VaultCreated {
+        vault: VaultInfo,
+        recovery_kit: Secret,
+    },
     Vaults {
         vaults: Vec<VaultInfo>,
     },

@@ -303,6 +303,30 @@ fn is_torn(seq: u64, file: &[u8]) -> bool {
     full_len.is_none_or(|len| file.len() < len)
 }
 
+/// The key slots of the newest complete local state, read without any key:
+/// what a passphrase or platform key unwraps the root from before [`open`].
+/// `None` when no file holds a complete slot section.
+pub fn peek_slots<B: Blocks>(blocks: &B) -> Result<Option<Vec<u8>>> {
+    for seq in numbered(blocks, LOCAL_PREFIX, LOCAL_SUFFIX)?.into_iter().rev() {
+        let bytes = match blocks.read_all(&local_sealed(seq)) {
+            Ok(bytes) => bytes,
+            Err(err) if err.is_not_found() => continue,
+            Err(err) => return Err(err),
+        };
+        if is_torn(seq, &bytes) {
+            continue;
+        }
+        let slots = (|| {
+            let len = u32::from_be_bytes(bytes.get(HEADER_LEN - 4..HEADER_LEN)?.try_into().ok()?);
+            bytes.get(HEADER_LEN..HEADER_LEN.checked_add(usize::try_from(len).ok()?)?)
+        })();
+        if let Some(slots) = slots {
+            return Ok(Some(slots.to_vec()));
+        }
+    }
+    Ok(None)
+}
+
 /// Opens the newest local state and checks it against the anchor. The caller
 /// is the single writer: once a state is accepted, torn or unreadable files
 /// above it and superseded files below it are deleted.

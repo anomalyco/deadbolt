@@ -74,7 +74,7 @@ impl Error {
         }
     }
 
-    pub(crate) fn is_not_found(&self) -> bool {
+    pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
     }
 }

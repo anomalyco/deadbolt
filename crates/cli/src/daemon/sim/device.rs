@@ -10,7 +10,7 @@ use deadbolt_core::{DeviceId, DeviceSecret, Log, MembershipOp, Payload, Vault, V
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PeerId, SyncHandler,
 };
-use deadbolt_store::KdfParams;
+use crate::disk::KdfParams;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -39,7 +39,7 @@ impl Device {
         let key = [index as u8 + 1; 32];
         let secret = DeviceSecret::from_bytes(&key);
         let id = *secret.device_id().as_bytes();
-        let store = deadbolt_store::init_with_params(
+        let store = crate::disk::init_with_params(
             dir.path(),
             PASS,
             &key,

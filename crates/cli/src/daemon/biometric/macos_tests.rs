@@ -3,7 +3,7 @@ use tempfile::TempDir;
 
 use super::*;
 
-const FAST: deadbolt_store::KdfParams = deadbolt_store::KdfParams {
+const FAST: crate::disk::KdfParams = crate::disk::KdfParams {
     m_cost_kib: 8,
     t_cost: 1,
     p_cost: 1,
@@ -141,7 +141,7 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
     let dir = tmp.path();
     let now = 1_700_000_000;
 
-    let store = deadbolt_store::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
+    let store = crate::disk::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
     store.append_batch([&b"vault-entry-1"[..]]).unwrap();
     store.meta_set("vault_id", b"v-touchid").unwrap();
     assert!(store.biometric_token().unwrap().is_none());
@@ -203,10 +203,10 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
         ),
         Err(UnlockError::Invalidated(_))
     ));
-    assert!(deadbolt_store::biometric_token(dir).unwrap().is_none());
+    assert!(crate::disk::biometric_token(dir).unwrap().is_none());
 
     // Re-enroll and verify 14-day age expiry wipes the slot.
-    let store = deadbolt_store::unlock(dir, PASS).unwrap();
+    let store = crate::disk::unlock(dir, PASS).unwrap();
     enroll_with_policy(&store, SealPolicy::HEADLESS_TEST, now).unwrap();
     drop(store);
     let expired = now + MAX_AGE_SECS + 1;
@@ -221,15 +221,15 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
         ),
         Err(UnlockError::Expired(_))
     ));
-    assert!(deadbolt_store::biometric_token(dir).unwrap().is_none());
+    assert!(crate::disk::biometric_token(dir).unwrap().is_none());
 
     // Re-enroll, mutate the recorded biometric stateHash inside the token,
     // and verify that a fingerprint-set stateHash change wipes the slot.
-    let store = deadbolt_store::unlock(dir, PASS).unwrap();
+    let store = crate::disk::unlock(dir, PASS).unwrap();
     enroll_with_policy(&store, SealPolicy::HEADLESS_TEST, now).unwrap();
     let mut mutated_token = store.biometric_token().unwrap().unwrap();
     mutated_token[HEADER_LEN + 1] ^= 0xff;
-    let fresh_key = deadbolt_store::generate_biometric_key().unwrap();
+    let fresh_key = crate::disk::generate_biometric_key().unwrap();
     store.set_biometric(&fresh_key, &mutated_token).unwrap();
     drop(store);
     assert!(matches!(
@@ -243,7 +243,7 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
         ),
         Err(UnlockError::Invalidated(_))
     ));
-    assert!(deadbolt_store::biometric_token(dir).unwrap().is_none());
+    assert!(crate::disk::biometric_token(dir).unwrap().is_none());
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn cancel_and_timeout_kill_in_flight_helper_and_preserve_slot() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
     let now = 1_700_000_000;
-    let store = deadbolt_store::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
+    let store = crate::disk::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
     if matches!(
         enroll_with_policy(&store, SealPolicy::HEADLESS_TEST, now),
         Err(UnlockError::Unavailable(_))
@@ -285,7 +285,7 @@ fn cancel_and_timeout_kill_in_flight_helper_and_preserve_slot() {
         .unwrap();
     assert!(matches!(err, UnlockError::Cancelled), "got {err:?}");
     assert!(start.elapsed() < Duration::from_secs(2));
-    assert!(deadbolt_store::biometric_token(dir).unwrap().is_some());
+    assert!(crate::disk::biometric_token(dir).unwrap().is_some());
 
     // 2. Timeout kills the helper and returns Unavailable without wiping the slot.
     let timeout_cancel = CancelHandle::new();
@@ -302,7 +302,7 @@ fn cancel_and_timeout_kill_in_flight_helper_and_preserve_slot() {
     .unwrap();
     assert!(matches!(err, UnlockError::Unavailable(_)), "got {err:?}");
     assert!(start.elapsed() < Duration::from_secs(2));
-    assert!(deadbolt_store::biometric_token(dir).unwrap().is_some());
+    assert!(crate::disk::biometric_token(dir).unwrap().is_some());
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn biometry_current_set_never_prompts_when_non_interactive() {
     let dir = tmp.path();
     let now = 1_700_000_000;
 
-    let store = deadbolt_store::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
+    let store = crate::disk::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
     let policy = SealPolicy {
         require_biometry: true,
         interactive: false,
@@ -334,7 +334,7 @@ fn biometry_current_set_never_prompts_when_non_interactive() {
                 matches!(err, UnlockError::Unavailable(_)),
                 "expected Unavailable for non-interactive biometric unseal, got {err:?}"
             );
-            assert!(deadbolt_store::biometric_token(dir).unwrap().is_some());
+            assert!(crate::disk::biometric_token(dir).unwrap().is_some());
         }
         Err(UnlockError::Unavailable(_)) => {
             // On a headless Mac without enrolled fingerprints (e.g. Mac mini or CI VM),

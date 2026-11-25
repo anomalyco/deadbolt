@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use deadbolt_client::peer::Peer;
-use deadbolt_store::{Budget, Dropped};
+use crate::disk::{Budget, Dropped};
 use tracing::warn;
 
 pub use deadbolt_engine::activity::{KEEP_SECS, Ledger, draft, ledger, reported};
@@ -117,7 +117,7 @@ impl Daemon {
 
     fn keep(
         &self,
-        store: Option<&deadbolt_store::Unlocked>,
+        store: Option<&crate::disk::Unlocked>,
         ledger: &mut Ledger,
         due: Vec<ActivityEntry>,
     ) {
@@ -302,7 +302,7 @@ mod tests {
     }
 
     async fn set_up(dir: &std::path::Path) -> Arc<Daemon> {
-        let daemon = Daemon::new(test_paths(dir), true, deadbolt_store::KdfParams::DEFAULT);
+        let daemon = Daemon::new(test_paths(dir), true, crate::disk::KdfParams::DEFAULT);
         daemon
             .setup(Zeroizing::new("test".into()), "laptop".into())
             .await
