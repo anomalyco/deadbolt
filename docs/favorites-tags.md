@@ -196,7 +196,7 @@ Each raw tag or folder name passes through `deadbolt_core::tag::normalize_tag`. 
 
 ### Deduplication on `deadbolt import`
 
-`daemon/items.rs::key` deduplicates re-imports by item content (login host/username/password, card number, SSH private key, or whole fields). `favorite` and `tags` stay **out** of `Key` so re-importing an export after tagging or starring items in Deadbolt still skips existing items rather than creating duplicates.
+`daemon/import.rs::key` deduplicates re-imports by item content (login host/username/password, card number, SSH private key, or whole fields). `favorite` and `tags` stay **out** of `Key` so re-importing an export after tagging or starring items in Deadbolt still skips existing items rather than creating duplicates.
 
 ### `deadbolt sync 1password` (`crates/cli/src/daemon/mirror.rs`)
 
@@ -300,7 +300,7 @@ Checked against every shortcut in `keys::SHORTCUTS`, `edit.rs`, `import.rs`, `pa
 - **Autofill ranking in `deadbolt-core` (shared by native host and standalone wasm):**
   - `crates/core/src/autofill.rs`: `Rank` becomes `(Closeness, Reverse<bool>, Reverse<u64>, String, Option<String>)` (`closeness`, then `favorite`, then `used`, then `title`, then `username`). Site closeness still comes first so `staging.example.com` never loses to a starred login on `app.example.com`; at equal closeness, a starred login beats unstarred ones, placing it first in the inline menu and giving it the primary `Fill` button in `extension/src/popup.ts`.
   - `crates/core/src/forms.rs`: `forms::list` sorts identities and cards by `(!item.favorite, title.to_lowercase(), item.id)`, putting starred cards and identities at the top of checkout and address menus.
-  - `crates/cli/src/daemon/passkeys.rs` and `crates/ext-core/src/device/passkeys.rs`: sort passkeys for an RP by `(!item.favorite, username, vault, id)`.
+  - `crates/engine/src/passkeys.rs` and `crates/ext-core/src/device/passkeys.rs`: sort passkeys for an RP by `(!item.favorite, username, vault, id)`.
 - **Standalone extension vault UI (`crates/ext-core/src/device/items.rs`, `extension/src/vault/`):**
   - Include `favorite` and `tags` on `device-items`, `device-item`, `device-item-save`, and `device-save`.
   - Sort favorites first within both "This site" and "Everything else" / "All items", parse `#tag` and `is:favorite` in the vault search box, and add star toggle + tag chips/editor in `extension/src/vault/tags.ts`.

@@ -9,11 +9,14 @@
 //!   `extension/src/gen/proto.ts`, are generated from these types by
 //!   `bun run gen:proto` (the `gen-ts` binary), and CI fails when they drift.
 //!
+//! - [`peer`]: the name and address hints devices exchange about each other.
+//!
 //! The two protocols are versioned separately: each version changes only when
 //! its own messages do.
 
 pub mod browser;
 pub mod daemon;
+pub mod peer;
 pub mod typescript;
 
 /// The daemon control protocol's version, sent as `v` in every request and

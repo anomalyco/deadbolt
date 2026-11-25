@@ -348,7 +348,8 @@ impl Daemon {
                 // Mapping needs no session: it runs before taking the lock.
                 let parsed = crate::import::parse_with(&export, &files)?;
                 drop((export, files));
-                let report = self.with(|s| items::import(s, vault.as_deref(), parsed, apply))?;
+                let report =
+                    self.with(|s| super::import::import(s, vault.as_deref(), parsed, apply))?;
                 if apply {
                     self.sync_now.notify_one();
                 }
@@ -400,14 +401,12 @@ impl Daemon {
                 let password = crate::protocol::Secret::new(
                     generate::generate(&origin, &generate::field_rules(&field))?.as_str(),
                 );
-                let id = self.with(|s| {
-                    s.generated
-                        .offer(&origin, password.clone(), std::time::Instant::now())
-                })?;
+                let id =
+                    self.with(|s| s.generated.offer(&origin, password.clone(), s.elapsed()))?;
                 Ok(Reply::SiteGenerated { password, id })
             }
             Command::SiteGenerateKeep { origin, id } => {
-                self.with(|s| s.generated.keep(&origin, &id, std::time::Instant::now()))?;
+                self.with(|s| s.generated.keep(&origin, &id, s.elapsed()))?;
                 Ok(Reply::Done)
             }
             Command::SiteGenerateDrop { origin, id } => {
@@ -423,9 +422,7 @@ impl Daemon {
                 password,
             } => {
                 let (status, matches) = self.with(|s| {
-                    let password =
-                        s.generated
-                            .resolve(&origin, &password, std::time::Instant::now())?;
+                    let password = s.generated.resolve(&origin, &password, s.elapsed())?;
                     autofill::check(s, &origin, username.as_deref(), &password)
                 })?;
                 Ok(Reply::SiteCheck { status, matches })
@@ -439,9 +436,7 @@ impl Daemon {
                 password,
             } => {
                 let (login, created) = self.with(|s| {
-                    let secret =
-                        s.generated
-                            .resolve(&origin, &password, std::time::Instant::now())?;
+                    let secret = s.generated.resolve(&origin, &password, s.elapsed())?;
                     let saved = autofill::save(
                         s,
                         autofill::Save {
@@ -475,6 +470,9 @@ impl Daemon {
                             url: &url,
                             provider: &provider,
                             account: &account,
+                            test_hosts: crate::config::test_env("DEADBOLT_TEST_PROVIDER_HOSTS")
+                                .as_deref()
+                                == Some("1"),
                         },
                     )
                 })?;

@@ -1,6 +1,7 @@
 use super::connection::{invalid_request, request_line};
 use super::lifecycle::drain_connections;
 use super::*;
+use crate::client::DaemonError;
 use crate::protocol::FieldInput;
 use crate::protocol::PROTOCOL_VERSION;
 use crate::protocol::Request;

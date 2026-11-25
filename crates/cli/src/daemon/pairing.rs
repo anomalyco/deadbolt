@@ -374,7 +374,7 @@ pub async fn join(
             Home::Memory(Box::new(Memory {
                 secret,
                 name,
-                addr: Addr::from_peer(node.addr()),
+                addr: Addr::from(node.addr()),
             })),
         ),
     };

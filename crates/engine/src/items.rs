@@ -24,27 +24,30 @@ use anyhow::{Result, anyhow, bail};
 use deadbolt_core::tag::{MAX_TAGS, Query, fold_tag, item_has_tag, normalize_tag, tag_counts};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{
-    DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Source, Vault, VaultId, schema,
-    valid_name,
+    DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use super::session::{Loaded, hex};
-use crate::import::onepassword::source_key;
-use crate::import::{Imported, MirrorVersion, digest};
-use crate::items::line;
-use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo, TagCount, Tally};
+use deadbolt_core::listing::{detail, input_field, searchable};
+pub use deadbolt_core::listing::{host, label};
+use deadbolt_proto::daemon::{Code, FieldInfo, FieldInput, ItemInfo, TagCount};
+
+use crate::Engine;
 
 const MIN_SHORT: usize = 4;
 
-use deadbolt_core::listing::{detail, input_field, searchable};
-pub use deadbolt_core::listing::{host, label};
-
 #[cfg(test)]
-#[path = "items_tests.rs"]
 mod tests;
 
-pub(super) fn matches(item: &Item, query: &[String], has_any_tagged: bool) -> bool {
+/// `short<TAB>label[<TAB>detail]`, as `ls` prints it.
+pub fn line(item: &ItemInfo) -> String {
+    match &item.detail {
+        Some(detail) => format!("{}\t{}\t{detail}", item.short, item.label),
+        None => format!("{}\t{}", item.short, item.label),
+    }
+}
+
+pub fn matches(item: &Item, query: &[String], has_any_tagged: bool) -> bool {
     matches_parsed(item, &Query::from_words(query), has_any_tagged)
 }
 
@@ -108,21 +111,21 @@ fn short_between<'a>(id: &str, neighbours: impl Iterator<Item = &'a str>) -> Str
     id[..(shared + 1).clamp(MIN_SHORT, id.len())].to_string()
 }
 
-pub(super) struct Listing {
-    pub(super) items: Vec<Item>,
+pub struct Listing {
+    pub items: Vec<Item>,
     ids: Vec<String>,
     /// A listing of deleted items, and when each was deleted.
     deleted: Option<BTreeMap<ItemId, u64>>,
 }
 
 impl Listing {
-    pub(super) fn new(vault: &Vault) -> Self {
+    pub fn new(vault: &Vault) -> Self {
         Self::of(vault.items(), None)
     }
 
     /// The deleted items instead, newest first ([`Vault::deleted`]). Short
     /// ids are unique among them.
-    pub(super) fn deleted(vault: &Vault) -> Self {
+    pub fn deleted(vault: &Vault) -> Self {
         let deleted = vault.deleted();
         let at = deleted
             .iter()
@@ -132,7 +135,7 @@ impl Listing {
     }
 
     /// The live items, or with `deleted` the deleted ones.
-    pub(super) fn pick(vault: &Vault, deleted: bool) -> Self {
+    pub fn pick(vault: &Vault, deleted: bool) -> Self {
         if deleted {
             Self::deleted(vault)
         } else {
@@ -150,18 +153,18 @@ impl Listing {
         }
     }
 
-    pub(super) fn has_any_tagged(&self) -> bool {
+    pub fn has_any_tagged(&self) -> bool {
         self.items.iter().any(|i| !i.tags.is_empty())
     }
 
     /// The item, without field values unless `with_fields`, and without
     /// one-time password secrets unless `with_otp` too. Files come as their
     /// names alone.
-    pub(super) fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
+    pub fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
         self.info_with(item, with_fields, with_otp, true)
     }
 
-    pub(super) fn info_with(
+    pub fn info_with(
         &self,
         item: &Item,
         with_fields: bool,
@@ -183,7 +186,7 @@ impl Listing {
                         .map(String::as_str)
                         .filter(|n| !known.contains(n)),
                 )
-                .filter(|name| !super::passkeys::private(item, name));
+                .filter(|name| !crate::passkeys::private(item, name));
             fields = order
                 .map(|name| FieldInfo {
                     name: name.into(),
@@ -216,7 +219,7 @@ impl Listing {
         )
     }
 
-    pub(super) fn find(&self, query: &[String]) -> Result<&Item> {
+    pub fn find(&self, query: &[String]) -> Result<&Item> {
         let parsed = Query::from_words(query);
         let tagged = parsed.any_tag && self.has_any_tagged();
         unique_match(
@@ -232,7 +235,7 @@ impl Listing {
 
 /// Single-target writes search one materialized item at a time. Only on an
 /// ambiguous query do we retain multiple rows, and then just public labels.
-pub(super) fn find_live(vault: &Vault, query: &[String]) -> Result<Item> {
+pub fn find_live(vault: &Vault, query: &[String]) -> Result<Item> {
     let parsed = Query::from_words(query);
     let tagged = parsed.any_tag && vault.iter_items().any(|i| !i.tags.is_empty());
     unique_match(
@@ -329,7 +332,7 @@ fn clean_tags(raw: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Vec<Stri
     Ok(seen.into_values().collect())
 }
 
-fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
+fn write(s: &mut Engine, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
     s.update(vault, |v, secret| Ok(v.write(secret, ops)?))
 }
 
@@ -337,7 +340,7 @@ fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
     clippy::expect_used,
     reason = "callers just wrote this item while holding the session lock"
 )]
-fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
+fn info(s: &Engine, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");
     live_summary(vault, &item)
@@ -360,7 +363,7 @@ fn live_summary(vault: &Vault, item: &Item) -> ItemInfo {
 /// and the contents only of the file fields `files` names. With `deleted`,
 /// one of the deleted items instead.
 pub fn get(
-    s: &Loaded,
+    s: &Engine,
     vault: Option<&str>,
     query: &[String],
     otp: bool,
@@ -385,7 +388,7 @@ pub fn get(
 
 /// The current one-time code of the item's `otp` field, else of its first
 /// field of type otp, at `now` (since the unix epoch).
-pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: Duration) -> Result<Code> {
+pub fn code(s: &Engine, vault: Option<&str>, query: &[String], now: Duration) -> Result<Code> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
     let item = listing.find(query)?;
     let field = item
@@ -409,9 +412,8 @@ pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: Duration) ->
     })
 }
 
-#[cfg(test)]
 pub fn list(
-    s: &Loaded,
+    s: &Engine,
     vault: Option<&str>,
     query: &[String],
     kind: Option<&str>,
@@ -423,7 +425,7 @@ pub fn list(
 /// Matching items (favorites first, then by label), or with `deleted` the
 /// deleted ones newest first.
 pub fn list_filtered(
-    s: &Loaded,
+    s: &Engine,
     vault: Option<&str>,
     query: &[String],
     kind: Option<&str>,
@@ -458,7 +460,7 @@ pub fn list_filtered(
     Ok(items)
 }
 
-pub fn tags(s: &Loaded, vault: Option<&str>) -> Result<Vec<TagCount>> {
+pub fn tags(s: &Engine, vault: Option<&str>) -> Result<Vec<TagCount>> {
     let items = s.vault(&s.resolve(vault)?).items();
     Ok(
         tag_counts(items.iter().map(|i| i.tags.iter().map(String::as_str)))
@@ -469,7 +471,7 @@ pub fn tags(s: &Loaded, vault: Option<&str>) -> Result<Vec<TagCount>> {
 }
 
 pub fn create(
-    s: &mut Loaded,
+    s: &mut Engine,
     vault: Option<&str>,
     kind: &str,
     name: Option<String>,
@@ -479,7 +481,7 @@ pub fn create(
 }
 
 pub fn create_with(
-    s: &mut Loaded,
+    s: &mut Engine,
     vault: Option<&str>,
     kind: &str,
     name: Option<String>,
@@ -495,7 +497,7 @@ pub fn create_with(
     let tags = clean_tags(tags)?;
     let stamp = deadbolt_core::health::audited_password_field(kind)
         .is_some_and(|pw| fields.iter().any(|(n, _)| n == pw));
-    let today = stamp.then(crate::config::today_utc);
+    let today = stamp.then(|| s.today());
     let name = name.filter(|n| !n.is_empty());
     let (id, _) = s.update(vault, |v, secret| {
         let (id, entry) = v.create_item_with(secret, kind, name, fields, favorite, tags)?;
@@ -518,7 +520,7 @@ fn derive_ssh_create(fields: &mut Vec<(String, Field)>) {
         return;
     };
     let Some((public_key, fingerprint, file_comment)) =
-        super::ssh_keys::derive_fields(private_key, get("passphrase"), get("comment"))
+        crate::ssh_keys::derive_fields(private_key, get("passphrase"), get("comment"))
     else {
         return;
     };
@@ -538,280 +540,8 @@ fn derive_ssh_create(fields: &mut Vec<(String, Field)>) {
     }
 }
 
-/// What makes two items the same to an import: a login's URL host,
-/// username and password, a card's number, an SSH key's private key. A
-/// login without a URL host (a database, a Wi-Fi network) is also told
-/// apart by its name. A secure note or an identity is the same only with
-/// the same name and every field the same. Wiped when dropped.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum Key {
-    Login {
-        host: String,
-        name: String,
-        username: String,
-        password: String,
-    },
-    Card {
-        number: String,
-    },
-    Ssh {
-        private_key: String,
-    },
-    Whole {
-        kind: String,
-        name: String,
-        fields: Vec<(String, String)>,
-    },
-}
-
-impl Drop for Key {
-    fn drop(&mut self) {
-        match self {
-            Self::Login {
-                host,
-                name,
-                username,
-                password,
-            } => {
-                host.zeroize();
-                name.zeroize();
-                username.zeroize();
-                password.zeroize();
-            }
-            Self::Card { number } => number.zeroize(),
-            Self::Ssh { private_key } => private_key.zeroize(),
-            Self::Whole { kind, name, fields } => {
-                kind.zeroize();
-                name.zeroize();
-                for (field, value) in fields {
-                    field.zeroize();
-                    value.zeroize();
-                }
-            }
-        }
-    }
-}
-
-fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Option<Key> {
-    let value = |field| {
-        fields
-            .get(field)
-            .map_or(String::new(), |f: &Field| f.value.clone())
-    };
-    // A sign-in link is the import's own doing, not the item's content.
-    let whole = || Key::Whole {
-        kind: kind.into(),
-        name: name.unwrap_or_default().into(),
-        fields: fields
-            .iter()
-            .filter(|(field, _)| *field != "sign-in-account")
-            .map(|(field, f)| (field.clone(), f.value.clone()))
-            .collect(),
-    };
-    match kind {
-        // A login without a password (a server, an API credential, an SSO
-        // account) is told apart by all of it, not by host and username.
-        "login" if !fields.contains_key("password") => Some(whole()),
-        "login" => {
-            let host = fields
-                .get("url")
-                .filter(|f| f.kind == FieldType::Url)
-                .map(|f| host(&f.value))
-                .unwrap_or_default();
-            let name = if host.is_empty() {
-                name.unwrap_or_default().to_string()
-            } else {
-                String::new()
-            };
-            Some(Key::Login {
-                host,
-                name,
-                username: value("username"),
-                password: value("password"),
-            })
-        }
-        "card" => Some(Key::Card {
-            number: value("number")
-                .chars()
-                .filter(char::is_ascii_digit)
-                .collect(),
-        }),
-        "ssh" => Some(Key::Ssh {
-            private_key: value("private-key").trim().to_string(),
-        }),
-        "note" | "identity" | "api" | "database" | "server" | "wifi" | "license" | "bank"
-        | "document" | "passport" | "driver-license" | "membership" | "crypto" | "id-document" => {
-            Some(whole())
-        }
-        _ => None,
-    }
-}
-
-/// Where an item of an export is, or will be, here.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Target {
-    Here(ItemId),
-    /// The export's new item at this index.
-    New(usize),
-}
-
-/// A sign-in method that links to an account the import cannot find.
-const UNLINKED: (&str, &str) = (
-    "sign-in method links to an account not in this export (kept without the link)",
-    "sign-in methods link to an account not in this export (kept without the link)",
-);
-
-/// Sign-in links written per entry.
-const LINK_BATCH: usize = 256;
-
-/// The source of an item imported from 1Password, as it records a digest
-/// of the item as written: now with `field` as its `sign-in-account`.
-fn relinked_source(item: Item, field: &Field) -> Option<DataOp> {
-    let source = item.source.as_ref()?;
-    let mut version = MirrorVersion::parse(&source.version)?;
-    let mut fields = item.fields;
-    fields.insert("sign-in-account".into(), field.clone());
-    version.digest = digest(
-        &item.kind,
-        item.name.as_deref(),
-        &fields,
-        item.favorite,
-        &item.tags,
-    );
-    let source = Source {
-        id: source.id.clone(),
-        version: version.to_string(),
-    };
-    Some(DataOp::source(item.id, Some(source)))
-}
-
-/// Imports a mapped export. Items the vault already has, or the export
-/// repeats, are left out, so importing again changes nothing. With
-/// `apply`, the rest are created, all or none.
-///
-/// A login that signs in with another ([`Imported::sign_in_link`]) is then
-/// linked to it by `sign-in-account`: to the item created from that
-/// 1Password item, or the one here it duplicates, or one here imported or
-/// mirrored from it before. Item ids come from the entries that create
-/// them, so the links are a second write.
-pub fn import(
-    s: &mut Loaded,
-    vault: Option<&str>,
-    (items, mut report): (Vec<Imported>, ImportReport),
-    apply: bool,
-) -> Result<ImportReport> {
-    let vault = s.resolve(vault)?;
-    let mut seen: BTreeMap<Key, Target> = BTreeMap::new();
-    for item in s.vault(&vault).items() {
-        if let Some(key) = key(&item.kind, item.name.as_deref(), &item.fields) {
-            seen.entry(key).or_insert(Target::Here(item.id));
-        }
-    }
-    // 1Password items by vault and item id: this vault's copies first.
-    let mut copies: BTreeMap<(String, String), Target> = BTreeMap::new();
-    let others = s.vaults.iter().filter(|(id, _)| **id != vault);
-    for (_, v) in std::iter::once((&vault, s.vault(&vault))).chain(others) {
-        for item in v.items() {
-            if let Some((_, vault, id)) = item.source.as_ref().and_then(|s| source_key(&s.id)) {
-                copies
-                    .entry((vault.into(), id.into()))
-                    .or_insert(Target::Here(item.id));
-            }
-        }
-    }
-    let mut new = Vec::new();
-    let mut links = Vec::new();
-    let mut dates = Vec::new();
-    for item in items {
-        let target = match key(item.kind, item.name.as_deref(), &item.fields) {
-            Some(key) => match seen.get(&key) {
-                Some(target) => Some(*target),
-                None => {
-                    seen.insert(key, Target::New(new.len()));
-                    None
-                }
-            },
-            None => None,
-        };
-        let target = target.unwrap_or(Target::New(new.len()));
-        if let Some((_, vault, id)) = item.source.as_ref().and_then(|s| source_key(&s.id)) {
-            copies.entry((vault.into(), id.into())).or_insert(target);
-        }
-        if target != Target::New(new.len()) {
-            report.duplicates += 1;
-            if let Some(n) = report.new.get_mut(item.kind) {
-                *n -= 1;
-            }
-            continue;
-        }
-        if let Some(provider) = item.fields.get("sign-in-with") {
-            *report
-                .sign_in
-                .providers
-                .entry(provider.value.clone())
-                .or_default() += 1;
-            links.extend(item.sign_in_link.map(|link| (new.len(), link)));
-        }
-        if let Some(date) = item.password_changed {
-            dates.push((new.len(), date));
-        }
-        new.push(DataOp::Create {
-            kind: item.kind.to_string(),
-            name: item.name,
-            fields: item.fields,
-            source: item.source,
-            favorite: item.favorite,
-            tags: item.tags,
-        });
-    }
-    let given = links.len();
-    let links: Vec<(usize, Target)> = links
-        .into_iter()
-        .filter_map(|(at, link)| {
-            copies
-                .get(&link)
-                .copied()
-                .filter(|to| *to != Target::New(at))
-                .map(|to| (at, to))
-        })
-        .collect();
-    report.sign_in.linked = links.len();
-    if given > links.len() {
-        report.warnings.push(Tally {
-            count: given - links.len(),
-            one: UNLINKED.0.into(),
-            many: UNLINKED.1.into(),
-        });
-    }
-    if apply && !new.is_empty() {
-        s.update(vault, |v, secret| {
-            let (ids, _) = v.create_items(secret, new)?;
-            let mut ops = Vec::new();
-            for (at, date) in dates {
-                ops.push(DataOp::password_changed(ids[at], Some(date)));
-            }
-            for (at, to) in links {
-                let account = match to {
-                    Target::Here(id) => id,
-                    Target::New(i) => ids[i],
-                };
-                let id = ids[at];
-                let field = Field::new(FieldType::Text, hex(account.as_bytes()));
-                ops.extend(v.item(&id).and_then(|item| relinked_source(item, &field)));
-                ops.push(DataOp::set(id, "sign-in-account", field));
-            }
-            for batch in ops.chunks(LINK_BATCH) {
-                v.write(secret, batch.to_vec())?;
-            }
-            Ok(())
-        })?;
-    }
-    Ok(report)
-}
-
-#[cfg(test)]
 pub fn set(
-    s: &mut Loaded,
+    s: &mut Engine,
     vault: Option<&str>,
     query: &[String],
     inputs: Vec<FieldInput>,
@@ -826,7 +556,7 @@ pub fn set(
     reason = "ItemSet carries fields, name, unset, favorite and tag deltas in one atomic entry"
 )]
 pub fn set_with(
-    s: &mut Loaded,
+    s: &mut Engine,
     vault: Option<&str>,
     query: &[String],
     inputs: Vec<FieldInput>,
@@ -858,7 +588,7 @@ pub fn set_with(
             let changed = item.fields.get(pw).is_none_or(|prev| {
                 !deadbolt_core::autofill::same_password(Some(&prev.value), &next.value)
             });
-            changed.then(|| Some(crate::config::today_utc()))
+            changed.then(|| Some(s.today()))
         } else if unset.iter().any(|n| n == pw) && item.fields.contains_key(pw) {
             Some(None)
         } else {
@@ -894,7 +624,7 @@ pub fn set_with(
         };
         if let Some(private_key) = merged("private-key")
             && let Some((public_key, fingerprint, _)) =
-                super::ssh_keys::derive_fields(private_key, merged("passphrase"), merged("comment"))
+                crate::ssh_keys::derive_fields(private_key, merged("passphrase"), merged("comment"))
         {
             if !seen.contains("public-key") {
                 ops.push(DataOp::set(
@@ -959,7 +689,7 @@ pub fn set_with(
 }
 
 pub fn unset(
-    s: &mut Loaded,
+    s: &mut Engine,
     vault: Option<&str>,
     query: &[String],
     field: &str,
@@ -977,22 +707,18 @@ pub fn unset(
     Ok(info(s, vault, &item.id))
 }
 
-#[cfg(test)]
-pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+pub fn remove(s: &mut Engine, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;
     let info = listing.info(item, false, false);
-    write(
-        s,
-        vault,
-        vec![DataOp::delete(item.id, crate::config::now())],
-    )?;
+    let delete = DataOp::delete(item.id, s.now());
+    write(s, vault, vec![delete])?;
     Ok(info)
 }
 
 /// Deletes the exact item selected before consent, never re-running a search.
-pub(super) fn remove_id(s: &mut Loaded, vault: VaultId, id: ItemId) -> Result<ItemInfo> {
+pub fn remove_id(s: &mut Engine, vault: VaultId, id: ItemId) -> Result<ItemInfo> {
     let stored = s
         .vaults
         .get(&vault)
@@ -1002,11 +728,12 @@ pub(super) fn remove_id(s: &mut Loaded, vault: VaultId, id: ItemId) -> Result<It
         .filter(|item| !item.deleted)
         .ok_or_else(|| anyhow!("no such item"))?;
     let info = live_summary(stored, &item);
-    write(s, vault, vec![DataOp::delete(id, crate::config::now())])?;
+    let now = s.now();
+    write(s, vault, vec![DataOp::delete(id, now)])?;
     Ok(info)
 }
 /// Brings back the one deleted item `query` matches, as it was.
-pub fn restore(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+pub fn restore(s: &mut Engine, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
     let id = Listing::deleted(s.vault(&vault)).find(query)?.id;
     write(s, vault, vec![DataOp::restore(id)])?;

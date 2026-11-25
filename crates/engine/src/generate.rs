@@ -1,14 +1,15 @@
-//! Native protocol and monotonic-clock adapters for shared site generation.
+//! Protocol adapters for shared site password generation, and the
+//! passwords made for a page's form until it is saved.
 
-use std::time::Instant;
+use std::time::Duration;
 
 use anyhow::Result;
 use deadbolt_core::password_rules::Refused;
 use deadbolt_core::site_password::{self, FieldRules};
+use deadbolt_proto::daemon::{ErrorCode, PagePassword, Secret, SiteField};
 use zeroize::Zeroizing;
 
-use super::{ErrorCode, fail};
-use crate::protocol::{PagePassword, Secret, SiteField};
+use crate::fail;
 
 pub fn field_rules(field: &SiteField) -> FieldRules<'_> {
     FieldRules {
@@ -37,35 +38,22 @@ pub fn generate(origin: &str, field: &FieldRules) -> Result<Zeroizing<String>> {
     site_password::generate(origin, field).map_err(error)
 }
 
+/// Passwords made for web forms, until saved. Times are a monotonic clock's
+/// reading, since any epoch the host keeps for the session.
+#[derive(Default)]
 pub struct Pending {
     passwords: site_password::Pending,
-    epoch: Instant,
-}
-
-impl Default for Pending {
-    fn default() -> Self {
-        Self {
-            passwords: site_password::Pending::default(),
-            epoch: Instant::now(),
-        }
-    }
 }
 
 impl Pending {
-    pub fn offer(&mut self, origin: &str, password: Secret, now: Instant) -> Result<String> {
+    pub fn offer(&mut self, origin: &str, password: Secret, now: Duration) -> Result<String> {
         self.passwords
-            .offer(
-                origin,
-                Zeroizing::new(password.expose().to_owned()),
-                now.saturating_duration_since(self.epoch),
-            )
+            .offer(origin, Zeroizing::new(password.expose().to_owned()), now)
             .map_err(error)
     }
 
-    pub fn keep(&mut self, origin: &str, id: &str, now: Instant) -> Result<()> {
-        self.passwords
-            .keep(origin, id, now.saturating_duration_since(self.epoch))
-            .map_err(error)
+    pub fn keep(&mut self, origin: &str, id: &str, now: Duration) -> Result<()> {
+        self.passwords.keep(origin, id, now).map_err(error)
     }
 
     pub fn drop_candidate(&mut self, origin: &str, id: &str) {
@@ -76,15 +64,14 @@ impl Pending {
         &mut self,
         origin: &str,
         password: &PagePassword,
-        now: Instant,
+        now: Duration,
     ) -> Result<Secret> {
-        self.passwords
-            .expire(now.saturating_duration_since(self.epoch));
+        self.passwords.expire(now);
         match password {
             PagePassword::Typed(secret) => Ok(secret.clone()),
             PagePassword::Generated(id) => self
                 .passwords
-                .resolve(origin, id, now.saturating_duration_since(self.epoch))
+                .resolve(origin, id, now)
                 .map(|password| Secret::new(password.as_str()))
                 .map_err(error),
         }
@@ -103,7 +90,7 @@ mod tests {
 
     #[test]
     fn weak_fields_are_refused_with_their_own_code() {
-        let code = |result: Result<()>| crate::client::code(&result.unwrap_err());
+        let code = |result: Result<()>| crate::code(&result.unwrap_err());
         let pin = FieldRules {
             max_length: Some(8),
             allowed: Some("0123456789"),

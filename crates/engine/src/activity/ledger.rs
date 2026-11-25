@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::protocol::{ActivityEntry, CallerInfo, Tier};
+use deadbolt_proto::daemon::{ActivityEntry, CallerInfo, Tier};
 
 /// The longest string an entry keeps, in bytes, cut marker included.
 pub const MAX_TEXT: usize = 256;
@@ -305,7 +305,7 @@ impl Ledger {
         }
     }
 
-    #[cfg(test)]
+    /// How many entries wait for an unlock.
     pub fn held_len(&self) -> usize {
         self.held.len() + usize::from(self.over.is_some())
     }
@@ -314,7 +314,7 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ActivityItem, Ancestor, Outcome, Tier};
+    use deadbolt_proto::daemon::{ActivityItem, Ancestor, Outcome, Tier};
 
     fn entry(time: u64, label: &str) -> ActivityEntry {
         let mut caller = CallerInfo::unverified(label);

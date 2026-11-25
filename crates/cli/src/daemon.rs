@@ -2,16 +2,14 @@
 //! unlocked, runs the iroh node while unlocked, and serves the control socket.
 
 mod activity;
-mod autofill;
 pub mod biometric;
 mod caller;
 mod commands;
 mod connection;
 mod forms;
-mod generate;
 mod guesses;
 mod health;
-mod items;
+mod import;
 mod legacy;
 mod lifecycle;
 mod macos_autofill;
@@ -23,7 +21,7 @@ mod session;
 #[cfg(test)]
 mod sim;
 mod ssh_cleanup;
-pub(crate) mod ssh_keys;
+mod ssh_keys;
 mod status;
 mod sync;
 mod system;
@@ -41,13 +39,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use deadbolt_core::DeviceId;
+use deadbolt_engine::{autofill, generate, items};
 use deadbolt_net::{Membership, Node, NodeConfig, PeerId};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-use crate::client::DaemonError;
 use crate::config::Config;
 use crate::paths::Paths;
 use crate::protocol::ErrorCode;
@@ -254,13 +252,7 @@ fn wrong_passphrase(error: &anyhow::Error) -> bool {
     })
 }
 
-fn fail(code: ErrorCode, message: impl Into<String>) -> anyhow::Error {
-    DaemonError {
-        code,
-        message: message.into(),
-    }
-    .into()
-}
+use deadbolt_engine::fail;
 
 impl Daemon {
     /// Locks on each sleep or screen-lock event unless `lock_on_sleep` is off.

@@ -1474,21 +1474,17 @@ dependencies = [
  "deadbolt-client",
  "deadbolt-core",
  "deadbolt-enclave",
+ "deadbolt-engine",
  "deadbolt-net",
  "deadbolt-os",
  "deadbolt-proto",
  "deadbolt-send",
  "deadbolt-store",
- "der",
- "ed25519-dalek",
  "flate2",
  "getrandom 0.4.3",
  "indexmap",
  "memchr",
  "p256",
- "p384",
- "p521",
- "pkcs8",
  "procwatch",
  "redb",
  "reqwest",
@@ -1499,7 +1495,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "sigpipe",
- "ssh-key",
  "tempfile",
  "tokio",
  "toml",
@@ -1559,6 +1554,30 @@ name = "deadbolt-enclave"
 version = "0.0.0"
 
 [[package]]
+name = "deadbolt-engine"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "data-encoding",
+ "deadbolt-core",
+ "deadbolt-proto",
+ "der",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "indexmap",
+ "p256",
+ "p384",
+ "p521",
+ "pkcs8",
+ "serde",
+ "serde_json",
+ "ssh-key",
+ "tempfile",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "deadbolt-ffi"
 version = "0.0.0"
 dependencies = [
@@ -1578,6 +1597,7 @@ dependencies = [
  "argon2",
  "data-encoding",
  "deadbolt-core",
+ "deadbolt-proto",
  "getrandom 0.4.3",
  "hmac",
  "iroh",

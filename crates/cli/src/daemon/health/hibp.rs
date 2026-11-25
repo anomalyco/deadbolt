@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use data_encoding::HEXLOWER;
 use deadbolt_core::health::{SiteBreach, hibp_parts};
-use deadbolt_store::Unlocked;
+use deadbolt_engine::VaultStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -52,14 +52,14 @@ pub struct StoredBreaches {
 }
 
 impl HibpCache {
-    pub fn load(store: &Unlocked) -> Self {
+    pub fn load(store: &dyn VaultStore) -> Self {
         get_json(store, META_HIBP_CACHE)
             .ok()
             .flatten()
             .unwrap_or_default()
     }
 
-    pub fn save(&mut self, store: &Unlocked) -> Result<()> {
+    pub fn save(&mut self, store: &dyn VaultStore) -> Result<()> {
         while self.entries.len() > MAX_CACHE_ENTRIES {
             // Evict oldest clean (`count == 0`) entry first; else oldest overall.
             let victim = self
@@ -100,7 +100,7 @@ impl HibpCache {
     }
 }
 
-pub fn load_site_breaches(store: &Unlocked) -> Option<StoredBreaches> {
+pub fn load_site_breaches(store: &dyn VaultStore) -> Option<StoredBreaches> {
     get_json(store, META_SITE_BREACHES).ok().flatten()
 }
 

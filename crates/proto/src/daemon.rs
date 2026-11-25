@@ -96,3 +96,19 @@ pub const MAX_AUTOFILL_LINE: usize = 64 * 1024;
 /// (`~/Library/Group Containers/<TEAM_ID>.anomaly.deadbolt/s`), short for
 /// `sun_path`.
 pub const AUTOFILL_SOCKET: &str = "s";
+
+/// An error the daemon reports (`Message::Error`): its code, and the message
+/// shown as is.
+#[derive(Debug)]
+pub struct DaemonError {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DaemonError {}
