@@ -9,6 +9,26 @@ pub(crate) const TAG_LEN: usize = 16;
 
 pub(crate) type SecretKey = Zeroizing<[u8; KEY_LEN]>;
 
+/// A key the open store holds for as long as it's open (the data key, the
+/// device secret, the meta blinding key). On Unix it sits in pages of its own,
+/// locked in RAM, out of core dumps on Linux, and wiped before they're freed
+/// (`deadbolt_os::mem::LockedSecret`); elsewhere (wasm) it's a wiped array.
+#[cfg(unix)]
+pub(crate) type LiveKey = deadbolt_os::mem::LockedSecret<KEY_LEN>;
+#[cfg(not(unix))]
+pub(crate) type LiveKey = Zeroizing<[u8; KEY_LEN]>;
+
+/// A [`LiveKey`] holding a copy of `key`. The caller wipes its own copy.
+#[cfg(unix)]
+pub(crate) fn live_key(key: &[u8; KEY_LEN]) -> LiveKey {
+    LiveKey::from_bytes(key)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn live_key(key: &[u8; KEY_LEN]) -> LiveKey {
+    Zeroizing::new(*key)
+}
+
 pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
     let mut out = [0u8; N];
     getrandom::fill(&mut out).map_err(Error::Rng)?;
@@ -17,6 +37,13 @@ pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
 
 pub(crate) fn random_key() -> Result<SecretKey> {
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    getrandom::fill(key.as_mut_slice()).map_err(Error::Rng)?;
+    Ok(key)
+}
+
+/// A random [`LiveKey`], filled in place.
+pub(crate) fn random_live_key() -> Result<LiveKey> {
+    let mut key = live_key(&[0; KEY_LEN]);
     getrandom::fill(key.as_mut_slice()).map_err(Error::Rng)?;
     Ok(key)
 }

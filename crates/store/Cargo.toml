@@ -18,6 +18,10 @@ redb = "4"
 thiserror = "2"
 zeroize = "1"
 
+# Locked, non-dumpable memory for the open store's keys.
+[target.'cfg(unix)'.dependencies]
+deadbolt-os = { path = "../os" }
+
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 

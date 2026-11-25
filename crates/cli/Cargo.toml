@@ -25,6 +25,7 @@ deadbolt-core = { path = "../core" }
 deadbolt-proto = { path = "../proto" }
 deadbolt-enclave = { path = "../enclave" }
 deadbolt-net = { path = "../net", features = ["application"] }
+deadbolt-os = { path = "../os" }
 deadbolt-send = { path = "../send" }
 deadbolt-store = { path = "../store" }
 rpassword = "7.5.4"
