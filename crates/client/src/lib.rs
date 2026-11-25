@@ -9,7 +9,6 @@ pub mod peer;
 pub mod protocol;
 pub mod telemetry;
 
-use std::fmt;
 use std::fs;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::process::CommandExt;
@@ -106,19 +105,7 @@ async fn check_for(stream: &UnixStream, command: &Command) -> Result<(), Error> 
 }
 
 /// An error reported by the daemon.
-#[derive(Debug)]
-pub struct DaemonError {
-    pub code: ErrorCode,
-    pub message: String,
-}
-
-impl fmt::Display for DaemonError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for DaemonError {}
+pub use deadbolt_proto::daemon::DaemonError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

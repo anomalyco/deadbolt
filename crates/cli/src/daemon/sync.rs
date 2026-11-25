@@ -314,7 +314,6 @@ pub async fn run(daemon: Arc<Daemon>) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::session::Meta;
     use super::*;
     use deadbolt_core::{DeviceSecret, Field, FieldType, Vault};
 
@@ -972,20 +971,10 @@ mod tests {
         .unwrap();
         let (mut source, genesis) = Vault::create(&secret, "test").unwrap();
         let id = source.id();
-        let health = crate::daemon::health::State::new(&store);
-        let mut loaded = Loaded {
-            store,
-            id: secret.device_id(),
-            secret,
-            meta: Meta::default(),
-            vaults: [(id, Vault::from_genesis(genesis).unwrap())]
-                .into_iter()
-                .collect(),
-            unavailable: Default::default(),
-            changes: Default::default(),
-            health,
-            append_uncertain: false,
-        };
+        let mut loaded = Loaded::from_unlocked(store).unwrap();
+        loaded
+            .vaults
+            .insert(id, Vault::from_genesis(genesis).unwrap());
         let (_, entry) = source
             .create_item(
                 &loaded.secret,

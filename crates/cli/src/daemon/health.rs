@@ -14,7 +14,7 @@ use deadbolt_core::health::{
     IGNORE_ALWAYS, ItemMemo, audited_password_field, build_memo, evaluate, item_fingerprint,
 };
 use deadbolt_core::{DataOp, Item, ItemId, VaultId};
-use deadbolt_store::Unlocked;
+use deadbolt_engine::VaultStore;
 use tracing::warn;
 use zeroize::Zeroizing;
 
@@ -42,7 +42,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(store: &Unlocked) -> Self {
+    pub fn new(store: &dyn VaultStore) -> Self {
         let mut reuse_key = Zeroizing::new(blake3::derive_key(
             "deadbolt health reuse fallback v1",
             store.device_secret(),
@@ -309,7 +309,7 @@ impl Daemon {
                     let checked_at = now();
                     let day = (checked_at / 86_400) as u32;
                     self.with(|s| {
-                        let Loaded { store, health, .. } = &mut **s;
+                        let Loaded { engine, health, .. } = &mut **s;
                         for (key, count) in results {
                             health
                                 .hibp_cache
@@ -317,7 +317,7 @@ impl Daemon {
                                 .insert(HEXLOWER.encode(&key), HibpEntry { count, day });
                         }
                         health.hibp_cache.last_checked = Some(checked_at);
-                        health.hibp_cache.save(store)
+                        health.hibp_cache.save(engine.store())
                     })?;
                     changed = true;
                 }
@@ -329,9 +329,9 @@ impl Daemon {
             // on an explicit manual check so the UI reflects it.
             let checked_at = now();
             self.with(|s| {
-                let Loaded { store, health, .. } = &mut **s;
+                let Loaded { engine, health, .. } = &mut **s;
                 health.hibp_cache.last_checked = Some(checked_at);
-                health.hibp_cache.save(store)
+                health.hibp_cache.save(engine.store())
             })?;
             changed = true;
         }
@@ -341,7 +341,7 @@ impl Daemon {
                 Ok(breaches) => {
                     if !interrupts.has_changed().unwrap_or(true) {
                         if let Err(err) = self.with(|s| {
-                            set_json(&s.store, META_SITE_BREACHES, &breaches)?;
+                            set_json(s.engine.store(), META_SITE_BREACHES, &breaches)?;
                             s.health.site_breaches = Some(breaches);
                             Ok(())
                         }) {

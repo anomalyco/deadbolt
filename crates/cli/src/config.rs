@@ -99,6 +99,15 @@ pub fn wall_clock() -> Duration {
         .unwrap_or_default()
 }
 
+/// The system's wall clock, for the engine.
+pub struct SystemClock;
+
+impl deadbolt_engine::Clock for SystemClock {
+    fn now(&self) -> Duration {
+        wall_clock()
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -211,24 +220,6 @@ pub fn set_breach_checks(path: &Path, enabled: bool) -> Result<()> {
     change(path, |cfg| cfg.breach_checks = Some(enabled))
 }
 
-/// Today's UTC date as `YYYY-MM-DD`.
-pub fn today_utc() -> String {
-    utc_date(now())
-}
-
-/// `secs` (since the Unix epoch) as a UTC `YYYY-MM-DD` date.
-pub fn utc_date(secs: u64) -> String {
-    let z = (secs / 86_400) as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
-}
 /// Records an extension directory `deadbolt update` keeps current.
 pub fn set_extension_dir(path: &Path, dir: &Path) -> Result<()> {
     change(path, |cfg| {

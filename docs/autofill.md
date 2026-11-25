@@ -13,7 +13,7 @@ web page ─ content script ─ extension ══ native messaging ══ deadbol
 
 - **The daemon decides.** Matching a page to logins, refusing another site's
   login, computing one-time codes and comparing passwords all happen in the
-  daemon (`crates/cli/src/daemon/autofill.rs`, rules in `crates/cli/src/site.rs`).
+  daemon (`crates/engine/src/autofill.rs`, rules in `crates/core/src/site.rs`).
   Each daemon command names the page's origin and the daemon works out the site
   itself, so nothing upstream can widen what a page gets.
 - **The host is a pipe.** `deadbolt browser-host` checks the shape of each

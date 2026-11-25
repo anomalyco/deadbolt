@@ -315,22 +315,8 @@ fn month_year(n: i64) -> String {
         .unwrap_or_else(|| n.to_string())
 }
 
-/// A 1Password date, Unix seconds, as `YYYY-MM-DD`: the nearest day, so a
-/// day's local midnight from UTC+11 to UTC-12, or its noon UTC, lands on it
-/// rather than the day before.
-pub(crate) fn date(secs: i64) -> String {
-    // Howard Hinnant's days-to-civil.
-    let z = (secs + 43_199).div_euclid(86_400) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
-}
+/// A 1Password date, Unix seconds, as `YYYY-MM-DD` (the nearest day).
+pub(crate) use deadbolt_engine::clock::nearest_date as date;
 
 /// 1Password's card type codes as card brands.
 fn brand(code: String) -> String {
@@ -673,7 +659,7 @@ fn ssh(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     let mut comment = field(["comment", "comment"]);
     if (public.is_none() || fingerprint.is_none())
         && let Some((derived_pub, derived_fp, derived_comment)) =
-            crate::daemon::ssh_keys::derive_fields(
+            deadbolt_engine::ssh_keys::derive_fields(
                 &private,
                 passphrase.as_deref(),
                 comment.as_deref(),

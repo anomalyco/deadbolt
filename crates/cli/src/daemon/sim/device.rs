@@ -2,7 +2,7 @@
 
 use super::super::{
     pairing,
-    session::{Changes, Loaded, Meta},
+    session::{Changes, Loaded},
     sync,
 };
 use anyhow::Result;
@@ -50,18 +50,7 @@ impl Device {
             },
         )
         .unwrap();
-        let health = super::super::health::State::new(&store);
-        let state = Arc::new(Mutex::new(Some(Loaded {
-            store,
-            secret,
-            id: DeviceId::from_bytes(id),
-            meta: Meta::default(),
-            vaults: Default::default(),
-            unavailable: Default::default(),
-            changes: Default::default(),
-            health,
-            append_uncertain: false,
-        })));
+        let state = Arc::new(Mutex::new(Some(Loaded::from_unlocked(store).unwrap())));
         let member_state = state.clone();
         let gate = MembershipGate::new(Arc::new(move |peer: &PeerId| {
             member_state

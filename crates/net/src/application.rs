@@ -7,7 +7,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
-    net::SocketAddr,
     time::Duration,
 };
 
@@ -85,40 +84,26 @@ pub enum Error {
     Removed(String),
 }
 
-/// How to reach a device. Addresses and names are hints, never authority.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Addr {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub direct: Vec<SocketAddr>,
-}
+pub use deadbolt_proto::peer::{Addr, Hint, clean_name};
 
-impl Addr {
-    pub fn from_peer(addr: PeerAddr) -> Self {
+impl From<PeerAddr> for Addr {
+    fn from(addr: PeerAddr) -> Self {
         Self {
             relay: addr.relay_url,
             direct: addr.direct_addrs,
         }
     }
-
-    pub fn peer(&self, id: PeerId) -> PeerAddr {
-        PeerAddr {
-            id,
-            relay_url: self.relay.clone(),
-            direct_addrs: self.direct.clone(),
-        }
-    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Hint {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub addr: Option<Addr>,
-    #[serde(default)]
-    pub addr_seen: u64,
+impl PeerAddr {
+    /// The address `addr` gives the device `id`.
+    pub fn of(id: PeerId, addr: &Addr) -> Self {
+        Self {
+            id,
+            relay_url: addr.relay.clone(),
+            direct_addrs: addr.direct.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -181,14 +166,6 @@ pub trait State {
     ) -> Result<(), Self::Error>;
     /// Record a completed receive (e.g. the native address book's last-seen).
     fn received(&mut self, peer: &DeviceId) -> Result<(), Self::Error>;
-}
-
-pub fn clean_name(name: &str) -> String {
-    name.trim()
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect()
 }
 
 fn unhex<const N: usize>(text: &str) -> Result<[u8; N], Error> {
