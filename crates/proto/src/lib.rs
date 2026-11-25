@@ -20,6 +20,8 @@ pub mod typescript;
 /// as `protocol` in `status`. Clients and the daemon must speak the same
 /// one; `deadbolt_client::ensure_running` replaces an older daemon and
 /// refuses a newer one. Bump it on any change to [`daemon`]'s messages.
+/// `crates/app/scripts/build-autofill.sh` reads this line to stamp the macOS
+/// AutoFill extension, so keep it a plain literal.
 pub const DAEMON_PROTOCOL_VERSION: u32 = 29;
 
 /// The browser native messaging protocol's version, sent as `protocol` in

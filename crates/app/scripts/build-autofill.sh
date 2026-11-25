@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compiles DeadboltAutoFill.appex (anomaly.deadbolt.autofill) from
 # crates/app/autofill/*.swift, stamps Info.plist and the control protocol
-# version from crates/client/src/protocol.rs, and signs ad hoc (or with
+# version from crates/proto/src/lib.rs, and signs ad hoc (or with
 # DEADBOLT_APPLE_SIGNING_IDENTITY + DEADBOLT_AUTOFILL_PROVISION_PROFILE).
 #
 #   crates/app/scripts/build-autofill.sh [--universal] <out.appex> [version] [build]
@@ -37,8 +37,8 @@ if [[ -z $build ]]; then
   esac
 fi
 
-proto_v=$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' "$root/crates/client/src/protocol.rs")
-[[ -n $proto_v ]] || { echo "Could not read PROTOCOL_VERSION from crates/client/src/protocol.rs." >&2; exit 1; }
+proto_v=$(sed -n 's/^pub const DAEMON_PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' "$root/crates/proto/src/lib.rs")
+[[ -n $proto_v ]] || { echo "Could not read DAEMON_PROTOCOL_VERSION from crates/proto/src/lib.rs." >&2; exit 1; }
 
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT

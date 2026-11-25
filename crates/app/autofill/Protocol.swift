@@ -1,7 +1,7 @@
 // Wire protocol between `DeadboltAutoFill.appex` and `deadbolt daemon` over the
 // App Group Unix socket (`~/Library/Group Containers/<TEAM>.anomaly.deadbolt/s`).
-// Mirrors `crates/client/src/protocol.rs` (`generatedProtocolVersion` is
-// stamped from `PROTOCOL_VERSION` at build time).
+// Mirrors `crates/proto/src/daemon` (`generatedProtocolVersion` is
+// stamped from `DAEMON_PROTOCOL_VERSION` at build time).
 
 import AuthenticationServices
 import Foundation
