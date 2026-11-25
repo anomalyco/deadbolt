@@ -10,6 +10,7 @@ mod pushing;
 mod recovery;
 #[cfg(feature = "http")]
 mod s3_http;
+mod send;
 mod sigv4;
 mod store;
 #[cfg(feature = "http")]

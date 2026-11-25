@@ -10,10 +10,10 @@ use super::store::contract;
 use crate::sigv4::{self, AmzDate, Credentials, Request, Scope, sha256_hex};
 use crate::{Addressing, ObjStore, Outbox, PutOutcome, RemoteError, S3Config, S3ObjStore};
 
-const NOW: u64 = 1_764_000_000;
+pub(super) const NOW: u64 = 1_764_000_000;
 const PAGE: usize = 2;
 
-fn credentials() -> Credentials {
+pub(super) fn credentials() -> Credentials {
     Credentials::new("AKIDTEST", "test-secret-key")
 }
 
@@ -64,9 +64,9 @@ fn signature_ok(req: &MockRequest) -> bool {
     expect.authorization == auth
 }
 
-type Objects = Arc<Mutex<BTreeMap<String, Vec<u8>>>>;
+pub(super) type Objects = Arc<Mutex<BTreeMap<String, Vec<u8>>>>;
 
-fn handle(objects: &Objects, req: &MockRequest) -> MockResponse {
+pub(super) fn handle(objects: &Objects, req: &MockRequest) -> MockResponse {
     if !signature_ok(req) {
         return MockResponse::status(403);
     }

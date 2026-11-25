@@ -133,7 +133,9 @@ pub async fn receive(
         conn.close(close::DONE, b"received");
     }
     progress(Progress::Decrypting);
-    let plaintext = open(&ticket.key, &sealed)?;
+    // The sender enforces the expiry it sealed into the header; this clock may
+    // not agree with its clock.
+    let (_header, plaintext) = open(&ticket.key, &sealed)?;
     Bundle::decode(&plaintext)
 }
 

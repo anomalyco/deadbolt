@@ -1,4 +1,5 @@
 #![cfg(test)]
+#![cfg(feature = "live")]
 
 //! A sender and a native receiver over local iroh endpoints, end to end.
 
@@ -8,8 +9,8 @@ use std::sync::{
 };
 
 use deadbolt_send::{
-    Bundle, Entry, Error, Group, Network, Node, Policy, Progress, SendTicket, Server, ShareRequest,
-    State, random_secret, receive, receiver_endpoint, seal,
+    Bundle, Entry, Error, Group, Network, Node, Policy, PolicyHeader, Progress, SendTicket, Server,
+    ShareRequest, State, random_secret, receive, receiver_endpoint, seal,
 };
 
 struct Sender {
@@ -50,16 +51,21 @@ impl Sender {
     async fn share(&self, bundle: &Bundle, opens: u32) -> (String, SendTicket) {
         let secret = random_secret().unwrap();
         let key = random_secret().unwrap();
-        let sealed = seal(&key, &bundle.encode()).unwrap();
+        let policy = Policy {
+            opens,
+            expires_at: self.clock.load(Ordering::SeqCst) + 3600,
+        };
+        let header = PolicyHeader {
+            expires_unix: policy.expires_at,
+            multi_open: opens > 1,
+        };
+        let sealed = seal(&key, &header, &bundle.encode()).unwrap();
         let info = self
             .server
             .add(ShareRequest {
                 secret: secret.clone(),
                 sealed,
-                policy: Policy {
-                    opens,
-                    expires_at: self.clock.load(Ordering::SeqCst) + 3600,
-                },
+                policy,
                 label: "test".into(),
             })
             .unwrap();

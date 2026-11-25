@@ -19,6 +19,8 @@
 //! - [`sigv4`]: AWS Signature Version 4 and presigned GET URLs, pure.
 //! - [`planner`]: push and pull order, the [`SyncAnchor`], and the rollback,
 //!   withholding and self-rollback checks.
+//! - [`send`]: store-backed Send, sealed by `deadbolt-send` (built without its
+//!   live iroh transport) at `<vault>/s/<name>` behind a presigned URL.
 //!
 //! Without the `http` feature the crate builds for `wasm32-unknown-unknown`.
 
@@ -30,6 +32,7 @@ mod mem;
 pub mod path;
 pub mod planner;
 pub mod s3;
+pub mod send;
 pub mod sigv4;
 mod store;
 pub mod webdav;
@@ -52,6 +55,10 @@ pub use planner::{
 #[cfg(feature = "http")]
 pub use s3::S3ObjStore;
 pub use s3::{Addressing, S3Config};
+pub use send::{
+    MAX_SEND_TTL_SECS, SendStoreError, StoreSend, download_send, open_stored, presign_send_url,
+    revoke_send, send_name, send_path, upload_send,
+};
 pub use store::{ByteRange, ObjStore, PutOutcome};
 #[cfg(feature = "http")]
 pub use webdav::WebDavObjStore;

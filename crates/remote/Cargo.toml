@@ -1,6 +1,6 @@
 [package]
 name = "deadbolt-remote"
-description = "Deadbolt v2 blind remote storage, not yet wired in: a four-verb ObjStore (create-only PUT, ranged GET, sorted LIST, idempotent DELETE) over S3/R2 (SigV4) and WebDAV, canonical object names, the push/pull planner and the rollback, withholding and self-rollback detector. The pure core builds for wasm32-unknown-unknown; the reqwest transport sits behind the default http feature."
+description = "Deadbolt v2 blind remote storage, not yet wired in: a four-verb ObjStore (create-only PUT, ranged GET, sorted LIST, idempotent DELETE) over S3/R2 (SigV4) and WebDAV, canonical object names, the push/pull planner, the rollback, withholding and self-rollback detector, and store-backed Send. The pure core builds for wasm32-unknown-unknown; the reqwest transport sits behind the default http feature."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -18,6 +18,8 @@ http = ["dep:reqwest", "dep:rustls"]
 [dependencies]
 blake3 = "1.8"
 deadbolt-core = { path = "../core", default-features = false }
+# The sealed format only: no iroh, so the crate stays small and wasm32-clean.
+deadbolt-send = { path = "../send", default-features = false }
 hmac = "0.13.0"
 quick-xml = "0.42"
 sha2 = { version = "0.11.1", default-features = false }
