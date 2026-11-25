@@ -3,6 +3,7 @@ use super::*;
 use crate::protocol::{
     Change, ErrorCode, FormCard, FormIdentity, Message, SignIn, SiteStatus, SiteValues,
 };
+use deadbolt_proto::browser::{Account, Change as HostChange};
 use tokio::io::AsyncWriteExt;
 
 fn json(envelope: &Envelope) -> Value {
@@ -71,7 +72,9 @@ fn replies_have_the_documented_shapes() {
     );
     let changed = Envelope {
         id: None,
-        body: Body::Changed { change: "locked" },
+        body: Body::Changed {
+            change: HostChange::Locked,
+        },
     };
     assert_eq!(
         json(&changed),

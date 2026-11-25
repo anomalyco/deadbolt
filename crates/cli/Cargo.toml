@@ -22,6 +22,7 @@ getrandom = "0.4"
 indexmap = "2.14"
 deadbolt-client = { path = "../client" }
 deadbolt-core = { path = "../core" }
+deadbolt-proto = { path = "../proto" }
 deadbolt-enclave = { path = "../enclave" }
 deadbolt-net = { path = "../net", features = ["application"] }
 deadbolt-send = { path = "../send" }

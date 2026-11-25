@@ -3,12 +3,13 @@
 //! drop.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::LoginRef;
 
 /// The kinds of item forms fill from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
 pub enum FormKind {
     Identity,

@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 
 /// The native messaging host's name, which the extension connects to.
-pub const HOST_NAME: &str = "anomaly.deadbolt.browser";
+pub const HOST_NAME: &str = deadbolt_proto::browser::NATIVE_HOST;
 
 /// The extension's id, fixed by the public key in
 /// `extension/manifest-key.txt` (the manifest's `key`): the first 128 bits

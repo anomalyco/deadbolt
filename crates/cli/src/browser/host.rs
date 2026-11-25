@@ -34,11 +34,11 @@ use crate::protocol::{Command, FieldInput, FormKind, LoginRef, PagePassword, Rep
 use learn::{learn, learn_read, learn_session};
 pub(crate) use protocol::Bucket;
 use protocol::MAX_REQUEST;
+pub(super) use protocol::{Body, Code, Envelope, Refusal, encode, format_ref, parse_ref};
 use protocol::{
-    Account, Head, MAX_PASSWORD, MAX_TITLE, MAX_URL, MAX_USERNAME, Request, form_fields,
+    Head, MAX_PASSWORD, MAX_TITLE, MAX_URL, MAX_USERNAME, Request, field_rules, form_fields,
     form_kinds, generated_id, invalid, refuse, site, write_frames,
 };
-pub(super) use protocol::{Body, Code, Envelope, Refusal, encode, format_ref, parse_ref};
 use watch::{RECONNECT, hello, watch};
 
 /// Checks are a password oracle and fills hand out secrets, so a runaway
@@ -335,20 +335,10 @@ impl Serial {
                 else {
                     return Err(unexpected());
                 };
-                let accounts = logins
-                    .into_iter()
-                    .map(|l| Account {
-                        login: format_ref(&l.login),
-                        vault: l.vault,
-                        title: l.title,
-                        username: l.username,
-                        has_password: l.has_password,
-                        has_totp: l.has_otp,
-                        urls: l.urls,
-                        sign_in: l.sign_in,
-                    })
-                    .collect();
-                Ok(Body::List { site, accounts })
+                Ok(Body::List {
+                    site,
+                    accounts: logins.into_iter().map(Into::into).collect(),
+                })
             }
             Request::Fill {
                 origin,
@@ -381,7 +371,7 @@ impl Serial {
             }
             Request::Generate { origin, field } => {
                 site(&origin)?;
-                let field = field.check()?;
+                let field = field_rules(field)?;
                 if !self.fills.take(Instant::now()) {
                     return Err(Refusal::slow_down());
                 }
@@ -397,7 +387,7 @@ impl Serial {
             }
             Request::GenerateCheck { origin, field } => {
                 site(&origin)?;
-                let field = field.check()?;
+                let field = field_rules(field)?;
                 if !self.checks.take(Instant::now()) {
                     return Err(Refusal::slow_down());
                 }
@@ -686,7 +676,7 @@ impl Serial {
                 if !self.learns.take(Instant::now()) {
                     return Err(Refusal::slow_down());
                 }
-                learn_read(&self.paths, &session, offset)
+                learn_read(&self.paths, &session, offset.unwrap_or(0))
             }
             Request::LearnDelete { session } => {
                 if !learn_session(&session) {

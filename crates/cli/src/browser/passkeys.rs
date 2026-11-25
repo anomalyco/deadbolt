@@ -6,7 +6,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use deadbolt_proto::browser::{
+    PasskeyAssertion, PasskeyCancel, PasskeyCreate, PasskeyCreated, PasskeyGet, PasskeyList,
+    Passkeys,
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -16,7 +19,7 @@ use super::host::{
     Body, Bucket, Code, Envelope, Refusal, call, encode, format_ref, parse_ref, unexpected,
 };
 use crate::paths::Paths;
-use crate::protocol::{Command, Reply, Verify};
+use crate::protocol::{Command, Reply};
 
 /// Ceremonies a user starts from Deadbolt's own prompt: a burst, then one a
 /// second.
@@ -38,101 +41,6 @@ use deadbolt_core::passkeys::MAX_USER_NAME;
 const MAX_CREDENTIAL_ID: usize = 1364;
 const MAX_EXCLUDE: usize = 64;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct List {
-    origin: String,
-    #[serde(default)]
-    rp_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct User {
-    id: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default, rename = "displayName")]
-    display_name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Create {
-    origin: String,
-    #[serde(default)]
-    rp_id: Option<String>,
-    challenge: String,
-    user: User,
-    #[serde(default)]
-    exclude: Vec<String>,
-    user_verification: Verify,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Get {
-    origin: String,
-    #[serde(default)]
-    rp_id: Option<String>,
-    #[serde(rename = "ref")]
-    passkey: String,
-    challenge: String,
-    user_verification: Verify,
-}
-
-#[derive(Deserialize)]
-pub struct Cancel {
-    /// The id of the `passkey-create` or `passkey-get` to stop.
-    request: Value,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Listed {
-    rp_id: String,
-    can_verify: bool,
-    passkeys: Vec<Passkey>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Passkey {
-    #[serde(rename = "ref")]
-    passkey: String,
-    vault: String,
-    credential_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    username: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    created: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Created {
-    #[serde(rename = "ref")]
-    passkey: String,
-    credential_id: String,
-    #[serde(rename = "clientDataJSON")]
-    client_data_json: String,
-    attestation_object: String,
-    authenticator_data: String,
-    public_key: String,
-    verified: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Assertion {
-    credential_id: String,
-    #[serde(rename = "clientDataJSON")]
-    client_data_json: String,
-    authenticator_data: String,
-    signature: String,
-    user_handle: String,
-    verified: bool,
-}
-
 fn at_most(what: &str, value: &str, max: usize) -> Result<(), Refusal> {
     if value.is_empty() || value.len() > max {
         return Err(Refusal::bad(format!("{what} is 1 to {max} bytes")));
@@ -148,7 +56,7 @@ fn check_page(origin: &str, rp_id: Option<&str>) -> Result<(), Refusal> {
     Ok(())
 }
 
-pub async fn list(paths: &Paths, list: List) -> Result<Body, Refusal> {
+pub async fn list(paths: &Paths, list: PasskeyList) -> Result<Body, Refusal> {
     check_page(&list.origin, list.rp_id.as_deref())?;
     let Reply::Passkeys {
         rp_id,
@@ -165,23 +73,14 @@ pub async fn list(paths: &Paths, list: List) -> Result<Body, Refusal> {
     else {
         return Err(unexpected());
     };
-    Ok(Body::Passkeys(Listed {
+    Ok(Body::Passkeys(Passkeys {
         rp_id,
         can_verify,
-        passkeys: passkeys
-            .into_iter()
-            .map(|p| Passkey {
-                passkey: format_ref(&p.passkey),
-                vault: p.vault,
-                credential_id: p.credential_id,
-                username: p.username,
-                created: p.created,
-            })
-            .collect(),
+        passkeys: passkeys.into_iter().map(Into::into).collect(),
     }))
 }
 
-pub fn create_command(create: Create) -> Result<Command, Refusal> {
+pub fn create_command(create: PasskeyCreate) -> Result<Command, Refusal> {
     check_page(&create.origin, create.rp_id.as_deref())?;
     at_most("challenge", &create.challenge, MAX_CHALLENGE)?;
     at_most("user.id", &create.user.id, MAX_USER_ID)?;
@@ -211,7 +110,7 @@ pub fn create_command(create: Create) -> Result<Command, Refusal> {
     })
 }
 
-pub fn get_command(get: Get) -> Result<Command, Refusal> {
+pub fn get_command(get: PasskeyGet) -> Result<Command, Refusal> {
     check_page(&get.origin, get.rp_id.as_deref())?;
     at_most("challenge", &get.challenge, MAX_CHALLENGE)?;
     Ok(Command::PasskeyGet {
@@ -233,7 +132,7 @@ async fn ceremony(paths: &Paths, command: Command) -> Result<Body, Refusal> {
             authenticator_data,
             public_key,
             verified,
-        } => Ok(Body::PasskeyCreated(Created {
+        } => Ok(Body::PasskeyCreated(PasskeyCreated {
             passkey: format_ref(&passkey),
             credential_id,
             client_data_json,
@@ -249,7 +148,7 @@ async fn ceremony(paths: &Paths, command: Command) -> Result<Body, Refusal> {
             signature,
             user_handle,
             verified,
-        } => Ok(Body::PasskeyAssertion(Assertion {
+        } => Ok(Body::PasskeyAssertion(PasskeyAssertion {
             credential_id,
             client_data_json,
             authenticator_data,
@@ -313,7 +212,7 @@ impl Ceremonies {
     /// cancelled. Whether one was running.
     pub async fn cancel(
         &mut self,
-        cancel: Cancel,
+        cancel: PasskeyCancel,
         frames: &mpsc::Sender<Zeroizing<Vec<u8>>>,
     ) -> Body {
         let found = match self.running.remove(&cancel.request.to_string()) {
@@ -348,6 +247,7 @@ impl Drop for Ceremonies {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Verify;
 
     fn create(json: Value) -> Result<Command, Refusal> {
         create_command(serde_json::from_value(json).unwrap())
@@ -379,9 +279,9 @@ mod tests {
         assert!(create(bad).is_err());
         let mut bad = ok;
         bad["userVerification"] = "always".into();
-        assert!(serde_json::from_value::<Create>(bad).is_err());
+        assert!(serde_json::from_value::<PasskeyCreate>(bad).is_err());
 
-        let get: Get = serde_json::from_value(serde_json::json!({
+        let get: PasskeyGet = serde_json::from_value(serde_json::json!({
             "origin": "https://example.com", "ref": "not a ref",
             "challenge": "AAAAAAAAAAAAAAAAAAAAAA", "userVerification": "required",
         }))
