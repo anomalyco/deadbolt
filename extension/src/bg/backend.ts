@@ -1,8 +1,6 @@
 // What the background's autofill, save, forms, passkey and learning code asks
-// of Deadbolt. Two implementations: the native host (bg/host.ts, `deadbolt
-// browser-host`, the default build) and the standalone
-// device (bg/standalone.ts, built with `scripts/build.ts --standalone`), where the extension is a Deadbolt
-// device of its own with the Rust vault running in an offscreen worker.
+// of Deadbolt: the native host (bg/host.ts, `deadbolt browser-host`), and
+// the tests' fakes.
 
 import type { Status } from "../messages"
 import type { Change, ErrorCode, ReplyFor, RequestBody } from "../protocol"
@@ -23,8 +21,6 @@ export interface SendOptions {
 }
 
 export type Listener = (status: Status, change?: Change) => void
-export type ReauthBody = Extract<RequestBody, { type: "fill-form" | "save-form" | "passkey-create" | "passkey-get" }>
-export type ReauthReply = ReplyFor[ReauthBody["type"]]
 
 export interface VaultBackend {
   status: Status
@@ -36,26 +32,6 @@ export interface VaultBackend {
   /** Try again now, e.g. when the popup opens. */
   reconnectNow(): Promise<void>
   send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, options?: SendOptions): Promise<ReplyFor[T]>
-  /** The user did something (opened the popup, filled, saved): restarts the idle lock, where there is one. */
-  used?(): void
-  /**
-   * The browser-only vault only: a fill the vault answered `passphrase_needed`
-   * (a card's number or code under Strict), or a card's save. Asks for the passphrase in
-   * Deadbolt's own popup or device.html, never the page, and runs the fill
-   * once with it. Rejects if the user cancels, Deadbolt locks, `signal`
-   * aborts (the page navigated) or nobody answers in time.
-   */
-  reauth?<T extends ReauthBody["type"]>(body: Extract<ReauthBody, { type: T }>, ask: ReauthAsk, signal: AbortSignal): Promise<ReplyFor[T]>
-  /** The browser-only vault only: whether a card's number or code asks for the passphrase (Strict), so the menu can say so. */
-  asksPassphrase?(): Promise<boolean>
-}
-
-/** What a passphrase prompt for a fill says, and the tab it's for. */
-export interface ReauthAsk {
-  tabId: number
-  /** The item, as the menu names it: "Visa •••• 4242". */
-  title: string
-  site: string
 }
 
 export const cancelled = () => new HostError("cancelled", "The request was cancelled.")

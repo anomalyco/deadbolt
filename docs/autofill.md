@@ -1094,8 +1094,7 @@ not running without sending hello, which would start the daemon again.
 
 ## Site icons
 
-Login rows can show their site's icon. Two switches, under Appearance in the
-standalone build's Settings and behind the gear in the native popup's footer,
+Login rows can show their site's icon. Two switches, behind the gear in the popup's footer,
 saved in `chrome.storage.local` (`siteIconsMenu`, `siteIconsVault`) and
 followed live by every open page:
 
@@ -1387,11 +1386,7 @@ fill nothing, and nothing is added to the page or takes its focus.
   native host writes it (see `learn` under Host messages); the daemon and
   the vault are never involved, and nothing syncs. Starting a recording's
   log removes logs older than 7 days, then the oldest beyond the newest 10.
-  `bun corpus/learned.ts` reports on the logs (it reads the steps). The
-  browser-only build keeps the same lines in the extension's IndexedDB
-  under the same limits (each line added on its own, never the whole log
-  rewritten), and Settings › Recordings downloads them for
-  `bun corpus/learned.ts --file` (docs/extension-device.md, Recordings).
+  `bun corpus/learned.ts` reports on the logs (it reads the steps).
 
 ## Which logins a page gets
 

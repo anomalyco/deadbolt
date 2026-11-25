@@ -2,9 +2,7 @@
 # Builds a browser crate to WebAssembly and its JS glue:
 #   scripts/wasm.sh <crate dir> <out dir>
 # e.g. `scripts/wasm.sh crates/send-web site/src/receive/wasm` (the site's
-# receive page) or `scripts/wasm.sh crates/ext-core extension/wasm` (the
-# extension's `--standalone` build). Paths are relative to the repository
-# root. Needs the wasm32-unknown-unknown target and wasm-bindgen-cli of the
+# receive page). Paths are relative to the repository root. Needs the wasm32-unknown-unknown target and wasm-bindgen-cli of the
 # exact version the crate pins:
 #   rustup target add wasm32-unknown-unknown
 #   cargo install wasm-bindgen-cli --version <pinned> --locked

@@ -99,8 +99,6 @@ export class Forms {
   private lockedShown = new Set<string>()
   /** The card and identity each tab last had filled, and when: a save may write their unchanged values back to them (bg/save.ts). */
   private filled = new Map<number, { card?: string; identity?: string; at: number }>()
-  /** Picks waiting on the passphrase (bg/standalone.ts), by the tab and frames they fill: a navigation there drops them. */
-  private waiting = new Map<AbortController, { tabId: number; frames: number[] }>()
 
   constructor(private host: VaultBackend) {
     host.onChange(() => {
@@ -229,8 +227,6 @@ export class Forms {
       // Every destination of a pick is the source's party (see targets): a provider's frames, or the site's own.
       const into = (t.source as Placed).provider
       const items = usable(reply, t.kind, t.needs)
-      // Only the browser-only vault under Strict, and only when the section takes a number or code.
-      const passphrase = t.kind === "card" && t.needs.some((f) => (VERIFIED_FIELDS as string[]).includes(f)) && (await this.host.asksPassphrase?.()) === true
       return {
         kind: "forms",
         form: t.kind,
@@ -238,7 +234,6 @@ export class Forms {
         identities: t.kind === "identity" ? (items as FormIdentity[]) : [],
         cards: t.kind === "card" ? (items as FormCard[]) : [],
         verify: t.kind === "card" && reply.canVerify,
-        ...(passphrase ? { passphrase } : {}),
         ...(t.kind === "identity" ? { fills: Object.fromEntries(items.map((i) => [i.ref, fillsWords(t.roles, i.fields)])) } : {}),
         ...(into ? { into } : {}),
       }
@@ -282,33 +277,19 @@ export class Forms {
     const verify = fields.some((f) => VERIFIED_FIELDS.includes(f))
     const body = { type: "fill-form" as const, origin: t.source.origin, ref, fields }
     let values: Record<string, string>
-    /** The fill waited on the passphrase, in Deadbolt's own popup or page: the top page is checked again too. */
-    let asked = false
     try {
       ;({ values } = await this.host.send(body, verify ? { timeout: VERIFY_TIMEOUT_MS } : {}))
     } catch (err) {
-      if (!(this.host.reauth && err instanceof HostError && err.code === "passphrase_needed")) return { ok: false, message: formsError(err, verify && !this.host.reauth) }
-      const pick = new AbortController()
-      this.waiting.set(pick, { tabId: t.owner.tabId, frames: approved.map((a) => a.target.frameId) })
-      try {
-        const site = siteOf(new URL(t.owner.origin).hostname) ?? new URL(t.owner.origin).hostname
-        ;({ values } = await this.host.reauth(body, { tabId: t.owner.tabId, title: itemTitle(item), site }, pick.signal))
-      } catch (err) {
-        return { ok: false, message: reauthError(err) }
-      } finally {
-        this.waiting.delete(pick)
-      }
-      asked = true
+      return { ok: false, message: formsError(err, verify) }
     }
-    // Frames below are checked again once the values are in hand, and after a
-    // passphrase prompt the top page too: the user was away from it.
-    await hold(true, asked)
+    // Frames below are checked again once the values are in hand.
+    await hold(true)
     let shown: typeof approved
     try {
       shown = []
-      for (const a of approved) if ((a.target.frameId === 0 && !asked) || (await stillShown(a.target, a.approved))) shown.push(a)
+      for (const a of approved) if (a.target.frameId === 0 || (await stillShown(a.target, a.approved))) shown.push(a)
     } finally {
-      await hold(false, asked)
+      await hold(false)
     }
     if (!shown.some((a) => a.target.frameId === t.source.frameId)) return { ok: false, message: NOT_SHOWN }
     let filled = 0
@@ -359,7 +340,6 @@ export class Forms {
   }
 
   navigated(d: { tabId: number; frameId: number }) {
-    for (const [pick, w] of this.waiting) if (w.tabId === d.tabId && (d.frameId === 0 || w.frames.includes(d.frameId))) pick.abort()
     if (d.frameId === 0) this.pages.delete(d.tabId)
     else this.pages.get(d.tabId)?.delete(d.frameId)
     for (const [token, t] of this.tokens) if (t.owner.tabId === d.tabId && (d.frameId === 0 || t.source.frameId === d.frameId)) this.tokens.delete(token)
@@ -367,7 +347,6 @@ export class Forms {
 
   forgetTab(tabId: number) {
     this.filled.delete(tabId)
-    for (const [pick, w] of this.waiting) if (w.tabId === tabId) pick.abort()
     this.pages.delete(tabId)
     for (const [token, t] of this.tokens) if (t.owner.tabId === tabId) this.tokens.delete(token)
   }
@@ -385,19 +364,6 @@ async function stillShown(target: FrameTarget, approved: FormsApproved): Promise
 export function usable(reply: FormsReply, kind: FormKind, needs: string[]): Array<FormIdentity | FormCard> {
   const items: Array<FormIdentity | FormCard> = kind === "card" ? reply.cards : reply.identities
   return needs.length ? items.filter((i) => (i.fields as string[]).some((f) => needs.includes(f))) : items
-}
-
-/** How the menu and the passphrase prompt name an item: "Visa •••• 4242", or an identity's title. */
-function itemTitle(item: FormIdentity | FormCard): string {
-  const card = item as FormCard
-  return "last4" in item && card.last4 ? `${card.brand || card.title} •••• ${card.last4}` : item.title
-}
-
-/** The passphrase prompt for a fill wasn't answered (cancelled, timed out, the page moved on) or the vault refused it. */
-export function reauthError(err: unknown): string {
-  if (err instanceof HostError && err.code === "cancelled") return "Deadbolt didn't get your passphrase. Nothing was filled."
-  if (err instanceof HostError && err.code === "locked") return "Deadbolt locked. Nothing was filled."
-  return formsError(err)
 }
 
 /**

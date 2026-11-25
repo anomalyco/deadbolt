@@ -9,7 +9,7 @@ export type Want = "username" | "password" | "totp"
 export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
 export type CheckStatus = "new" | "update" | "same"
 export type Change = "locked" | "unlocked" | "items" | "stopped" | "started"
-/** `passphrase_needed` and `wrong_passphrase` come only from the browser-only vault (bg/standalone.ts), never the native host. */
+/** `passphrase_needed` and `wrong_passphrase` came only from the retired browser-only vault; the native host never sends them. */
 export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "forbidden" | "failed" | "passphrase_needed" | "wrong_passphrase"
 export type UserVerification = "required" | "preferred" | "discouraged"
 export type FormKind = "identity" | "card"

@@ -11,7 +11,7 @@
 // dwell (see ui/dom.ts) before it does anything.
 
 
-import type { FieldRole, MenuLoadReply, MenuUnlockReply, PanelClosed, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
+import type { FieldRole, MenuLoadReply, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
 import { provider as providerOf } from "./signin"
 import type { Account } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, watchVisibility } from "./ui/dom"
@@ -20,7 +20,6 @@ import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
 import { onFold } from "./ui/pill-frame"
 import { ring } from "./ui/ring"
 import { siteTile } from "./ui/site-icon"
-import { lockedRow, turnInFlight, turnIntoLogins, waitOnPanel } from "./ui/unlock"
 import { COLLAPSE_GRACE_MS, FILLED_STAYS_MS, renderOffer, REPLAY_MS, ROW, type OfferState } from "./menu/offer"
 import { createPillController } from "./menu/pill"
 import { cardLine, CHEVRON, matches, notice, pillName, providerMark, type Row } from "./menu/rows"
@@ -152,10 +151,6 @@ const NARROW_SETTLES_MS = 480
 
 document.head.append(h("style", {}, ROLL_CSS))
 
-declare const DEADBOLT_NATIVE: boolean | undefined
-/** A `--native` build unlocks in the Deadbolt app; the default unlocks on device.html. */
-const native = typeof DEADBOLT_NATIVE !== "undefined" && DEADBOLT_NATIVE === true
-
 function send<T>(message: ToBackground): Promise<T | null> {
   return chrome.runtime.sendMessage(message).catch(() => null) as Promise<T | null>
 }
@@ -274,34 +269,6 @@ function loginTile(account: Account, i: number): HTMLElement {
   })
 }
 
-
-/**
- * The locked row (ui/unlock.ts), pressed: the browser-only Deadbolt unlocks in
- * the toolbar panel, never in the page or this frame, and the row waits there
- * by its field. Like a pick, the press counts only with the menu visible and
- * still through it, which takes a moment to know (confirmScale): the row
- * answers and the panel opens at once, and the menu's word follows. The panel
- * asks Touch ID only once the press counted, and closes if it didn't.
- */
-async function unlock() {
-  if (busy) return
-  if (!pressedScale || !dwell.settled(pressedAt)) return say(pressedScale && dwell.visible ? "Click again in a moment." : "This menu is covered.")
-  busy = true
-  waitOnPanel(rowsEl, true)
-  try {
-    const opening = send<MenuUnlockReply>({ type: "db:menu-unlock", token })
-    void opening.then((r) => r !== "panel" && waitOnPanel(rowsEl, false))
-    const ok = await confirmScale(pressedAt)
-    void send({ type: "db:menu-unlock-press", token, ok })
-    if (!ok) {
-      waitOnPanel(rowsEl, false)
-      say("This menu is covered.")
-    }
-    await opening
-  } finally {
-    busy = false
-  }
-}
 
 /** Says `text` to a screen reader, once, politely. */
 function announce(text: string) {
@@ -479,11 +446,7 @@ function showStatus(status: Status) {
   accounts = []
   listbox(null)
   highlightEl.hidden = true
-  if (status.state === "locked" && !native) {
-    // Still locked: the row stays the same one, waiting on the panel if it is (every vault answer pushes the status again).
-    if (!rowsEl.querySelector(":scope > .row.unlock")) rowsEl.replaceChildren(lockedRow(() => void unlock()))
-    say("")
-  } else if (status.state === "locked") {
+  if (status.state === "locked") {
     rowsEl.replaceChildren(notice(icon("lock"), "Deadbolt is locked", "Unlock it in the app, then come back"))
     say("")
   } else {
@@ -623,11 +586,6 @@ document.addEventListener("keydown", (e) => {
     return void send({ type: "db:menu-dismiss", token })
   }
   if (e.key === "Enter" || e.key === " ") e.preventDefault()
-  // The locked menu's one row: Enter opens Deadbolt to unlock, once the user came in with ↓.
-  if (e.key === "Enter" && mode === "accounts" && !accounts.length && rowsEl.querySelector("button.row")) {
-    if (!entry.entered) return say("Press ↓ in the field to choose.")
-    return void unlock()
-  }
   const rows = visible()
   if (!rows.length || mode !== "accounts") return
   // ↓ or ↑ on the corner offer's top account lists the others; the next ↓ moves in them.
@@ -654,8 +612,6 @@ function show(reply: MenuLoadReply) {
   if (mode !== "accounts") return
   if (reply.kind === "status") return showStatus(reply.status)
   if (reply.kind === "forms") return showForms(reply)
-  // Deadbolt just unlocked under the locked row: it turns into what's next.
-  const locked = rowsEl.querySelector<HTMLElement>(":scope > .row.unlock")
   universal = reply.kind === "accounts" && reply.universal === true
   signsIn = new Set(reply.kind === "accounts" ? (reply.signsIn ?? []) : [])
   surface.classList.toggle("universal", universal)
@@ -677,7 +633,6 @@ function show(reply: MenuLoadReply) {
     listbox(null)
     highlightEl.hidden = true
     rowsEl.replaceChildren(notice(icon("keyhole"), "No logins here", `Nothing saved for ${reply.site}`))
-    if (locked) turnIntoLogins(locked, rowsEl, highlightEl)
     setCaption("")
     return say("")
   }
@@ -697,7 +652,6 @@ function show(reply: MenuLoadReply) {
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]
   highlight()
-  if (locked) setTimeout(() => dwell.moved(performance.now()), turnIntoLogins(locked, rowsEl, highlightEl))
   if (universal) showUniversal()
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
 }
@@ -904,8 +858,7 @@ addEventListener("resize", (e) => (resizedAt = e.timeStamp))
 
 async function load() {
   const reply = token && mode === "accounts" ? await send<MenuLoadReply>({ type: "db:menu-load", token, parent: parentOrigin }) : null
-  // The turn into the logins plays out first: the status pushes that follow an unlock would cut it.
-  if (reply && !turnInFlight()) show(reply)
+  if (reply) show(reply)
 }
 
 /**
@@ -990,8 +943,7 @@ if (window.parent !== window) window.parent.postMessage({ type: "db:menu-ready" 
 onIconSettings(() => void load())
 
 // Unlocking in the app, or a sync, updates the open menu in place.
-chrome.runtime.onMessage.addListener((message: StatusChanged | PanelClosed) => {
+chrome.runtime.onMessage.addListener((message: StatusChanged) => {
   if (message?.type === "db:status") void load()
-  if (message?.type === "db:panel-closed") waitOnPanel(rowsEl, false)
 })
 

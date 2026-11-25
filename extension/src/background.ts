@@ -1,11 +1,8 @@
-// Service worker: the extension's only link to Deadbolt. The default native
-// build keeps one messaging port to `deadbolt browser-host` (bg/host.ts).
-// `--standalone` makes the extension its own device, with the Rust vault in
-// an offscreen worker (bg/standalone.ts). It answers the content
-// scripts, the inline menu, the popup and device.html.
+// Service worker: the extension's only link to Deadbolt. It keeps one
+// messaging port to `deadbolt browser-host` (bg/host.ts), and answers the
+// content scripts, the inline menu and the popup.
 
 import { Autofill } from "./bg/autofill"
-import type { VaultBackend } from "./bg/backend"
 import { Forms } from "./bg/forms"
 import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
@@ -16,13 +13,9 @@ import { SignInWith } from "./bg/signinwith"
 import { ProviderChain } from "./bg/provider-chain"
 import { SiteIcons } from "./bg/site-icons"
 import { UniversalSignIn } from "./bg/universal"
-import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
-import { LOCKED_PANEL, namePanel, PanelUnlock } from "./bg/panel-unlock"
-import type { DeviceReply, MenuUnlockReply, PanelClosed, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
+import type { PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
-declare const DEADBOLT_NATIVE: boolean
-const standalone = DEADBOLT_NATIVE ? null : new StandaloneBackend()
-const host: VaultBackend = DEADBOLT_NATIVE ? new Host() : standalone!
+const host = new Host()
 const saver = new Saver(host)
 // A recording's REC stays on the toolbar button over an offer's or a prompt's "1".
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined, badge: (tabId, text) => learner.badge(tabId, text) })
@@ -37,17 +30,6 @@ const siteIcons = new SiteIcons(host)
 const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(tabId) !== undefined, providers)
 autofill.signedOut = (target) => universal.signedOutNow(target)
 providers.submitIdentifier = (target, username, form) => autofill.submitIdentifier(target, username, form)
-/**
- * The device.html tab the inline menu's locked row opened. Memory only, like
- * Autofill's return target: a restarted worker returns nowhere. A later click
- * finds and reuses an existing unlock surface through getContexts. Forgotten
- * when the tab closes or leaves device.html.
- */
-let unlockTab: number | undefined
-let openingUnlock: Promise<void> | null = null
-/** The toolbar panel the locked row opens instead, when the browser lets it. */
-const panel = new PanelUnlock(() => void chrome.runtime.sendMessage({ type: "db:panel-closed" } satisfies PanelClosed).catch(() => {}))
-chrome.runtime.onConnect.addListener((port) => panel.connected(port))
 saver.formFrames = (tabId) => forms.reported(tabId)
 saver.formFilledFrom = (tabId) => forms.filledFrom(tabId)
 saver.signedIn = (tabId, site) => {
@@ -82,8 +64,6 @@ function title(status: Status): string {
 host.onChange((status, change) => {
   void chrome.runtime.sendMessage({ type: "db:status", status, ...(change ? { change } : {}) } satisfies StatusChanged).catch(() => {})
   void chrome.action.setTitle({ title: title(status) }).catch(() => {})
-  // The browser-only panel is told it's locked in its address, so its first frame is the locked panel (bg/panel-unlock.ts).
-  if (!DEADBOLT_NATIVE) namePanel(status.state === "locked" ? LOCKED_PANEL : "popup.html")
 })
 
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
@@ -153,10 +133,6 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       if (saver.ownsSurface(message.token)) return saver.surfaceDismiss(message.token, sender)
       if (forms.owns(message.token)) return forms.menuDismiss(message.token, sender)
       return autofill.menuDismiss(message.token, sender)
-    case "db:menu-unlock":
-      return menuUnlock(String(message.token), sender)
-    case "db:menu-unlock-press":
-      return panel.confirm(String(message.token), message.ok === true, sender.documentId)
     case "db:menu-resize":
       if (universal.owns(message.token)) return universal.resize(message.token, sender, Number(message.height), message.width, message.mode)
       if (saver.ownsSurface(message.token)) return saver.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
@@ -168,7 +144,6 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
         : { ok: false, message: "This offer has expired.", gone: true }
     case "db:popup-load": {
       if (!fromExtensionPage(sender, "popup.html")) return null
-      host.used?.()
       const reply: PopupReply = await autofill.popupLoad(message.tabId)
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
       const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
@@ -191,63 +166,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
         : { ok: false, message: "" }
     case "db:popup-saving-on":
       return fromExtensionPage(sender, "popup.html") ? saver.savingOn(message.tabId) : false
-    case "db:popup-lock":
-      if (!fromExtensionPage(sender, "popup.html") || !standalone) return host.status
-      await standalone.lock("manual")
-      return standalone.status
-    case "db:device":
-      return device(message.command, sender)
   }
-}
-
-/** The vault's own commands: only from device.html or the popup of this extension, never a content script or another page. */
-async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promise<DeviceReply> {
-  if (!fromVaultPage(sender)) return { ok: false, message: "", status: host.status }
-  if (!standalone) return { ok: false, message: "This build talks to the Deadbolt app; set it up there.", status: host.status }
-  const command = deviceCommand(raw)
-  if (!command) return { ok: false, message: "Deadbolt didn't understand that request. Reload the extension and try again.", status: host.status }
-  const reply = await standalone.device(command)
-  if (command.type === "device-unlock" && reply.ok) {
-    const opened = unlockTab
-    unlockTab = undefined
-    // Only the tab the locked row opened closes, and only when it is the one that unlocked (fromVaultPage: device.html).
-    if (await autofill.returnAfterUnlock() && opened !== undefined && sender.tab?.id === opened) void chrome.tabs.remove(opened).catch(() => {})
-  }
-  return reply
-}
-
-/**
- * The inline menu's locked row, from the menu frame its token was made for:
- * the toolbar panel, where the user unlocks while the menu waits by its
- * field, or device.html in a tab when the browser won't open the panel.
- * Nothing else is asked of the vault.
- */
-async function menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<MenuUnlockReply> {
-  if (!standalone || sender.tab?.id === undefined || !(await autofill.unlockClicked(token, sender))) return false
-  const pressed = panel.pressed(token, sender.documentId)
-  if (await panel.open(sender.tab.id, pressed)) return "panel"
-  if (!(await pressed) || !(await autofill.menuUnlock(token, sender))) return false
-  openingUnlock ??= openUnlock().finally(() => (openingUnlock = null))
-  await openingUnlock
-  return "tab"
-}
-
-async function openUnlock(): Promise<void> {
-  const url = `${chrome.runtime.getURL(DEVICE_PAGE)}#unlock`
-  if (unlockTab === undefined) {
-    const contexts = await chrome.runtime.getContexts({ contextTypes: ["TAB" as chrome.runtime.ContextType] })
-    unlockTab = contexts.find(c => c.documentUrl === url)?.tabId
-  }
-  // A second click brings back the unlock tab already open rather than opening another.
-  if (unlockTab !== undefined) {
-    const open = await chrome.tabs.update(unlockTab, { active: true }).catch(() => null)
-    if (open) {
-      await chrome.windows.update(open.windowId, { focused: true }).catch(() => {})
-      return
-    }
-  }
-  const page = await chrome.tabs.create({ url })
-  unlockTab = page.id
 }
 
 chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) => {
@@ -262,7 +181,6 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) =>
 chrome.tabs.onRemoved.addListener((tabId) => {
   void providers.closed(tabId)
   void universal.closeTab(tabId)
-  if (tabId === unlockTab) unlockTab = undefined
   autofill.forgetTab(tabId)
   forms.forgetTab(tabId)
   saver.forgetTab(tabId)
@@ -271,7 +189,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 })
 chrome.webNavigation.onCommitted.addListener((d) => {
   providers.navigated(d)
-  if (d.tabId === unlockTab && d.frameId === 0 && d.url.split(/[?#]/)[0] !== chrome.runtime.getURL(DEVICE_PAGE)) unlockTab = undefined
   void autofill.navigated(d)
   forms.navigated(d)
   learner.navigated(d)

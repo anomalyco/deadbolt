@@ -145,9 +145,8 @@ deadbolt vault ls
 deadbolt vault rename <old> <new>
 deadbolt vault default <name>
 
-# Sync immediately with peers, or mirror 1Password via `op`
+# Sync immediately with peers
 deadbolt sync
-deadbolt sync 1password [--account <acct>] [--op-vault <name>] [--dry-run] [--quiet]
 ```
 
 ### Managing items
@@ -249,8 +248,7 @@ deadbolt update [--channel dev|beta|stable] [--yes]
 # Desktop app, browser extension registration, and daemon diagnostics
 deadbolt app
 deadbolt desktop [install | uninstall]
-deadbolt browser install [--extension-dir <dir>] [--standalone]
-deadbolt browser switch --standalone | --native [--channel dev|beta|stable] [--extension-dir <dir>]
+deadbolt browser install [--extension-dir <dir>]
 deadbolt browser uninstall [--extension-dir <dir>]
 deadbolt debug whoami [--json]
 deadbolt debug watch

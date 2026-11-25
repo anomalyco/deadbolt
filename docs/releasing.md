@@ -35,9 +35,6 @@ Release (push dev | production | v*, or workflow_dispatch: channel)
 ├─ build-linux-*      deadbolt-<v>-linux-{x64,arm64}.tar.gz (glibc 2.28+, app built in)  [build]
 ├─ build-linux-*-musl deadbolt-<v>-linux-{x64,arm64}-musl.tar.gz (static, no app)         [build]
 ├─ build-extension    deadbolt-extension-<v>.zip (manifest version stamped)                [build]
-├─ build-extension-standalone
-│                     deadbolt-extension-standalone-<v>.zip (wasm vault; the only job
-│                     with the wasm32 target and wasm-bindgen-cli)                         [build]
 ├─ build-enclave      deadbolt-enclave for arm64 + x86_64, ad hoc                           [build]
 ├─ sign-enclave       Developer ID-signs the two helpers; decides "signed"                  [release]
 ├─ build-macos        deadbolt pinned to those helpers; universal Deadbolt.app (ad hoc);
@@ -145,7 +142,6 @@ Deadbolt has three artifacts, each with a manifest at
 | `desktop` | `macos-arm64`, `macos-x64` | `Deadbolt-<v>-macos-universal.zip` (root `Deadbolt.app`, for an updater) |
 | | `macos-arm64-dmg`, `macos-x64-dmg` | `Deadbolt-<v>-macos-universal.dmg` |
 | `extension` | `chromium` | `deadbolt-extension-<v>.zip` (unpacked MV3 build with its fixed key) |
-| | `chromium-standalone` | `deadbolt-extension-standalone-<v>.zip` (the standalone build, same key and id) |
 
 `publish` uploads each file with its SHA-256, posts each release, then
 downloads every published URL and compares it with the local bytes
@@ -325,7 +321,7 @@ channel's current release isn't the build it runs, a rollback included.
   its read permissions. Deleting it loses all remembered replay floors;
   Deadbolt never deletes it automatically. A persistent
   `update.lock` in the same state directory gives `update` (including
-  `--check`) and `browser switch` exclusive access for the whole transaction,
+  `--check`) exclusive access for the whole transaction,
   through installation. A competing invocation fails and must be retried
   after the first finishes; separate state directories are not coordinated.
   A real rollback is a new write with a higher sequence, so installs still
@@ -334,32 +330,20 @@ channel's current release isn't the build it runs, a rollback included.
   too.
 - **Root:** as euid 0, `update` only changes an install in a root-owned
   directory with a root-owned `HOME`.
-- **Extension:** `deadbolt browser install [--standalone] --extension-dir <dir>`
-  records an absolute path and the build it gets (`native` or `standalone`) as
-  an `[[extensions]]` entry in `config.toml`; the directory must be new or
-  empty. Several can be registered (say the native build for one profile and
-  the standalone one for another); registering one again changes its build,
-  and `deadbolt browser uninstall --extension-dir <dir>` unregisters it,
-  leaving its files. An older config's single `extension_dir` and
-  `extension_build` are read as one entry and rewritten the next time the
-  config changes. For each directory, `update` compares its `manifest.json` `version_name` with the
-  `extension` manifest and replaces the directory from that build's zip
-  (`chromium`, or `chromium-standalone`)
+- **Extension:** `deadbolt browser install --extension-dir <dir>`
+  records an absolute path as an `[[extensions]]` entry in `config.toml`;
+  the directory must be new or empty. Several can be registered (one per
+  browser profile, say), and `deadbolt browser uninstall --extension-dir <dir>`
+  unregisters one, leaving its files. An older config's single
+  `extension_dir` is read as one entry and rewritten the next time the
+  config changes; the retired standalone build's `build` and
+  `extension_build` keys are ignored. For each directory, `update` compares its `manifest.json` `version_name` with the
+  `extension` manifest and replaces the directory from its `chromium` zip
   (regular files and directories only, at most 64 MiB and 4096 entries,
   staged beside it and renamed into place), writing `.deadbolt-extension`
   with the names it installed. It never replaces a directory holding anything
   else. Then it says to reload Deadbolt in `chrome://extensions`. Without a
   registered directory it prints the channel's download link.
-  `deadbolt browser switch --standalone|--native [--channel] [--extension-dir <dir>]`
-  changes one directory's build (the only one, or `<dir>` when there are
-  several) and fetches it at once: a directory holding the other build
-  (told apart by its manifest's `nativeMessaging` or `offscreen` permission)
-  takes the channel's release whatever its version, with no rollout hold,
-  since the user asked. Both builds have the same id, so reloading the
-  extension switches the profile ([extension-device.md](extension-device.md#installing-and-updating-the-standalone-build)).
-  The standalone build's settings read the channel's feed themselves (a
-  release build knows its channel; a build from source checks nothing) and
-  say when a newer build is out, with this command and the download link.
   Deadbolt.app doesn't update extensions.
 - **Checks:** manifests come only from `https://anoma.ly/release` (no
   redirects, 30 s, at most 1 MiB, polled with `If-None-Match` so an unchanged

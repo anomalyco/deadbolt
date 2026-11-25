@@ -1,6 +1,5 @@
 //! End-to-end tests: each device is a separate set of directories with its
-//! own daemon process, networking over localhost only except the opt-in ignored
-//! standalone browser sync test, which requires public relays.
+//! own daemon process, networking over localhost only.
 
 // The daemon reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
@@ -15,86 +14,6 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_deadbolt");
 const PASSPHRASE: &str = "correct horse";
-
-/// The browser has no history API. Reopen its actual encrypted OPFS snapshots
-/// in shared Rust rather than add a privileged test command to the extension.
-/// Run with DEADBOLT_STANDALONE_DIST pointing to a standalone e2e build:
-/// cargo test -p deadbolt-cli --test cli standalone_sync_retains_conflict_history -- --ignored --nocapture
-#[test]
-#[ignore = "requires Bun, headless Chromium, public relays and DEADBOLT_STANDALONE_DIST"]
-fn standalone_sync_retains_conflict_history() {
-    use deadbolt_core::{Change, Entry, Vault, VersionStatus};
-    use std::collections::BTreeMap;
-
-    let dist = std::env::var_os("DEADBOLT_STANDALONE_DIST").unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let snapshots = directory.path().join("snapshots");
-    let mut run = Command::new("bun")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extension"))
-        .args(["e2e/sync.ts", "--deadbolt", BIN, "--dist"])
-        .arg(dist)
-        .arg("--snapshots")
-        .arg(&snapshots)
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
-    assert!(wait(&mut run, Duration::from_secs(10 * 60)).success());
-
-    let mut previous = None;
-    for (name, passphrase) in [
-        ("a", "synthetic browser sync fixture"),
-        ("b", "synthetic browser sync fixture"),
-        ("cli", "synthetic cli sync fixture"),
-    ] {
-        let store = deadbolt_store::unlock(&snapshots.join(name), passphrase.as_bytes()).unwrap();
-        let entries: Vec<_> = store
-            .iter_all()
-            .unwrap()
-            .map(|bytes| Entry::decode(&bytes.unwrap()).unwrap())
-            .collect();
-        let vault = Vault::load(entries).unwrap();
-        let items = vault.items();
-        let item = items
-            .iter()
-            .find(|item| item.name.as_deref() == Some("Shared"))
-            .unwrap();
-        let history: BTreeMap<_, _> = vault
-            .history(&item.id)
-            .into_iter()
-            .filter_map(|version| match version.change {
-                Change::Set { field, value } if field == "password" => {
-                    Some((value.value.clone(), (version.status, version.author)))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(history.len(), 3, "{name}: original and both edits survive");
-        assert_eq!(history["synthetic-original"].0, VersionStatus::Superseded);
-        let winner = &item.fields["password"].value;
-        assert!(["synthetic-concurrent-a", "synthetic-concurrent-b"].contains(&winner.as_str()));
-        for value in ["synthetic-concurrent-a", "synthetic-concurrent-b"] {
-            assert_eq!(
-                history[value].0,
-                if value == winner {
-                    VersionStatus::Current
-                } else {
-                    VersionStatus::Conflicted
-                }
-            );
-        }
-        assert_ne!(
-            history["synthetic-concurrent-a"].1,
-            history["synthetic-concurrent-b"].1
-        );
-        if let Some(previous) = &previous {
-            assert_eq!(
-                &history, previous,
-                "{name}: replicas retain identical history"
-            );
-        }
-        previous = Some(history);
-    }
-}
 
 struct Device {
     dir: tempfile::TempDir,
@@ -1708,206 +1627,6 @@ fn import() {
     );
 }
 
-/// A fake 1Password CLI: logs its arguments and stdin, then answers from
-/// the files beside it, or fails as `op.mode` says. `item get` gives every
-/// item, asked for or not.
-const FAKE_OP: &str = r#"#!/bin/sh
-dir=$(dirname "$0")
-echo "$*" >> "$dir/op.log"
-case "$(cat "$dir/op.mode" 2>/dev/null)" in
-  signed-out)
-    echo '[ERROR] 2024/03/09 16:00:00 You are not currently signed in. Please run `op signin --help` for instructions' >&2
-    exit 1 ;;
-  dismissed)
-    echo '[ERROR] 2024/03/09 16:00:00 authorization prompt dismissed, please try again' >&2
-    exit 1 ;;
-esac
-case "$1 $2" in
-  "account list") cat "$dir/op-accounts.json" ;;
-  "vault list") echo '[{"id": "v1v1v1v1v1v1v1v1v1v1v1v1v1", "name": "Private"}, {"id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared"}]' ;;
-  "item list") cat "$dir/op-list.json" ;;
-  "item get") cat > "$dir/op.stdin"; cat "$dir/op-items.json" ;;
-  *) echo "unexpected: $*" >&2; exit 1 ;;
-esac
-"#;
-
-const OP_ITEMS: &str = include_str!("fixtures/op-items.json");
-
-#[test]
-fn sync_from_1password() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let a = Device::new();
-    a.run(&["init", "--device-name", "alpha"]);
-    let sync = ["sync", "1password"];
-    let secrets = [
-        "op-github-pw",
-        "op-recovery-111",
-        "op-note-secret",
-        "op-api-key",
-        "op-ssh-pass",
-        "JBSWY3DPEHPK3PXP",
-        "4242",
-    ];
-    let no_secrets = |output: &Output| {
-        for text in [&output.stdout, &output.stderr] {
-            let text = String::from_utf8_lossy(text);
-            for secret in secrets {
-                assert!(!text.contains(secret), "{secret} leaked: {text}");
-            }
-        }
-    };
-
-    let err = a.fail(&sync);
-    assert!(
-        err.contains("the 1Password CLI (op) is not installed"),
-        "{err}"
-    );
-
-    let op = a.path("op");
-    std::fs::write(&op, FAKE_OP).unwrap();
-    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let account = r#"{"url": "https://my.1password.com/", "email": "sam@example.com", "user_uuid": "USERUSERUSERUSERUSERUSERUS", "account_uuid": "AAAABBBBCCCCDDDDEEEEFFFFGG", "shorthand": "my"}"#;
-    std::fs::write(a.path("op-accounts.json"), format!("[{account}]")).unwrap();
-    std::fs::write(a.path("op-items.json"), OP_ITEMS).unwrap();
-    // `op item list` gives no fields, sections or files.
-    let listed: Vec<serde_json::Value> = serde_json::Deserializer::from_str(OP_ITEMS)
-        .into_iter::<serde_json::Value>()
-        .map(|item| {
-            let mut item = item.unwrap();
-            for key in ["fields", "sections", "files"] {
-                item.as_object_mut().unwrap().remove(key);
-            }
-            item
-        })
-        .collect();
-    std::fs::write(
-        a.path("op-list.json"),
-        serde_json::to_string(&listed).unwrap(),
-    )
-    .unwrap();
-    let calls = || {
-        let calls = std::fs::read_to_string(a.path("op.log")).unwrap_or_default();
-        std::fs::remove_file(a.path("op.log")).ok();
-        calls
-    };
-    // The ids of the items the last sync asked `op item get` for.
-    let asked = || -> Vec<String> {
-        let Ok(stdin) = std::fs::read_to_string(a.path("op.stdin")) else {
-            return Vec::new();
-        };
-        std::fs::remove_file(a.path("op.stdin")).unwrap();
-        assert!(!secrets.iter().any(|s| stdin.contains(s)), "{stdin}");
-        let listed: Vec<serde_json::Value> = serde_json::from_str(&stdin).unwrap();
-        let mut ids: Vec<String> = listed
-            .iter()
-            .map(|i| i["id"].as_str().unwrap().to_string())
-            .collect();
-        ids.sort();
-        ids
-    };
-
-    // Not signed in, or access not approved: says what to do.
-    std::fs::write(a.path("op.mode"), "signed-out").unwrap();
-    let err = a.fail(&sync);
-    assert!(err.contains("1Password: not signed in"), "{err}");
-    std::fs::write(a.path("op.mode"), "dismissed").unwrap();
-    let err = a.fail(&sync);
-    assert!(err.contains("approve it"), "{err}");
-    std::fs::remove_file(a.path("op.mode")).unwrap();
-    calls();
-
-    // Locked: exits 3 before 1Password is asked anything.
-    a.run(&["lock"]);
-    let output = a.try_run(&sync);
-    assert_eq!(output.status.code(), Some(3));
-    assert_eq!(calls(), "");
-    a.run(&["unlock"]);
-
-    let output = a.try_run(&["sync", "1password", "--dry-run"]);
-    assert!(output.status.success());
-    no_secrets(&output);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.starts_with("dry run: 11 would add (0 unchanged, 3 skipped)\n  add     A note\n"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("  skip    Scan (document)\n"), "{stdout}");
-    assert_eq!(a.run(&["ls"]), "");
-    // Values never go to `op` on argv or stdin.
-    let log = calls();
-    assert_eq!(
-        log,
-        "account list --format json\n\
-         item list --account AAAABBBBCCCCDDDDEEEEFFFFGG --format json\n\
-         item get - --account AAAABBBBCCCCDDDDEEEEFFFFGG --format json\n"
-    );
-    // Every item but the document and the one of a type unknown here.
-    let all = asked();
-    assert_eq!(all.len(), listed.len() - 2, "{all:?}");
-
-    let output = a.try_run(&sync);
-    assert!(output.status.success());
-    no_secrets(&output);
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .starts_with("11 added (0 unchanged, 3 skipped)\n")
-    );
-    assert_eq!(a.run(&["ls"]).lines().count(), 11);
-    assert_eq!(a.run(&["get", "github"]), "op-github-pw\n");
-
-    asked();
-
-    // Nothing changed: --quiet prints nothing, and only the SSH key that
-    // could not be mirrored is asked for again.
-    assert_eq!(a.run(&["sync", "1password", "--quiet"]), "");
-    assert_eq!(asked(), ["item9"]);
-
-    // Changed here: asked for again, and 1Password's copy wins.
-    a.run(&["set", "github", "password=mine"]);
-    let out = a.run(&["sync", "1password"]);
-    assert!(
-        out.starts_with("1 updated (10 unchanged, 3 skipped)\n"),
-        "{out}"
-    );
-    assert_eq!(asked(), ["item1item1item1item1item1a", "item9"]);
-    assert_eq!(a.run(&["get", "github"]), "op-github-pw\n");
-
-    // Only some vaults.
-    calls();
-    let out = a.run(&[
-        "sync",
-        "op",
-        "--op-vault",
-        "private",
-        "--account",
-        "sam@example.com",
-    ]);
-    assert!(out.starts_with("Up to date (3 unchanged)\n"), "{out}");
-    assert!(calls().contains("vault list --account AAAABBBBCCCCDDDDEEEEFFFFGG --format json\n"));
-    let err = a.fail(&["sync", "op", "--op-vault", "Nope"]);
-    assert!(err.contains("no 1Password vault named \"Nope\""), "{err}");
-
-    // Two accounts: the one mirrored here, else which one must be said.
-    let other = r#"{"url": "team.1password.com", "email": "sam@team.example", "user_uuid": "YYYY", "account_uuid": "ZZZZ"}"#;
-    std::fs::write(a.path("op-accounts.json"), format!("[{account}, {other}]")).unwrap();
-    a.run(&sync);
-    a.run(&["init", "work"]);
-    let err = a.fail(&["sync", "op", "--vault", "work"]);
-    assert!(
-        err.contains(
-            "2 1Password accounts: choose one with --account (my, sam@team.example on team.1password.com)"
-        ),
-        "{err}"
-    );
-    let err = a.fail(&["sync", "op", "--account", "nobody"]);
-    assert!(
-        err.contains("no 1Password account matches \"nobody\""),
-        "{err}"
-    );
-}
-
 #[test]
 fn watch_prints_changes_as_json_lines() {
     let a = Device::new();
@@ -3354,136 +3073,128 @@ fn release_service(
 #[test]
 fn concurrent_updates_cannot_pass_a_pending_extension_install() {
     use sha2::Digest;
-    for first in [
-        vec!["update", "--channel", "dev"],
-        vec!["browser", "switch", "--native", "--channel", "dev"],
-    ] {
-        let a = Device::new();
-        let ext = a.path("extension");
-        let output = a.output(
-            a.cmd(&[
-                "browser",
-                "install",
-                "--browser",
-                "chrome",
-                "--extension-dir",
-            ])
-            .arg(&ext)
-            .env("HOME", a.path("user")),
-        );
-        assert!(output.status.success());
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(br#"{"version":"1.0","permissions":["nativeMessaging"]}"#)
-            .unwrap();
-        let zip = zip.finish().unwrap().into_inner();
-        let sha = data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&zip));
-        let file = format!("/release/deadbolt/files/{sha}/extension.zip");
-        let target = serde_json::json!({"url": file, "size": zip.len(), "sha256": sha});
-        let extension = serde_json::json!({
-            "schema": 1, "app": "deadbolt", "artifact": "extension", "channel": "dev",
-            "sequence": 7, "published_at": "2026-10-28T00:00:00Z",
-            "release": {"version": "1.0", "rollout_percent": 100,
-                "targets": {"chromium": target}, "distributions": []}
-        });
-        let mut cli = extension.clone();
-        cli["artifact"] = "cli".into();
-        cli["release"]["version"] = env!("CARGO_PKG_VERSION").into();
-        cli["release"]["targets"] = serde_json::json!({
-            "macos-arm64": target, "macos-x64": target,
-            "linux-arm64": target, "linux-x64": target
-        });
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}/release/", listener.local_addr().unwrap());
-        let (pending, ready) = mpsc::channel();
-        let (resume, proceed) = mpsc::channel();
-        let server = std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut request = String::new();
-                reader.read_line(&mut request).unwrap();
-                let mut line = String::new();
-                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
-                    line.clear();
-                }
-                let path = request.split_whitespace().nth(1).unwrap();
-                let downloading = path == file;
-                let body = if downloading {
-                    pending.send(()).unwrap();
-                    proceed.recv_timeout(Duration::from_secs(15)).unwrap();
-                    zip.clone()
-                } else if path.ends_with("/cli/dev.json") {
-                    cli.to_string().into_bytes()
-                } else {
-                    assert!(path.ends_with("/extension/dev.json"), "{path}");
-                    extension.to_string().into_bytes()
-                };
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .unwrap();
-                stream.write_all(&body).unwrap();
-                if downloading {
-                    break;
-                }
+    let first = ["update", "--channel", "dev"];
+    let a = Device::new();
+    let ext = a.path("extension");
+    let output = a.output(
+        a.cmd(&[
+            "browser",
+            "install",
+            "--browser",
+            "chrome",
+            "--extension-dir",
+        ])
+        .arg(&ext)
+        .env("HOME", a.path("user")),
+    );
+    assert!(output.status.success());
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(br#"{"version":"1.0","permissions":["nativeMessaging"]}"#)
+        .unwrap();
+    let zip = zip.finish().unwrap().into_inner();
+    let sha = data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&zip));
+    let file = format!("/release/deadbolt/files/{sha}/extension.zip");
+    let target = serde_json::json!({"url": file, "size": zip.len(), "sha256": sha});
+    let extension = serde_json::json!({
+        "schema": 1, "app": "deadbolt", "artifact": "extension", "channel": "dev",
+        "sequence": 7, "published_at": "2026-10-28T00:00:00Z",
+        "release": {"version": "1.0", "rollout_percent": 100,
+            "targets": {"chromium": target}, "distributions": []}
+    });
+    let mut cli = extension.clone();
+    cli["artifact"] = "cli".into();
+    cli["release"]["version"] = env!("CARGO_PKG_VERSION").into();
+    cli["release"]["targets"] = serde_json::json!({
+        "macos-arm64": target, "macos-x64": target,
+        "linux-arm64": target, "linux-x64": target
+    });
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/release/", listener.local_addr().unwrap());
+    let (pending, ready) = mpsc::channel();
+    let (resume, proceed) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                line.clear();
             }
-        });
-        let mut updating = a
-            .cmd(&first)
-            .env("DEADBOLT_RELEASE_URL", &base)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            let path = request.split_whitespace().nth(1).unwrap();
+            let downloading = path == file;
+            let body = if downloading {
+                pending.send(()).unwrap();
+                proceed.recv_timeout(Duration::from_secs(15)).unwrap();
+                zip.clone()
+            } else if path.ends_with("/cli/dev.json") {
+                cli.to_string().into_bytes()
+            } else {
+                assert!(path.ends_with("/extension/dev.json"), "{path}");
+                extension.to_string().into_bytes()
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
             .unwrap();
-        ready.recv_timeout(Duration::from_secs(10)).unwrap();
-        // The floor is already written, but the payload has not arrived.
-        let paths = deadbolt_client::Paths::from_vars(|name| match name {
-            "DEADBOLT_HOME" => Some(a.path("home").into()),
-            "XDG_STATE_HOME" => Some(a.path("state").into()),
-            "XDG_CONFIG_HOME" => Some(a.path("config").into()),
-            _ => None,
-        });
-        let floors = paths.log.with_file_name("release-sequences.json");
-        let before = std::fs::read(&floors).unwrap();
-        let config = paths.config;
-        let registered = std::fs::read(&config).unwrap();
-        for contender in [
-            vec!["update", "--check", "--channel", "dev"],
-            vec!["browser", "switch", "--standalone", "--channel", "dev"],
-        ] {
-            let mut child = a
-                .cmd(&contender)
-                .env("DEADBOLT_RELEASE_URL", &base)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            assert!(!wait(&mut child, Duration::from_secs(5)).success());
-            let output = child.wait_with_output().unwrap();
-            assert!(String::from_utf8_lossy(&output.stderr).contains("another deadbolt update"));
-            assert_eq!(std::fs::read(&floors).unwrap(), before);
-            assert_eq!(std::fs::read(&config).unwrap(), registered);
+            stream.write_all(&body).unwrap();
+            if downloading {
+                break;
+            }
         }
-        resume.send(()).unwrap();
-        assert!(wait(&mut updating, Duration::from_secs(5)).success());
-        server.join().unwrap();
-        assert!(
-            std::fs::read_to_string(ext.join("manifest.json"))
-                .unwrap()
-                .contains("1.0")
-        );
-        // A process finishing releases the persistent lock file for the next one.
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(paths.log.with_file_name("update.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
-    }
+    });
+    let mut updating = a
+        .cmd(&first)
+        .env("DEADBOLT_RELEASE_URL", &base)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    // The floor is already written, but the payload has not arrived.
+    let paths = deadbolt_client::Paths::from_vars(|name| match name {
+        "DEADBOLT_HOME" => Some(a.path("home").into()),
+        "XDG_STATE_HOME" => Some(a.path("state").into()),
+        "XDG_CONFIG_HOME" => Some(a.path("config").into()),
+        _ => None,
+    });
+    let floors = paths.log.with_file_name("release-sequences.json");
+    let before = std::fs::read(&floors).unwrap();
+    let config = paths.config;
+    let registered = std::fs::read(&config).unwrap();
+    let contender = ["update", "--check", "--channel", "dev"];
+    let mut child = a
+        .cmd(&contender)
+        .env("DEADBOLT_RELEASE_URL", &base)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert!(!wait(&mut child, Duration::from_secs(5)).success());
+    let output = child.wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains("another deadbolt update"));
+    assert_eq!(std::fs::read(&floors).unwrap(), before);
+    assert_eq!(std::fs::read(&config).unwrap(), registered);
+    resume.send(()).unwrap();
+    assert!(wait(&mut updating, Duration::from_secs(5)).success());
+    server.join().unwrap();
+    assert!(
+        std::fs::read_to_string(ext.join("manifest.json"))
+            .unwrap()
+            .contains("1.0")
+    );
+    // A process finishing releases the persistent lock file for the next one.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(paths.log.with_file_name("update.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
 }
 
 #[test]
@@ -3813,43 +3524,6 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
         "manifest.json\n"
     );
 
-    // The standalone build, the same release's other target: `browser
-    // switch` puts it in the same directory although the version is the
-    // same, `update` then finds it current, and switching back works too.
-    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
-        .unwrap();
-    zip.write_all(br#"{"name":"Deadbolt","version":"0.0.0.99","version_name":"0.0.0-dev-99","permissions":["storage","offscreen"]}"#)
-        .unwrap();
-    zip.start_file("vault.css", zip::write::SimpleFileOptions::default())
-        .unwrap();
-    let standalone = zip.finish().unwrap().into_inner();
-    let standalone_sha = sha(&standalone);
-    let mut both: serde_json::Value = serde_json::from_slice(&manifest(
-        "extension",
-        "dev",
-        "0.0.0-dev-99",
-        "chromium",
-        extension.len(),
-        ext_sha,
-    ))
-    .unwrap();
-    both["sequence"] = 2.into();
-    both["release"]["targets"]["chromium-standalone"] = serde_json::json!({
-        "url": format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
-        "size": standalone.len(),
-        "sha256": standalone_sha,
-    });
-    files.lock().unwrap().extend([
-        (
-            format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
-            standalone,
-        ),
-        (
-            "/release/deadbolt/extension/dev.json".to_string(),
-            both.to_string().into_bytes(),
-        ),
-    ]);
     // This test's deadbolt (built from source, so it names the channel);
     // the copy above is the stand-in now.
     let deadbolt = |args: &[&str]| {
@@ -3857,80 +3531,28 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
         cmd.env("DEADBOLT_RELEASE_URL", &base);
         a.output(&mut cmd)
     };
-    let output = deadbolt(&["browser", "switch", "--standalone"]);
-    assert!(!output.status.success(), "switched without a channel");
-    let output = deadbolt(&["browser", "switch", "--standalone", "--channel", "dev"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        stdout.contains("Updated the standalone browser extension"),
-        "{stdout}"
-    );
-    assert!(
-        std::fs::read_to_string(ext.join("manifest.json"))
-            .unwrap()
-            .contains("offscreen")
-    );
-    assert_eq!(
-        std::fs::read_to_string(ext.join(".deadbolt-extension")).unwrap(),
-        "manifest.json\nvault.css\n"
-    );
-    let output = deadbolt(&["update", "--check", "--channel", "dev"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Standalone browser extension 0.0.0-dev-99 is up to date"),
-        "{stdout}"
-    );
-    let output = deadbolt(&["browser", "switch", "--native", "--channel", "dev"]);
-    assert!(output.status.success());
-    assert!(
-        std::fs::read_to_string(ext.join("manifest.json"))
-            .unwrap()
-            .contains("nativeMessaging")
-    );
-    assert!(!ext.join("vault.css").exists());
 
-    // A second directory keeps the standalone build, beside the native one:
-    // `update` refreshes each with its own build.
-    let second = a.path("extension-standalone");
+    // A second directory: `update` refreshes each one registered.
+    let second = a.path("extension-second");
     let output = a.output(
         a.cmd(&[
             "browser",
             "install",
             "--browser",
             "chrome",
-            "--standalone",
             "--extension-dir",
         ])
         .arg(&second)
         .env("HOME", a.path("user")),
     );
     assert!(output.status.success());
-    let zip_of = |files: &[(&str, &str)]| {
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for (name, body) in files {
-            zip.start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            zip.write_all(body.as_bytes()).unwrap();
-        }
-        zip.finish().unwrap().into_inner()
-    };
-    let native = zip_of(&[(
-        "manifest.json",
-        r#"{"name":"Deadbolt","version":"0.0.0.100","version_name":"0.0.0-dev-100","permissions":["storage","nativeMessaging"]}"#,
-    )]);
-    let standalone = zip_of(&[
-        (
-            "manifest.json",
-            r#"{"name":"Deadbolt","version":"0.0.0.100","version_name":"0.0.0-dev-100","permissions":["storage","offscreen"]}"#,
-        ),
-        ("vault.css", ""),
-    ]);
-    let (native_sha, standalone_sha) = (sha(&native), sha(&standalone));
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(br#"{"name":"Deadbolt","version":"0.0.0.100","version_name":"0.0.0-dev-100","permissions":["storage","nativeMessaging"]}"#)
+        .unwrap();
+    let native = zip.finish().unwrap().into_inner();
+    let native_sha = sha(&native);
     let mut release: serde_json::Value = serde_json::from_slice(&manifest(
         "extension",
         "dev",
@@ -3941,11 +3563,6 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
     ))
     .unwrap();
     release["sequence"] = 3.into();
-    release["release"]["targets"]["chromium-standalone"] = serde_json::json!({
-        "url": format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
-        "size": standalone.len(),
-        "sha256": standalone_sha,
-    });
     // This test's deadbolt is the channel's current CLI, so `update` only
     // touches the extensions.
     let current_cli = String::from_utf8(manifest(
@@ -3965,10 +3582,6 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
             native,
         ),
         (
-            format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
-            standalone,
-        ),
-        (
             "/release/deadbolt/extension/dev.json".to_string(),
             release.to_string().into_bytes(),
         ),
@@ -3981,38 +3594,15 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("Updated the browser extension"), "{stdout}");
-    assert!(
-        stdout.contains("Updated the standalone browser extension"),
+    assert_eq!(
+        stdout.matches("Updated the browser extension").count(),
+        2,
         "{stdout}"
     );
     let manifest_of =
         |dir: &std::path::Path| std::fs::read_to_string(dir.join("manifest.json")).unwrap();
-    assert!(manifest_of(&ext).contains("nativeMessaging"));
     assert!(manifest_of(&ext).contains("0.0.0-dev-100"));
-    assert!(manifest_of(&second).contains("offscreen"));
     assert!(manifest_of(&second).contains("0.0.0-dev-100"));
-
-    // With two registered, `switch` needs to be told which.
-    let output = deadbolt(&["browser", "switch", "--standalone", "--channel", "dev"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--extension-dir"));
-    let output = a.output(
-        a.cmd(&[
-            "browser",
-            "switch",
-            "--native",
-            "--channel",
-            "dev",
-            "--extension-dir",
-        ])
-        .arg(&second)
-        .env("DEADBOLT_RELEASE_URL", &base),
-    );
-    assert!(output.status.success());
-    assert!(manifest_of(&second).contains("nativeMessaging"));
-    assert!(!second.join("vault.css").exists());
-    assert!(manifest_of(&ext).contains("nativeMessaging"));
 
     // Unregistered, a directory is left alone by `update`.
     let output = a.output(

@@ -947,16 +947,7 @@ export class Saver {
       },
       abort,
       fallback,
-      save: async () => {
-        try {
-          return await this.host.send(body)
-        } catch (err) {
-          // The browser-only vault under Strict: a card's save asks for the passphrase, as showing its number does.
-          // It ends when the offer does (abort), so what it holds goes with it.
-          if (!(this.host.reauth && err instanceof HostError && err.code === "passphrase_needed")) throw err
-          return this.host.reauth(body, { tabId, title: plan.label, site: c.site }, abort.signal)
-        }
-      },
+      save: () => this.host.send(body),
     }
   }
 

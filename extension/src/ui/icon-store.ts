@@ -7,7 +7,7 @@
 // content script can't read it, so a page (or a compromised renderer) can't
 // list which sites have a saved login by their icons.
 
-/** chrome.storage.local: whether rows show site icons, in the inline menu and in the vault (the popup and device.html). */
+/** chrome.storage.local: whether rows show site icons, in the inline menu and the popup. */
 export const ICONS_MENU_KEY = "siteIconsMenu"
 export const ICONS_VAULT_KEY = "siteIconsVault"
 

@@ -212,10 +212,6 @@ export type ToBackground =
   /** The user picked a "Sign in with …" row: point at the site's button for it (see SignInReply). */
   | { type: "db:menu-signin"; token: string; ref: string }
   | { type: "db:menu-dismiss"; token: string }
-  /** The locked row of a browser-only Deadbolt was clicked: open the toolbar panel (or device.html) to unlock it. Answers a MenuUnlockReply. */
-  | { type: "db:menu-unlock"; token: string }
-  /** Whether that press counted: the menu visible and still through it (menu.ts unlock). The panel it opened stays only if so. */
-  | { type: "db:menu-unlock-press"; token: string; ok: boolean }
   /** The size the surface needs; with `mode`, the mode it's folding into (only ever "pill"). */
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
@@ -237,10 +233,6 @@ export type ToBackground =
   | { type: "db:popup-learn"; tabId: number; on: boolean }
   /** The tab's finished recording: its log for Download (a RecordedReply), or Delete it, or put it away. */
   | { type: "db:popup-recorded"; tabId: number; action: "download" | "delete" | "dismiss" }
-  /** Lock the browser-only Deadbolt now (bg/standalone.ts). Answers with the Status after. */
-  | { type: "db:popup-lock" }
-  // device.html, the standalone device's own page (bg/standalone.ts): answers with a DeviceReply
-  | { type: "db:device"; command: DeviceCommand }
   // passkeys (bg/passkeys.ts): the content script relays the page's hook
   /** `request`: the hook's id for the call; `options`: the page's options, checked in the background. */
   | { type: "pk:get" | "pk:create"; request: number; options: unknown; allowed: boolean }
@@ -291,9 +283,7 @@ export type ToContent =
   | { type: "db:chooser"; account: string }
   /** Report the login form now, or that there's none. Answers once the background has it. */
   | { type: "db:report" }
-  | { type: "db:close-menu"; token: string; unlock?: boolean }
-  | { type: "db:unlock-return" }
-  | { type: "db:unlock-wait" }
+  | { type: "db:close-menu"; token: string }
   | { type: "db:resize-menu"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /**
    * Open the menu under `box` (in this page's viewport), for a login,
@@ -428,14 +418,6 @@ export interface StatusChanged {
   change?: Change
 }
 
-/** Where the locked row's unlock opened: the toolbar panel (the menu waits on it), device.html in a tab (the menu closed), or nowhere. */
-export type MenuUnlockReply = "panel" | "tab" | false
-
-/** Broadcast when the toolbar panel the locked row opened closes, or never came up: that menu stops waiting on it. */
-export interface PanelClosed {
-  type: "db:panel-closed"
-}
-
 export interface QueryReply {
   token?: string
   /** Rows the menu will show, so the frame can be sized before it loads. */
@@ -565,231 +547,3 @@ export type PasskeyPrompt = {
 
 /** `fallback`: the browser's own passkey flow, such as a phone or security key. */
 export type PasskeyChoice = { action: "use"; ref: string } | { action: "save" } | { action: "fallback" } | { action: "cancel" }
-
-/**
- * What the standalone device's own pages (device.html and the popup) ask of
- * it: set it up, unlock, lock, pair and sync it, manage its devices and
- * settings, and see, add, edit and delete items by hand. The background takes these
- * only from those two pages of this extension.
- */
-export type UnlockProof = { passphrase: string; prf?: never } | { prf: string; passphrase?: never }
-
-export type DeviceCommand =
-  | { type: "device-status" }
-  | { type: "device-create"; passphrase: string; name: string }
-  | ({ type: "device-unlock" } & UnlockProof)
-  | { type: "device-biometric-info" }
-  | { type: "device-biometric-check"; passphrase: string }
-  | { type: "device-biometric-set"; passphrase: string; prf: string; token: string }
-  | { type: "device-biometric-reset" }
-  | { type: "device-lock" }
-  /** Admit the device that `deadbolt join` shows this code on: the vault asks for the passphrase or a PRF key first. */
-  | { type: "device-pair"; code: string; passphrase?: string; prf?: string }
-  /**
-   * First run, joining a vault another device has: start waiting to be
-   * admitted (`{ type: "device-join-start", code, phase: "waiting" }`; the
-   * background names this browser), ask how it's going (JoinStatus), finish
-   * with this browser's own passphrase once admitted, or cancel. Cancel never
-   * reaches the vault: the background ends its worker, as Lock does.
-   */
-  | { type: "device-join-start" }
-  | { type: "device-join-status" }
-  | { type: "device-join-finish"; passphrase: string }
-  | { type: "device-join-cancel" }
-  /** `wait`: answer once a sync round has finished (at most 30 s), not as soon as it starts. */
-  | { type: "device-sync"; wait?: boolean }
-  /** Every item in the vault, for the page's list: `{ type: "device-items", items: ItemSummary[] }`. */
-  | { type: "device-items" }
-  /** The item types the page can add and their fields: `{ type: "device-kinds", kinds: ItemKind[] }`. */
-  | { type: "device-kinds" }
-  /** The vault's devices: `{ type: "device-devices", devices: VaultDevice[] }`. */
-  | { type: "device-devices" }
-  /** One item without its secrets (ItemDetail), with a one-time code's current code. */
-  | { type: "device-item"; ref: string }
-  /**
-   * One secret value, to reveal or copy (a login's password unless `field`
-   * names another), or a file's whole value (`name`, a line break, base64)
-   * to download: `{ type: "device-secret", value }`. Strict asks for the
-   * passphrase or platform verification every time.
-   */
-  | { type: "device-secret"; ref: string; field?: string; passphrase?: string; prf?: string }
-  /**
-   * Adds a login by hand, or edits `ref`; an edit with an empty password
-   * keeps the one it has. `otp` and `notes`, when given, set the one-time
-   * password secret and the notes; empty, they remove them.
-   */
-  | { type: "device-save"; ref?: string; entry: { title: string; url: string; username: string; password: string; otp?: string; notes?: string; favorite?: boolean; tags?: string[] } }
-  /**
-   * Adds an item of `kind`, or edits `ref`: `fields` are set, `remove` taken
-   * off, and `name` (when given, empty clears it) names it. Fields left out
-   * stay as they are. `{ type: "device-item-save", ref, created }`.
-   */
-  | { type: "device-item-save"; ref?: string; kind?: string; name?: string; fields: ItemInput[]; remove?: string[]; favorite?: boolean; tags?: string[] }
-  /** Deletes an item, on every device once synced. */
-  | { type: "device-item-delete"; ref: string; passphrase?: string }
-  /** Removes another device from the vault. */
-  | { type: "device-remove"; id: string }
-  /** Renames the vault. */
-  | { type: "device-rename"; name: string }
-  /**
-   * This browser's settings: `{ type: "device-settings", preset, retryAt,
-   * lockedBy? }`, `lockedBy` being why the vault last locked (a LockedBy).
-   */
-  | { type: "device-settings" }
-  /** Changing to "until-quit" from another preset takes the passphrase or a PRF key. */
-  | { type: "device-preset"; preset: LockPreset; passphrase?: string; prf?: string }
-  /** The user opened something (a login's details): counts as use for the idle lock, once, never on a poll. */
-  | { type: "device-used" }
-  /** A new password from the core's generator: `{ type: "device-generate", password }`. */
-  | { type: "device-generate"; length: number; symbols: boolean }
-  /**
-   * The page copied a password or code: clear it in 30 s if the clipboard
-   * permissions allow (`{ clears }`). Only its salted hash (bg/clipboard.ts),
-   * never the value.
-   */
-  | { type: "device-copied"; salt: string; hash: string }
-  /**
-   * Activity, newest first (docs/extension-device.md, "Activity"): `limit`
-   * entries (50 unless asked, at most 1,000) with ids before `before`, the
-   * page back from the last one shown. `{ type: "device-activity", now, entries: ActivityEntry[] }`.
-   */
-  | { type: "device-activity"; before?: number; limit?: number }
-  /** The page showed or copied `field` of `ref`, which only it sees: an Activity entry, never the value. */
-  | { type: "device-report"; action: "reveal" | "copy"; ref: string; field: string }
-  /** The fill waiting on the passphrase, if any: `{ type: "device-reauth", reauth: Reauth | null }`. */
-  | { type: "device-reauth" }
-  /** The passphrase for fill `id`, once: the background runs that fill with it and forgets it. */
-  | ({ type: "device-reauth-confirm"; id: string } & UnlockProof)
-  /** The user turned fill `id` down: nothing is filled. */
-  | { type: "device-reauth-cancel"; id: string }
-  /** The vault's passkeys, never their keys: `{ type: "device-passkeys", passkeys: DevicePasskey[] }`. */
-  | { type: "device-passkeys" }
-  /**
-   * Deletes passkey `ref` from the vault (passkeys only for now); the delete
-   * syncs to the other devices. Strict asks for the passphrase every time,
-   * as device-secret does: without it the vault answers `passphrase_needed`.
-   */
-  | { type: "device-delete"; ref: string; passphrase?: string }
-  | { type: "list"; origin: string }
-  | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
-
-/**
- * A request waiting on the passphrase under Strict, as Deadbolt's own pages
- * ask for it: a card's number or code to fill (`kind` "card", the default),
- * a card to save from a form ("card-save"), or a passkey sign-in
- * ("passkey-get") or registration ("passkey-create").
- */
-export interface Reauth {
-  id: string
-  kind?: "card" | "card-save" | "passkey-get" | "passkey-create"
-  /** "Visa •••• 4242"; for a passkey, its username (or "Passkey"). */
-  title: string
-  site: string
-}
-
-/**
- * An Activity entry, as the vault keeps it: what was filled, saved, made,
- * signed, shown or copied, naming the item, its fields and the page, never a
- * value. `caller`: a page through autofill, the vault page, or Deadbolt
- * itself (`more-past-budget`, counting the `more` entries that went to stay
- * within the log's budget). `time`: unix seconds.
- */
-export interface ActivityEntry {
-  id: number
-  time: number
-  caller: "autofill" | "vault" | "deadbolt"
-  command: string
-  items: Array<{ id?: string; title: string }>
-  fields: string[]
-  site?: string
-  outcome: "allowed" | "refused" | "failed"
-  more: number
-}
-
-/** A passkey in the vault, as device-passkeys lists it: never its private key. `created`: ISO date. */
-export interface DevicePasskey {
-  ref: string
-  vault: string
-  rpId: string
-  credentialId: string
-  username?: string
-  created?: string
-}
-
-/** Broadcast to Deadbolt's own pages when a fill starts or stops waiting on the passphrase: they ask device-reauth. */
-export interface ReauthChanged {
-  type: "db:reauth"
-}
-
-/** device-join-status's reply: `code` while waiting (so a reloaded page shows it again), `vault` once admitted, `message` when it failed. */
-export type JoinStatus = { type: "device-join-status"; phase: "waiting" | "admitted" | "failed" | "idle"; code?: string; vault?: string; message?: string }
-
-/** A member of the vault; `current`: this browser. `lastSeen`: when it last synced with this browser (unix seconds). */
-export type VaultDevice = { id: string; name: string; current: boolean; lastSeen?: number | null }
-
-/** How soon the browser-only Deadbolt locks by itself (docs/extension-device.md, Lock presets). */
-export type LockPreset = "strict" | "comfortable" | "relaxed" | "until-quit"
-
-/**
- * Why the vault last locked, kept until it unlocks again: never a value.
- * `idleMs` is the idle limit an `idle` lock ran out.
- */
-export type LockedBy = { reason: LockReason; idleMs?: number }
-export type LockReason = "idle" | "screen" | "quit" | "worker" | "offscreen" | "manual" | "update" | "changed" | "removed"
-
-/** A field to set in device-item-save. `type` only for a field the item's type doesn't know. */
-export interface ItemInput {
-  name: string
-  value: string
-  type?: string
-}
-
-/** An item type the page can add: its noun ("secure note") and its fields, as the core's schema has them. */
-export interface ItemKind {
-  kind: string
-  noun: string
-  fields: Array<{ name: string; type: string; required: boolean; multiline: boolean }>
-}
-
-/**
- * One item in the page's list (device-items): its type, label and detail
- * as the daemon names them, and the words a search finds it by (never a
- * secret). A login also has its Account's fields.
- */
-export interface ItemSummary extends Partial<Account> {
-  ref: string
-  kind: string
-  title: string
-  detail?: string
-  urls: string[]
-  search: string[]
-  favorite?: boolean
-  tags?: string[]
-  /** The field the item is for, which its row copies: a login's password, a card's number, a note's body. */
-  primary?: string
-}
-
-/** A field of an item's details. `secret`: its value comes only from device-secret. A file has its name as `value`, and its `size`. */
-export interface ItemField {
-  name: string
-  type: string
-  value?: string
-  secret?: boolean
-  size?: number
-}
-
-/** device-item's reply: an item without its secrets. `totp.until`: when the code ends (unix seconds). */
-export interface ItemDetail extends ItemSummary {
-  name: string | null
-  editable: boolean
-  /** A login's website. */
-  url?: string
-  fields: ItemField[]
-  totp?: { code: string; period: number; until: number }
-}
-
-/** `reply`: the vault's answer as it gave it; `ms`: how long it took. */
-export type DeviceReply =
-  | { ok: true; reply: Record<string, unknown>; ms: number; status: Status }
-  /** `code`: why, for the page to act on ("wrong_passphrase", "passphrase_needed", "backoff", "locked", "expired"). */
-  | { ok: false; message: string; status: Status; code?: string; retryAt?: number }

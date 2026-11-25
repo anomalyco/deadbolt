@@ -3,16 +3,14 @@
 // server) in the same tab or a popup. Headless, disposable browser vault,
 // synthetic accounts only (e2e/universal-fixture.ts).
 //
-//   bun scripts/build.ts --e2e <dir> --standalone   (.test provider hosts need an e2e build)
-//   bun e2e/universal-providers.ts --dist <dir> [--video <dir>] [--skip-ttl]
-//   bun scripts/build.ts --e2e <dir> --native
-//   bun e2e/universal-providers.ts --native --deadbolt <deadbolt binary> --dist <dir> [...]
+//   bun scripts/build.ts --e2e <dir>   (.test provider hosts need an e2e build)
+//   bun e2e/universal-providers.ts --deadbolt <deadbolt binary> --dist <dir> [--video <dir>] [--skip-ttl]
 //
-// Standalone uses the extension's own wasm vault; --native runs that real
-// deadbolt binary as the browser host over a throwaway store (fast KDF,
-// local network only), as e2e/run.ts's passkey run does. Both seed a real
-// passkey for the fake Google through the extension's own save prompt, and
-// the fake Google checks every ceremony with @simplewebauthn/server.
+// It runs that real deadbolt binary as the browser host over a throwaway
+// store (fast KDF, local network only), as e2e/run.ts's passkey run does,
+// seeds a real passkey for the fake Google through the extension's own save
+// prompt, and the fake Google checks every ceremony with
+// @simplewebauthn/server.
 // --skip-ttl leaves out the real two-minute lifetime wait. The browser's
 // popup blocker stays on (Playwright's --disable-popup-blocking is dropped).
 import { chromium, type CDPSession, type Frame, type Page } from "playwright-core"
@@ -29,32 +27,28 @@ const video = arg("--video")
 const stills = arg("--stills")
 const scheme = arg("--scheme") === "dark" ? "dark" : "light"
 const skipTtl = process.argv.includes("--skip-ttl")
-const native = process.argv.includes("--native")
 // Absolute: Chromium reads a relative host path in the manifest as relative to the manifest.
 const deadbolt = arg("--deadbolt") && resolve(arg("--deadbolt")!)
-if (native && !deadbolt) throw new Error("--native needs --deadbolt <path to the deadbolt binary>")
-const mode = native ? "native" : "standalone"
+if (!deadbolt) throw new Error("needs --deadbolt <path to the deadbolt binary>")
 const root = await mkdtemp(join(tmpdir(), "deadbolt-universal-providers-"))
 /** The real daemon's throwaway store (see e2e/run.ts deadboltStore). Short: the socket path must fit a sockaddr. */
-const store = native ? await mkdtemp(process.platform === "darwin" ? "/tmp/dbup-" : join(tmpdir(), "dbup-")) : ""
-const storeEnv: Record<string, string> = native ? {
+const store = await mkdtemp(process.platform === "darwin" ? "/tmp/dbup-" : join(tmpdir(), "dbup-"))
+const storeEnv: Record<string, string> = {
   DEADBOLT_HOME: join(store, "home"), XDG_RUNTIME_DIR: join(store, "run"), XDG_STATE_HOME: join(store, "state"), XDG_CONFIG_HOME: join(store, "config"),
   DEADBOLT_NET: "local", DEADBOLT_KDF: "fast", DEADBOLT_PASSPHRASE: "universal providers synthetic store",
   // The daemon takes the .test stand-ins for providers' hosts (a debug build only), as the e2e build does.
   DEADBOLT_TEST_PROVIDER_HOSTS: "1",
-} : {}
+}
 const cli = (...args: string[]) => {
   const r = Bun.spawnSync([deadbolt!, ...args], { env: { ...process.env, ...storeEnv }, stdin: "ignore" })
   if (r.exitCode !== 0) throw new Error(`deadbolt ${args[0]} failed: ${r.stderr}`)
   return String(r.stdout).trim()
 }
-if (native) {
-  cli("init", "--device-name", "universal-providers")
-  await mkdir(join(root, "profile", "NativeMessagingHosts"), { recursive: true })
-  await writeFile(join(root, "profile", "NativeMessagingHosts", "anomaly.deadbolt.browser.json"), JSON.stringify({
-    name: "anomaly.deadbolt.browser", description: "deadbolt", path: deadbolt, type: "stdio", allowed_origins: ["chrome-extension://jhocodkhpifjndffenppfmdkmiolngal/"],
-  }))
-}
+cli("init", "--device-name", "universal-providers")
+await mkdir(join(root, "profile", "NativeMessagingHosts"), { recursive: true })
+await writeFile(join(root, "profile", "NativeMessagingHosts", "anomaly.deadbolt.browser.json"), JSON.stringify({
+  name: "anomaly.deadbolt.browser", description: "deadbolt", path: deadbolt, type: "stdio", allowed_origins: ["chrome-extension://jhocodkhpifjndffenppfmdkmiolngal/"],
+}))
 // idleTimeout 0: the lifetime case holds one response open for two minutes.
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, fetch: universalFixture })
 const port = server.port
@@ -238,12 +232,6 @@ async function settles(w: Watch, path: string, label: string, optional = false) 
 const quietOn = (w: Watch, host: string) => !w.samples.some((s) => { try { return new URL(s.url).hostname === host } catch { return false } })
 const noFocus = (w: Watch, label: string) => check(!w.focus.length, `${label}: nothing of Deadbolt's takes focus (${JSON.stringify(w.focus)})`)
 
-const device = await context.newPage()
-async function command(command: Record<string, unknown>) {
-  const reply = await device.evaluate((command) => chrome.runtime.sendMessage({ type: "db:device", command }), command)
-  if (!reply?.ok) throw new Error(`${command.type}: ${reply?.message ?? "no reply"}`)
-  return reply
-}
 // What the chain asked each page and what it answered, for the DIAG line on a failure.
 await worker.evaluate(() => {
   const g = globalThis as unknown as { __chain: unknown[] }
@@ -293,11 +281,11 @@ async function hostRequest(body: Record<string, unknown>) {
 
 /** The logins the vault lists for `origin` (with what they sign in with), as the extension sees them. */
 async function listAt(origin: string): Promise<Array<{ ref: string; username?: string; signIn?: { provider: string; account?: string } }>> {
-  const reply = native ? await hostRequest({ type: "list", origin }) as { accounts?: [] } : (await command({ type: "list", origin })).reply as { accounts?: [] }
+  const reply = await hostRequest({ type: "list", origin }) as { accounts?: [] }
   return reply?.accounts ?? []
 }
 
-/** The browser's DevTools targets and a minimal connection to one (as e2e/standalone.ts drives its toolbar popup). */
+/** The browser's DevTools targets and a minimal connection to one, to drive the toolbar popup. */
 async function targets() {
   const port = (await Bun.file(join(root, "profile", "DevToolsActivePort")).text()).split("\n")[0]
   return await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(5000) })).json() as Array<{ id: string; url: string; webSocketDebuggerUrl: string }>
@@ -384,25 +372,17 @@ async function noPasskeyPrompt(prefix: string, ms: number) {
 }
 
 try {
-  if (native) {
-    // The real daemon's vault, filled as a person would with the CLI.
+  // The real daemon's vault, filled as a person would with the CLI.
+  {
     cli("new", "login", "--name", "Google", `url=${googleOrigin}`, `username=${GOOGLE_USER}`, `password=${GOOGLE_PASSWORD}`, `otp=${OTP}`)
     const listed = JSON.stringify(await hostRequest({ type: "list", origin: googleOrigin }))
     const ref = listed.match(/"ref":"([^"]+)"/)?.[1]
     if (!ref) throw new Error(`the host lists no Google login: ${listed.slice(0, 200)}`)
     cli("new", "login", "--name", "Acme", `url=${site}`, "sign-in-with=google", `sign-in-account=${ref.split(":")[1]}`)
-    // A Google-only login, as in the browser vault: `new login` generates a password, which would add a second row.
+    // A Google-only login: `new login` generates a password, which would add a second row.
     cli("unset", "--field", "password", "Acme")
-    await device.close()
-  } else {
-    await device.goto(`chrome-extension://${ID}/device.html`)
-    await device.getByRole("button", { name: "Create a new vault", exact: true }).waitFor({ timeout: 60_000 })
-    await command({ type: "device-create", passphrase: "universal providers synthetic browser vault", name: "universal-providers" })
-    const login = async (name: string, fields: Array<{ name: string; value: string }>) => String((await command({ type: "device-item-save", kind: "login", name, fields })).reply.ref)
-    const googleRef = await login("Google", [{ name: "url", value: googleOrigin }, { name: "username", value: GOOGLE_USER }, { name: "password", value: GOOGLE_PASSWORD }, { name: "otp", value: OTP }])
-    await login("Acme", [{ name: "url", value: site }, { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: googleRef.split(":")[1] }])
   }
-  check(true, `${mode}: the vault has a synthetic Google login and an Acme login that signs in with it`)
+  check(true, `the vault has a synthetic Google login and an Acme login that signs in with it`)
 
   // On by default (never set): Acme gets the offer. Turned off: no offer, and nothing on the provider either.
   {
@@ -620,10 +600,10 @@ try {
     await p.goto(`${googleOrigin}/v3/signin/passkey/enroll?flow=enroll`)
     await p.evaluate(() => void (window as unknown as { enroll(): Promise<void> }).enroll())
     const save = await passkeyPrompt(googleOrigin)
-    check(save?.heading === "Save a passkey for accounts.google.test?", `${mode}: the person is asked to save a passkey for accounts.google.test (${save?.heading})`)
+    check(save?.heading === "Save a passkey for accounts.google.test?", `the person is asked to save a passkey for accounts.google.test (${save?.heading})`)
     await save!.press("Save")
     await p.locator("#enroll-status", { hasText: /\S/ }).waitFor({ timeout: 20_000 })
-    check(await p.locator("#enroll-status").textContent() === "Passkey created" && !!googlePasskey.credential, `${mode}: @simplewebauthn/server verifies Deadbolt's registration (AAGUID ${googlePasskey.aaguid})`)
+    check(await p.locator("#enroll-status").textContent() === "Passkey created" && !!googlePasskey.credential, `@simplewebauthn/server verifies Deadbolt's registration (AAGUID ${googlePasskey.aaguid})`)
     await p.close()
   }
 
@@ -639,13 +619,13 @@ try {
     const w = await watch(p)
     await pick(p)
     const prompt = await passkeyPrompt(googleOrigin)
-    check(prompt?.heading === "Sign in to accounts.google.test with a passkey?", `${mode} ${flow}: the chain hands the passkey to the usual prompt (${prompt?.heading})`)
-    check(googlePasskey.verified === before && !hits(flow, (h) => h.path === "/pk/auth").length, `${mode} ${flow}: no assertion is made before the person answers`)
+    check(prompt?.heading === "Sign in to accounts.google.test with a passkey?", `${flow}: the chain hands the passkey to the usual prompt (${prompt?.heading})`)
+    check(googlePasskey.verified === before && !hits(flow, (h) => h.path === "/pk/auth").length, `${flow}: no assertion is made before the person answers`)
     await prompt!.press("Sign in")
     await p.waitForURL(`${site}/account*`, { timeout: 20_000 })
-    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, `${mode} ${flow}: the person's Sign in finishes with the saved passkey back to Acme`)
-    check(googlePasskey.verified === before + 1 && hits(flow, (h) => h.path === "/pk/auth" && h.value === "verified").length === 1, `${mode} ${flow}: exactly one assertion, verified by @simplewebauthn/server`)
-    check(!hits(flow, (h) => h.path === "/v3/signin/challenge/pwd" || h.path === "/v3/signin/challenge/selection").length, `${mode} ${flow}: the passkey is used instead of the password, Try another way untouched`)
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, `${flow}: the person's Sign in finishes with the saved passkey back to Acme`)
+    check(googlePasskey.verified === before + 1 && hits(flow, (h) => h.path === "/pk/auth" && h.value === "verified").length === 1, `${flow}: exactly one assertion, verified by @simplewebauthn/server`)
+    check(!hits(flow, (h) => h.path === "/v3/signin/challenge/pwd" || h.path === "/v3/signin/challenge/selection").length, `${flow}: the passkey is used instead of the password, Try another way untouched`)
     noFocus(w, flow)
     w.stop()
     await p.close()
@@ -714,16 +694,12 @@ try {
 
   // A linked login for a provider Deadbolt knows no hosts for (Okta): the pick
   // points at the site's own Okta button, as before chains, and clicks nothing.
-  if (native) {
+  {
     cli("new", "login", "--name", "Okta", "url=https://acme.okta.com", "username=alex@acme.test", "password=synthetic-okta-password")
     const ref = JSON.stringify(await hostRequest({ type: "list", origin: "https://acme.okta.com" })).match(/"ref":"([^"]+)"/)?.[1]
     if (!ref) throw new Error("the host lists no Okta login")
     cli("new", "login", "--name", "Acme via Okta", `url=${site}`, "sign-in-with=okta", `sign-in-account=${ref.split(":")[1]}`)
     cli("unset", "--field", "password", "Acme via Okta")
-  } else {
-    const save = async (name: string, fields: Array<{ name: string; value: string }>) => String((await command({ type: "device-item-save", kind: "login", name, fields })).reply.ref)
-    const oktaRef = await save("Okta", [{ name: "url", value: "https://acme.okta.com" }, { name: "username", value: "alex@acme.test" }, { name: "password", value: "synthetic-okta-password" }])
-    await save("Acme via Okta", [{ name: "url", value: site }, { name: "sign-in-with", value: "okta" }, { name: "sign-in-account", value: oktaRef.split(":")[1] }])
   }
   // Past the offer's five-second cache of Acme's logins (bg/universal.ts).
   await Bun.sleep(5500)
@@ -755,8 +731,7 @@ try {
 
   // A second Google account, saved only at Google: the corner offer lists it
   // for Acme's Google button, and for a site with no saved login at all.
-  if (native) cli("new", "login", "--name", "Google", `url=${googleOrigin}`, `username=${GOOGLE_OTHER}`, `password=${GOOGLE_OTHER_PASSWORD}`, `otp=${OTP}`)
-  else await command({ type: "device-item-save", kind: "login", name: "Google", fields: [{ name: "url", value: googleOrigin }, { name: "username", value: GOOGLE_OTHER }, { name: "password", value: GOOGLE_OTHER_PASSWORD }, { name: "otp", value: OTP }] })
+  cli("new", "login", "--name", "Google", `url=${googleOrigin}`, `username=${GOOGLE_OTHER}`, `password=${GOOGLE_OTHER_PASSWORD}`, `otp=${OTP}`)
   await Bun.sleep(5500)
   const linkedTo = async (origin: string, account: string) => (await listAt(origin)).some((a) => a.signIn?.provider === "google" && a.signIn.account === account)
   const rowCount = (f: Frame) => f.locator("button.row").count()
@@ -900,14 +875,9 @@ try {
   const ramp = `http://app.ramp.test:${port}`
   const otherRef = (await listAt(googleOrigin)).find((a) => a.username === GOOGLE_OTHER)?.ref
   if (!otherRef) throw new Error("no second Gmail in the vault")
-  if (native) {
-    cli("new", "login", "--name", "Ramp", `url=${ramp}`, `username=${GOOGLE_USER}`, "password=synthetic-ramp-password-7731")
-    cli("new", "login", "--name", "Ramp via Google", `url=${ramp}`, "sign-in-with=google", `sign-in-account=${otherRef.split(":")[1]}`)
-    cli("unset", "--field", "password", "Ramp via Google")
-  } else {
-    await command({ type: "device-item-save", kind: "login", name: "Ramp", fields: [{ name: "url", value: ramp }, { name: "username", value: GOOGLE_USER }, { name: "password", value: "synthetic-ramp-password-7731" }] })
-    await command({ type: "device-item-save", kind: "login", name: "Ramp via Google", fields: [{ name: "url", value: ramp }, { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: otherRef.split(":")[1] }] })
-  }
+  cli("new", "login", "--name", "Ramp", `url=${ramp}`, `username=${GOOGLE_USER}`, "password=synthetic-ramp-password-7731")
+  cli("new", "login", "--name", "Ramp via Google", `url=${ramp}`, "sign-in-with=google", `sign-in-account=${otherRef.split(":")[1]}`)
+  cli("unset", "--field", "password", "Ramp via Google")
   await Bun.sleep(5500)
   const rampPage = async (flow: string, extra: Record<string, string> = {}) => {
     const p = await context.newPage()
@@ -1020,7 +990,7 @@ try {
     await popup.close()
     await p.close()
   }
-  console.log(`PASS universal sign-in with a provider (${mode})`)
+  console.log("PASS universal sign-in with a provider")
 } catch (err) {
   // What the status pill said last, and where: enough to tell a fixture gap from a chain stop.
   for (const w of watches.slice(-2)) console.log(`DIAG pill ${JSON.stringify([...new Map(w.samples.map((s) => [`${new URL(s.url).pathname} ${s.text}`, 1])).keys()])}`)
@@ -1033,15 +1003,13 @@ try {
     await mkdir(video, { recursive: true })
     for (const [i, { page, name, clicks }] of recordings.entries()) {
       const path = await page.video()?.path()
-      const file = `providers-${mode}-${String(i + 1).padStart(2, "0")}-${name.replace(/[^a-z0-9.-]+/gi, "-")}`
+      const file = `providers-${String(i + 1).padStart(2, "0")}-${name.replace(/[^a-z0-9.-]+/gi, "-")}`
       if (path) await copyFile(path, join(video, `${file}.webm`))
       await Bun.write(join(video, `${file}.cursor.json`), JSON.stringify(clicks))
     }
   }
   server.stop(true)
-  if (native) {
-    try { cli("debug", "daemon", "stop") } catch {}
-    await rm(store, { recursive: true, force: true })
-  }
+  try { cli("debug", "daemon", "stop") } catch {}
+  await rm(store, { recursive: true, force: true })
   await rm(root, { recursive: true, force: true })
 }

@@ -24,7 +24,7 @@ mod protocol;
 mod replace;
 mod service;
 
-pub use self::extension::{extension_dir_ok, switch_extension};
+pub use self::extension::extension_dir_ok;
 pub use self::install::{Checked, Etags, UpdateArgs, available, run};
 pub use self::notice::notice;
 pub(crate) use self::protocol::build_channel;
@@ -41,14 +41,10 @@ use std::process::Command;
 use url::Url;
 
 #[cfg(test)]
-use crate::config::ExtensionBuild;
-#[cfg(test)]
 use crate::protocol::UpdateInfo;
 
 #[cfg(test)]
-use self::extension::{
-    EXTENSION_LIMIT, EXTENSION_MARKER, extension_build, extension_version, unpack_extension,
-};
+use self::extension::{EXTENSION_LIMIT, EXTENSION_MARKER, extension_version, unpack_extension};
 #[cfg(test)]
 use self::install::{
     OUTPUT_LINES, UpdateState, check_sequence, npm_from_release, output_tail, platform_package,

@@ -1,6 +1,5 @@
 // The Gauntlet's e2e scenarios (see site.ts): what Deadbolt should do on
-// each page, checked in a real browser against the fake host or the
-// standalone vault. Each page is one unit of the table: it passes when every
+// each page, checked in a real browser against the fake host. Each page is one unit of the table: it passes when every
 // check on it does. e2e/run.ts mounts the site under /gauntlet and hands
 // these its helpers.
 //

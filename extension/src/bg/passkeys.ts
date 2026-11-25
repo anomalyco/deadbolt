@@ -12,9 +12,9 @@
 
 import type { FieldRole, HookReply, MenuPasskey, PasskeyChoice, PasskeyPrompt, PickReply, ToBackground } from "../messages"
 import { IDENTIFIER_ROLES } from "../messages"
-import { isB64url, isRef, type Passkey, type PasskeysReply, type UserVerification, type ReplyFor } from "../protocol"
+import { isB64url, isRef, type Passkey, type PasskeysReply, type UserVerification, type ReplyFor, type RequestBody } from "../protocol"
 import { frameChain, fromExtensionPage, newToken, sameSiteTop, type FrameTarget } from "./frames"
-import { HostError, type VaultBackend, type ReauthBody } from "./backend"
+import { HostError, type VaultBackend } from "./backend"
 import { openPopupFor } from "./save"
 import { fillableOrigin, senderOrigin, siteOf } from "./site"
 
@@ -396,16 +396,13 @@ export class Passkeys {
 
   private async create(p: Pending, o: CreateOptions, listed: PasskeysReply): Promise<HookReply> {
     const registered = listed.passkeys.some((k) => o.exclude.includes(k.credentialId))
-    // The worker's own preset, as it listed: the prompt's note is what the ceremony then asks.
-    const passphrase = o.userVerification !== "discouraged" && listed.asksPassphrase === true
-    const choice = await this.ask(p, { id: newToken(), kind: "create", rpId: p.rpId, verify: listed.canVerify && o.userVerification !== "discouraged", passphrase, username: o.user.name, registered }, o.timeout)
+    const choice = await this.ask(p, { id: newToken(), kind: "create", rpId: p.rpId, verify: listed.canVerify && o.userVerification !== "discouraged", username: o.user.name, registered }, o.timeout)
     if (choice.action === "fallback") return FALLBACK
     if (registered && choice.action !== "cancel") return fail("InvalidStateError", "A passkey for this account is already saved.")
     if (choice.action !== "save") return fail(registered ? "InvalidStateError" : "NotAllowedError")
     await this.ready(p)
     const made = await this.ceremony(p,
       { type: "passkey-create", origin: p.origin, rpId: o.rpId, challenge: o.challenge, user: o.user, exclude: o.exclude, userVerification: o.userVerification },
-      o.user.name,
     )
     const { credentialId, clientDataJSON, attestationObject, authenticatorData, publicKey } = made
     return { credential: { credentialId, clientDataJSON, attestationObject, authenticatorData, publicKey } }
@@ -416,8 +413,7 @@ export class Passkeys {
     const passkeys = o.allow.length ? listed.passkeys.filter((k) => o.allow.includes(k.credentialId)) : listed.passkeys
     if (!passkeys.length) return FALLBACK
     const verify = listed.canVerify && o.userVerification !== "discouraged"
-    const passphrase = o.userVerification !== "discouraged" && listed.asksPassphrase === true
-    const choice = await this.ask(p, { id: newToken(), kind: "get", rpId: p.rpId, verify, passphrase, passkeys: passkeys.map(({ ref, vault, username, created }) => ({ ref, vault, username, created })) }, o.timeout)
+    const choice = await this.ask(p, { id: newToken(), kind: "get", rpId: p.rpId, verify, passkeys: passkeys.map(({ ref, vault, username, created }) => ({ ref, vault, username, created })) }, o.timeout)
     if (choice.action === "fallback") return FALLBACK
     const passkey = choice.action === "use" ? passkeys.find((k) => k.ref === choice.ref) : undefined
     if (!passkey) return fail("NotAllowedError")
@@ -428,22 +424,15 @@ export class Passkeys {
     await this.ready(p)
     const signed = await this.ceremony(p,
       { type: "passkey-get", origin: p.origin, rpId, ref: passkey.ref, challenge, userVerification },
-      passkey.username ?? "Passkey",
     )
     if (signed.credentialId !== passkey.credentialId) return fail("NotAllowedError")
     const { credentialId, clientDataJSON, authenticatorData, signature, userHandle } = signed
     return { credential: { credentialId, clientDataJSON, authenticatorData, signature, userHandle } }
   }
 
-  /** The native daemon verifies there; standalone Strict asks in extension UI. */
-  private async ceremony<T extends "passkey-create" | "passkey-get">(p: Pending, body: Extract<ReauthBody, { type: T }>, title: string): Promise<ReplyFor[T]> {
-    try {
-      return await this.host.send(body, { timeout: CEREMONY_MS, onId: (id) => (p.hostId = id), signal: p.stop.signal })
-    } catch (error) {
-      if (!(error instanceof HostError) || error.code !== "passphrase_needed" || !this.host.reauth) throw error
-      await this.ready(p)
-      return this.host.reauth(body, { tabId: p.tabId, title, site: p.rpId }, p.stop.signal)
-    }
+  /** The native daemon verifies there (Touch ID), not the extension. */
+  private ceremony<T extends "passkey-create" | "passkey-get">(p: Pending, body: Extract<RequestBody, { type: T }>): Promise<ReplyFor[T]> {
+    return this.host.send(body, { timeout: CEREMONY_MS, onId: (id) => (p.hostId = id), signal: p.stop.signal })
   }
 
   /**

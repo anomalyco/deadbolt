@@ -35,6 +35,7 @@ export const ICONS = {
   key: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15.5" r="3.8"/><path d="m10.7 12.8 8.3-8.3M15.8 7.7l2.6 2.6M13.6 9.9l1.9 1.9"/></svg>`,
   card: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="6" width="17" height="12" rx="2.2"/><path d="M3.5 10h17M7 14.5h3"/></svg>`,
   close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`,
+  gear: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4.5 8h6M15.5 8h4M4.5 16h4M13.5 16h6"/><circle cx="13" cy="8" r="2.4"/><circle cx="11" cy="16" r="2.4"/></svg>`,
 } as const
 
 export const icon = (name: keyof typeof ICONS) => svg(ICONS[name])

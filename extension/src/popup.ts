@@ -10,20 +10,14 @@ import { h, icon, ICONS, monogram, svg } from "./ui/dom"
 import { offerCard } from "./ui/offer"
 import { passkeyCard } from "./ui/passkey"
 import { recordControl, savingOffLine } from "./ui/site-notes"
-import { mountVault } from "./vault/app"
 import { animateTo, reducedMotion, ROLL_CSS, timing } from "./ui/motion"
 import { appearanceRows } from "./ui/appearance"
 import { signInRow } from "./ui/signin-setting"
 import { iconSettings, onIconSettings, type IconSettings } from "./ui/icon-store"
 import { siteTile } from "./ui/site-icon"
-import { glyph } from "./vault/kit"
-
-declare const DEADBOLT_NATIVE: boolean | undefined
-/** Native builds use `deadbolt browser-host`; `--standalone` uses the browser-only device on device.html. */
-const native = typeof DEADBOLT_NATIVE !== "undefined" && DEADBOLT_NATIVE === true
 
 const root = document.getElementById("app")!
-if (native) document.head.append(h("style", {}, ROLL_CSS))
+document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
 let rendered = ""
 /** Where rows show site icons; the popup's settings change them. */
@@ -40,7 +34,7 @@ function announce(text: string) {
   setTimeout(() => (live.textContent = text), 50)
 }
 /** Record: in the header and under it on every web page, whatever Deadbolt's state (see ui/site-notes.ts). */
-const record = native ? recordControl(() => tabId, announce) : null
+const record = recordControl(() => tabId, announce)
 /** A login's tile: its site's icon, dithered in the first time this popup shows it, or its letter (see ui/site-icon.ts). */
 function tileFor(a: Account, index: number): HTMLElement {
   const url = a.urls.find(Boolean) ?? ""
@@ -99,11 +93,6 @@ function swapIcon(button: HTMLElement, name: "check" | "copy") {
 // Deadbolt has no URL scheme or host message that opens the app, so "Open
 // Deadbolt" says where to find it instead of launching it.
 function openApp() {
-  if (!native) {
-    void chrome.tabs.create({ url: chrome.runtime.getURL("device.html") })
-    window.close()
-    return
-  }
   const help = document.getElementById("open-help")
   if (help) {
     help.hidden = !help.hidden
@@ -164,10 +153,8 @@ function statusBody(status: Status): HTMLElement | null {
     case "unavailable":
       return state(icon("plug"), "Deadbolt couldn't start", para(status.detail || "The daemon didn't answer."))
     case "not-set-up":
-      if (!native) return state(icon("keyhole"), "Set up Deadbolt", para("Pair with a device that has your vault, or create a new vault."), openButton(true, "Set up"))
       return state(icon("keyhole"), "Set up Deadbolt first", para("Create your vault in the Deadbolt app, or run ", code("deadbolt init"), "."), openButton(true))
     case "locked": {
-      if (!native) return state(icon("lock"), "Unlock Deadbolt", para(status.detail || "Unlock it to fill passwords."), openButton(true, "Unlock"))
       return state(
         icon("lock"),
         "Unlock Deadbolt",
@@ -180,8 +167,8 @@ function statusBody(status: Status): HTMLElement | null {
   }
 }
 
-function openButton(primary: boolean, label = "Open Deadbolt"): HTMLElement {
-  const b = h("button", { class: `btn${primary ? " primary" : ""}`, type: "button" }, label)
+function openButton(primary: boolean): HTMLElement {
+  const b = h("button", { class: `btn${primary ? " primary" : ""}`, type: "button" }, "Open Deadbolt")
   b.addEventListener("click", openApp)
   return b
 }
@@ -266,7 +253,7 @@ function siteBody(reply: PopupReply): HTMLElement {
 
 /** Opens and closes the popup's settings. */
 function settingsButton(): HTMLElement {
-  const b = h("button", { class: `icon-button${settingsOpen ? " on" : ""}`, type: "button", title: "Settings", "aria-label": "Settings", "aria-pressed": String(settingsOpen), "data-focus": "settings" }, glyph("gear"))
+  const b = h("button", { class: `icon-button${settingsOpen ? " on" : ""}`, type: "button", title: "Settings", "aria-label": "Settings", "aria-pressed": String(settingsOpen), "data-focus": "settings" }, icon("gear"))
   b.addEventListener("click", () => {
     settingsOpen = !settingsOpen
     refocus = "settings"
@@ -275,21 +262,10 @@ function settingsButton(): HTMLElement {
   return b
 }
 
-/** A lock button for the browser-only Deadbolt, which has no app to lock it from. */
-function lockButton(): HTMLElement {
-  const b = h("button", { class: "link", type: "button" }, icon("lock"), "Lock")
-  b.addEventListener("click", async () => {
-    b.setAttribute("disabled", "")
-    await send<Status>({ type: "db:popup-lock" })
-    void render(true)
-  })
-  return b
-}
-
 async function render(changed = false) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   tabId = tab?.id
-  void record?.refresh()
+  void record.refresh()
   const reply = tabId === undefined ? null : await send<PopupReply>({ type: "db:popup-load", tabId })
   paint(reply, changed)
 }
@@ -327,10 +303,10 @@ function paint(reply: PopupReply | null, changed: boolean) {
           ]),
   )
   root.replaceChildren(
-    h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("h1", { class: "brand" }, "Deadbolt"), record?.button ?? null, pill(status)),
-    ...(record ? [record.bar] : []),
+    h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("h1", { class: "brand" }, "Deadbolt"), record.button, pill(status)),
+    record.bar,
     body2,
-    h("footer", { class: "bottom" }, open ?? h("span"), h("span", { class: "bottom-end" }, status.state === "ready" ? (native ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : lockButton()) : null, native ? settingsButton() : null)),
+    h("footer", { class: "bottom" }, open ?? h("span"), h("span", { class: "bottom-end" }, status.state === "ready" ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : null, settingsButton())),
   )
   // Keyboard focus stays on the button that repainted the popup, not on the page's body.
   if (refocus) root.querySelector<HTMLElement>(`[data-focus="${refocus}"]`)?.focus({ preventScroll: true })
@@ -351,23 +327,18 @@ function paint(reply: PopupReply | null, changed: boolean) {
   )
 }
 
-if (native) {
-  // The settings, here or in another popup, show at once.
-  onIconSettings((now) => {
-    icons = now
-    void render()
-  })
-  chrome.runtime.onMessage.addListener((message: StatusChanged) => {
-    if (message?.type === "db:status") void render()
-  })
+// The settings, here or in another popup, show at once.
+onIconSettings((now) => {
+  icons = now
+  void render()
+})
+chrome.runtime.onMessage.addListener((message: StatusChanged) => {
+  if (message?.type === "db:status") void render()
+})
 
-  // A vault that's slow to answer shows that it's connecting, never an empty popup.
-  const slow = setTimeout(() => rendered === "" && paint({ status: { state: "connecting" }, accounts: [] }, false), 300)
-  void iconSettings()
-    .then((now) => (icons = now))
-    .then(() => render())
-    .finally(() => clearTimeout(slow))
-} else {
-  // The browser-only Deadbolt has no app: the popup is the vault itself (src/vault).
-  mountVault(root, "popup")
-}
+// A vault that's slow to answer shows that it's connecting, never an empty popup.
+const slow = setTimeout(() => rendered === "" && paint({ status: { state: "connecting" }, accounts: [] }, false), 300)
+void iconSettings()
+  .then((now) => (icons = now))
+  .then(() => render())
+  .finally(() => clearTimeout(slow))
