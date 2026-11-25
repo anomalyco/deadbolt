@@ -276,3 +276,96 @@ fn without_an_anchor_the_newest_valid_file_wins() {
     open(&blocks, &fresh).unwrap();
     assert_eq!(fresh.token(), Some(second.token()));
 }
+
+/// The bytes of a first commit, with how far into them the sealed body starts.
+fn first_commit_file() -> (Vec<u8>, usize) {
+    let blocks = MemBlocks::new();
+    commit(&blocks, &NoopAnchor, None, "the first state");
+    let bytes = blocks.file("local-1.sealed").unwrap();
+    // magic, seq, prev_mac, slots_len, "slots", sealed_len
+    (bytes, 8 + 8 + 24 + 4 + b"slots".len() + 4)
+}
+
+#[test]
+fn a_first_commit_cut_short_anywhere_is_cleared_on_open() {
+    let (full, sealed_at) = first_commit_file();
+    assert!(full.len() > sealed_at + 40);
+    for cut in 0..full.len() {
+        let fresh = MemAnchor::new();
+        let anchors: [&dyn RollbackAnchor; 2] = [&NoopAnchor, &fresh];
+        for anchor in anchors {
+            let ctx = format!(
+                "cut at {cut} of {} (sealed body at {sealed_at})",
+                full.len()
+            );
+            let blocks = MemBlocks::new();
+            blocks.put_raw("local-1.sealed", &full[..cut]);
+            assert!(
+                matches!(
+                    local::decode("local-1.sealed", &VAULT, &root(), 1, &full[..cut]),
+                    Err(Error::CorruptLocal { .. })
+                ),
+                "{ctx}: a short file is corrupt, never a decrypt failure"
+            );
+            assert!(open(&blocks, &anchor).unwrap().is_none(), "{ctx}");
+            assert!(local_files(&blocks).is_empty(), "{ctx}: torn file cleared");
+            let first = commit(&blocks, &anchor, None, "again");
+            let reopened = open(&blocks, &anchor).unwrap().unwrap();
+            assert_eq!(reopened.token(), first.token(), "{ctx}");
+            assert_eq!(&reopened.body[..], b"again", "{ctx}");
+        }
+    }
+}
+
+#[test]
+fn a_power_cut_during_the_first_commit_never_bricks_the_device() {
+    let (full, _) = first_commit_file();
+    for keep in [None, Some(0), Some(30), Some(60), Some(full.len() - 1)] {
+        let blocks = MemBlocks::new();
+        let anchor = MemAnchor::new();
+        blocks.crash_at(0, keep);
+        let body = b"the first state";
+        assert!(local::commit(&blocks, &anchor, &VAULT, &root(), None, b"slots", body).is_err());
+        let after = blocks.reboot();
+        assert!(open(&after, &anchor).unwrap().is_none(), "keep {keep:?}");
+        let first = commit(&after, &anchor, None, "x");
+        assert_eq!(
+            open(&after, &anchor).unwrap().unwrap().token(),
+            first.token()
+        );
+    }
+}
+
+#[test]
+fn a_complete_file_that_fails_to_open_is_reported_and_kept() {
+    let (full, _) = first_commit_file();
+    // The wrong root: a decrypt failure, and the file stays.
+    let blocks = MemBlocks::new();
+    blocks.put_raw("local-1.sealed", &full);
+    let wrong = DeviceRoot::from_bytes(&[8; 32]);
+    for anchor in [&NoopAnchor as &dyn RollbackAnchor, &MemAnchor::new()] {
+        assert!(matches!(
+            local::open(&blocks, &anchor, &VAULT, &wrong),
+            Err(Error::Decrypt)
+        ));
+        assert_eq!(blocks.file("local-1.sealed").unwrap(), full);
+    }
+    // A flipped ciphertext byte, under the right root: the same.
+    blocks.flip_bit("local-1.sealed", full.len() - 20, 0);
+    assert!(matches!(open(&blocks, &NoopAnchor), Err(Error::Decrypt)));
+    assert_eq!(local_files(&blocks), ["local-1.sealed"]);
+
+    // Bytes past the sealed body, or a wrong magic: corrupt, not torn, kept.
+    for damaged in [
+        [full.as_slice(), b"extra"].concat(),
+        [b"XXXX".as_slice(), &full[4..]].concat(),
+    ] {
+        let blocks = MemBlocks::new();
+        blocks.put_raw("local-1.sealed", &damaged);
+        assert!(matches!(
+            open(&blocks, &NoopAnchor),
+            Err(Error::CorruptLocal { .. })
+        ));
+        assert_eq!(blocks.file("local-1.sealed").unwrap(), damaged);
+    }
+}
