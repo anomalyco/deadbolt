@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::id::DeviceId;
 
 use super::super::*;
-use super::sim::{DAY_MS, K_MAC, Sim, adders, dev, item, membership};
+use super::sim::{DAY_MS, K_MAC, Sim, adders, dev, item, membership, sealed};
 
 fn set(it: u8, field: &str, value: &str) -> DataOp {
     DataOp::SetField {
@@ -346,19 +346,20 @@ fn dispute_detection_and_unverifiable_peers() {
         &ctx,
         id,
         &payload,
-        Some(&bytes),
+        Some((&pack, PackCommitment::of(&sealed(&bytes)))),
         all.iter().copied(),
     );
     assert_eq!(agreed.unwrap(), CheckpointVerdict::Agreed);
 
-    let mut bad_pack = bytes.clone();
+    // The fetched encrypted pack file does not match the commitment: disputed.
+    let mut bad_pack = sealed(&bytes);
     *bad_pack.last_mut().unwrap() ^= 1;
     let verdict = verify_checkpoint(
         &K_MAC,
         &ctx,
         id,
         &payload,
-        Some(&bad_pack),
+        Some((&pack, PackCommitment::of(&bad_pack))),
         all.iter().copied(),
     );
     assert!(matches!(
@@ -426,7 +427,7 @@ fn gc_checkpoint(
         ),
         author: dev(author),
         seq,
-        timestamp_ms,
+        first_seen_ms: timestamp_ms,
         frontier: frontier
             .iter()
             .map(|&(d, s)| (dev(d), (s, FrameId::ZERO)))
@@ -488,7 +489,10 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
     let mut expected = expected;
     expected.sort();
     assert_eq!(plan.delete_frames, expected);
-    assert_eq!(plan.expired_tombstones[&item(0)], tomb);
+    assert!(
+        plan.expired_tombstones.is_empty(),
+        "a base this peer has known for a day keeps its tombstones"
+    );
 
     // One drawer iPad has not covered it: wait, then fall back to the 30-day grace.
     clocks.insert(dev(2), VectorClock::new());
@@ -501,7 +505,7 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
         &frames,
     );
     assert!(plan.eligible.is_empty() && plan.delete_frames.is_empty());
-    let later = c.timestamp_ms + GC_GRACE_MS;
+    let later = c.first_seen_ms + GC_GRACE_MS;
     let plan = plan_gc(
         later,
         &members,
@@ -511,6 +515,7 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
         &frames,
     );
     assert_eq!(plan.eligible[&c.id], Eligibility::Grace);
+    assert_eq!(plan.expired_tombstones[&item(0)], tomb);
 
     // A dispute by a current member blocks GC forever; one by a removed device does not.
     let dispute = |author| DisputeRecord {
@@ -552,33 +557,4 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
     );
     assert_eq!(plan.base, Some(newer.id));
     assert_eq!(plan.delete_frames.len(), 5);
-}
-
-#[test]
-fn pruning_expired_tombstones_keeps_revived_items() {
-    let m = membership(2, None);
-    let adders = adders(2);
-    let ctx = FoldContext {
-        membership: &m,
-        adders: &adders,
-    };
-    let mut sim = Sim::new(2);
-    sim.write(0, vec![set(0, "user", "a"), set(1, "user", "b")]);
-    sim.write(
-        0,
-        vec![
-            DataOp::DeleteItem { item: item(0) },
-            DataOp::DeleteItem { item: item(1) },
-        ],
-    );
-    let mut state = fold_from_scratch(&ctx, sim.shuffled(1));
-    let expired = state.tombstones();
-    assert_eq!(expired.len(), 2);
-    sim.write(0, vec![DataOp::RestoreItem { item: item(1) }]);
-    let mut revived = fold_from_scratch(&ctx, sim.shuffled(2));
-    revived.prune_tombstones(&expired);
-    assert!(!revived.items.contains_key(&item(0)));
-    assert!(revived.items.contains_key(&item(1)));
-    state.prune_tombstones(&expired);
-    assert!(state.items.is_empty());
 }

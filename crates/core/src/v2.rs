@@ -5,10 +5,12 @@
 //! `wasm32`-clean. Not yet wired into the v1 engine or CLI.
 
 pub mod builder;
+pub mod causal;
 pub mod checkpoint;
 pub mod clock;
 pub mod codec;
 pub mod crypto;
+mod dag;
 pub mod data;
 pub mod epoch;
 pub mod fold;
@@ -28,9 +30,10 @@ pub use builder::{
     build_remove_frame, build_rewrap_frame, build_rotate_recovery_frame,
     build_standalone_rotate_frame, rewrap_wrap_aad, rotate_wrap_aad,
 };
+pub use causal::{Closure, SeenBy};
 pub use checkpoint::{
-    CheckpointError, CheckpointPayload, CheckpointVerdict, build_checkpoint, fold_at_frontier,
-    verify_checkpoint,
+    CheckpointError, CheckpointPayload, CheckpointVerdict, PackCommitment, build_checkpoint,
+    fold_at_frontier, verify_checkpoint,
 };
 pub use clock::{
     Causality, DeltaClock, Dot, VectorClock, compare, diff_clock, frame_clock, happened_before,
@@ -45,7 +48,8 @@ pub use crypto::{
     NONCE_LEN, NetPublic, NetSecret, PADME_FLOOR, RecoverySecret, SUITE_X25519_WRAP,
     SUITE_XWING_RESERVED, TAG_LEN, WRAP_LEN, aead_open, aead_seal, derive_frame_id,
     derive_vault_id, open_back_link, padme_pad, padme_padded_len, padme_unpad, seal_back_link,
-    sign, unwrap_epoch_key, verify_strict, wrap_epoch_key, wrap_info,
+    sign, unwrap_epoch_key, verify_recovery_wrap, verify_strict, wrap_epoch_key, wrap_info,
+    wrap_recovery_epoch_key,
 };
 pub use data::{
     DataBody, DataFrame, DataOp, DataPayload, FieldValue, MAX_FIELD_VALUE_LEN, MAX_LABEL_LEN,
@@ -71,7 +75,7 @@ pub use gc::{
     GcFrame, GcPlan, plan_gc, should_checkpoint,
 };
 pub use membership::{ParkingReason, ParkingStatus, ResolvedMembership, check_parking, resolve};
-pub use pack::{Pack, PackMeta, pack_hash};
+pub use pack::{Pack, PackMeta};
 pub use state::{
     ClockBook, DeviceCardValue, DisputeRecord, FoldedState, ItemState, Life, Register, Tombstone,
     Write, state_mac,

@@ -9,6 +9,7 @@ use crate::id::{DeviceId, DeviceSecret, VaultId};
 
 use super::super::*;
 use super::model::{assert_matches_ref, dummy_rotate, pool, shuffled};
+use super::view;
 
 #[derive(Debug, Clone)]
 struct Step {
@@ -42,6 +43,7 @@ fn build_random_history(steps: &[Step]) -> (VaultId, Vec<Frame>, Vec<FraudProof>
     let add0 = build_add_frame(
         &p.root_sks[0],
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -59,6 +61,7 @@ fn build_random_history(steps: &[Step]) -> (VaultId, Vec<Frame>, Vec<FraudProof>
     let add1 = build_add_frame(
         &p.root_sks[0],
         vault,
+        &view(&[&create, &add0]),
         2,
         add0.id(),
         vec![add0.id()],
@@ -116,16 +119,23 @@ fn build_random_history(steps: &[Step]) -> (VaultId, Vec<Frame>, Vec<FraudProof>
                 let dev = &p.devices[(step.target as usize) % p.devices.len()];
                 let consent =
                     sign_join_consent(dev.sign_key(), &vault, &author_id, &dev.kem_public());
-                if let Ok(f) = build_add_frame(
+                // Signed directly, not through `build_add_frame`: the generator is adversarial
+                // and must keep producing re-adds of removed devices for the resolver to judge.
+                if let Ok(f) = Frame::sign_member(
                     author_sk,
                     vault,
                     seq,
                     prev,
-                    deps,
-                    dev.device_id(),
-                    dev.kem_public(),
-                    consent,
-                    None,
+                    MemberBody {
+                        deps,
+                        op: Some(MemberOp::Add {
+                            device: dev.device_id(),
+                            kem: dev.kem_public(),
+                            consent,
+                            rewrap: None,
+                        }),
+                        rotate: None,
+                    },
                 ) {
                     last_by_author.insert(author_id, (seq, f.id()));
                     frames.push(f);

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::id::{DeviceId, VaultId};
 
 use super::crypto::{FrameId, KemPublic};
+use super::dag::{DagNode, build_dag};
 use super::frame::{Frame, FrameKind, LogKind, MemberOp};
 pub use super::fraud::{
     FRAUD_PROOF_LEN, FraudError, FraudProof, VerifiedFraud, detect_fraud_in_frames,
@@ -34,6 +35,12 @@ pub struct ResolvedMembership {
     pub member_fork_seq: BTreeMap<DeviceId, u64>,
     /// Minimum `Data` fork seq per author (from fraud proofs and observed forks).
     pub data_fork_seq: BTreeMap<DeviceId, u64>,
+    /// `Member` frames placed in the causal DAG (every `dep` and `prev` present, and `prev`
+    /// continuing the author's own log). Builders only cite these.
+    pub dag_frames: BTreeSet<FrameId>,
+    /// `Member` frames held but not placed: a missing `dep` or `prev`, or a `prev` that does
+    /// not continue the author's log. They count for nothing until they can be placed.
+    pub unplaced_frames: BTreeSet<FrameId>,
     /// For each author that forked in `Member`, every `Member` frame ID equal to or
     /// causally descending from any voided fork frame of that author.
     fork_descendants: BTreeMap<DeviceId, BTreeSet<FrameId>>,
@@ -84,14 +91,18 @@ impl ResolvedMembership {
     }
 
     /// True iff a data frame by `author` at `seq` with membership view `mheads` counts.
+    ///
+    /// For an author that forked in `Member`, every head must be a placed frame outside the
+    /// fork's descendants: a head this peer cannot place may be a withheld fork-chain frame.
     pub fn counts_data(&self, author: &DeviceId, seq: u64, mheads: &[FrameId]) -> bool {
         if self.counted_through(author, seq) != Some(seq) {
             return false;
         }
-        if let Some(descendants) = self.fork_descendants.get(author)
-            && mheads.iter().any(|h| descendants.contains(h))
-        {
-            return false;
+        if self.member_fork_seq.contains_key(author) {
+            let descendants = self.fork_descendants.get(author);
+            return mheads.iter().all(|h| {
+                self.dag_frames.contains(h) && descendants.is_none_or(|d| !d.contains(h))
+            });
         }
         true
     }
@@ -135,43 +146,6 @@ pub fn check_parking(
         reasons.push(ParkingReason::MutualRemoval { a, b });
     }
     ParkingStatus { reasons }
-}
-
-#[derive(Clone, Default)]
-struct BitSet {
-    words: Vec<u64>,
-}
-
-impl BitSet {
-    fn new(bits: usize) -> Self {
-        Self {
-            words: vec![0u64; bits.div_ceil(64)],
-        }
-    }
-    fn set(&mut self, bit: usize) {
-        self.words[bit / 64] |= 1u64 << (bit % 64);
-    }
-    fn contains(&self, bit: usize) -> bool {
-        (self.words[bit / 64] & (1u64 << (bit % 64))) != 0
-    }
-    fn union_with(&mut self, other: &Self) {
-        for (dst, &src) in self.words.iter_mut().zip(other.words.iter()) {
-            *dst |= src;
-        }
-    }
-}
-
-struct DagNode<'a> {
-    frame: &'a Frame,
-    depth: u64,
-    past: BitSet,
-    void: bool,
-}
-
-impl DagNode<'_> {
-    fn saw(&self, other_idx: usize) -> bool {
-        self.past.contains(other_idx)
-    }
 }
 
 /// Resolves v2 membership from an unordered set of frames and keyless `FraudProof`s (invariant I4).
@@ -224,7 +198,9 @@ pub fn resolve<'a>(
         }
     }
 
-    let nodes = build_dag(&by_id, &member_fork_seq);
+    let dag = build_dag(&by_id, &member_fork_seq);
+    let nodes = dag.nodes;
+    let dag_frames: BTreeSet<FrameId> = nodes.iter().map(|n| n.frame.id()).collect();
     let mut fork_descendants = explicit_member_fork_ids;
     for (idx, node) in nodes.iter().enumerate() {
         if node.void {
@@ -262,11 +238,18 @@ pub fn resolve<'a>(
     let mutual_removals = find_mutual_removals(&nodes, &structural);
     let (chosen, authority) = choose_removals(vault, &nodes, structural, &structural_lineage);
 
-    let recovery_frozen = genesis_creator_forked
-        || authority
-            .lineage_order
-            .iter()
-            .any(|root| member_fork_seq.contains_key(root) || data_fork_seq.contains_key(root));
+    // A retired root's handoff is a non-void frame, so any later `Member` fork of that root is
+    // above its retire seq and cannot undo it; recovery roots never write counted data either.
+    // Only the active root forking, or a root forking at or before its own handoff, freezes.
+    let retired_root_forked = authority.retired_roots.iter().any(|(root, &ret_idx)| {
+        let retire_seq = nodes[ret_idx].frame.header().seq;
+        member_fork_seq.get(root).is_some_and(|&s| s <= retire_seq)
+    });
+    let active_root_forked = authority
+        .lineage_order
+        .last()
+        .is_some_and(|root| member_fork_seq.contains_key(root) || data_fork_seq.contains_key(root));
+    let recovery_frozen = genesis_creator_forked || retired_root_forked || active_root_forked;
     let active_recovery = if recovery_frozen {
         None
     } else {
@@ -339,77 +322,10 @@ pub fn resolve<'a>(
         mutual_removals,
         member_fork_seq,
         data_fork_seq,
+        dag_frames,
+        unplaced_frames: dag.unplaced,
         fork_descendants,
     }
-}
-
-fn build_dag<'a>(
-    by_id: &BTreeMap<FrameId, &'a Frame>,
-    member_fork_seq: &BTreeMap<DeviceId, u64>,
-) -> Vec<DagNode<'a>> {
-    let mut depth_map: BTreeMap<FrameId, u64> = BTreeMap::new();
-    loop {
-        let mut progress = false;
-        for (&id, &frame) in by_id {
-            if depth_map.contains_key(&id) {
-                continue;
-            }
-            let Some(body) = frame.member_body() else {
-                continue;
-            };
-            let mut max_dep = 0u64;
-            let mut ready = true;
-            for dep in &body.deps {
-                if let Some(&d) = depth_map.get(dep) {
-                    max_dep = max_dep.max(d + 1);
-                } else {
-                    ready = false;
-                    break;
-                }
-            }
-            if ready {
-                depth_map.insert(id, max_dep);
-                progress = true;
-            }
-        }
-        if !progress {
-            break;
-        }
-    }
-    let mut ordered: Vec<(u64, FrameId, &'a Frame)> = depth_map
-        .into_iter()
-        .filter_map(|(id, depth)| by_id.get(&id).map(|&f| (depth, id, f)))
-        .collect();
-    ordered.sort_by_key(|&(depth, id, _)| (depth, id));
-
-    let total = ordered.len();
-    let mut index_of: BTreeMap<FrameId, usize> = BTreeMap::new();
-    for (idx, &(_, id, _)) in ordered.iter().enumerate() {
-        index_of.insert(id, idx);
-    }
-    let mut nodes: Vec<DagNode<'a>> = Vec::with_capacity(total);
-    for (depth, _, frame) in ordered {
-        let mut past = BitSet::new(total);
-        if let Some(body) = frame.member_body() {
-            for dep in &body.deps {
-                if let Some(&dep_idx) = index_of.get(dep) {
-                    past.set(dep_idx);
-                    past.union_with(&nodes[dep_idx].past);
-                }
-            }
-        }
-        let h = frame.header();
-        let void = member_fork_seq
-            .get(&h.author)
-            .is_some_and(|&fork_seq| h.seq >= fork_seq);
-        nodes.push(DagNode {
-            frame,
-            depth,
-            past,
-            void,
-        });
-    }
-    nodes
 }
 
 #[derive(Default)]
@@ -465,6 +381,7 @@ fn compute_recovery_lineage(vault: &VaultId, nodes: &[DagNode<'_>]) -> BTreeSet<
             node.frame.member_body().and_then(|b| b.op.as_ref())
             && !retired.contains_key(&author)
             && !lineage.contains(new)
+            && !added_as_device(nodes, new, idx)
         {
             lineage.insert(*new);
             retired.insert(author, idx);
@@ -532,7 +449,12 @@ fn authorize(
         match &body.op {
             Some(MemberOp::Create { .. }) => {}
             Some(MemberOp::Add { device, kem, .. }) => {
-                if !known_lineage.contains(device) {
+                // Re-adding a device whose removal this frame saw would hand the removed key
+                // the post-removal epoch through the inline `Rewrap`.
+                let readd = cuts
+                    .get(device)
+                    .is_some_and(|removals| removals.iter().any(|&r_idx| node.saw(r_idx)));
+                if !known_lineage.contains(device) && !readd {
                     state.admissions.entry(*device).or_default().push(idx);
                     state.kem_keys.entry(*device).or_insert(*kem);
                     state.non_removal_frames.insert(node.frame.id());
@@ -547,6 +469,7 @@ fn authorize(
                 if state.lineage.contains(&author)
                     && !state.retired_roots.contains_key(&author)
                     && !state.lineage.contains(new)
+                    && !added_as_device(nodes, new, idx)
                 {
                     state.lineage.insert(*new);
                     state.lineage_order.push(*new);
@@ -595,7 +518,11 @@ fn choose_removals(
             continue;
         }
         let cuts_nothing = nodes.iter().enumerate().all(|(i, n)| {
-            n.void || n.frame.header().author != victim || i == candidate || nodes[candidate].saw(i)
+            n.void
+                || ((n.frame.header().author != victim
+                    || i == candidate
+                    || nodes[candidate].saw(i))
+                    && !(n.saw(candidate) && adds_device(n.frame, &victim)))
         });
         if cuts_nothing {
             if current.removals.contains(&candidate)
@@ -660,6 +587,22 @@ fn is_genesis(vault: &VaultId, frame: &Frame) -> bool {
                 && body.deps.is_empty()
                 && super::crypto::derive_vault_id(&h.author, nonce) == *vault
     )
+}
+
+fn adds_device(frame: &Frame, device: &DeviceId) -> bool {
+    matches!(
+        frame.member_body().and_then(|b| b.op.as_ref()),
+        Some(MemberOp::Add { device: d, .. }) if d == device
+    )
+}
+
+/// True iff some non-void `Add` of `device` as an ordinary device is in `past(idx)`: such a
+/// device can never become a recovery root.
+fn added_as_device(nodes: &[DagNode<'_>], device: &DeviceId, idx: usize) -> bool {
+    nodes
+        .iter()
+        .enumerate()
+        .any(|(j, n)| !n.void && nodes[idx].saw(j) && adds_device(n.frame, device))
 }
 
 fn remove_target(frame: &Frame) -> Option<DeviceId> {

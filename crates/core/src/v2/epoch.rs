@@ -11,8 +11,8 @@ pub use super::builder::{
     build_standalone_rotate_frame, rewrap_wrap_aad, rotate_wrap_aad,
 };
 use super::crypto::{
-    BACK_LINK_LEN, CryptoError, EpochId, EpochKey, FrameId, KemSecret, WRAP_LEN, open_back_link,
-    unwrap_epoch_key, wrap_info,
+    BACK_LINK_LEN, CryptoError, EpochId, EpochKey, FrameId, KemPublic, KemSecret, WRAP_LEN,
+    open_back_link, unwrap_epoch_key, verify_recovery_wrap, wrap_info,
 };
 use super::frame::{Frame, FrameError, FrameKind, HEADER_LEN, MemberOp};
 use super::membership::{ParkingReason, ResolvedMembership, check_parking};
@@ -30,6 +30,16 @@ pub enum EpochError {
     UnknownEpoch(EpochId),
     #[error("epoch key does not match epoch commit for {0}")]
     CommitMismatch(EpochId),
+    #[error("dep or prev {0} is not placed in the resolved membership DAG")]
+    UnplacedDep(FrameId),
+    #[error("device {0} was removed or is a recovery root and cannot be added")]
+    CannotAdd(DeviceId),
+    #[error("rotate wraps must go to exactly the eligible recipients of the frame's view")]
+    RecipientsMismatch,
+    #[error("{0} is not an eligible wrap recipient in the frame's view")]
+    IneligibleRecipient(DeviceId),
+    #[error("the recovery lineage is frozen; there is no active recovery root to repair")]
+    NoActiveRecovery,
 }
 
 /// In-memory cache of unlocked symmetric epoch keys (`EpochId -> K_e`).
@@ -103,7 +113,27 @@ pub struct BadCommit {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnlockReport {
     pub newly_unlocked: BTreeSet<EpochId>,
+    /// Offers and back-links that opened to a key failing the epoch's E2 `commit`.
     pub bad_commits: Vec<BadCommit>,
+    /// Offers to this device that did not open at all (junk bytes, wrong key, bad suite).
+    pub bad_offers: Vec<BadCommit>,
+    /// Back-links `(child, parent)` that opened to the parent's `commit`-verified key.
+    pub verified_back: BTreeSet<(EpochId, EpochId)>,
+    /// Back-links that did not open (`epoch` is the parent, `offer_frame` the child's frame).
+    pub bad_back_links: Vec<BadCommit>,
+}
+
+impl UnlockReport {
+    /// Epochs with an offer to this device that failed to open or failed `commit`: pass them
+    /// to [`EpochGraph::select_write_epoch`] so a junk wrap mints a fresh `Rotate` instead of
+    /// waiting forever for a rewrap.
+    pub fn bad_epochs(&self) -> BTreeSet<EpochId> {
+        self.bad_commits
+            .iter()
+            .chain(&self.bad_offers)
+            .map(|b| b.epoch)
+            .collect()
+    }
 }
 
 /// Result of rule E4 clean-tip write epoch selection.
@@ -254,16 +284,25 @@ impl EpochGraph {
                     let aad = rotate_wrap_aad(&offer.header_bytes);
                     unwrap_epoch_key(offer.suite, my_kem, &w_info, &aad, &offer.wrap)
                 };
-                if let Ok(candidate) = unwrapped {
-                    if candidate.verify_commit(&self.vault, &info.author, info.seq, &info.commit) {
+                let bad = BadCommit {
+                    epoch: epoch_id,
+                    offer_frame: offer.frame_id,
+                };
+                match unwrapped {
+                    Ok(candidate)
+                        if candidate.verify_commit(
+                            &self.vault,
+                            &info.author,
+                            info.seq,
+                            &info.commit,
+                        ) =>
+                    {
                         keyring.insert(epoch_id, candidate);
                         report.newly_unlocked.insert(epoch_id);
                         break;
                     }
-                    report.bad_commits.push(BadCommit {
-                        epoch: epoch_id,
-                        offer_frame: offer.frame_id,
-                    });
+                    Ok(_) => report.bad_commits.push(bad),
+                    Err(_) => report.bad_offers.push(bad),
                 }
             }
         }
@@ -278,34 +317,94 @@ impl EpochGraph {
             else {
                 continue;
             };
-            let k_back = k_e.back_key(&self.vault, &info.author, info.seq);
+            // Every back-link is checked whenever the child key is known, even when the
+            // parent is already unlocked, so a fake link is never trusted for reachability.
             for (parent_id, sealed) in &info.back {
-                if keyring.contains(parent_id) {
-                    continue;
-                }
-                let aad = back_link_aad(&info.header_bytes, parent_id);
-                if let Ok(parent_key) = open_back_link(&k_back, &aad, sealed) {
-                    if let Some(parent_info) = self.epochs.get(parent_id)
-                        && !parent_key.verify_commit(
-                            &self.vault,
-                            &parent_info.author,
-                            parent_info.seq,
-                            &parent_info.commit,
-                        )
-                    {
-                        report.bad_commits.push(BadCommit {
-                            epoch: *parent_id,
-                            offer_frame: epoch_id.as_frame_id(),
-                        });
-                        continue;
+                let bad = BadCommit {
+                    epoch: *parent_id,
+                    offer_frame: epoch_id.as_frame_id(),
+                };
+                match self.open_back(info, &k_e, *parent_id, sealed) {
+                    BackLink::Verified(parent_key) => {
+                        report.verified_back.insert((epoch_id, *parent_id));
+                        if !keyring.contains(parent_id) {
+                            keyring.insert(*parent_id, parent_key);
+                            report.newly_unlocked.insert(*parent_id);
+                            queue.push_back(*parent_id);
+                        }
                     }
-                    keyring.insert(*parent_id, parent_key);
-                    report.newly_unlocked.insert(*parent_id);
-                    queue.push_back(*parent_id);
+                    BackLink::BadCommit => report.bad_commits.push(bad),
+                    BackLink::Unopenable => report.bad_back_links.push(bad),
                 }
             }
         }
         report
+    }
+
+    /// Opens one back-link of the epoch `info` (whose key is `k_child`) and checks the parent's
+    /// `commit`.
+    fn open_back(
+        &self,
+        info: &EpochInfo,
+        k_child: &EpochKey,
+        parent: EpochId,
+        sealed: &[u8; BACK_LINK_LEN],
+    ) -> BackLink {
+        let k_back = k_child.back_key(&self.vault, &info.author, info.seq);
+        let aad = back_link_aad(&info.header_bytes, &parent);
+        let Ok(parent_key) = open_back_link(&k_back, &aad, sealed) else {
+            return BackLink::Unopenable;
+        };
+        match self.epochs.get(&parent) {
+            Some(p) if parent_key.verify_commit(&self.vault, &p.author, p.seq, &p.commit) => {
+                BackLink::Verified(parent_key)
+            }
+            Some(_) => BackLink::BadCommit,
+            None => BackLink::Unopenable,
+        }
+    }
+
+    /// Back-links `child -> [parent]` this keyring can open and verify against the parent's
+    /// `commit`. Unverifiable links are never trusted for reachability.
+    fn verified_back_links(&self, keyring: &EpochKeyring) -> BTreeMap<EpochId, Vec<EpochId>> {
+        let mut out: BTreeMap<EpochId, Vec<EpochId>> = BTreeMap::new();
+        for (&child, info) in &self.epochs {
+            let Some(k_child) = keyring.get(&child) else {
+                continue;
+            };
+            for (parent, sealed) in &info.back {
+                if matches!(
+                    self.open_back(info, k_child, *parent, sealed),
+                    BackLink::Verified(_)
+                ) {
+                    out.entry(child).or_default().push(*parent);
+                }
+            }
+        }
+        out
+    }
+
+    /// True iff some offer of `epoch` to the recovery root is exactly the deterministic recovery
+    /// wrap of the known `k_e`: checkable by any key holder without `R_kem`'s secret.
+    fn recovery_wrap_ok(
+        &self,
+        info: &EpochInfo,
+        root: &DeviceId,
+        kem: &KemPublic,
+        k_e: &EpochKey,
+    ) -> bool {
+        info.wrap_offers.get(root).is_some_and(|offers| {
+            offers.iter().any(|offer| {
+                let w_info = wrap_info(&self.vault, &offer.author, offer.seq, root);
+                let ok = |aad: &[u8]| verify_recovery_wrap(k_e, kem, &w_info, aad, &offer.wrap);
+                offer.suite == super::crypto::SUITE_X25519_WRAP
+                    && if offer.is_rewrap {
+                        ok(&rewrap_wrap_aad(&offer.header_bytes, &info.id))
+                    } else {
+                        ok(&rotate_wrap_aad(&offer.header_bytes))
+                    }
+            })
+        })
     }
 
     /// All authorized epochs that no other authorized epoch names as a parent.
@@ -368,7 +467,9 @@ impl EpochGraph {
             .collect()
     }
 
-    /// Rule E4 write-epoch selection.
+    /// Rule E4 write-epoch selection. `bad_commit_epochs` is [`UnlockReport::bad_epochs`]: a
+    /// clean tip whose offer to this device was junk or failed `commit` is replaced by a fresh
+    /// `Rotate` rather than awaited forever.
     pub fn select_write_epoch(
         &self,
         resolved: &ResolvedMembership,
@@ -419,43 +520,28 @@ impl EpochGraph {
         self.select_write_epoch(resolved, keyring, bad_commit_epochs)
     }
 
-    /// Plaintext reachability: epochs `recipient` can unlock via direct wraps + E5 `back` links.
-    pub fn reachable_by(&self, recipient: &DeviceId) -> BTreeSet<EpochId> {
-        let mut reached = BTreeSet::new();
-        let mut queue = VecDeque::new();
-        for (&id, info) in &self.epochs {
-            if info.recipients.contains(recipient) && reached.insert(id) {
-                queue.push_back(id);
-            }
-        }
-        while let Some(cur) = queue.pop_front() {
-            if let Some(info) = self.epochs.get(&cur) {
-                for &(parent_id, _) in &info.back {
-                    if reached.insert(parent_id) {
-                        queue.push_back(parent_id);
-                    }
-                }
-            }
-        }
-        reached
-    }
-
-    fn back_reachable_from(&self, epoch: EpochId) -> BTreeSet<EpochId> {
-        let mut reached = BTreeSet::new();
-        let mut queue = VecDeque::new();
-        if reached.insert(epoch) {
-            queue.push_back(epoch);
-        }
-        while let Some(cur) = queue.pop_front() {
-            if let Some(info) = self.epochs.get(&cur) {
-                for &(parent_id, _) in &info.back {
-                    if reached.insert(parent_id) {
-                        queue.push_back(parent_id);
-                    }
-                }
-            }
-        }
-        reached
+    /// Epochs `recipient` can unlock, as far as `keyring` can check: direct wraps plus E5
+    /// back-links this keyring verified. The recovery root's direct wraps count only when they
+    /// are the exact deterministic recovery wrap of a key in `keyring`, so a junk wrap to the
+    /// cold root is caught by any online key holder.
+    pub fn reachable_by(
+        &self,
+        recipient: &DeviceId,
+        keyring: &EpochKeyring,
+        resolved: &ResolvedMembership,
+    ) -> BTreeSet<EpochId> {
+        let back = self.verified_back_links(keyring);
+        let root_kem = resolved
+            .active_recovery
+            .filter(|root| root == recipient)
+            .and_then(|root| resolved.kem_of(&root));
+        let direct = self.epochs.values().filter(|info| match &root_kem {
+            Some(kem) => keyring
+                .get(&info.id)
+                .is_some_and(|k| self.recovery_wrap_ok(info, recipient, kem, k)),
+            None => info.recipients.contains(recipient),
+        });
+        back_closure(direct.map(|info| info.id), &back)
     }
 
     /// Rule E6 (Reader duty): minimal `(EpochId, Vec<DeviceId>)` plan for epochs missing a
@@ -469,22 +555,27 @@ impl EpochGraph {
         let eligible = resolved.eligible_recipients();
         let mut target_epochs: BTreeSet<EpochId> = epochs_with_counted_data.clone();
         target_epochs.extend(self.clean_tips(resolved));
-        target_epochs.retain(|e| keyring.contains(e) && self.epochs.contains_key(e));
+        // Only authorized epochs: the epoch of an unplaced or unauthorized `Remove` must never be
+        // rewrapped, least of all to the device that `Remove` targets.
+        target_epochs.retain(|e| {
+            keyring.contains(e) && self.epochs.get(e).is_some_and(|info| info.authorized)
+        });
+        let back = self.verified_back_links(keyring);
 
         let mut candidates: Vec<(usize, EpochId)> = target_epochs
             .iter()
-            .map(|&e| (self.back_reachable_from(e).len(), e))
+            .map(|&e| (back_closure([e], &back).len(), e))
             .collect();
         candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
         let mut per_recipient_reached: BTreeMap<DeviceId, BTreeSet<EpochId>> = eligible
             .iter()
-            .map(|&r| (r, self.reachable_by(&r)))
+            .map(|&r| (r, self.reachable_by(&r, keyring, resolved)))
             .collect();
 
         let mut plan: BTreeMap<EpochId, Vec<DeviceId>> = BTreeMap::new();
         for (_, epoch) in candidates {
-            let back_cover = self.back_reachable_from(epoch);
+            let back_cover = back_closure([epoch], &back);
             let mut missing = Vec::new();
             for (&recipient, reached) in &mut per_recipient_reached {
                 if !reached.contains(&epoch) {
@@ -499,4 +590,32 @@ impl EpochGraph {
         }
         plan.into_iter().collect()
     }
+}
+
+enum BackLink {
+    Verified(EpochKey),
+    BadCommit,
+    Unopenable,
+}
+
+/// `start` plus every epoch reachable from it through `back` links.
+fn back_closure(
+    start: impl IntoIterator<Item = EpochId>,
+    back: &BTreeMap<EpochId, Vec<EpochId>>,
+) -> BTreeSet<EpochId> {
+    let mut reached = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for id in start {
+        if reached.insert(id) {
+            queue.push_back(id);
+        }
+    }
+    while let Some(cur) = queue.pop_front() {
+        for &parent in back.get(&cur).into_iter().flatten() {
+            if reached.insert(parent) {
+                queue.push_back(parent);
+            }
+        }
+    }
+    reached
 }

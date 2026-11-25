@@ -6,13 +6,15 @@
 //! in the frontier (a conflict); the winner is the highest `(author, seq, frame_id, index)`.
 //! Any change but a delete revives an item, so a concurrent edit beats a delete.
 //!
-//! Inserting into a register only needs the full clock of the new write and of the writes
-//! still in the frontier, which is why a checkpoint keeps exactly those clocks (`dots`).
+//! Inserting into a register only needs the causal closures (see `causal`) of the new write and
+//! of the writes still standing, which is why a checkpoint keeps exactly those clocks (`dots`)
+//! and the thresholds at which later frames saw them (`seen_by`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{DeviceId, ItemId};
 
+use super::causal::Book;
 use super::clock::{Dot, VectorClock};
 use super::crypto::{FrameId, NetPublic};
 use super::data::{DataOp, DataPayload, FieldValue, MAX_LABEL_LEN};
@@ -36,12 +38,16 @@ impl<V> Write<V> {
         (self.dot, self.index)
     }
 
-    /// True iff this write was based on `other` (`other` happened before it).
-    fn follows<U>(&self, other: &Write<U>, self_clock: &VectorClock) -> bool {
+    /// True iff this write was based on `other` (`other` happened before it), judged on the
+    /// transitive closures in `book`.
+    fn follows<U>(&self, other: &Write<U>, book: &Book<'_>) -> bool {
         if self.dot.author == other.dot.author && self.dot.seq == other.dot.seq {
             other.index < self.index
         } else {
-            self_clock.covers(&other.dot.author, other.dot.seq)
+            book.covers(
+                (self.dot.author, self.dot.seq),
+                (other.dot.author, other.dot.seq),
+            )
         }
     }
 }
@@ -78,22 +84,18 @@ impl<V> Register<V> {
         self.writes.is_empty()
     }
 
-    /// Inserts `write` whose frame has full clock `clock`; `book` holds the clocks of the
-    /// writes already standing. Order-independent: the result is the antichain of maximal writes.
-    pub(crate) fn insert(&mut self, write: Write<V>, clock: &VectorClock, book: &ClockBook) {
-        let empty = VectorClock::new();
+    /// Inserts `write`; `book` holds the causal closures of its frame and of the writes
+    /// already standing. Order-independent because `follows` is transitive: the result is the
+    /// antichain of maximal writes.
+    pub(crate) fn insert(&mut self, write: Write<V>, book: &Book<'_>) {
         let key = write.key();
         if self.writes.iter().any(|e| e.key() == key) {
             return;
         }
-        let dominated = self.writes.iter().any(|e| {
-            let e_clock = book.get(&(e.dot.author, e.dot.seq)).unwrap_or(&empty);
-            e.follows(&write, e_clock)
-        });
-        if dominated {
+        if self.writes.iter().any(|e| e.follows(&write, book)) {
             return;
         }
-        self.writes.retain(|e| !write.follows(e, clock));
+        self.writes.retain(|e| !write.follows(e, book));
         let at = self.writes.partition_point(|e| e.key() < key);
         self.writes.insert(at, write);
     }
@@ -229,20 +231,16 @@ impl FoldedState {
             .any(|d| d.checkpoint == *checkpoint && members.contains(&d.author))
     }
 
-    /// Drops items whose tombstone is still exactly `expired[item]` (GC of old deletes).
-    pub fn prune_tombstones(&mut self, expired: &BTreeMap<ItemId, Tombstone>) {
-        self.items
-            .retain(|id, item| expired.get(id).is_none_or(|t| item.tombstone() != Some(*t)));
-    }
-
-    /// Applies the ops of one counted data frame whose full clock is `clock` (already in
-    /// `book`). `card_ok(author, device)` decides `DeviceCard` authority.
+    /// Applies the ops of one counted data frame whose closure is already in `book`.
+    /// `card_ok(author, device)` decides `DeviceCard` authority.
+    ///
+    /// The state only ever changes through logged ops, so `state_mac` stays a pure function of
+    /// the counted frames; there is deliberately no local tombstone pruning.
     pub(crate) fn apply(
         &mut self,
         dot: Dot,
         payload: &DataPayload,
-        clock: &VectorClock,
-        book: &ClockBook,
+        book: &Book<'_>,
         card_ok: impl Fn(&DeviceId, &DeviceId) -> bool,
     ) {
         for (index, op) in payload.ops.iter().enumerate() {
@@ -260,8 +258,8 @@ impl FoldedState {
                         index,
                         value: kind.clone(),
                     };
-                    state.kind.insert(write, clock, book);
-                    state.life.insert(alive, clock, book);
+                    state.kind.insert(write, book);
+                    state.life.insert(alive, book);
                 }
                 DataOp::SetField { item, field, value } => {
                     let state = self.items.entry(*item).or_default();
@@ -271,8 +269,8 @@ impl FoldedState {
                         value: Some(value.clone()),
                     };
                     let reg = state.fields.entry(field.clone()).or_default();
-                    reg.insert(write, clock, book);
-                    state.life.insert(alive, clock, book);
+                    reg.insert(write, book);
+                    state.life.insert(alive, book);
                 }
                 DataOp::ClearField { item, field } => {
                     let state = self.items.entry(*item).or_default();
@@ -282,8 +280,8 @@ impl FoldedState {
                         value: None,
                     };
                     let reg = state.fields.entry(field.clone()).or_default();
-                    reg.insert(write, clock, book);
-                    state.life.insert(alive, clock, book);
+                    reg.insert(write, book);
+                    state.life.insert(alive, book);
                 }
                 DataOp::DeleteItem { item } => {
                     let at_ms = payload.timestamp_ms;
@@ -296,14 +294,14 @@ impl FoldedState {
                         .entry(*item)
                         .or_default()
                         .life
-                        .insert(write, clock, book);
+                        .insert(write, book);
                 }
                 DataOp::RestoreItem { item } => {
                     self.items
                         .entry(*item)
                         .or_default()
                         .life
-                        .insert(alive, clock, book);
+                        .insert(alive, book);
                 }
                 DataOp::VaultMeta { name } => {
                     let write = Write {
@@ -311,7 +309,7 @@ impl FoldedState {
                         index,
                         value: name.clone(),
                     };
-                    self.vault_meta.insert(write, clock, book);
+                    self.vault_meta.insert(write, book);
                 }
                 DataOp::DeviceCard {
                     device,
@@ -327,7 +325,7 @@ impl FoldedState {
                     };
                     let write = Write { dot, index, value };
                     let reg = self.device_cards.entry(*device).or_default();
-                    reg.insert(write, clock, book);
+                    reg.insert(write, book);
                 }
                 DataOp::Dispute {
                     checkpoint,
@@ -404,6 +402,9 @@ impl FoldedState {
             let mut prev_name: Option<String> = None;
             for _ in 0..nf {
                 let name = r.str(MAX_LABEL_LEN, "field name")?;
+                if name.is_empty() {
+                    return Err(PayloadError::Invalid("field name must be non-empty"));
+                }
                 ascending(prev_name.as_ref(), &name, "fields")?;
                 prev_name = Some(name.clone());
                 fields.insert(name, non_empty(decode_register(r)?)?);

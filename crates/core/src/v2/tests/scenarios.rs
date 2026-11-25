@@ -30,6 +30,7 @@ fn i1_i2_i3_concurrent_offline_removals_and_dual_merge() {
         let add = build_add_frame(
             r0_sk,
             vault,
+            &resolve(&vault, &base, &[]),
             seq,
             prev,
             deps,
@@ -62,6 +63,7 @@ fn i1_i2_i3_concurrent_offline_removals_and_dual_merge() {
     let rem_x = build_remove_frame(
         a.sign_key(),
         vault,
+        &resolve(&vault, &base, &[]),
         0,
         FrameId::ZERO,
         base_heads.clone(),
@@ -84,6 +86,7 @@ fn i1_i2_i3_concurrent_offline_removals_and_dual_merge() {
     let rem_y = build_remove_frame(
         b.sign_key(),
         vault,
+        &resolve(&vault, &base, &[]),
         0,
         FrameId::ZERO,
         base_heads,
@@ -121,6 +124,7 @@ fn i1_i2_i3_concurrent_offline_removals_and_dual_merge() {
     let e3a_frame = build_standalone_rotate_frame(
         a.sign_key(),
         vault,
+        &res_mid,
         a_seq,
         a_prev,
         all_deps_with_prev(member_heads(&merged), a_prev),
@@ -143,6 +147,7 @@ fn i1_i2_i3_concurrent_offline_removals_and_dual_merge() {
     let e3c_frame = build_standalone_rotate_frame(
         c.sign_key(),
         vault,
+        &res_mid,
         0,
         FrameId::ZERO,
         member_heads(&merged),
@@ -219,6 +224,7 @@ fn i2_sixty_day_offline_device_and_newly_added_device_decrypt_via_back_links() {
         let add = build_add_frame(
             r0_sk,
             vault,
+            &resolve(&vault, &frames, &[]),
             seq,
             prev,
             deps,
@@ -254,6 +260,7 @@ fn i2_sixty_day_offline_device_and_newly_added_device_decrypt_via_back_links() {
     let rem_temp = build_remove_frame(
         a.sign_key(),
         vault,
+        &resolve(&vault, &frames, &[]),
         0,
         FrameId::ZERO,
         member_heads(&frames),
@@ -272,6 +279,7 @@ fn i2_sixty_day_offline_device_and_newly_added_device_decrypt_via_back_links() {
     let add_new_phone = build_add_frame(
         a.sign_key(),
         vault,
+        &resolve(&vault, &frames, &[]),
         a_seq,
         a_prev,
         all_deps_with_prev(member_heads(&frames), a_prev),
@@ -334,6 +342,7 @@ fn e6_reader_duty_rewraps_for_concurrent_add_and_rotate() {
         let add = build_add_frame(
             r0_sk,
             vault,
+            &resolve(&vault, &frames, &[]),
             seq,
             prev,
             deps,
@@ -351,6 +360,7 @@ fn e6_reader_duty_rewraps_for_concurrent_add_and_rotate() {
     let add_new = build_add_frame(
         a.sign_key(),
         vault,
+        &resolve(&vault, &frames, &[]),
         0,
         FrameId::ZERO,
         heads_before.clone(),
@@ -376,6 +386,7 @@ fn e6_reader_duty_rewraps_for_concurrent_add_and_rotate() {
     let rem_x = build_remove_frame(
         b.sign_key(),
         vault,
+        &resolve(&vault, &frames, &[]),
         0,
         FrameId::ZERO,
         heads_before,
@@ -418,6 +429,7 @@ fn e6_reader_duty_rewraps_for_concurrent_add_and_rotate() {
     let rewrap = build_rewrap_frame(
         a.sign_key(),
         vault,
+        &res1,
         a_seq,
         a_prev,
         all_deps_with_prev(member_heads(&frames), a_prev),

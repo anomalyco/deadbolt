@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::*;
 use super::model::{assert_matches_ref, dummy_rotate, pool, shuffled};
+use super::view;
 
 #[test]
 fn rotate_recovery_beats_depth1_backdating_stolen_laptop() {
@@ -22,6 +23,7 @@ fn rotate_recovery_beats_depth1_backdating_stolen_laptop() {
     let add_laptop = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -39,6 +41,7 @@ fn rotate_recovery_beats_depth1_backdating_stolen_laptop() {
     let add_phone = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create, &add_laptop]),
         2,
         add_laptop.id(),
         vec![add_laptop.id()],
@@ -65,6 +68,7 @@ fn rotate_recovery_beats_depth1_backdating_stolen_laptop() {
     let rot_rec = build_rotate_recovery_frame(
         r0_sk,
         vault,
+        &view(&[&create, &add_laptop, &add_phone]),
         3,
         add_phone.id(),
         vec![add_phone.id()],
@@ -124,6 +128,7 @@ fn rotate_recovery_beats_depth1_backdating_stolen_laptop() {
     let r1_rem_laptop = build_remove_frame(
         r1_sk,
         vault,
+        &view(&[&create, &add_laptop, &add_phone, &rot_rec]),
         0,
         FrameId::ZERO,
         vec![rot_rec.id()],
@@ -171,6 +176,7 @@ fn competing_root_rotations_freeze_lineage_with_no_hash_lottery() {
     let add_dev = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -266,6 +272,7 @@ fn data_fork_removes_at_seq_minus_1_and_member_fork_filters_mheads() {
     let add_a = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -278,6 +285,7 @@ fn data_fork_removes_at_seq_minus_1_and_member_fork_filters_mheads() {
     let add_b = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create, &add_a]),
         2,
         add_a.id(),
         vec![add_a.id()],
@@ -355,6 +363,7 @@ fn exhaustive_small_scope_all_delivery_permutations_and_removal_cycles() {
     let add_a = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -367,6 +376,7 @@ fn exhaustive_small_scope_all_delivery_permutations_and_removal_cycles() {
     let add_b = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create, &add_a]),
         2,
         add_a.id(),
         vec![add_a.id()],
@@ -379,6 +389,7 @@ fn exhaustive_small_scope_all_delivery_permutations_and_removal_cycles() {
     let add_c = build_add_frame(
         r0_sk,
         vault,
+        &view(&[&create, &add_a, &add_b]),
         3,
         add_b.id(),
         vec![add_b.id()],

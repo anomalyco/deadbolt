@@ -125,6 +125,13 @@ fn field_name(r: &mut Reader<'_>) -> Result<String, PayloadError> {
     Ok(name)
 }
 
+fn write_field_name(w: &mut Writer, name: &str) -> Result<(), PayloadError> {
+    if name.is_empty() {
+        return Err(PayloadError::Invalid("field name must be non-empty"));
+    }
+    w.str(name, MAX_LABEL_LEN, "field name")
+}
+
 impl DataOp {
     /// The item this op touches, if any.
     pub fn item(&self) -> Option<ItemId> {
@@ -148,13 +155,13 @@ impl DataOp {
             Self::SetField { item, field, value } => {
                 w.u8(1);
                 w.item(item);
-                w.str(field, MAX_LABEL_LEN, "field name")?;
+                write_field_name(w, field)?;
                 value.encode(w)?;
             }
             Self::ClearField { item, field } => {
                 w.u8(2);
                 w.item(item);
-                w.str(field, MAX_LABEL_LEN, "field name")?;
+                write_field_name(w, field)?;
             }
             Self::DeleteItem { item } => {
                 w.u8(3);
@@ -325,6 +332,8 @@ pub struct DataFrame {
     pub author: DeviceId,
     pub seq: u64,
     pub prev: FrameId,
+    /// The epoch the frame was sealed under: a checkpoint's `K_mac` comes from this epoch.
+    pub epoch: EpochId,
     pub body: DataBody,
 }
 
@@ -343,6 +352,7 @@ impl DataFrame {
             author: hdr.author,
             seq: hdr.seq,
             prev: hdr.prev,
+            epoch: hdr.epoch,
             body,
         })
     }
@@ -375,7 +385,9 @@ impl DataFrame {
 
 /// Rule E7 (frontier honesty): the clock a device may claim, given every data frame it holds
 /// as `(author, seq, readable)`. A stream advances only through a gap-free prefix of frames
-/// that decrypted and were not disputed; an undecryptable frame stops its stream there.
+/// that decrypted, were not disputed and that the fold resolved causally (pass `false` for a
+/// frame still waiting on a frame it names); an undecryptable frame stops its stream there.
+/// The result need not be causally closed: the fold closes every clock itself.
 pub fn honest_clock(observed: impl IntoIterator<Item = (DeviceId, u64, bool)>) -> VectorClock {
     let mut streams: BTreeMap<DeviceId, BTreeMap<u64, bool>> = BTreeMap::new();
     for (author, seq, readable) in observed {

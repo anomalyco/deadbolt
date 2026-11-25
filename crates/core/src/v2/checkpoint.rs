@@ -1,15 +1,19 @@
 //! `Checkpoint` frames: their sealed payload, building one from a pack, and a full peer's
 //! verification that emits a `Dispute` on a `state_mac` mismatch.
+//!
+//! A checkpoint's `pack_hash`/`pack_len` commit to the **encrypted** `DBPK` file that
+//! `deadbolt-pack` sealed the plaintext [`Pack`] into: that is what peers fetch, so it is what
+//! they can check before decrypting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{DeviceId, DeviceSecret, VaultId};
 
 use super::crypto::{EpochId, EpochKey, FrameId};
 use super::data::{DataFrame, DataOp, decode_mheads, encode_mheads};
-use super::fold::{FoldContext, fold_from_scratch};
+use super::fold::{FoldContext, fold_subset};
 use super::frame::Frame;
-use super::pack::{Pack, pack_hash};
+use super::pack::Pack;
 use super::state::{FoldedState, state_mac};
 use super::wire::{PayloadError, Reader, Writer, ascending};
 
@@ -24,6 +28,24 @@ pub enum CheckpointError {
     Payload(#[from] PayloadError),
 }
 
+/// The encrypted pack file a checkpoint commits to: `BLAKE3` and length of the sealed `DBPK`
+/// bytes, never of the plaintext pack inside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackCommitment {
+    pub hash: [u8; 32],
+    pub len: u64,
+}
+
+impl PackCommitment {
+    /// Commits to the sealed pack file bytes as stored and fetched.
+    pub fn of(sealed: &[u8]) -> Self {
+        Self {
+            hash: blake3::hash(sealed).into(),
+            len: sealed.len() as u64,
+        }
+    }
+}
+
 /// Decrypted plaintext of a `Checkpoint` frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointPayload {
@@ -33,7 +55,9 @@ pub struct CheckpointPayload {
     pub timestamp_ms: u64,
     /// `BLAKE3::keyed_hash(K_mac(epoch), canonical fold at frontier)`.
     pub state_mac: [u8; 32],
+    /// `BLAKE3` of the encrypted `DBPK` pack file.
     pub pack_hash: [u8; 32],
+    /// Byte length of the encrypted `DBPK` pack file.
     pub pack_len: u64,
 }
 
@@ -80,6 +104,14 @@ impl CheckpointPayload {
         Ok(payload)
     }
 
+    /// The encrypted pack file this checkpoint commits to.
+    pub const fn pack_commitment(&self) -> PackCommitment {
+        PackCommitment {
+            hash: self.pack_hash,
+            len: self.pack_len,
+        }
+    }
+
     /// The frontier as a map.
     pub fn frontier_map(&self) -> BTreeMap<DeviceId, (u64, FrameId)> {
         self.frontier
@@ -105,15 +137,16 @@ impl CheckpointPayload {
     }
 }
 
-/// Builds a checkpoint payload and its pack bytes from a compacted pack.
+/// Builds a checkpoint payload for a compacted `pack` that `deadbolt-pack` has already sealed
+/// into the encrypted file `sealed` commits to.
 pub fn build_checkpoint(
     k_mac: &[u8; 32],
     pack: &Pack,
+    sealed: PackCommitment,
     mheads: Vec<FrameId>,
     timestamp_ms: u64,
-) -> Result<(CheckpointPayload, Vec<u8>), PayloadError> {
-    let bytes = pack.encode()?;
-    let payload = CheckpointPayload {
+) -> Result<CheckpointPayload, PayloadError> {
+    Ok(CheckpointPayload {
         frontier: pack
             .meta
             .frontier
@@ -123,10 +156,9 @@ pub fn build_checkpoint(
         mheads,
         timestamp_ms,
         state_mac: state_mac(k_mac, &pack.state)?,
-        pack_hash: pack_hash(&bytes),
-        pack_len: bytes.len() as u64,
-    };
-    Ok((payload, bytes))
+        pack_hash: sealed.hash,
+        pack_len: sealed.len,
+    })
 }
 
 /// A full peer's verdict on a checkpoint.
@@ -136,56 +168,93 @@ pub enum CheckpointVerdict {
     Agreed,
     /// Mismatch: emit `dispute` and never cover, adopt or GC behind this checkpoint.
     Disputed { dispute: DataOp },
+    /// The membership no longer counts a frame the checkpoint covered (a later removal), so
+    /// the folds differ without anyone cheating: do not adopt it, and do not dispute it.
+    Invalidated,
     /// This peer lacks frames up to the frontier, so it cannot judge.
     Unverifiable,
 }
 
-/// The canonical fold at `frontier`: every held frame at or below it, or `None` if any
-/// frame up to the frontier is missing.
+/// Every held frame on each author's unique `prev` chain `0..=seq` ending at the frontier's
+/// frame, or `None` if any link is missing. Fork siblings off the chain are ignored.
+fn frontier_chains<'f>(
+    frames: impl IntoIterator<Item = &'f DataFrame>,
+    frontier: &BTreeMap<DeviceId, (u64, FrameId)>,
+) -> Option<Vec<&'f DataFrame>> {
+    let by_id: BTreeMap<FrameId, &DataFrame> = frames
+        .into_iter()
+        .filter(|f| frontier.get(&f.author).is_some_and(|(s, _)| f.seq <= *s))
+        .map(|f| (f.id, f))
+        .collect();
+    let mut out = Vec::new();
+    for (author, (seq, id)) in frontier {
+        let (mut cur, mut expect) = (*id, *seq);
+        loop {
+            let f = *by_id.get(&cur)?;
+            if f.author != *author || f.seq != expect {
+                return None;
+            }
+            out.push(f);
+            if expect == 0 {
+                break;
+            }
+            (cur, expect) = (f.prev, expect - 1);
+        }
+    }
+    Some(out)
+}
+
+/// The canonical fold at `frontier`: exactly each author's frames on its unbroken `prev` chain
+/// up to the frontier frame, with clocks closed over every held frame (a covered frame may
+/// have seen a frame above the frontier). `None` if any covered frame is missing or cannot be
+/// resolved yet.
 pub fn fold_at_frontier<'f>(
     ctx: &FoldContext<'_>,
     frames: impl IntoIterator<Item = &'f DataFrame>,
     frontier: &BTreeMap<DeviceId, (u64, FrameId)>,
 ) -> Option<FoldedState> {
-    let covered: Vec<&DataFrame> = frames
-        .into_iter()
-        .filter(|f| frontier.get(&f.author).is_some_and(|(s, _)| f.seq <= *s))
-        .collect();
-    for (author, (seq, id)) in frontier {
-        let mut have: Vec<&DataFrame> = covered
-            .iter()
-            .copied()
-            .filter(|f| f.author == *author)
-            .collect();
-        have.sort_by_key(|f| f.seq);
-        have.dedup_by_key(|f| f.seq);
-        let complete =
-            have.len() as u64 == seq.saturating_add(1) && have.last().is_some_and(|f| f.id == *id);
-        if !complete {
-            return None;
-        }
-    }
-    Some(fold_from_scratch(ctx, covered))
+    fold_covered(ctx, frames, frontier).map(|(state, _)| state)
 }
 
-/// Verifies a checkpoint as a full peer holding `frames`. `pack` is the checkpoint's pack
-/// bytes if fetched; a pack that disagrees with its own payload is disputed too.
+/// [`fold_at_frontier`] plus the covered frames.
+fn fold_covered<'f>(
+    ctx: &FoldContext<'_>,
+    frames: impl IntoIterator<Item = &'f DataFrame>,
+    frontier: &BTreeMap<DeviceId, (u64, FrameId)>,
+) -> Option<(FoldedState, Vec<&'f DataFrame>)> {
+    let all: Vec<&DataFrame> = frames.into_iter().collect();
+    let covered = frontier_chains(all.iter().copied(), frontier)?;
+    let ids: BTreeSet<FrameId> = covered.iter().map(|f| f.id).collect();
+    // Fork siblings at or below the frontier are left out; frames above it only close clocks.
+    let usable = all
+        .into_iter()
+        .filter(|f| ids.contains(&f.id) || frontier.get(&f.author).is_none_or(|(s, _)| f.seq > *s));
+    Some((fold_subset(ctx, usable, &ids)?, covered))
+}
+
+/// Verifies a checkpoint as a full peer holding `frames`. `k_mac` is `K_mac` of the checkpoint
+/// frame's own epoch (`DataFrame::epoch`). `pack` is the decrypted pack, if fetched, with the
+/// commitment observed over its encrypted bytes; a pack that disagrees with the payload is
+/// disputed.
 pub fn verify_checkpoint<'f>(
     k_mac: &[u8; 32],
     ctx: &FoldContext<'_>,
     checkpoint: FrameId,
     payload: &CheckpointPayload,
-    pack: Option<&[u8]>,
+    pack: Option<(&Pack, PackCommitment)>,
     frames: impl IntoIterator<Item = &'f DataFrame>,
 ) -> Result<CheckpointVerdict, PayloadError> {
     let frontier = payload.frontier_map();
-    let Some(ours) = fold_at_frontier(ctx, frames, &frontier) else {
+    let Some((ours, covered)) = fold_covered(ctx, frames, &frontier) else {
         return Ok(CheckpointVerdict::Unverifiable);
     };
     let expected_state_mac = state_mac(k_mac, &ours)?;
-    let pack_ok = pack.is_none_or(|bytes| pack_matches(k_mac, payload, bytes));
+    let pack_ok = pack.is_none_or(|(p, seen)| pack_matches(k_mac, payload, p, seen));
     if expected_state_mac == payload.state_mac && pack_ok {
         return Ok(CheckpointVerdict::Agreed);
+    }
+    if pack_ok && covered.iter().any(|f| !ctx.counts(f)) {
+        return Ok(CheckpointVerdict::Invalidated);
     }
     Ok(CheckpointVerdict::Disputed {
         dispute: DataOp::Dispute {
@@ -195,13 +264,14 @@ pub fn verify_checkpoint<'f>(
     })
 }
 
-fn pack_matches(k_mac: &[u8; 32], payload: &CheckpointPayload, bytes: &[u8]) -> bool {
-    if bytes.len() as u64 != payload.pack_len || pack_hash(bytes) != payload.pack_hash {
-        return false;
-    }
-    let Ok(pack) = Pack::decode(bytes) else {
-        return false;
-    };
-    pack.meta.frontier == payload.frontier_map()
+fn pack_matches(
+    k_mac: &[u8; 32],
+    payload: &CheckpointPayload,
+    pack: &Pack,
+    seen: PackCommitment,
+) -> bool {
+    seen == payload.pack_commitment()
+        && pack.meta.validate(&pack.state).is_ok()
+        && pack.meta.frontier == payload.frontier_map()
         && state_mac(k_mac, &pack.state).is_ok_and(|mac| mac == payload.state_mac)
 }

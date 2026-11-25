@@ -140,8 +140,19 @@ impl<'a> RefGraph<'a> {
                 .copied()
                 .filter(|f| !frames.iter().any(|x| x.id() == f.id()))
                 .filter(|f| {
-                    f.member_body()
-                        .is_some_and(|b| b.deps.iter().all(|d| frames.iter().any(|x| x.id() == *d)))
+                    let h = f.header();
+                    // Per-author continuity: seq 0, or `prev` is the same author's seq - 1,
+                    // already placed (an implicit causal parent).
+                    let prev_ok = h.seq == 0
+                        || frames.iter().any(|x| {
+                            x.id() == h.prev
+                                && x.header().author == h.author
+                                && x.header().seq.checked_add(1) == Some(h.seq)
+                        });
+                    prev_ok
+                        && f.member_body().is_some_and(|b| {
+                            b.deps.iter().all(|d| frames.iter().any(|x| x.id() == *d))
+                        })
                 })
                 .collect();
             if ready.is_empty() {
@@ -152,7 +163,8 @@ impl<'a> RefGraph<'a> {
                 let body = f.member_body().unwrap();
                 let mut pset = BTreeSet::new();
                 let mut d = 0u64;
-                for dep in &body.deps {
+                let prev = (f.header().seq > 0).then_some(f.header().prev);
+                for dep in body.deps.iter().chain(prev.iter()) {
                     let pidx = frames.iter().position(|x| x.id() == *dep).unwrap();
                     pset.insert(pidx);
                     pset.extend(&past[pidx]);
@@ -218,10 +230,21 @@ impl<'a> RefGraph<'a> {
                 {
                     continue;
                 }
+                let added_as_device = |dev: &DeviceId| {
+                    (0..frames.len()).any(|j| {
+                        !void[j]
+                            && past[i].contains(&j)
+                            && matches!(
+                                frames[j].member_body().and_then(|b| b.op.as_ref()),
+                                Some(MemberOp::Add { device, .. }) if device == dev
+                            )
+                    })
+                };
                 if let Some(MemberOp::RotateRecovery { new, .. }) =
                     frames[i].member_body().and_then(|b| b.op.as_ref())
                     && !retired.contains_key(&author)
                     && !lineage.contains(new)
+                    && !added_as_device(new)
                 {
                     lineage.insert(*new);
                     lineage_order.push(*new);
@@ -307,7 +330,12 @@ impl<'a> RefGraph<'a> {
         }
         match self.op(i) {
             Some(MemberOp::Create { .. }) => false,
-            Some(MemberOp::Add { device, .. }) => !self.lineage.contains(device),
+            Some(MemberOp::Add { device, .. }) => {
+                !self.lineage.contains(device)
+                    && !chosen
+                        .iter()
+                        .any(|&r| self.target(r) == *device && self.past[i].contains(&r))
+            }
             Some(MemberOp::Remove { device, .. }) => {
                 !self.lineage.contains(device) && self.admitted(*device, i, chosen)
             }
@@ -373,10 +401,15 @@ impl<'a> RefGraph<'a> {
                 && matches!(self.op(i), Some(MemberOp::Create { .. }))
                 && self.member_fork_seq.get(&self.frames[i].header().author) == Some(&0)
         });
-        let recovery_frozen = genesis_forked
-            || self.lineage_order.iter().any(|r| {
-                self.member_fork_seq.contains_key(r) || self.data_fork_seq.contains_key(r)
-            });
+        let retired_forked = self.retired.iter().any(|(root, &r)| {
+            self.member_fork_seq
+                .get(root)
+                .is_some_and(|&s| s <= self.frames[r].header().seq)
+        });
+        let active_forked = self.lineage_order.last().is_some_and(|r| {
+            self.member_fork_seq.contains_key(r) || self.data_fork_seq.contains_key(r)
+        });
+        let recovery_frozen = genesis_forked || retired_forked || active_forked;
         let active_recovery = if recovery_frozen {
             None
         } else {
