@@ -362,7 +362,8 @@ impl World {
             }
             let accepted = self.devices[receiver].with(|s| {
                 let start = std::time::Instant::now();
-                let added = sync::receive(s, &author_id, blobs.clone(), true)?;
+                let added =
+                    sync::receive(s, &author_id, blobs.clone(), true, &mut Default::default())?;
                 let elapsed = start.elapsed();
                 slowest = slowest.max(elapsed);
                 // A generous regression watchdog, not a simulated deadline:
@@ -393,6 +394,7 @@ impl World {
                     &DeviceId::from_bytes(self.devices[receiver].id),
                     blobs,
                     true,
+                    &mut Default::default(),
                 )?;
                 ensure!(added == accepted, "author lost its accepted flood prefix");
                 Ok(())

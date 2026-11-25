@@ -320,19 +320,31 @@ pub fn missing_for<S: State>(
     })
 }
 
+/// One incoming entry stream's memory across its batches: the vaults whose
+/// removal of the peer this stream delivered. The sync protocol commits a
+/// stream in prefix batches (1, 2, 4, ... entries), so the removal and the
+/// data written before it usually arrive in different batches. Keep one per
+/// stream, never per peer or across streams.
+#[derive(Debug, Default)]
+pub struct ReceiveStream {
+    removed: BTreeSet<VaultId>,
+}
+
 /// Skip malformed/rejected entries, not the valid removals beside them. Check
 /// data against the evolving membership, and commit independently per vault.
 ///
 /// Data from a peer the vault no longer admits is dropped, with one exception:
-/// in the batch that delivers the peer's own removal, data written before that
-/// removal (the peer was a member in its causal past) is still applied. Only
-/// data that causally follows the removal, which the peer should never have
-/// held, and every later batch are refused.
+/// in the stream that delivers the peer's own removal, data written before that
+/// removal (the peer was a member in its causal past) is still applied, in that
+/// batch or a later one of the same stream. Only data that causally follows the
+/// removal, which the peer should never have held, and every later stream are
+/// refused.
 pub fn receive<S: State>(
     s: &mut S,
     peer: &DeviceId,
     entries: Vec<Blob>,
     ready: bool,
+    stream: &mut ReceiveStream,
 ) -> Result<usize, S::Error> {
     let mut grouped: BTreeMap<VaultId, Vec<Entry>> = BTreeMap::new();
     for bytes in entries {
@@ -350,8 +362,10 @@ pub fn receive<S: State>(
     }
     let mut added = 0;
     for (id, entries) in grouped {
-        added += s.update(id, |vault, _| {
-            let admitted = vault.is_member(peer);
+        let removed_here = stream.removed.contains(&id);
+        let (count, removed) = s.update(id, |vault, _| {
+            let before = vault.is_member(peer);
+            let admitted = before || removed_here;
             let mut added = 0;
             for entry in entries {
                 if entry.log() == Log::Data
@@ -366,8 +380,12 @@ pub fn receive<S: State>(
                     Err(error) => debug!(peer = %peer, "rejected entry: {error}"),
                 }
             }
-            Ok(added)
+            Ok((added, before && !vault.is_member(peer)))
         })?;
+        added += count;
+        if removed {
+            stream.removed.insert(id);
+        }
     }
     s.received(peer)?;
     if added > 0 {

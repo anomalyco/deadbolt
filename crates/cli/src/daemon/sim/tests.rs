@@ -608,7 +608,10 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
         assert_eq!(entries.len(), 3);
         let mut reversed = entries.clone();
         reversed.reverse();
-        target.receive(a, reversed, &mut (), true).await.unwrap();
+        target
+            .receive(a, reversed, &mut Default::default(), true)
+            .await
+            .unwrap();
         world.check().unwrap();
         world.devices[1]
             .with(|s| {
@@ -632,10 +635,16 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
         assert_eq!(missing, entries[1..]);
         // Resume one batch at a time, then replay the entire overlapping session.
         for entry in missing {
-            target.receive(a, vec![entry], &mut (), true).await.unwrap();
+            target
+                .receive(a, vec![entry], &mut Default::default(), true)
+                .await
+                .unwrap();
             world.check().unwrap();
         }
-        target.receive(a, entries, &mut (), true).await.unwrap();
+        target
+            .receive(a, entries, &mut Default::default(), true)
+            .await
+            .unwrap();
         world.check().unwrap();
         world.step(&Action::Crash(1)).unwrap();
         world.converge().unwrap();
@@ -678,7 +687,7 @@ async fn exhausted_author_does_not_block_removal_or_other_authors() {
             .receive(
                 world.devices[0].id,
                 vec![rejected.encode(), removal.encode()],
-                &mut (),
+                &mut Default::default(),
                 true,
             )
             .await
