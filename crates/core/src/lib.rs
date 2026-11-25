@@ -93,6 +93,7 @@ pub mod site;
 pub mod site_password;
 pub mod tag;
 pub mod totp;
+pub mod v2;
 mod vault;
 pub mod webauthn;
 
