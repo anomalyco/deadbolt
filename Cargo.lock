@@ -1475,6 +1475,7 @@ dependencies = [
  "deadbolt-core",
  "deadbolt-enclave",
  "deadbolt-net",
+ "deadbolt-os",
  "deadbolt-proto",
  "deadbolt-send",
  "deadbolt-store",
@@ -1603,6 +1604,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -1655,6 +1657,7 @@ dependencies = [
  "argon2",
  "blake3",
  "chacha20poly1305",
+ "deadbolt-os",
  "getrandom 0.4.3",
  "redb",
  "tempfile",

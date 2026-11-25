@@ -8,7 +8,7 @@ use redb::{
 };
 use zeroize::Zeroizing;
 
-use crate::crypto::{self, KEY_LEN, SecretKey};
+use crate::crypto::{self, KEY_LEN, LiveKey};
 use crate::error::{Error, Result};
 use crate::kdf::{KdfHeader, KdfParams};
 
@@ -70,10 +70,7 @@ pub fn init_with_backend(
     if backend.len()? != 0 {
         return Err(Error::AlreadyExists(PathBuf::from(DB_FILE)));
     }
-    let keyset = KeySet {
-        data_key: crypto::random_key()?,
-        device_secret,
-    };
+    let keyset = KeySet::new(&device_secret)?;
     let kdf = KdfHeader::generate(params)?;
     let wrapped = keyset.wrap(&kdf, passphrase)?;
     let keys = Keys::new(keyset);
@@ -455,11 +452,19 @@ impl PassphraseCheck {
 }
 
 struct KeySet {
-    data_key: SecretKey,
-    device_secret: Zeroizing<[u8; 32]>,
+    data_key: LiveKey,
+    device_secret: LiveKey,
 }
 
 impl KeySet {
+    /// A fresh random data key with the caller's device secret.
+    fn new(device_secret: &[u8; 32]) -> Result<Self> {
+        Ok(Self {
+            data_key: crypto::random_live_key()?,
+            device_secret: crypto::live_key(device_secret),
+        })
+    }
+
     fn encode(&self) -> Zeroizing<[u8; 64]> {
         let mut out = Zeroizing::new([0u8; 64]);
         out[..32].copy_from_slice(self.data_key.as_slice());
@@ -501,8 +506,8 @@ impl KeySet {
         if plain.len() != 64 {
             return Err(Error::corrupt("key set has the wrong length"));
         }
-        let mut data_key = Zeroizing::new([0u8; KEY_LEN]);
-        let mut device_secret = Zeroizing::new([0u8; 32]);
+        let mut data_key = crypto::live_key(&[0; KEY_LEN]);
+        let mut device_secret = crypto::live_key(&[0; 32]);
         data_key.copy_from_slice(&plain[..32]);
         device_secret.copy_from_slice(&plain[32..]);
         Ok(Self {
@@ -515,7 +520,7 @@ impl KeySet {
 pub(crate) struct Keys {
     keyset: KeySet,
     data: XChaCha20Poly1305,
-    meta_index: SecretKey,
+    meta_index: LiveKey,
 }
 
 impl Keys {
@@ -523,7 +528,7 @@ impl Keys {
         let data = crypto::subkey(CTX_DATA, &keyset.data_key);
         Self {
             data: crypto::cipher(&data),
-            meta_index: crypto::subkey(CTX_META_INDEX, &keyset.data_key),
+            meta_index: crypto::live_key(&crypto::subkey(CTX_META_INDEX, &keyset.data_key)),
             keyset,
         }
     }

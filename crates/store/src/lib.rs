@@ -111,9 +111,13 @@
 //!
 //! # Memory
 //!
-//! Keys, the device secret, and decrypted values are kept in
-//! [`zeroize::Zeroizing`] buffers and wiped on drop, as is Argon2's working
-//! memory. Dropping [`Unlocked`] locks the store.
+//! Keys, the device secret, and decrypted values are wiped on drop, as is
+//! Argon2's working memory. The keys an open store holds (data key, device
+//! secret, meta blinding key) live on Unix in
+//! `deadbolt_os::mem::LockedSecret`s: pages of their own, locked in RAM,
+//! left out of core dumps on Linux, and wiped before they're unlocked and
+//! freed. Passing keys and decrypted values use [`zeroize::Zeroizing`]
+//! buffers. Dropping [`Unlocked`] locks the store.
 //!
 //! # OS keychain / Secure Enclave
 //!

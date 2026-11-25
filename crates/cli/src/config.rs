@@ -33,14 +33,22 @@ use anyhow::{Context, Result, bail};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-/// Runtime switches are read once when the daemon starts. Both are for
-/// tests and development only ([`test_env`]).
+/// Runtime switches are read once when the daemon starts. `local_net` and
+/// `kdf` are for tests and development only ([`test_env`]).
 pub struct Environment {
     pub local_net: bool,
     pub kdf: deadbolt_store::KdfParams,
 }
 
 impl Environment {
+    /// Whether the daemon refuses debuggers (macOS `PT_DENY_ATTACH`): in
+    /// release builds, unless `DEADBOLT_ALLOW_DEBUG` is set to attach one on
+    /// purpose. Debug builds and tests never do, since a process already under
+    /// a debugger exits when it asks.
+    pub fn deny_debugger() -> bool {
+        !cfg!(any(debug_assertions, test)) && env("DEADBOLT_ALLOW_DEBUG").is_err()
+    }
+
     pub fn load() -> Self {
         Self {
             local_net: test_env("DEADBOLT_NET").as_deref() == Some("local"),

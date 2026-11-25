@@ -41,10 +41,7 @@ pub fn init_with_params(
         return Err(Error::AlreadyExists(dir.to_path_buf()));
     }
 
-    let keyset = KeySet {
-        data_key: crypto::random_key()?,
-        device_secret,
-    };
+    let keyset = KeySet::new(&device_secret)?;
     let kdf = KdfHeader::generate(params)?;
     let wrapped = keyset.wrap(&kdf, passphrase)?;
     let keys = Keys::new(keyset);

@@ -25,6 +25,7 @@ use crate::protocol::MAX_LINE;
 /// started it as `deadbolt agent` and waits for it at the old socket
 /// ([`legacy`]).
 pub async fn serve(paths: Paths, old_name: bool) -> Result<()> {
+    harden();
     let runtime = paths.socket.parent().context("socket has no parent")?;
     fs::DirBuilder::new()
         .recursive(true)
@@ -140,6 +141,24 @@ pub async fn serve(paths: Paths, old_name: bool) -> Result<()> {
     }
     drop(lock);
     Ok(())
+}
+
+/// Keeps keys out of core dumps and, where the OS allows, away from other
+/// processes and debuggers, before the daemon holds any. A refusal (a
+/// sandbox or container) is logged, and the daemon runs on without it.
+fn harden() {
+    let report = deadbolt_os::mem::harden_process(deadbolt_os::mem::HardeningOptions {
+        deny_debugger: crate::config::Environment::deny_debugger(),
+    });
+    info!(
+        core_dumps = %report.core_dumps,
+        dumpable = %report.dumpable,
+        debugger = %report.debugger,
+        "process hardened"
+    );
+    for (protection, outcome) in report.failures() {
+        warn!(protection, %outcome, "process hardening failed; running without it");
+    }
 }
 
 pub(crate) fn remove_socket(path: &Path) -> Result<()> {
