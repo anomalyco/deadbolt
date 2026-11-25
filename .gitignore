@@ -4,3 +4,4 @@ node_modules
 dist
 .wrangler
 /site/src/receive/wasm
+/crates/ffi/bindgen/target

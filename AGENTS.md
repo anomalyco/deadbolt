@@ -11,6 +11,7 @@ internal APIs directly and update their callers.
 - `crates/cli`: commands, background daemon, control socket, deterministic simulator and `deadbolt update` (`src/update.rs`, docs/releasing.md "Updater").
 - `crates/app`: the Rune desktop app, its own binary `deadbolt-ui` (`src/main.rs`; Deadbolt.app's `Contents/MacOS/Deadbolt`). `deadbolt` is always headless and never links it; `deadbolt app` finds and opens `deadbolt-ui`, `deadbolt ui` runs it with Rune's flags (docs/app.md).
 - `crates/enclave`: the macOS Touch ID helper (`deadbolt-enclave`, Swift) and its SHA-256 pin, built once for both `deadbolt` and `deadbolt-ui` (docs/touch-id.md).
+- `crates/ffi`: Deadbolt for Swift through UniFFI (`deadbolt-ffi`). Its `client` feature is the macOS AutoFill extension's daemon client: socket, protocol and the daemon's code check. `crates/app/scripts/build-autofill.sh` links it into `DeadboltAutoFill.appex` (`crates/app/autofill/*.swift`) and generates the Swift bindings with `crates/ffi/bindgen`, UniFFI's generator in its own workspace and lockfile.
 - `crates/send`: Deadbolt Send links, sealing and delivery (native and wasm32); `crates/send-web`: its browser build for the site's `/r`.
 - `extension/`: the Chromium MV3 extension (TypeScript, `bun build`), talking to `deadbolt browser-host`.
 - `docs/`: design and simulation reference. `site/`: project site.
