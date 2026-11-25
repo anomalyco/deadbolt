@@ -9,9 +9,9 @@ use zeroize::Zeroizing;
 
 use super::{
     ActivityEntry, Code, DeviceInfo, FormCard, FormIdentity, HealthReport, ImportReport, ItemInfo,
-    LoginRef, MirrorReport, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync,
-    ResolvedSecret, SendInfo, SenderInfo, SiteLogin, SitePasskey, SiteStatus, SiteValues, Status,
-    TagCount, VaultInfo,
+    LoginRef, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync, ResolvedSecret,
+    SendInfo, SenderInfo, SiteLogin, SitePasskey, SiteStatus, SiteValues, Status, TagCount,
+    VaultInfo,
 };
 
 /// A secret on the wire: wiped on drop; Debug leaves it out.
@@ -292,9 +292,6 @@ pub enum Reply {
         signature: String,
         user_handle: String,
         verified: bool,
-    },
-    Mirror {
-        report: MirrorReport,
     },
     SendCreated {
         send: SendInfo,

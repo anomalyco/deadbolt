@@ -28,13 +28,11 @@ use crate::items::with_scheme;
 use crate::protocol::{ExportFile, ImportSource, sign_in_provider};
 
 /// A `.1pux`'s attachments, as the client read them from `files/`; `None`
-/// for the `op` CLI's items, which come without their files.
+/// for an export without them.
 #[derive(Clone, Copy)]
 pub(super) struct Files<'a>(Option<&'a [ExportFile]>);
 
 impl<'a> Files<'a> {
-    pub(super) const NONE: Files<'static> = Files(None);
-
     /// The file with `documentId` `id` (named `<id>__<fileName>` in the
     /// archive, or `<id>`), in base64.
     fn get(&self, id: &str) -> Result<&'a str, Missing> {

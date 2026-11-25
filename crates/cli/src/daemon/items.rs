@@ -288,7 +288,6 @@ fn summarize(
         label: label(item),
         detail: detail(item),
         fields,
-        source: super::mirror::source_app(item.source.as_ref()),
         favorite: item.favorite,
         tags: item.tags.iter().cloned().collect(),
         deleted_at,

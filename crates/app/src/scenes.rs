@@ -4,7 +4,7 @@ mod fixtures;
 
 pub use fixtures::{LOOPBACK_COST, MANY};
 
-use deadbolt_client::protocol::{ImportReport, MirrorAction, MirrorItem, MirrorReport, Status};
+use deadbolt_client::protocol::{ImportReport, Status};
 use rune::{SecretCopy, Tx};
 
 use crate::daemon;
@@ -16,7 +16,7 @@ use crate::{import, install, shortcut};
 use fixtures::{
     FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault,
     fixture_pairing_code, form, generated, import_preview, import_report, inviter, join_notice,
-    kind_scene, locked, locked_error, locked_touch_id, locked_touch_id_reset, mirrored, new_of,
+    kind_scene, locked, locked_error, locked_touch_id, locked_touch_id_reset, new_of,
     other_shortcut, panel_vault, settings_touch_id, show_preview, status, trash, trash_item, typed,
     vault, vault_243, vault_info, vault_with_health, vault_with_offered_installer, welcome,
     working,
@@ -441,39 +441,6 @@ pub(crate) const SCENES: &[Scene] = &[
     }),
     // Settings on a Mac with Touch ID enabled.
     ("settings-touch-id", settings_touch_id),
-    // github.com mirrored from 1Password, shown, then opened with ⌘E.
-    ("mirrored", mirrored),
-    ("edit-mirrored", |s| {
-        mirrored(s);
-        s.edit_selected();
-    }),
-    // Settings after a sync from 1Password, and one 1Password refused.
-    ("settings-synced", |s| {
-        vault(s);
-        s.open_settings();
-        s.sync_one_password();
-        let item = |action, title: &str| MirrorItem {
-            action,
-            title: title.into(),
-            reason: None,
-        };
-        let mut items = vec![item(MirrorAction::Update, "github.com"); 12];
-        items.extend(vec![item(MirrorAction::Add, "Cloudflare"); 3]);
-        let report = MirrorReport {
-            applied: true,
-            unchanged: 214,
-            items,
-            warnings: Vec::new(),
-            dropped: Vec::new(),
-        };
-        s.apply(
-            daemon::Done::Mirrored {
-                seq: 1,
-                result: Ok(report),
-            },
-            &mut Tx::default(),
-        );
-    }),
     // The card, selected.
     ("card", |s| {
         vault(s);
@@ -523,24 +490,6 @@ pub(crate) const SCENES: &[Scene] = &[
     ("settings-page", |s| {
         settings_touch_id(s);
         s.nav.row = 1;
-    }),
-    ("settings-sync-failed", |s| {
-        vault(s);
-        s.open_settings();
-        s.sync_one_password();
-        let failure = daemon::Failure {
-            code: None,
-            message: "1Password: not signed in. Sign in to the 1Password app and turn on \
-                Settings › Developer › Integrate with 1Password CLI"
-                .into(),
-        };
-        s.apply(
-            daemon::Done::Mirrored {
-                seq: 1,
-                result: Err(failure),
-            },
-            &mut Tx::default(),
-        );
     }),
 ];
 

@@ -133,9 +133,6 @@ fn detail(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 /// The head, a delete waiting for its answer, and the fields, if they're here.
 fn page(s: &App, k: &Kit, item: &ItemInfo, full: Option<&ItemInfo>) -> Vec<El> {
     let mut sub = crate::vault::kind_name(&item.kind).to_owned();
-    if let Some(source) = &item.source {
-        sub = format!("{sub} · From {source}");
-    }
     if let Some(changed) = s.health.password_changed_for(&item.id) {
         sub = format!(
             "{sub} · Changed {}",

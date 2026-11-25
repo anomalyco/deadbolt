@@ -468,12 +468,6 @@ impl Form {
         self.id.is_none()
     }
 
-    /// The app the item is mirrored from, which puts back its own values
-    /// the next time it syncs.
-    pub fn source(&self) -> Option<&str> {
-        self.base.as_ref()?.0.source.as_deref()
-    }
-
     /// The field the generator fills: a login's password, or the audited
     /// password/passphrase field when fixing a security finding.
     pub fn generates(&self) -> Option<usize> {
@@ -665,7 +659,6 @@ mod tests {
                     value: value.into(),
                 })
                 .collect(),
-            source: None,
             favorite: false,
             tags: Vec::new(),
             deleted_at: None,

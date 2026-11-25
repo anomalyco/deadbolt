@@ -124,9 +124,6 @@ pub struct ItemInfo {
     pub detail: Option<String>,
     /// Known fields in schema order, then extra fields by name. Empty in lists.
     pub fields: Vec<FieldInfo>,
-    /// The app the item is mirrored from ("1Password"), which overwrites
-    /// changes made here; `None` for the user's own.
-    pub source: Option<String>,
     #[serde(default)]
     pub favorite: bool,
     #[serde(default)]

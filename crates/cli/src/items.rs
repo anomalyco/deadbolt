@@ -749,7 +749,6 @@ mod tests {
                 f
             })
             .collect(),
-            source: None,
             favorite: false,
             tags: Vec::new(),
             deleted_at: None,

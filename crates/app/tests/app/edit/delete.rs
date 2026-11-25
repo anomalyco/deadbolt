@@ -1,9 +1,9 @@
-//! Deleting items, remote deletion conflicts, passkeys, menus and 1Password sync.
+//! Deleting items, remote deletion conflicts, passkeys and menus.
 
-use deadbolt_app::daemon::{Done, Failure, Job};
+use deadbolt_app::daemon::{Done, Job};
 use deadbolt_app::edit::Conflict;
 use deadbolt_app::model::{App, Screen};
-use deadbolt_client::protocol::{ErrorCode, ItemInfo, MirrorAction, MirrorItem, MirrorReport};
+use deadbolt_client::protocol::ItemInfo;
 use rune::{Key, KeyEvent};
 
 use super::{FRAME, Rig, cmd, failure, info, rig};
@@ -258,120 +258,4 @@ fn the_menus_add_edit_and_delete() {
     assert!(!shows(&keys, "form"), "nothing from the quick panel");
     let keys = main_after("settings", serde_json::json!([menu(NEW)])).unwrap();
     assert!(!shows(&keys, "form"), "nothing over Settings");
-}
-
-/// A mirrored item says where it's from, and editing it warns that the
-/// next sync puts the source's version back, but still saves.
-#[test]
-fn a_mirrored_item_warns_on_edit_but_saves() {
-    let mut r = rig("vault");
-    r.command('e');
-    assert!(!r.shows("From 1Password"));
-    r.tap(Key::Escape);
-
-    let mut r = rig("mirrored");
-    let github = r.github();
-    assert!(r.shows("Login · From 1Password"));
-    r.command('e');
-    assert!(r.shows("From 1Password"));
-    r.fill("username", "alex");
-    r.sent();
-    r.command('s');
-    assert_eq!(r.take_save().1, github.id, "the edit saves");
-}
-
-#[test]
-fn syncing_from_1password_says_what_it_did() {
-    let mut r = rig("vault");
-    r.sent();
-    r.rt.update(|s, _| {
-        s.sync_one_password();
-        s.sync_one_password();
-    });
-    assert!(matches!(r.sent()[..], [Job::SyncOnePassword { seq: 1 }]));
-    assert!(r.rt.state.mirror.syncing);
-    let item = |action| MirrorItem {
-        action,
-        title: "github.com".into(),
-        reason: None,
-    };
-    let report = MirrorReport {
-        applied: true,
-        unchanged: 3,
-        items: vec![
-            item(MirrorAction::Update),
-            item(MirrorAction::Add),
-            item(MirrorAction::Skip),
-        ],
-        warnings: Vec::new(),
-        dropped: Vec::new(),
-    };
-    r.reply(Done::Mirrored {
-        seq: 1,
-        result: Ok(report),
-    });
-    assert!(!r.rt.state.mirror.syncing);
-    assert_eq!(
-        r.rt.state.mirror.result,
-        Some(Ok("1 updated, 1 added".into()))
-    );
-
-    r.rt.update(|s, _| s.sync_one_password());
-    r.reply(Done::Mirrored {
-        seq: 2,
-        result: Err(failure("1Password is locked")),
-    });
-    assert_eq!(
-        r.rt.state.mirror.result,
-        Some(Err("1Password is locked".into()))
-    );
-    r.rt.update(|s, _| s.close_settings());
-    assert_eq!(r.rt.state.mirror.result, None);
-
-    // Deadbolt locked meanwhile: the window locks too.
-    r.rt.update(|s, _| s.sync_one_password());
-    r.reply(Done::Mirrored {
-        seq: 3,
-        result: Err(Failure {
-            code: Some(ErrorCode::Locked),
-            message: "locked".into(),
-        }),
-    });
-    assert_eq!(r.rt.state.screen, Screen::Locked);
-}
-
-#[test]
-fn a_sync_from_1password_ends_with_the_lock() {
-    let report = || MirrorReport {
-        applied: true,
-        unchanged: 3,
-        items: Vec::new(),
-        warnings: Vec::new(),
-        dropped: Vec::new(),
-    };
-    let mut r = rig("vault");
-    r.rt.update(|s, _| s.sync_one_password());
-    r.reply(Done::Mirrored {
-        seq: 1,
-        result: Ok(report()),
-    });
-    assert!(r.rt.state.mirror.result.is_some());
-    r.rt.update(|s, _| s.sync_one_password());
-    r.command('l');
-    r.reply(Done::Locked(Ok(())));
-    assert!(!r.rt.state.mirror.syncing && r.rt.state.mirror.result.is_none());
-
-    // Its reply comes once another has started (after an unlock): it is
-    // not the new sync's.
-    r.rt.update(|s, _| s.sync_one_password());
-    r.reply(Done::Mirrored {
-        seq: 2,
-        result: Ok(report()),
-    });
-    assert!(r.rt.state.mirror.syncing && r.rt.state.mirror.result.is_none());
-    r.reply(Done::Mirrored {
-        seq: 4,
-        result: Ok(report()),
-    });
-    assert_eq!(r.rt.state.mirror.result, Some(Ok("Up to date".into())));
 }

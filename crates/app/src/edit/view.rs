@@ -54,7 +54,6 @@ pub fn form(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
     // The head and the foot line up with the scroll's padded fields.
     form.child(head(s, k, f, layer).px(FIELD_PAD))
         .children(conflict(k, f))
-        .children(mirrored(k, f))
         .child(
             scroll_col("form-scroll")
                 .w_full()
@@ -341,26 +340,6 @@ fn conflict(k: &Kit, f: &Form) -> Option<El> {
         );
     }
     Some(block)
-}
-
-/// Editing a mirrored item: allowed, but its source wins the next sync.
-fn mirrored(k: &Kit, f: &Form) -> Option<El> {
-    let source = f.source().filter(|_| f.conflict.is_none())?;
-    let notice = Notice {
-        severity: Severity::Caution,
-        title: format!("From {source}"),
-        body: format!(
-            "The next sync from {source} puts back its version. \
-             To keep a change, make it in {source}."
-        ),
-    };
-    Some(
-        col()
-            .key("mirrored")
-            .w_full()
-            .transition(Transition::opacity())
-            .child(crate::view::banner(k, &notice)),
-    )
 }
 
 fn placeholder(kind: &str, input: &Input) -> &'static str {

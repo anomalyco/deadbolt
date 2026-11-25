@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use deadbolt_client::export::ExportError;
 use deadbolt_client::protocol::{
     ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, FindingKind, HealthReport,
-    ImportReport, ItemInfo, MirrorReport, SshKeyKind, Status,
+    ImportReport, ItemInfo, SshKeyKind, Status,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -77,12 +77,6 @@ pub enum Job {
         /// The digest of the export as previewed, to import it; `None` to
         /// preview. The file imports only if it still has that digest.
         apply: Option<blake3::Hash>,
-        seq: u64,
-    },
-    /// Mirrors 1Password into the default vault. It runs beside the other
-    /// jobs, since 1Password may wait on its approval prompt. `seq` tells
-    /// the sync it's for (`mirror::Mirror`).
-    SyncOnePassword {
         seq: u64,
     },
     /// Adds an item to the default vault. `seq` tells the edit it's for (`edit::Edit`).
@@ -221,10 +215,6 @@ pub enum Done {
         applied: bool,
         result: Result<Imported, ImportFailure>,
     },
-    Mirrored {
-        seq: u64,
-        result: Result<MirrorReport, Failure>,
-    },
     /// An item added or changed, without its values.
     Saved {
         seq: u64,
@@ -300,7 +290,6 @@ impl Values {
             label: std::mem::take(&mut self.0.label),
             detail: self.0.detail.take(),
             fields: std::mem::take(&mut self.0.fields),
-            source: self.0.source.take(),
             favorite: self.0.favorite,
             tags: std::mem::take(&mut self.0.tags),
             deleted_at: self.0.deleted_at,
