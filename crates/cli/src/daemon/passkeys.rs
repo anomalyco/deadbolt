@@ -496,7 +496,7 @@ pub(super) mod tests {
         pub(in crate::daemon) async fn unlocked_with(fast: deadbolt_store::KdfParams) -> Fixture {
             let dir = tempfile::tempdir().unwrap();
             let secret = [61; 32];
-            drop(deadbolt_store::init_with_params(dir.path(), b"test", secret, fast).unwrap());
+            drop(deadbolt_store::init_with_params(dir.path(), b"test", &secret, fast).unwrap());
             let mut loaded = Loaded::open(dir.path(), b"test").unwrap();
             loaded.create_vault("personal").unwrap();
             let key = deadbolt_store::generate_biometric_key().unwrap();

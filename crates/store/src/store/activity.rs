@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn rows_list_newest_first_and_old_ones_go() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::init_with_params(dir.path(), b"pass", [1; 32], FAST).unwrap();
+        let store = crate::init_with_params(dir.path(), b"pass", &[1; 32], FAST).unwrap();
         assert!(store.activity_list(0, None, 10).unwrap().rows.is_empty());
         let ids = store
             .activity_append([(10, &b"a"[..]), (20, b"b"), (30, b"c")], 0, ROOMY)
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn the_table_keeps_to_its_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::init_with_params(dir.path(), b"pass", [1; 32], FAST).unwrap();
+        let store = crate::init_with_params(dir.path(), b"pass", &[1; 32], FAST).unwrap();
         let three = Budget {
             rows: 3,
             bytes: 1 << 20,

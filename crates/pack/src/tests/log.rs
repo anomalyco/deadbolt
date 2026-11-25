@@ -1,4 +1,6 @@
-use crate::log::{self, MAX_RECORD, encode};
+use std::time::Instant;
+
+use crate::log::{self, HEADER_LEN, MAGIC, MAX_RECORD, RECORD_OVERHEAD, encode, hash_count};
 use crate::{Blocks, Error, MemBlocks};
 
 const NAME: &str = "wal-0.log";
@@ -147,10 +149,149 @@ fn a_missing_log_is_empty_and_append_creates_it() {
     assert!(log::recover(&blocks, NAME).unwrap().is_empty());
     assert!(log::read(&blocks, NAME).unwrap().is_empty());
     assert_eq!(log::append(&blocks, NAME, b"one").unwrap(), 0);
-    assert_eq!(log::append(&blocks, NAME, b"two").unwrap(), 15);
+    assert_eq!(
+        log::append(&blocks, NAME, b"two").unwrap(),
+        (RECORD_OVERHEAD + 3) as u64
+    );
     assert_eq!(
         log::read(&blocks, NAME).unwrap(),
         [b"one".to_vec(), b"two".to_vec()]
     );
-    assert_eq!(blocks.read_all(NAME).unwrap()[..4], 3u32.to_le_bytes());
+    let bytes = blocks.read_all(NAME).unwrap();
+    assert_eq!(bytes[..8], MAGIC);
+    assert_eq!(bytes[8..HEADER_LEN], 3u32.to_le_bytes());
+}
+
+/// Deterministic noise.
+fn noise(seed: &[u8], len: usize) -> Vec<u8> {
+    let mut out = vec![0; len];
+    blake3::Hasher::new()
+        .update(seed)
+        .finalize_xof()
+        .fill(&mut out);
+    out
+}
+
+/// A payload that holds whole encoded records of its own.
+fn nesting_payload() -> Vec<u8> {
+    let mut payload = b"outer:".to_vec();
+    payload.extend(encode(b"inner one").unwrap());
+    payload.extend(encode(b"inner two").unwrap());
+    payload.extend_from_slice(b":outer");
+    payload
+}
+
+#[test]
+fn a_torn_record_holding_encoded_records_is_cut_not_corrupt() {
+    let (committed, _) = framed();
+    let last = encode(&nesting_payload()).unwrap();
+    // Every cut, including the exact ends of the records nested inside, and
+    // 40 bytes in.
+    for cut in (1..last.len()).chain([40]) {
+        let blocks = MemBlocks::new();
+        blocks.put_raw(NAME, &[committed.as_slice(), &last[..cut]].concat());
+        assert_eq!(
+            log::read(&blocks, NAME).unwrap(),
+            records(),
+            "read at {cut}"
+        );
+        assert_eq!(
+            log::recover(&blocks, NAME).unwrap(),
+            records(),
+            "recover at {cut}"
+        );
+        assert_eq!(blocks.file(NAME).unwrap(), committed, "cut back at {cut}");
+        log::append(&blocks, NAME, &nesting_payload()).unwrap();
+        let mut all = records();
+        all.push(nesting_payload());
+        assert_eq!(log::recover(&blocks, NAME).unwrap(), all, "reopen at {cut}");
+    }
+}
+
+#[test]
+fn a_bad_record_before_valid_ones_is_still_corrupt_around_nested_records() {
+    let mut bytes = Vec::new();
+    let mut starts = Vec::new();
+    for payload in [nesting_payload(), b"middle".to_vec(), nesting_payload()] {
+        starts.push(bytes.len());
+        bytes.extend(encode(&payload).unwrap());
+    }
+    // A bit flipped in the magic, the length, the payload and the check of
+    // the first and second records.
+    for record in 0..2 {
+        let end = starts[record + 1];
+        for at in [
+            starts[record],
+            starts[record] + 9,
+            starts[record] + 20,
+            end - 1,
+        ] {
+            let blocks = MemBlocks::new();
+            blocks.put_raw(NAME, &bytes);
+            blocks.flip_bit(NAME, at, 0);
+            assert!(
+                matches!(
+                    log::recover(&blocks, NAME),
+                    Err(Error::CorruptLog { offset, .. }) if offset == starts[record] as u64
+                ),
+                "flip at {at}"
+            );
+            assert_eq!(blocks.file(NAME).unwrap().len(), bytes.len());
+        }
+    }
+}
+
+#[test]
+fn a_large_torn_tail_scans_in_linear_time() {
+    let (committed, _) = framed();
+    let big = encode(&noise(b"torn", 1 << 20)).unwrap();
+    // Payloads packed with encoded records, so every magic match is a
+    // plausible record start.
+    let mut packed = Vec::new();
+    while packed.len() < 1 << 20 {
+        packed.extend(encode(&noise(&packed.len().to_le_bytes(), 64)).unwrap());
+    }
+    let nested = encode(&packed).unwrap();
+    let tails: [(&str, Vec<u8>); 4] = [
+        ("torn 1 MiB record", big[..big.len() - 1].to_vec()),
+        (
+            "torn record of records",
+            nested[..nested.len() / 2].to_vec(),
+        ),
+        ("1 MiB of noise", noise(b"garbage", 1 << 20)),
+        // A bad header that fits, then a megabyte of records whose chain
+        // breaks just before the end: the search must stay bounded.
+        ("records behind a bad header", {
+            let mut tail = vec![0xee; RECORD_OVERHEAD];
+            tail.extend_from_slice(&packed[..packed.len() - 1]);
+            tail
+        }),
+    ];
+    for (case, tail) in tails {
+        let bytes = [committed.as_slice(), &tail].concat();
+        hash_count::take();
+        let started = Instant::now();
+        let scan = log::scan(NAME, &bytes);
+        let elapsed = started.elapsed();
+        let hashed = hash_count::take();
+        assert!(
+            hashed <= committed.len() + 4 * bytes.len(),
+            "{case}: hashed {hashed} bytes"
+        );
+        if case == "records behind a bad header" {
+            assert!(matches!(scan, Err(Error::CorruptLog { .. })), "{case}");
+        } else {
+            let scan = scan.unwrap();
+            assert_eq!(
+                (scan.records, scan.valid_len, scan.torn),
+                (records(), committed.len() as u64, true),
+                "{case}"
+            );
+            assert!(hashed < committed.len() + 4096, "{case}: hashed {hashed}");
+        }
+        assert!(
+            elapsed.as_millis() < 5 || cfg!(debug_assertions) && elapsed.as_millis() < 500,
+            "{case}: {elapsed:?}"
+        );
+    }
 }

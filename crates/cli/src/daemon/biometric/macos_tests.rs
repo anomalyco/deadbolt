@@ -141,7 +141,7 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
     let dir = tmp.path();
     let now = 1_700_000_000;
 
-    let store = deadbolt_store::init_with_params(dir, PASS, SECRET, FAST).unwrap();
+    let store = deadbolt_store::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
     store.append_batch([&b"vault-entry-1"[..]]).unwrap();
     store.meta_set("vault_id", b"v-touchid").unwrap();
     assert!(store.biometric_token().unwrap().is_none());
@@ -257,7 +257,7 @@ fn cancel_and_timeout_kill_in_flight_helper_and_preserve_slot() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
     let now = 1_700_000_000;
-    let store = deadbolt_store::init_with_params(dir, PASS, SECRET, FAST).unwrap();
+    let store = deadbolt_store::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
     if matches!(
         enroll_with_policy(&store, SealPolicy::HEADLESS_TEST, now),
         Err(UnlockError::Unavailable(_))
@@ -317,7 +317,7 @@ fn biometry_current_set_never_prompts_when_non_interactive() {
     let dir = tmp.path();
     let now = 1_700_000_000;
 
-    let store = deadbolt_store::init_with_params(dir, PASS, SECRET, FAST).unwrap();
+    let store = deadbolt_store::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
     let policy = SealPolicy {
         require_biometry: true,
         interactive: false,

@@ -1,5 +1,5 @@
 use crate::objects::{get_blob, list_outbox, put_blob, put_outbox};
-use crate::{Blocks, Error, MemBlocks};
+use crate::{Blocks, Error, MemBlocks, VaultDir};
 
 #[test]
 fn blobs_are_content_addressed_and_checked() {
@@ -27,6 +27,12 @@ fn blobs_are_content_addressed_and_checked() {
     blocks.put_raw(&name, b"attach");
     assert_eq!(put_blob(&blocks, b"attachment").unwrap(), hash);
     assert_eq!(get_blob(&blocks, &hash).unwrap(), b"attachment");
+
+    // Outside the crate, only the locked writer stores blobs.
+    let (dir, _) = VaultDir::open(blocks.clone()).unwrap();
+    let other = dir.put_blob(b"another").unwrap();
+    assert_eq!(dir.get_blob(&other).unwrap(), b"another");
+    assert!(matches!(VaultDir::open(blocks), Err(Error::Locked)));
 }
 
 #[test]

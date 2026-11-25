@@ -37,7 +37,11 @@ pub struct PackIndex {
 }
 
 impl PackIndex {
-    fn parse(file: &str, plain: &[u8], record_count: u32) -> Result<Self> {
+    /// Parses and checks a decrypted index against its pack's header and
+    /// size: sorted unique entries, every entry for an item agreeing, and
+    /// the items' records laid end to end from the index's end to the
+    /// trailer, with no gap, overlap or overflow.
+    pub(crate) fn parse(file: &str, plain: &[u8], header: &PackHeader, size: u64) -> Result<Self> {
         let corrupt = |reason| Error::corrupt_pack(file, reason);
         let (chunks, rest) = plain.as_chunks::<ENTRY_LEN>();
         if !rest.is_empty() {
@@ -59,22 +63,36 @@ impl PackIndex {
             })();
             raw.push(parsed.ok_or_else(|| corrupt("index entry"))?);
         }
-        if raw.windows(2).any(|w| (w[0].0, w[0].1) > (w[1].0, w[1].1)) {
-            return Err(corrupt("index out of order"));
+        if raw.windows(2).any(|w| (w[0].0, w[0].1) >= (w[1].0, w[1].1)) {
+            return Err(corrupt("index out of order or duplicated"));
         }
         // One item per distinct head offset, every entry for it agreeing.
         let mut by_head: BTreeMap<u64, (u32, u64, u32)> = BTreeMap::new();
         for &(_, head_off, head_len, secret_off, secret_len) in &raw {
             let at = (head_len, secret_off, secret_len);
-            if *by_head.entry(head_off).or_insert(at) != at
-                || secret_off != head_off + u64::from(head_len)
-            {
+            if *by_head.entry(head_off).or_insert(at) != at {
                 return Err(corrupt("index entries disagree"));
             }
         }
         let item_count = u32::try_from(by_head.len()).map_err(|_| corrupt("too many items"))?;
-        if item_count.checked_mul(2).and_then(|n| n.checked_add(2)) != Some(record_count) {
+        if item_count.checked_mul(2).and_then(|n| n.checked_add(2)) != Some(header.record_count) {
             return Err(corrupt("index does not cover every record"));
+        }
+        // Head, then Secret, item after item, from the index to the trailer.
+        let mut next = header.index_off.checked_add(u64::from(header.index_len));
+        for (&head_off, &(head_len, secret_off, secret_len)) in &by_head {
+            let whole = |len: u32| len as usize >= RECORD_OVERHEAD;
+            if next != Some(head_off)
+                || !whole(head_len)
+                || !whole(secret_len)
+                || head_off.checked_add(u64::from(head_len)) != Some(secret_off)
+            {
+                return Err(corrupt("item records are not contiguous"));
+            }
+            next = secret_off.checked_add(u64::from(secret_len));
+        }
+        if next != size.checked_sub(TRAILER_LEN as u64) {
+            return Err(corrupt("item records do not reach the trailer"));
         }
         let items: Vec<ItemRef> = by_head
             .iter()
@@ -218,7 +236,7 @@ impl<R: BlockReader> PackReader<R> {
             .reader
             .read_range(self.header.index_off, self.header.index_len as usize)?;
         let plain = open_record(&self.name, keys, &self.id, 1, Tag::Index, &record)?;
-        PackIndex::parse(&self.name, &plain, self.header.record_count)
+        PackIndex::parse(&self.name, &plain, &self.header, self.size)
     }
 
     pub fn read_head(&self, keys: &PackKeys, item: &ItemRef) -> Result<Zeroizing<Vec<u8>>> {

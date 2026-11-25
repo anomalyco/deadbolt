@@ -41,7 +41,7 @@ fn append_diagnostics_omit_backend_messages_and_values() {
 }
 
 fn init(dir: &Path) -> Unlocked {
-    crate::init_with_params(dir, PASS, SECRET, FAST).unwrap()
+    crate::init_with_params(dir, PASS, &SECRET, FAST).unwrap()
 }
 
 fn unlock(dir: &Path) -> Unlocked {
@@ -130,7 +130,7 @@ fn backend_roundtrip_uses_the_native_encrypted_format() {
         Err(Error::NotInitialized(_))
     ));
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-    let store = crate::init_with_backend(backend(), PASS, SECRET, FAST).unwrap();
+    let store = crate::init_with_backend(backend(), PASS, &SECRET, FAST).unwrap();
     let entry = body(42);
     store.append_batch([entry.as_slice()]).unwrap();
     store.meta_set("backend-meta", b"hidden-value").unwrap();
@@ -140,7 +140,7 @@ fn backend_roundtrip_uses_the_native_encrypted_format() {
         assert!(!bytes.windows(plain.len()).any(|part| part == plain));
     }
     assert!(matches!(
-        crate::init_with_backend(backend(), PASS, SECRET, FAST),
+        crate::init_with_backend(backend(), PASS, &SECRET, FAST),
         Err(Error::AlreadyExists(_))
     ));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
@@ -360,7 +360,7 @@ fn init_over_existing_refused() {
     drop(store);
     let before = std::fs::read(db_path(tmp.path())).unwrap();
 
-    let err = crate::init_with_params(tmp.path(), b"other", [1; 32], FAST).unwrap_err();
+    let err = crate::init_with_params(tmp.path(), b"other", &[1; 32], FAST).unwrap_err();
     assert!(matches!(err, Error::AlreadyExists(_)), "{err:?}");
     assert_eq!(std::fs::read(db_path(tmp.path())).unwrap(), before);
     assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
@@ -375,7 +375,7 @@ fn init_refuses_while_open() {
     let tmp = TempDir::new().unwrap();
     let _store = init(tmp.path());
     assert!(matches!(
-        crate::init_with_params(tmp.path(), PASS, SECRET, FAST),
+        crate::init_with_params(tmp.path(), PASS, &SECRET, FAST),
         Err(Error::AlreadyExists(_))
     ));
 }
@@ -600,7 +600,7 @@ fn kdf_params_have_a_practical_budget() {
         crate::init_with_params(
             tmp.path(),
             PASS,
-            SECRET,
+            &SECRET,
             KdfParams {
                 m_cost_kib: 256 * mib,
                 t_cost: 7,
@@ -609,6 +609,33 @@ fn kdf_params_have_a_practical_budget() {
         ),
         Err(Error::InvalidKdfParams(_))
     ));
+}
+
+/// The data key sits in pages of its own (a `LiveKey`), and every row still
+/// seals and opens under a cipher built from it per call.
+#[test]
+fn the_data_key_lives_in_its_own_pages() {
+    let tmp = TempDir::new().unwrap();
+    let store = init(tmp.path());
+    store.append_batch([b"entry".as_slice()]).unwrap();
+    store.meta_set("m", b"value").unwrap();
+    let data: &crate::crypto::LiveKey = store.keys_for_test().data_for_test();
+    #[cfg(unix)]
+    assert_eq!(
+        data.as_ptr() as usize % 4096,
+        0,
+        "page-aligned LockedSecret"
+    );
+    assert_ne!(**data, [0; 32]);
+    drop(store);
+    let store = unlock(tmp.path());
+    let entries: Vec<Vec<u8>> = store
+        .iter_all()
+        .unwrap()
+        .map(|e| e.unwrap().to_vec())
+        .collect();
+    assert_eq!(entries, [b"entry".to_vec()]);
+    assert_eq!(store.meta_get("m").unwrap().unwrap().as_slice(), b"value");
 }
 
 #[test]
@@ -794,7 +821,7 @@ fn crash_child() {
 #[test]
 fn default_kdf_params_roundtrip() {
     let tmp = TempDir::new().unwrap();
-    drop(crate::init(tmp.path(), PASS, SECRET).unwrap());
+    drop(crate::init(tmp.path(), PASS, &SECRET).unwrap());
     let kdf = KdfHeader::decode(&raw_value(tmp.path(), raw::HEADER, "kdf")).unwrap();
     assert_eq!(kdf.params, KdfParams::DEFAULT);
     assert_eq!(unlock(tmp.path()).device_secret(), &SECRET);
@@ -820,7 +847,7 @@ fn kdf_header_encoding() {
         crate::init_with_params(
             Path::new("/nonexistent/never"),
             PASS,
-            SECRET,
+            &SECRET,
             KdfParams {
                 m_cost_kib: 1,
                 t_cost: 1,

@@ -8,7 +8,7 @@
 //! ```no_run
 //! # fn main() -> deadbolt_store::Result<()> {
 //! # let dir = std::path::Path::new("/tmp/deadbolt");
-//! let store = deadbolt_store::init(dir, b"passphrase", [7; 32])?;
+//! let store = deadbolt_store::init(dir, b"passphrase", &[7; 32])?;
 //! store.append_batch([&b"signed entry bytes"[..]])?;
 //! drop(store);
 //!

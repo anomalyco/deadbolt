@@ -74,7 +74,7 @@ impl World {
             let nonce = [42; 32];
             let id = VaultId::derive(&s.id, &nonce);
             let genesis = Entry::sign(
-                &s.secret,
+                &s.secret(),
                 id,
                 0,
                 [],
@@ -318,7 +318,7 @@ impl World {
         let (vault, consent) = self.devices[receiver].with(|s| {
             Ok((
                 s.vault(&self.vault).clone(),
-                s.secret.join_consent(&self.vault, &author_id),
+                s.secret().join_consent(&self.vault, &author_id),
             ))
         })?;
         if !vault.is_member(&author_id) {
@@ -340,7 +340,7 @@ impl World {
             let mut entries = Vec::new();
             for seq in start..end + MAX_MEMBERSHIP_ENTRIES {
                 let entry = Entry::sign(
-                    &s.secret,
+                    &s.secret(),
                     self.vault,
                     seq,
                     deps,
@@ -468,7 +468,7 @@ impl World {
             Action::WriteFailure(i) if self.can_write(i) => {
                 self.devices[i].with(|s| {
                     let s: &mut deadbolt_engine::Engine = s;
-                    let key = &s.secret;
+                    let key = &s.secret();
                     let result = s.vaults.get_mut(&self.vault).unwrap().transact(
                         |v| Ok(v.write(key, vec![])?),
                         |_| anyhow::bail!("injected disk full"),

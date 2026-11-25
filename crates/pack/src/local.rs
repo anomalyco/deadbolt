@@ -2,7 +2,8 @@
 //! two-phase rollback anchor in the OS keystore.
 //!
 //! ```text
-//! file = "DBLS\x02\0\0\0" || m u64_be || prev_mac 24 || slots_len u32_be || slots || nonce 24 || AEAD(K_seal, body)
+//! file = "DBLS\x02\0\0\0" || m u64_be || prev_mac 24 || slots_len u32_be || slots
+//!        || sealed_len u32_be || sealed            sealed = nonce 24 || AEAD(K_seal, body)
 //! aad  = "deadbolt/v2 local\0" || vault 32 || m u64_be || prev_mac 24 || slots
 //! cur_mac = BLAKE3-keyed(K_mac, file)[..24]        K_seal, K_mac = KDF(DeviceRoot)
 //! ```
@@ -21,16 +22,23 @@
 //! anchor's `cur_mac` is a power cut between steps 1 and 2, and the anchor is
 //! healed forward; anything else is [`Error::RollbackDetected`].
 //!
+//! Every length is explicit, so a file cut short anywhere (the ciphertext
+//! included) is [`Error::CorruptLocal`], never [`Error::Decrypt`]: a torn
+//! step 1 is told apart from a wrong root. With nothing anchored yet, torn
+//! files alone are a first commit that never finished, and open clears them
+//! so the next commit can take their names.
+//!
 //! An anchor without a hardware counter can't stop a restore that rolls the
 //! disk and the keychain back together (Time Machine). The remote stream
 //! comparison and the self-rollback check cover that case.
 
+use std::cmp::Ordering;
 use std::sync::{Mutex, PoisonError};
 
 use zeroize::Zeroizing;
 
 use crate::blocks::Blocks;
-use crate::crypto::{self, KEY_LEN, Key};
+use crate::crypto::{self, KEY_LEN, Key, SEAL_OVERHEAD};
 use crate::error::{Error, Result};
 use crate::names::{LOCAL_PREFIX, LOCAL_SUFFIX, local_sealed, numbered};
 use crate::pack::Cursor;
@@ -39,6 +47,8 @@ pub const LOCAL_MAGIC: [u8; 8] = *b"DBLS\x02\0\0\0";
 const AAD_PREFIX: &[u8] = b"deadbolt/v2 local\0";
 pub const MAC_LEN: usize = 24;
 pub type Mac = [u8; MAC_LEN];
+/// Magic, sequence, `prev_mac` and the key slots' length.
+const HEADER_LEN: usize = 8 + 8 + MAC_LEN + 4;
 
 /// The anchor's record of the newest commit: 56 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,12 +217,15 @@ pub fn encode(
     let slots_len =
         u32::try_from(slots.len()).map_err(|_| Error::InvalidInput("key slots too large"))?;
     let sealed = crypto::seal(&root.seal, &aad(vault, seq, prev_mac, slots), body)?;
-    let mut file = Vec::with_capacity(8 + 8 + MAC_LEN + 4 + slots.len() + sealed.len());
+    let sealed_len =
+        u32::try_from(sealed.len()).map_err(|_| Error::InvalidInput("local state too large"))?;
+    let mut file = Vec::with_capacity(HEADER_LEN + slots.len() + 4 + sealed.len());
     file.extend_from_slice(&LOCAL_MAGIC);
     file.extend_from_slice(&seq.to_be_bytes());
     file.extend_from_slice(prev_mac);
     file.extend_from_slice(&slots_len.to_be_bytes());
     file.extend_from_slice(slots);
+    file.extend_from_slice(&sealed_len.to_be_bytes());
     file.extend_from_slice(&sealed);
     let cur_mac = mac(root, &file);
     Ok((file, cur_mac))
@@ -244,10 +257,25 @@ pub fn decode(
         .map(u32::from_be_bytes)
         .ok_or_else(|| corrupt("short header"))?;
     let slots_len = usize::try_from(slots_len).map_err(|_| corrupt("key slots too large"))?;
-    let (slots, sealed) = cursor
+    let (slots, rest) = cursor
         .bytes
         .split_at_checked(slots_len)
         .ok_or_else(|| corrupt("short key slots"))?;
+    let mut cursor = Cursor { bytes: rest };
+    let sealed_len = cursor
+        .take()
+        .map(u32::from_be_bytes)
+        .ok_or_else(|| corrupt("short sealed length"))?;
+    let sealed = cursor.bytes;
+    match usize::try_from(sealed_len).map(|len| len.cmp(&sealed.len())) {
+        Ok(Ordering::Equal) => {}
+        Ok(Ordering::Greater) | Err(_) => return Err(corrupt("short sealed body")),
+        Ok(Ordering::Less) => return Err(corrupt("bytes after the sealed body")),
+    }
+    if sealed.len() < SEAL_OVERHEAD {
+        return Err(corrupt("sealed body too short"));
+    }
+    // Every byte is present: from here a failure is a wrong key or tampering.
     let body = crypto::open(&root.seal, &aad(vault, seq, &prev_mac, slots), sealed)?;
     Ok(LocalState {
         seq,
@@ -258,10 +286,32 @@ pub fn decode(
     })
 }
 
+/// Whether `file` is a strict prefix of a commit-`seq` file: what a power
+/// cut during commit step 1 leaves behind.
+fn is_torn(seq: u64, file: &[u8]) -> bool {
+    let fixed = [LOCAL_MAGIC.as_slice(), &seq.to_be_bytes()].concat();
+    if !fixed.starts_with(&file[..file.len().min(fixed.len())]) {
+        return false;
+    }
+    let full_len = (|| {
+        let slots_len = u32::from_be_bytes(file.get(HEADER_LEN - 4..HEADER_LEN)?.try_into().ok()?);
+        let at = HEADER_LEN.checked_add(usize::try_from(slots_len).ok()?)?;
+        let sealed_len = u32::from_be_bytes(file.get(at..at.checked_add(4)?)?.try_into().ok()?);
+        at.checked_add(4)?
+            .checked_add(usize::try_from(sealed_len).ok()?)
+    })();
+    full_len.is_none_or(|len| file.len() < len)
+}
+
 /// Opens the newest local state and checks it against the anchor. The caller
 /// is the single writer: once a state is accepted, torn or unreadable files
-/// above it and superseded files below it are deleted. `Ok(None)`: no state
-/// yet and no anchor.
+/// above it and superseded files below it are deleted.
+///
+/// With no state on disk and nothing anchored: `Ok(None)` when there are no
+/// files, or only torn ones (a first commit cut short, deleted here so the
+/// next commit succeeds); [`Error::Decrypt`] when a complete file fails
+/// authentication (a wrong root), and [`Error::CorruptLocal`] for any other
+/// damaged file, both leaving every file in place.
 pub fn open<B: Blocks, A: RollbackAnchor>(
     blocks: &B,
     anchor: &A,
@@ -269,7 +319,9 @@ pub fn open<B: Blocks, A: RollbackAnchor>(
     root: &DeviceRoot,
 ) -> Result<Option<LocalState>> {
     let present = numbered(blocks, LOCAL_PREFIX, LOCAL_SUFFIX)?;
+    let mut torn = Vec::new();
     let mut unreadable = Vec::new();
+    let mut failure = None;
     let mut newest = None;
     for &seq in present.iter().rev() {
         let name = local_sealed(seq);
@@ -283,19 +335,31 @@ pub fn open<B: Blocks, A: RollbackAnchor>(
                 newest = Some(state);
                 break;
             }
-            Err(Error::Decrypt | Error::CorruptLocal { .. }) => unreadable.push(seq),
+            Err(Error::CorruptLocal { .. }) if is_torn(seq, &bytes) => torn.push(seq),
+            Err(err @ (Error::Decrypt | Error::CorruptLocal { .. })) => {
+                unreadable.push(seq);
+                // A wrong root explains every file; report it first.
+                if !matches!(failure, Some(Error::Decrypt)) {
+                    failure = Some(err);
+                }
+            }
             Err(err) => return Err(err),
         }
     }
     let Some(disk) = newest else {
-        return match anchor.load()? {
-            Some(token) => Err(Error::RollbackDetected {
+        return match (anchor.load()?, failure) {
+            (Some(token), _) => Err(Error::RollbackDetected {
                 disk: None,
                 anchor: token.commit_seq,
             }),
-            // Every file failed: a wrong root, not a reason to delete them.
-            None if !unreadable.is_empty() => Err(Error::Decrypt),
-            None => Ok(None),
+            // A complete file that won't open: never a reason to delete it.
+            (None, Some(err)) => Err(err),
+            (None, None) => {
+                for seq in torn {
+                    blocks.delete(&local_sealed(seq))?;
+                }
+                Ok(None)
+            }
         };
     };
     match anchor.load()? {
@@ -316,7 +380,7 @@ pub fn open<B: Blocks, A: RollbackAnchor>(
         // A fresh keystore (or none): start anchoring from here.
         None => anchor.store(&disk.token())?,
     }
-    for seq in unreadable {
+    for seq in torn.into_iter().chain(unreadable) {
         blocks.delete(&local_sealed(seq))?;
     }
     for &seq in present.iter().filter(|&&seq| seq < disk.seq) {

@@ -557,7 +557,7 @@ fn outgoing_welcome_stops_after_removal() {
     let device = DeviceId::from_bytes(world.devices[1].id);
     let inviter = DeviceId::from_bytes(world.devices[0].id);
     let join = world.devices[1]
-        .with(|s| pairing::join_blob(&s.secret, "beta", inviter, &world.vault, None))
+        .with(|s| pairing::join_blob(&s.secret(), "beta", inviter, &world.vault, None))
         .unwrap();
     let mut history = world.devices[0]
         .with(|s| Ok(pairing::welcome(s, world.vault, device, &join, None)?.0))
@@ -665,9 +665,9 @@ async fn exhausted_author_does_not_block_removal_or_other_authors() {
         let (rejected, removal) = world.devices[0]
             .with(|s| {
                 let mut probe = s.vault(&world.vault).clone();
-                let removal = probe.remove(&s.secret, removed)?;
+                let removal = probe.remove(&s.secret(), removed)?;
                 let rejected = Entry::sign(
-                    &s.secret,
+                    &s.secret(),
                     world.vault,
                     removal.seq(),
                     removal.deps().to_vec(),

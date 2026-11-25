@@ -20,6 +20,9 @@ use crate::names::LOCK;
 
 pub struct FsBlocks {
     root: PathBuf,
+    /// Test fault: the next append writes this many bytes, then fails.
+    #[cfg(test)]
+    fail_append: Mutex<Option<usize>>,
 }
 
 impl FsBlocks {
@@ -27,7 +30,35 @@ impl FsBlocks {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root).map_err(io_error(&root.to_string_lossy()))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            #[cfg(test)]
+            fail_append: Mutex::new(None),
+        })
+    }
+
+    /// Makes the next [`Blocks::append_sync`] write only `landed` bytes and
+    /// then fail, like a full disk or an I/O error part way through.
+    #[cfg(test)]
+    pub(crate) fn fail_next_append(&self, landed: usize) {
+        *self
+            .fail_append
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(landed);
+    }
+
+    fn write_append(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(landed) = self
+            .fail_append
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            file.write_all(&bytes[..landed.min(bytes.len())])?;
+            return Err(io::Error::other("injected append failure"));
+        }
+        file.write_all(bytes)
     }
 
     pub fn root(&self) -> &Path {
@@ -93,9 +124,24 @@ impl Blocks for FsBlocks {
             Err(err) => return Err(io_error(name)(err)),
         };
         let offset = file.metadata().map_err(io_error(name))?.len();
-        file.write_all(bytes)
+        if let Err(err) = self
+            .write_append(&mut file, bytes)
             .and_then(|()| file.sync_all())
-            .map_err(io_error(name))?;
+        {
+            drop(file);
+            // A failed (not crashed) append mustn't leave part of a record
+            // behind: the caller retries, and a record appended after junk
+            // would read as corruption. Cut back to where this append started,
+            // through a plain write handle (an append-only one can't truncate
+            // on Windows). If that fails too, the caller still sees the
+            // write's own error, and the next writer's open cuts the junk off
+            // as a torn tail.
+            let _rollback = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_len(offset).and_then(|()| file.sync_all()));
+            return Err(io_error(name)(err));
+        }
         if created {
             let dir = path
                 .parent()

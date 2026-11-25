@@ -224,3 +224,45 @@ fn middle_corruption_in_a_wal_fails_the_open() {
         Err(Error::CorruptLog { offset: 0, .. })
     ));
 }
+
+#[test]
+fn carrying_a_frame_no_wal_holds_is_refused() {
+    let (blocks, expected) = base(true);
+    let names = blocks.names();
+    let (mut dir, loaded) = VaultDir::open(blocks.clone()).unwrap();
+    let all: Vec<Vec<u8>> = logical(loaded.pack.as_ref(), &loaded.wal)
+        .into_iter()
+        .collect();
+    // frame 0 lives only in gen-1.pack; frame 500 nowhere.
+    for (carried, count) in [
+        (vec![frame(0)], 1),
+        (vec![frame(8), frame(500)], 1),
+        (vec![frame(0), frame(500)], 2),
+    ] {
+        let rest: Vec<Vec<u8>> = all
+            .iter()
+            .filter(|f| !carried.contains(f))
+            .cloned()
+            .collect();
+        assert!(
+            matches!(
+                dir.compact(pack_input(&rest), &EPOCH_KEY, &carried),
+                Err(Error::InvalidCompactionInput { count: n }) if n == count
+            ),
+            "{carried:?}"
+        );
+        assert_eq!(blocks.names(), names, "nothing written");
+    }
+    assert_eq!(dir.next_generation(), 2);
+
+    // The WAL tail carries, and a reader opened before the compaction and
+    // one opened after it both see every frame.
+    let before = VaultReader::open(&blocks).unwrap();
+    let split = all.len() - 3;
+    assert!(loaded.wal.contains(&all[split]));
+    dir.compact(pack_input(&all[..split]), &EPOCH_KEY, &all[split..])
+        .unwrap();
+    drop(dir);
+    assert_eq!(logical(before.pack(), &before.wal().unwrap()), expected);
+    check_open(&blocks, &expected, "after a valid carry");
+}

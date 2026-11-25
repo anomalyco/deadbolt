@@ -42,7 +42,7 @@ impl Device {
         let store = deadbolt_store::init_with_params(
             dir.path(),
             PASS,
-            key,
+            &key,
             KdfParams {
                 m_cost_kib: 64,
                 t_cost: 1,
@@ -244,7 +244,7 @@ impl Joiner for Device {
         let join = self
             .with(|s| {
                 anyhow::ensure!(!s.vaults.contains_key(&vault), "already held");
-                pairing::join_blob(&s.secret, &s.meta.device_name, inviter, &vault, None)
+                pairing::join_blob(&s.secret(), &s.meta.device_name, inviter, &vault, None)
             })
             .map_err(|e| -> HandlerError { e.to_string().into() })?;
         *self.offer.lock().unwrap() = Some(offer);

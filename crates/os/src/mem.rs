@@ -157,6 +157,12 @@ fn page_size() -> usize {
     })
 }
 
+/// The bytes to allocate for an `n`-byte secret: whole pages, at least one.
+/// `None` if rounding up overflows.
+fn alloc_size(n: usize, page: usize) -> Option<usize> {
+    n.max(1).checked_next_multiple_of(page)
+}
+
 /// `N` secret bytes on the heap, in pages of their own, locked in RAM
 /// (`mlock`, so never written to swap) and on Linux left out of core dumps
 /// (`MADV_DONTDUMP`). Dropping it zeroes the bytes, then unlocks and frees
@@ -185,10 +191,11 @@ impl<const N: usize> LockedSecret<N> {
     /// All zeroes, ready to be filled in place through `DerefMut`.
     pub fn new() -> Self {
         let page = page_size();
-        let size = N.max(1).div_ceil(page) * page;
-        let Ok(layout) = Layout::from_size_align(size, page) else {
+        let layout = alloc_size(N, page).and_then(|size| Layout::from_size_align(size, page).ok());
+        let Some(layout) = layout else {
             panic!("a {N}-byte secret doesn't fit in memory");
         };
+        let size = layout.size();
         // SAFETY: `layout` has a nonzero size.
         let raw = unsafe { alloc::alloc_zeroed(layout) };
         let Some(bytes) = NonNull::new(raw.cast::<[u8; N]>()) else {
@@ -409,6 +416,18 @@ mod tests {
         if memlock == libc::RLIM_INFINITY || memlock >= (4 * page) as libc::rlim_t {
             assert!(moved.is_locked());
         }
+    }
+
+    #[test]
+    fn sizes_round_up_to_whole_pages_without_overflow() {
+        assert_eq!(alloc_size(0, 4096), Some(4096));
+        assert_eq!(alloc_size(32, 4096), Some(4096));
+        assert_eq!(alloc_size(4096, 4096), Some(4096));
+        assert_eq!(alloc_size(4097, 16384), Some(16384));
+        assert_eq!(alloc_size(20_000, 4096), Some(20_480));
+        assert_eq!(alloc_size(usize::MAX - 10, 4096), None);
+        assert_eq!(alloc_size(usize::MAX, 16384), None);
+        assert_eq!(alloc_size(usize::MAX - 4095, 4096), Some(usize::MAX - 4095));
     }
 
     #[test]

@@ -2,7 +2,10 @@ use zeroize::Zeroizing;
 
 use super::{EPOCH, EPOCH_KEY, VAULT, keys_for};
 use crate::blocks::ReadOp;
-use crate::pack::{self, HEADER_LEN, PACK_MAGIC, RecordRef, Tag, open_record};
+use crate::pack::{
+    self, HEADER_LEN, PACK_MAGIC, PackIndex, RECORD_OVERHEAD, RecordRef, TRAILER_LEN, Tag,
+    open_record,
+};
 use crate::{
     Blocks, Error, MemBlocks, PackHeader, PackId, PackInput, PackItem, PackKeys, PackReader,
 };
@@ -287,4 +290,136 @@ fn empty_packs_work_and_items_need_a_key() {
         pack::write(&blocks, NAME, &input, &EPOCH_KEY),
         Err(Error::AlreadyExists { .. })
     ));
+}
+
+/// A header for a crafted index of `items` items: the index record ends at
+/// 300.
+fn crafted_header(items: u32) -> PackHeader {
+    PackHeader {
+        vault: VAULT,
+        author: [2; 32],
+        seq: 1,
+        epoch: EPOCH,
+        generation: 1,
+        record_count: 2 + 2 * items,
+        index_off: 200,
+        index_len: 100,
+    }
+}
+
+fn entry(key: u8, head_off: u64, head_len: u32, secret_off: u64, secret_len: u32) -> Vec<u8> {
+    let mut out = vec![key; 16];
+    out.extend_from_slice(&head_off.to_be_bytes());
+    out.extend_from_slice(&head_len.to_be_bytes());
+    out.extend_from_slice(&secret_off.to_be_bytes());
+    out.extend_from_slice(&secret_len.to_be_bytes());
+    out
+}
+
+#[test]
+fn crafted_indexes_fail_cleanly_never_panic() {
+    let one = crafted_header(1);
+    let size = 300 + 50 + 60 + TRAILER_LEN as u64;
+    // The well-formed one parses: Head 300..350, Secret 350..410.
+    let good = entry(1, 300, 50, 350, 60);
+    let index = PackIndex::parse(NAME, &good, &one, size).unwrap();
+    assert_eq!((index.items().len(), index.entry_count()), (1, 1));
+
+    let max = u64::MAX;
+    // Indexes ending right where the overflowing records start.
+    let ending_at = |end: u64| PackHeader {
+        index_off: end - 100,
+        ..one
+    };
+    let cases: [(&str, Vec<u8>, PackHeader, u64); 10] = [
+        ("head_off overflows", entry(1, max, 10, 9, 60), one, size),
+        (
+            "head end overflows",
+            entry(1, max, 50, 49, 60),
+            ending_at(max),
+            size,
+        ),
+        (
+            "secret end overflows",
+            entry(1, max - 60, 50, max - 10, 60),
+            ending_at(max - 60),
+            size,
+        ),
+        ("gap after the index", entry(1, 301, 50, 351, 59), one, size),
+        ("overlaps the index", entry(1, 299, 50, 349, 61), one, size),
+        (
+            "gap between head and secret",
+            entry(1, 300, 50, 351, 59),
+            one,
+            size,
+        ),
+        (
+            "stops short of the trailer",
+            entry(1, 300, 50, 350, 59),
+            one,
+            size,
+        ),
+        (
+            "runs into the trailer",
+            entry(1, 300, 50, 350, 61),
+            one,
+            size,
+        ),
+        (
+            "a record too short to be sealed",
+            entry(1, 300, 4, 304, 106),
+            one,
+            size,
+        ),
+        (
+            "the same key twice for one item",
+            [entry(1, 300, 50, 350, 60), entry(1, 300, 50, 350, 60)].concat(),
+            one,
+            size,
+        ),
+    ];
+    for (case, plain, header, size) in cases {
+        assert!(
+            matches!(
+                PackIndex::parse(NAME, &plain, &header, size),
+                Err(Error::CorruptPack { .. })
+            ),
+            "{case}"
+        );
+    }
+    // Two items laid end to end, then the second one's offsets overlapping.
+    let two = crafted_header(2);
+    let size2 = size + 100;
+    let a = entry(1, 300, 50, 350, 60);
+    let b = entry(2, 410, 44, 454, 56);
+    assert!(PackIndex::parse(NAME, &[a.clone(), b].concat(), &two, size2).is_ok());
+    let overlapping = entry(2, 400, 54, 454, 56);
+    assert!(matches!(
+        PackIndex::parse(NAME, &[a, overlapping].concat(), &two, size2),
+        Err(Error::CorruptPack { .. })
+    ));
+    assert_eq!(RECORD_OVERHEAD, 44);
+}
+
+#[test]
+fn a_key_given_twice_finds_its_item_once() {
+    let mut input = big_input();
+    input.items.truncate(3);
+    input.items[1].keys = vec![b"dup".to_vec(), b"other".to_vec(), b"dup".to_vec()];
+    input.items[2].keys.push(b"dup".to_vec());
+    let blocks = MemBlocks::new();
+    pack::write(&blocks, NAME, &input, &EPOCH_KEY).unwrap();
+    let reader = PackReader::open(&blocks, NAME).unwrap();
+    reader.verify_trailer().unwrap();
+    let keys = keys_for(&reader);
+    let index = reader.read_index(&keys).unwrap();
+    // item 0: 2 keys, item 1: dup and other, item 2: 2 keys and dup.
+    assert_eq!(index.entry_count(), 2 + 2 + 3);
+    let hits: Vec<u32> = index
+        .lookup_by_key(&keys, b"dup")
+        .iter()
+        .map(|item| item.item)
+        .collect();
+    assert_eq!(hits, [1, 2]);
+    assert_eq!(index.lookup_by_key(&keys, b"other").len(), 1);
 }

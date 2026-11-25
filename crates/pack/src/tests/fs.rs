@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use super::{EPOCH_KEY, frame, keys_for, logical, pack_input, secret_of};
-use crate::{BlockReader, Blocks, Error, FsBlocks, Result, VaultDir, VaultReader};
+use crate::{BlockReader, Blocks, Error, FsBlocks, Result, VaultDir, VaultReader, log};
 
 fn temp() -> (tempfile::TempDir, FsBlocks) {
     let dir = tempfile::tempdir().unwrap();
@@ -146,4 +146,37 @@ fn readers_see_every_committed_frame_while_the_writer_compacts() {
     }
     let reader = VaultReader::open(&FsBlocks::open(&root).unwrap()).unwrap();
     assert_eq!(logical(reader.pack(), &reader.wal().unwrap()).len(), 48);
+}
+
+#[test]
+fn a_failed_partial_append_leaves_nothing_behind_for_the_retry() {
+    let (dir, blocks) = temp();
+    let root = dir.path().join("v").join("vault");
+    let (vault, _) = VaultDir::open(blocks).unwrap();
+    for i in 0..3 {
+        vault.append_wal(&frame(i)).unwrap();
+    }
+    let wal = vault.active_wal();
+    let before = vault.blocks().read_all(&wal).unwrap();
+    for landed in [1, 7, log::RECORD_OVERHEAD + 3] {
+        vault.blocks().fail_next_append(landed);
+        assert!(matches!(
+            vault.append_wal(&frame(99)),
+            Err(Error::Io { .. })
+        ));
+        assert_eq!(
+            vault.blocks().read_all(&wal).unwrap(),
+            before,
+            "{landed} landed bytes were cut back"
+        );
+    }
+    // The retry lands on a record boundary.
+    vault.append_wal(&frame(99)).unwrap();
+    drop(vault);
+
+    let expected: Vec<Vec<u8>> = [0, 1, 2, 99].into_iter().map(frame).collect();
+    let reader = VaultReader::open(&FsBlocks::open(&root).unwrap()).unwrap();
+    assert_eq!(reader.wal().unwrap(), expected);
+    let (_, loaded) = VaultDir::open(FsBlocks::open(&root).unwrap()).unwrap();
+    assert_eq!(loaded.wal, expected);
 }

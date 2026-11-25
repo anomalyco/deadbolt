@@ -36,6 +36,11 @@ pub enum Error {
     CorruptBlob { name: String },
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
+    /// A frame to carry into the new WAL isn't in any WAL on disk: only the
+    /// old WALs, kept until the new generation is durable, make carrying it
+    /// crash-safe.
+    #[error("compaction carries {count} frame(s) that no WAL on disk holds")]
+    InvalidCompactionInput { count: usize },
     #[error("authentication failed: wrong key, or the bytes were altered")]
     Decrypt,
     /// The newest local state on disk is older than, newer than, or forked

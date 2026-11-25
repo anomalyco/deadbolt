@@ -102,7 +102,7 @@ impl Loaded {
         params: KdfParams,
         secret: DeviceSecret,
     ) -> Result<Self> {
-        let store = deadbolt_store::init_with_params(dir, passphrase, *secret.to_bytes(), params)?;
+        let store = deadbolt_store::init_with_params(dir, passphrase, &secret.to_bytes(), params)?;
         let store = Arc::new(store);
         let engine = Engine::create(
             Box::new(NativeStore(store.clone())),
@@ -292,7 +292,7 @@ pub(super) mod tests {
                 remaining: remaining.clone(),
             },
             b"test",
-            secret,
+            &secret,
             KdfParams {
                 m_cost_kib: 8,
                 t_cost: 1,
@@ -496,7 +496,7 @@ pub(super) mod tests {
         let mut flood = Vec::new();
         for seq in 1..=deadbolt_core::MAX_MEMBERSHIP_ENTRIES {
             let entry = Entry::sign(
-                &loaded.secret,
+                &loaded.secret(),
                 bad,
                 seq,
                 [prev],
@@ -626,7 +626,7 @@ pub(super) mod tests {
         let store = deadbolt_store::init_with_params(
             dir.path(),
             b"test",
-            *secret.to_bytes(),
+            &secret.to_bytes(),
             KdfParams {
                 m_cost_kib: 64,
                 t_cost: 1,
