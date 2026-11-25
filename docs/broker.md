@@ -62,8 +62,11 @@ loopback host.
    `/proc/net/tcp` and `/proc/<pid>/fd`. A connection from any other
    process gets `403` before its request is read. This also covers a
    process of the same user that read the placeholder from `ps eww`. The
-   lookup takes about 10–30 µs, because it checks a few pids rather than
-   every process on the system.
+   lookup checks a few pids rather than every process on the system. On a
+   Mac it takes about 10–30 µs. On Linux it is one exact `NETLINK_SOCK_DIAG`
+   query. A kernel without `CONFIG_INET_DIAG` falls back to
+   `/proc/net/tcp`, which costs about 8 ms per connection on a 32 GB VM
+   because the kernel walks its whole connection hash table to print it.
 5. Each request is checked before its body is read:
    - The request target must be in origin form.
    - The path must be canonical. The broker refuses `//`, `.` or `..`

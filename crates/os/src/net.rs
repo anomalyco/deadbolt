@@ -15,8 +15,11 @@
 //!   nothing wraps. `struct socket_fdinfo` is read at hand-kept offsets,
 //!   the same on arm64 and x86_64; the tests match a real connection
 //!   through them.
-//! - Linux, no `unsafe`: the socket's inode from `/proc/net/tcp` (and
-//!   `tcp6`, for a dual-stack socket's v4-mapped address), the tree from
+//! - Linux, no `unsafe`: the socket's inode from one exact
+//!   `NETLINK_SOCK_DIAG` lookup, or from `/proc/net/tcp` and `tcp6` on a
+//!   kernel without `CONFIG_INET_DIAG` (or a sandbox without netlink),
+//!   which costs milliseconds: the kernel walks its whole connection hash
+//!   table to print them. Then the tree from
 //!   `/proc/<pid>/task/<tid>/children`, then `socket:[<inode>]` among each
 //!   process's `/proc/<pid>/fd` links. A process that made itself
 //!   undumpable hides its fds, and so is never found: the lookup fails
@@ -280,8 +283,18 @@ mod macos {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use rustix::net::netlink::{self, SocketAddrNetlink};
+    use rustix::net::sockopt::{Timeout, set_socket_timeout};
+    use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
     use super::{LOOPBACK, LoopbackConnection, MAPPED_LOOPBACK};
+
+    /// Set once netlink has missed a socket the tables then found: a
+    /// kernel without `INET_DIAG` answers every lookup with `ENOENT`.
+    static NO_NETLINK: AtomicBool = AtomicBool::new(false);
 
     /// The connection's socket, by inode.
     pub(super) struct Socket {
@@ -290,13 +303,20 @@ mod linux {
 
     impl Socket {
         pub(super) fn find(connection: LoopbackConnection) -> Option<Self> {
+            let of = |inode: u64| Self {
+                link: format!("socket:[{inode}]"),
+            };
+            if !NO_NETLINK.load(Ordering::Relaxed)
+                && let Ok(Some(inode)) = by_netlink(connection)
+            {
+                return Some(of(inode));
+            }
             let inode = ["/proc/net/tcp", "/proc/net/tcp6"]
                 .into_iter()
                 .filter_map(|table| fs::read_to_string(table).ok())
                 .find_map(|text| inode_in(&text, connection))?;
-            Some(Self {
-                link: format!("socket:[{inode}]"),
-            })
+            NO_NETLINK.store(true, Ordering::Relaxed);
+            Some(of(inode))
         }
 
         pub(super) fn held_by(&self, pid: u32) -> bool {
@@ -308,6 +328,93 @@ mod linux {
                     .is_ok_and(|target| target.as_os_str() == self.link.as_str())
             })
         }
+    }
+
+    /// `SOCK_DIAG_BY_FAMILY`, `NLM_F_REQUEST` and `NLMSG_ERROR` (`<linux/netlink.h>`,
+    /// `<linux/sock_diag.h>`).
+    const SOCK_DIAG_BY_FAMILY: u16 = 20;
+    const NLM_F_REQUEST: u16 = 1;
+    const NLMSG_ERROR: u16 = 2;
+    const AF_INET: u8 = 2;
+    const AF_INET6: u8 = 10;
+    const IPPROTO_TCP: u8 = 6;
+    const ENOENT: i32 = 2;
+    /// A request: `nlmsghdr` (16 bytes) and `inet_diag_req_v2` (56), whose
+    /// `inet_diag_sockid` starts at 24.
+    const REQUEST: usize = 72;
+    /// In a reply's `inet_diag_msg` (after the 16-byte header): the ports at
+    /// 20 and 22, the inode at 84.
+    const REPLY_SPORT: usize = 20;
+    const REPLY_DPORT: usize = 22;
+    const REPLY_INODE: usize = 84;
+
+    fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+        Some(u16::from_ne_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+    }
+
+    fn port_at(bytes: &[u8], at: usize) -> Option<u16> {
+        Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+    }
+
+    fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+        Some(u32::from_ne_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    }
+
+    /// The client socket's inode by one exact `NETLINK_SOCK_DIAG` lookup,
+    /// as IPv4 then as a dual-stack socket's v4-mapped address. `Ok(None)`
+    /// is `ENOENT`: no such socket, or no `INET_DIAG` in this kernel.
+    fn by_netlink(connection: LoopbackConnection) -> rustix::io::Result<Option<u64>> {
+        let fd = rustix::net::socket_with(
+            AddressFamily::NETLINK,
+            SocketType::DGRAM,
+            SocketFlags::CLOEXEC,
+            Some(netlink::SOCK_DIAG),
+        )?;
+        set_socket_timeout(&fd, Timeout::Recv, Some(Duration::from_millis(500)))?;
+        for (family, address) in [(AF_INET, &LOOPBACK[..]), (AF_INET6, &MAPPED_LOOPBACK[..])] {
+            let mut request = [0u8; REQUEST];
+            request[0..4].copy_from_slice(&(REQUEST as u32).to_ne_bytes());
+            request[4..6].copy_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+            request[6..8].copy_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+            request[8..12].copy_from_slice(&1u32.to_ne_bytes());
+            request[16] = family;
+            request[17] = IPPROTO_TCP;
+            // Every state.
+            request[20..24].copy_from_slice(&u32::MAX.to_ne_bytes());
+            // The socket's own end, then its peer, then no interface or cookie.
+            request[24..26].copy_from_slice(&connection.client_port.to_be_bytes());
+            request[26..28].copy_from_slice(&connection.server_port.to_be_bytes());
+            request[28..28 + address.len()].copy_from_slice(address);
+            request[44..44 + address.len()].copy_from_slice(address);
+            request[64..72].copy_from_slice(&[0xff; 8]);
+            rustix::net::sendto(
+                &fd,
+                &request,
+                SendFlags::empty(),
+                &SocketAddrNetlink::new(0, 0),
+            )?;
+            let mut reply = [0u8; 4096];
+            let (length, _) = rustix::net::recv(&fd, &mut reply[..], RecvFlags::empty())?;
+            let reply = &reply[..length.min(reply.len())];
+            match u16_at(reply, 4) {
+                Some(SOCK_DIAG_BY_FAMILY)
+                    if port_at(reply, REPLY_SPORT) == Some(connection.client_port)
+                        && port_at(reply, REPLY_DPORT) == Some(connection.server_port) =>
+                {
+                    return Ok(u32_at(reply, REPLY_INODE)
+                        .filter(|i| *i != 0)
+                        .map(u64::from));
+                }
+                Some(NLMSG_ERROR) => {
+                    let errno = u32_at(reply, 16).map_or(0, |e| (e as i32).wrapping_neg());
+                    if errno != ENOENT {
+                        return Err(rustix::io::Errno::from_raw_os_error(errno));
+                    }
+                }
+                _ => return Err(rustix::io::Errno::PROTO),
+            }
+        }
+        Ok(None)
     }
 
     /// A `/proc/net/tcp{,6}` address, `0100007F:1F90`: the address as the
@@ -412,6 +519,39 @@ mod linux {
             assert_eq!(inode_in(&table, connection(8080, 50000)), Some(111));
             // TIME_WAIT has no inode, and no owner.
             assert_eq!(inode_in(&table, connection(50001, 8080)), None);
+        }
+
+        /// Netlink and the table name the same socket, and netlink is fast.
+        #[test]
+        fn netlink_finds_what_the_table_finds() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let server_port = listener.local_addr().unwrap().port();
+            let _client = std::net::TcpStream::connect(("127.0.0.1", server_port)).unwrap();
+            let (_server, peer) = listener.accept().unwrap();
+            let connection = LoopbackConnection {
+                client_port: peer.port(),
+                server_port,
+            };
+            let table = fs::read_to_string("/proc/net/tcp").unwrap();
+            let start = std::time::Instant::now();
+            let found = by_netlink(connection);
+            eprintln!("netlink lookup: {:?}", start.elapsed());
+            let Ok(Some(found)) = found else {
+                // A kernel without INET_DIAG, or a sandbox: the tables answer.
+                // One with it (built in or loaded by this request) must find it.
+                assert!(
+                    !std::path::Path::new("/sys/module/inet_diag").exists(),
+                    "INET_DIAG is here but netlink didn't find the socket: {found:?}"
+                );
+                eprintln!("netlink can't look sockets up here: {found:?}");
+                return;
+            };
+            assert_eq!(Some(found), inode_in(&table, connection));
+            let none = LoopbackConnection {
+                client_port: peer.port(),
+                server_port: server_port.wrapping_add(1),
+            };
+            assert_eq!(by_netlink(none).unwrap(), None);
         }
     }
 }
