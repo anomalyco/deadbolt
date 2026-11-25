@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use deadbolt_core::v2::{DeltaClock, Frame, FraudProof, VectorClock};
+use deadbolt_core::v2::{DeltaClock, Frame, FrameId, FraudProof, LogKind, VectorClock};
 use deadbolt_core::{DeviceId, VaultId};
 
-use super::{Observed, RemoteAnomaly, SyncAnchor};
+use super::{Observed, RemoteAnomaly, SelfRollback, SyncAnchor};
 use crate::path::RemotePath;
 
 /// Checks a fetched object against its name and the anchor: it must be a
@@ -32,8 +32,46 @@ pub fn check_fetched(
     }
 }
 
+/// [`check_fetched`] for a pull by `me`, which also judges `me`'s own
+/// frames against the local replica. `local(log, seq)` is the id of the
+/// replica's own frame at `seq`, or `None` where it holds none.
+///
+/// An own frame the store holds above the anchor must be the replica's: a
+/// push whose acknowledgement was lost, so observe it. Another frame at a
+/// `seq` the replica holds, or one beyond the replica's tip, is
+/// [`RemoteAnomaly::SelfRollback`]: the device was restored from a backup or
+/// its keys are in use elsewhere. Do not observe it, or the next push would
+/// build on the store's frame instead of the replica's.
+pub fn check_fetched_as(
+    anchor: &SyncAnchor,
+    me: &DeviceId,
+    local: impl Fn(LogKind, u64) -> Option<FrameId>,
+    path: &RemotePath,
+    bytes: &[u8],
+) -> Result<Frame, RemoteAnomaly> {
+    let frame = check_fetched(anchor, path, bytes)?;
+    let h = frame.header();
+    let log = h.kind.log_kind();
+    if h.author != *me || anchor.tip(log, me).is_some_and(|(seq, _)| h.seq <= seq) {
+        return Ok(frame);
+    }
+    match local(log, h.seq) {
+        Some(id) if id == frame.id() => Ok(frame),
+        Some(_) => Err(RemoteAnomaly::SelfRollback(SelfRollback {
+            log,
+            remote_ahead: Vec::new(),
+            conflicting: Some(*path),
+        })),
+        None => Err(RemoteAnomaly::SelfRollback(SelfRollback {
+            log,
+            remote_ahead: vec![*path],
+            conflicting: None,
+        })),
+    }
+}
+
 /// A frame that verifies and whose header matches its name exactly.
-fn verify_named(path: &RemotePath, bytes: &[u8]) -> Result<Frame, RemoteAnomaly> {
+pub(super) fn verify_named(path: &RemotePath, bytes: &[u8]) -> Result<Frame, RemoteAnomaly> {
     let mismatched = |reason| RemoteAnomaly::Mismatched {
         name: path.to_name(),
         reason,

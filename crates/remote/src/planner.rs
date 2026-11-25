@@ -3,12 +3,15 @@
 //!
 //! - [`SyncAnchor`] remembers the newest `(seq, FrameId)` this device has
 //!   accepted from every stream, advancing only along verified `prev`
-//!   links or to a verified checkpoint's frontier. A LIST that shows less,
-//!   or a different frame at that `seq`, is [`RemoteAnomaly::RemoteRegressed`].
+//!   links or to a verified checkpoint's frontier. A LIST that shows less
+//!   (and a direct GET that agrees: [`confirm_missing`], since a LIST can lag
+//!   a PUT it acknowledged), or a different frame at that `seq`, is
+//!   [`RemoteAnomaly::RemoteRegressed`].
 //! - [`check_withholding`]: a decrypted clock citing `(B, s)` while the
 //!   store lists B only below `s` is [`RemoteAnomaly::Withheld`].
-//! - [`check_self_rollback`] and [`push`]: a device restored from a backup
-//!   finds its own stream ahead of it, or its own name holding another frame.
+//! - [`check_self_rollback`], [`check_fetched_as`] and [`push`]: a device
+//!   restored from a backup finds its own stream ahead of it or missing its
+//!   acknowledged tip, or its own name holding another frame.
 //!
 //! A zero-state device still cannot tell one store rolling the whole vault
 //! back to an older consistent cut; recovery shows the newest signed state
@@ -16,6 +19,7 @@
 
 mod anchor;
 mod index;
+mod probe;
 mod pull;
 mod push;
 mod recovery;
@@ -23,14 +27,15 @@ mod verify;
 
 pub use anchor::SyncAnchor;
 pub use index::{RemoteIndex, Spellings};
+pub use probe::confirm_missing;
 pub use pull::{PullPlan, Regressions, check_regressions, plan_pull};
 pub use push::{
-    Outbox, PushPlan, PushReport, PushStep, PushStop, SelfRollback, check_self_rollback, plan_push,
-    push,
+    Outbox, PushPlan, PushReport, PushStep, SelfRollback, check_self_rollback, plan_push, push,
 };
 pub use recovery::{RecoveryPlan, Tail, plan_recovery_bootstrap};
 pub use verify::{
-    CitedCounts, Twin, check_fetched, check_fetched_fraud, check_withholding, resolve_twin,
+    CitedCounts, Twin, check_fetched, check_fetched_as, check_fetched_fraud, check_withholding,
+    resolve_twin,
 };
 
 use deadbolt_core::DeviceId;
@@ -98,4 +103,8 @@ pub enum RemoteAnomaly {
     /// The object under `name` is not what its name says: it fails to
     /// verify, is truncated, or names another vault, author, kind or `seq`.
     Mismatched { name: String, reason: &'static str },
+    /// This device's own stream on the store moved without it: a backup
+    /// restore, or a second device sharing its keys. Never accept or build on
+    /// the store's frames there.
+    SelfRollback(SelfRollback),
 }

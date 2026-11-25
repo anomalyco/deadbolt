@@ -4,6 +4,14 @@
 //! clock transitively over the frames it names (see `causal`), and applies the ops of frames
 //! the resolved membership counts. A frame naming a frame the fold cannot resolve waits.
 //! Register merges are order-independent, so delivery order never matters.
+//!
+//! Two rules keep every peer's fold identical however much of a misbehaving stream it holds:
+//! - A forked stream is cut at its lowest known fork seq (a fraud proof or two held frames at
+//!   one seq), and a frame naming that stream at or above the cut names only what lies below
+//!   it, since nothing valid will ever arrive there.
+//! - A frame sealed under an epoch the membership does not authorize counts for nobody and
+//!   names nothing, so a reader that cannot open it folds [`DataFrame::unreadable`] in its
+//!   place and still chains the author's later frames.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,10 +35,13 @@ pub struct FoldContext<'a> {
 }
 
 impl FoldContext<'_> {
-    /// True iff the membership counts this data-log frame.
+    /// True iff the membership counts this data-log frame: its author at its seq, and the
+    /// epoch it was sealed under.
     pub fn counts(&self, frame: &DataFrame) -> bool {
-        self.membership
-            .counts_data(&frame.author, frame.seq, frame.body.mheads())
+        self.membership.is_authorized_epoch(&frame.epoch)
+            && self
+                .membership
+                .counts_data(&frame.author, frame.seq, frame.body.mheads())
     }
 
     /// A `DeviceCard` for `device` is valid from `device` itself or from its adder.
@@ -120,8 +131,12 @@ fn starts_of(meta: &PackMeta) -> BTreeMap<DeviceId, Start> {
 }
 
 /// The `(author, count)` streams a frame claims to have seen: a `Data` frame's `dclock`, or a
-/// `Checkpoint` frame's frontier.
-fn refs(f: &DataFrame) -> Vec<(DeviceId, u64)> {
+/// `Checkpoint` frame's frontier. A frame under an unauthorized epoch names nothing, so its
+/// author's readers and non-readers close it alike.
+fn refs(f: &DataFrame, membership: &ResolvedMembership) -> Vec<(DeviceId, u64)> {
+    if !membership.is_authorized_epoch(&f.epoch) {
+        return Vec::new();
+    }
     match &f.body {
         DataBody::Data(p) => p.dclock.entries().to_vec(),
         DataBody::Checkpoint(c) => c
@@ -132,9 +147,19 @@ fn refs(f: &DataFrame) -> Vec<(DeviceId, u64)> {
     }
 }
 
+/// What [`close`] needs besides the frame: where every stream starts, where forked streams are
+/// cut, and the membership judging epochs.
+struct Scope<'a> {
+    starts: &'a BTreeMap<DeviceId, Start>,
+    cuts: &'a BTreeMap<DeviceId, u64>,
+    membership: &'a ResolvedMembership,
+}
+
 /// `f`'s closure, or `None` while some frame it names is neither compacted nor resolved (a
-/// gap, a forged future count, or a cycle back through `f`).
-fn close(f: &DataFrame, starts: &BTreeMap<DeviceId, Start>, done: &Chains<'_>) -> Option<Closure> {
+/// gap, a forged future count, or a cycle back through `f`). A count naming a forked stream at
+/// or above its cut is clamped to the cut.
+fn close(f: &DataFrame, scope: &Scope<'_>, done: &Chains<'_>) -> Option<Closure> {
+    let starts = scope.starts;
     let mut closure = match done.get(&f.author).and_then(|c| c.last()) {
         Some((_, c)) => c.clone(),
         None => starts
@@ -142,7 +167,12 @@ fn close(f: &DataFrame, starts: &BTreeMap<DeviceId, Start>, done: &Chains<'_>) -
             .map(|s| s.closure.clone())
             .unwrap_or_default(),
     };
-    for (author, count) in refs(f) {
+    for (author, count) in refs(f, scope.membership) {
+        let cut = scope.cuts.get(&author).copied();
+        if cut == Some(0) {
+            continue;
+        }
+        let count = cut.map_or(count, |cut| count.min(cut));
         let seq = count.checked_sub(1)?;
         closure.clock.raise(author, count);
         let start = starts.get(&author);
@@ -167,13 +197,16 @@ fn close(f: &DataFrame, starts: &BTreeMap<DeviceId, Start>, done: &Chains<'_>) -
 
 /// Per author, the gap-free, fork-free `prev` chain from its start, each frame with its causal
 /// closure, cut at the first frame that cannot be resolved yet. Frames at or below an author's
-/// start are skipped; two different frames at one seq end the chain there (the fraud filter
-/// removes forked streams anyway).
+/// start are skipped. A stream is cut at its lowest known fork: the membership's
+/// `data_fork_seq` (a fraud proof) or two different held frames at one seq. A peer holding one
+/// sibling and the proof and a peer holding both siblings therefore fold alike.
 fn chains<'f>(
+    membership: &ResolvedMembership,
     frames: impl IntoIterator<Item = &'f DataFrame>,
     starts: &BTreeMap<DeviceId, Start>,
 ) -> Chains<'f> {
     let mut by_author: BTreeMap<DeviceId, BTreeMap<u64, Option<&'f DataFrame>>> = BTreeMap::new();
+    let mut cuts = membership.data_fork_seq.clone();
     for f in frames {
         if f.seq < starts.get(&f.author).map_or(0, |s| s.next) {
             continue;
@@ -185,6 +218,8 @@ fn chains<'f>(
             .or_insert(Some(f));
         if slot.is_some_and(|g| g.id != f.id) {
             *slot = None;
+            let cut = cuts.entry(f.author).or_insert(f.seq);
+            *cut = (*cut).min(f.seq);
         }
     }
     let empty = Start::default();
@@ -193,8 +228,11 @@ fn chains<'f>(
         .map(|(author, seqs)| {
             let start = starts.get(&author).unwrap_or(&empty);
             let (mut seq, mut prev) = (start.next, start.prev);
+            let cut = cuts.get(&author).copied().unwrap_or(u64::MAX);
             let mut chain = Vec::new();
-            while let Some(Some(f)) = seqs.get(&seq) {
+            while seq < cut
+                && let Some(Some(f)) = seqs.get(&seq)
+            {
                 if f.prev != prev {
                     break;
                 }
@@ -205,12 +243,17 @@ fn chains<'f>(
             (author, chain)
         })
         .collect();
+    let scope = Scope {
+        starts,
+        cuts: &cuts,
+        membership,
+    };
     let mut done: Chains<'f> = raw.keys().map(|a| (*a, Vec::new())).collect();
     loop {
         let mut progress = false;
         for (author, chain) in &raw {
             while let Some(&f) = chain.get(done[author].len()) {
-                let Some(closure) = close(f, starts, &done) else {
+                let Some(closure) = close(f, &scope, &done) else {
                     break;
                 };
                 if let Some(c) = done.get_mut(author) {
@@ -248,7 +291,7 @@ pub fn fold_from_scratch<'f>(
     ctx: &FoldContext<'_>,
     frames: impl IntoIterator<Item = &'f DataFrame>,
 ) -> FoldedState {
-    let chains = chains(frames, &BTreeMap::new());
+    let chains = chains(ctx.membership, frames, &BTreeMap::new());
     let mut state = FoldedState::default();
     let seen_by = SeenBy::new();
     apply_chains(ctx, &mut state, &mut Book::new(&seen_by), &chains);
@@ -262,7 +305,7 @@ pub(crate) fn fold_subset<'f>(
     frames: impl IntoIterator<Item = &'f DataFrame>,
     apply: &BTreeSet<FrameId>,
 ) -> Option<FoldedState> {
-    let mut chains = chains(frames, &BTreeMap::new());
+    let mut chains = chains(ctx.membership, frames, &BTreeMap::new());
     let resolved = chains
         .values()
         .flatten()
@@ -284,19 +327,57 @@ pub(crate) fn fold_subset<'f>(
     Some(state)
 }
 
-/// Fails if the membership no longer counts what the checkpoint covered, or a covered
-/// `DeviceCard` would now be judged against a different adder.
-pub fn check_still_valid(ctx: &FoldContext<'_>, meta: &PackMeta) -> Result<(), CheckpointError> {
+/// This device's own `Data` frames that count for nobody only because of their epoch: sealed
+/// under an epoch the membership does not (or no longer) authorize, such as the epoch of a
+/// `Remove` that lost its conflict or of a rotation a root fork voided, while the membership
+/// still counts `me` at that seq. Their ops reach no one: re-emit them in new frames under the
+/// current clean write epoch. Ascending by seq.
+pub fn uncounted_own_frames<'f>(
+    ctx: &FoldContext<'_>,
+    me: &DeviceId,
+    frames: impl IntoIterator<Item = &'f DataFrame>,
+) -> Vec<&'f DataFrame> {
+    let m = ctx.membership;
+    let mut out: Vec<&DataFrame> = frames
+        .into_iter()
+        .filter(|f| f.author == *me && matches!(f.body, DataBody::Data(_)))
+        .filter(|f| !m.is_authorized_epoch(&f.epoch) && m.counts_data(me, f.seq, f.body.mheads()))
+        .collect();
+    out.sort_by_key(|f| (f.seq, f.id));
+    out.dedup_by_key(|f| f.id);
+    out
+}
+
+/// Fails if the membership no longer counts what a pack covered: a frontier frame (a later
+/// removal, fork or voided membership head) or an epoch a covered frame was sealed under.
+pub fn check_counts(
+    membership: &ResolvedMembership,
+    meta: &PackMeta,
+) -> Result<(), CheckpointError> {
     for (author, (seq, _)) in &meta.frontier {
         let heads: Vec<FrameId> = meta
             .mheads
             .get(author)
             .map(|h| h.iter().copied().collect())
             .unwrap_or_default();
-        if !ctx.membership.counts_data(author, *seq, &heads) {
+        if !membership.counts_data(author, *seq, &heads) {
             return Err(CheckpointError::Invalidated(*author));
         }
     }
+    if let Some(epoch) = meta
+        .epochs
+        .iter()
+        .find(|e| !membership.is_authorized_epoch(e))
+    {
+        return Err(CheckpointError::Deauthorized(*epoch));
+    }
+    Ok(())
+}
+
+/// Fails if the membership no longer counts what the checkpoint covered ([`check_counts`]), or
+/// a covered `DeviceCard` would now be judged against a different adder.
+pub fn check_still_valid(ctx: &FoldContext<'_>, meta: &PackMeta) -> Result<(), CheckpointError> {
+    check_counts(ctx.membership, meta)?;
     for (device, adder) in &meta.card_adders {
         if ctx.adders.get(device) != Some(adder) {
             return Err(CheckpointError::AdderChanged(*device));
@@ -314,7 +395,7 @@ pub fn fold_from_checkpoint<'f>(
 ) -> Result<FoldedState, CheckpointError> {
     pack.meta.validate(&pack.state)?;
     check_still_valid(ctx, &pack.meta)?;
-    let chains = chains(tail, &starts_of(&pack.meta));
+    let chains = chains(ctx.membership, tail, &starts_of(&pack.meta));
     let mut state = pack.state.clone();
     apply_chains(ctx, &mut state, &mut Book::new(&pack.meta.seen_by), &chains);
     Ok(state)
@@ -336,7 +417,7 @@ pub fn compact<'f>(
         }
         None => (FoldedState::default(), PackMeta::default()),
     };
-    let resolved = chains(view, &starts_of(&meta));
+    let resolved = chains(ctx.membership, view, &starts_of(&meta));
     let mut chains = resolved.clone();
     for chain in chains.values_mut() {
         let keep = chain
@@ -359,6 +440,7 @@ pub fn compact<'f>(
         };
         meta.frontier.insert(*author, (last.seq, last.id));
         meta.stream_clocks.insert(*author, closure.clock.clone());
+        meta.epochs.extend(chain.iter().map(|(f, _)| f.epoch));
         let heads = meta.mheads.entry(*author).or_default();
         for (f, _) in chain {
             heads.extend(f.body.mheads().iter().copied());

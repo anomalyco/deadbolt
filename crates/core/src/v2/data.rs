@@ -357,6 +357,31 @@ impl DataFrame {
         })
     }
 
+    /// A data-log frame by its header alone, for a reader that cannot open it: no ops, and it
+    /// names nothing. Fold it only in place of a frame whose epoch the membership does not
+    /// authorize: such a frame counts for nobody and the fold ignores what it names, so readers
+    /// and non-readers close it alike and the author's later frames still chain. A frame under
+    /// an authorized epoch must be opened.
+    pub fn unreadable(frame: &Frame) -> Result<Self, PayloadError> {
+        let hdr = frame.header();
+        if hdr.kind == FrameKind::Member {
+            return Err(PayloadError::WrongKind);
+        }
+        Ok(Self {
+            id: frame.id(),
+            author: hdr.author,
+            seq: hdr.seq,
+            prev: hdr.prev,
+            epoch: hdr.epoch,
+            body: DataBody::Data(DataPayload {
+                mheads: Vec::new(),
+                dclock: DeltaClock::default(),
+                timestamp_ms: 0,
+                ops: Vec::new(),
+            }),
+        })
+    }
+
     pub fn dot(&self) -> super::clock::Dot {
         super::clock::Dot {
             author: self.author,
@@ -386,7 +411,8 @@ impl DataFrame {
 /// Rule E7 (frontier honesty): the clock a device may claim, given every data frame it holds
 /// as `(author, seq, readable)`. A stream advances only through a gap-free prefix of frames
 /// that decrypted, were not disputed and that the fold resolved causally (pass `false` for a
-/// frame still waiting on a frame it names); an undecryptable frame stops its stream there.
+/// frame still waiting on a frame it names); an undecryptable frame stops its stream there,
+/// unless its epoch is unauthorized and it was folded as [`DataFrame::unreadable`].
 /// The result need not be causally closed: the fold closes every clock itself.
 pub fn honest_clock(observed: impl IntoIterator<Item = (DeviceId, u64, bool)>) -> VectorClock {
     let mut streams: BTreeMap<DeviceId, BTreeMap<u64, bool>> = BTreeMap::new();

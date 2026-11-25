@@ -12,6 +12,7 @@ mod order;
 mod revocation;
 mod scenarios;
 mod sim;
+mod tear;
 mod wraps;
 
 use std::collections::{BTreeMap, BTreeSet};

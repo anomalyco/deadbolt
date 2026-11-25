@@ -11,7 +11,7 @@ use crate::id::{DeviceId, ItemId};
 
 use super::causal::SeenBy;
 use super::clock::{Dot, VectorClock};
-use super::crypto::FrameId;
+use super::crypto::{EpochId, FrameId};
 use super::state::{FoldedState, Tombstone};
 use super::wire::{PayloadError, Reader, Writer, ascending};
 
@@ -34,6 +34,9 @@ pub struct PackMeta {
     pub mheads: BTreeMap<DeviceId, BTreeSet<FrameId>>,
     /// Adder used to judge each third-party `DeviceCard` the fold covered.
     pub card_adders: BTreeMap<DeviceId, DeviceId>,
+    /// Every epoch a covered frame was sealed under. One the membership stops authorizing
+    /// invalidates this checkpoint, as a fold from genesis would stop counting its frames.
+    pub epochs: BTreeSet<EpochId>,
     /// For each standing dot and each tail frame a compacted frame saw, the lowest compacted
     /// seq per author whose closure saw it, so a late frame naming a compacted frame is judged
     /// exactly as a fold from genesis would.
@@ -124,6 +127,10 @@ impl PackMeta {
                 w.u64(*at);
             }
         }
+        w.count(self.epochs.len(), "epochs")?;
+        for epoch in &self.epochs {
+            w.frame_id(&epoch.as_frame_id());
+        }
         Ok(())
     }
 
@@ -183,6 +190,12 @@ impl PackMeta {
                 thresholds.insert(by, r.u64()?);
             }
             meta.seen_by.insert(key, thresholds);
+        }
+        let n = r.count(32, "epochs")?;
+        for _ in 0..n {
+            let epoch = EpochId::from_frame_id(r.frame_id()?);
+            ascending(meta.epochs.last(), &epoch, "epochs")?;
+            meta.epochs.insert(epoch);
         }
         Ok(meta)
     }

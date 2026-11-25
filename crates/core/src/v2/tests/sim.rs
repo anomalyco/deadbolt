@@ -33,6 +33,8 @@ pub(super) fn adders(n: usize) -> BTreeMap<DeviceId, DeviceId> {
 pub(super) fn membership(n: usize, removed: Option<(usize, Option<u64>)>) -> ResolvedMembership {
     let mut m = ResolvedMembership::default();
     m.devices = (0..n).map(dev).collect();
+    // The sim seals every frame under `EpochId::ZERO`, an authorized epoch.
+    m.authorized_frames.insert(EpochId::ZERO.as_frame_id());
     m.active_recovery = Some(root());
     if let Some((victim, last_seen)) = removed {
         m.devices.remove(&dev(victim));

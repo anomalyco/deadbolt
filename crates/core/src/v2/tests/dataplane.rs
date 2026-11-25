@@ -428,11 +428,13 @@ fn gc_checkpoint(
         author: dev(author),
         seq,
         first_seen_ms: timestamp_ms,
-        frontier: frontier
-            .iter()
-            .map(|&(d, s)| (dev(d), (s, FrameId::ZERO)))
-            .collect(),
-        tombstones: BTreeMap::new(),
+        meta: PackMeta {
+            frontier: frontier
+                .iter()
+                .map(|&(d, s)| (dev(d), (s, FrameId::ZERO)))
+                .collect(),
+            ..PackMeta::default()
+        },
     }
 }
 
@@ -445,7 +447,8 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
     assert!(should_checkpoint(CHECKPOINT_TRIGGER_BYTES, 0));
     assert!(should_checkpoint(0, CHECKPOINT_TRIGGER_FRAMES));
 
-    let members: BTreeSet<DeviceId> = [dev(0), dev(1), dev(2)].into();
+    let current = membership(3, None);
+    let members = &current.devices;
     let now = 100 * DAY_MS;
     let mut c = gc_checkpoint(0, 5, now - DAY_MS, &[(0, 4), (1, 2)]);
     let tomb = Tombstone {
@@ -456,7 +459,7 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
         },
         at_ms: 1,
     };
-    c.tombstones.insert(item(0), tomb);
+    c.meta.tombstones.insert(item(0), tomb);
     let frames: Vec<GcFrame> = [(0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (2, 0)]
         .iter()
         .map(|&(d, s)| GcFrame {
@@ -472,11 +475,12 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
 
     let plan = plan_gc(
         now,
-        &members,
+        &current,
         &clocks,
         std::slice::from_ref(&c),
         &none,
         &frames,
+        &BTreeMap::new(),
     );
     assert_eq!(plan.eligible[&c.id], Eligibility::Covered);
     assert_eq!(plan.base, Some(c.id));
@@ -498,21 +502,23 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
     clocks.insert(dev(2), VectorClock::new());
     let plan = plan_gc(
         now,
-        &members,
+        &current,
         &clocks,
         std::slice::from_ref(&c),
         &none,
         &frames,
+        &BTreeMap::new(),
     );
     assert!(plan.eligible.is_empty() && plan.delete_frames.is_empty());
     let later = c.first_seen_ms + GC_GRACE_MS;
     let plan = plan_gc(
         later,
-        &members,
+        &current,
         &clocks,
         std::slice::from_ref(&c),
         &none,
         &frames,
+        &BTreeMap::new(),
     );
     assert_eq!(plan.eligible[&c.id], Eligibility::Grace);
     assert_eq!(plan.expired_tombstones[&item(0)], tomb);
@@ -526,21 +532,23 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
     let disputes: BTreeSet<DisputeRecord> = [dispute(dev(1))].into();
     let plan = plan_gc(
         later * 10,
-        &members,
+        &current,
         &clocks,
         std::slice::from_ref(&c),
         &disputes,
         &frames,
+        &BTreeMap::new(),
     );
     assert!(plan.disputed.contains(&c.id) && plan.eligible.is_empty() && plan.base.is_none());
     let outsider: BTreeSet<DisputeRecord> = [dispute(dev(9))].into();
     let plan = plan_gc(
         later,
-        &members,
+        &current,
         &clocks,
         std::slice::from_ref(&c),
         &outsider,
         &frames,
+        &BTreeMap::new(),
     );
     assert_eq!(plan.base, Some(c.id));
 
@@ -549,11 +557,12 @@ fn gc_needs_full_coverage_or_thirty_days_and_never_a_dispute() {
     let both = [c.clone(), newer.clone()];
     let plan = plan_gc(
         later + GC_GRACE_MS,
-        &members,
+        &current,
         &clocks,
         &both,
         &none,
         &frames,
+        &BTreeMap::new(),
     );
     assert_eq!(plan.base, Some(newer.id));
     assert_eq!(plan.delete_frames.len(), 5);

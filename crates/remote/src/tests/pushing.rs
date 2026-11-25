@@ -8,7 +8,7 @@ use deadbolt_core::v2::{FrameKind, LogKind};
 use super::fixture::{data_chain, data_frame, device, fraud, genesis, vault as other_vault};
 use crate::path::RemotePath;
 use crate::{
-    FaultyObjStore, Outbox, PushStop, RemoteAnomaly, RemoteError, SelfRollback, SyncAnchor,
+    FaultyObjStore, Outbox, RemoteAnomaly, RemoteError, SelfRollback, SyncAnchor,
     check_self_rollback, plan_push, push,
 };
 
@@ -105,10 +105,10 @@ async fn an_own_name_holding_another_vaults_or_kinds_frame_is_mismatched() {
         let report = push(&store, &plan).await.unwrap();
         assert_eq!(
             report.stopped,
-            Some(PushStop::Anomaly(RemoteAnomaly::Mismatched {
+            Some(RemoteAnomaly::Mismatched {
                 name: name.clone(),
                 reason: "frame header disagrees with its name",
-            }))
+            })
         );
     }
 }
@@ -140,7 +140,7 @@ async fn a_restore_with_unpushed_edits_is_caught_against_the_acknowledged_tip() 
         .unwrap();
     assert_eq!(
         found,
-        [SelfRollback {
+        [RemoteAnomaly::SelfRollback(SelfRollback {
             log: LogKind::Data,
             remote_ahead: [
                 (3, FrameKind::Data),
@@ -150,7 +150,7 @@ async fn a_restore_with_unpushed_edits_is_caught_against_the_acknowledged_tip() 
             .map(|(seq, kind)| RemotePath::frame(vault, kind, me, seq))
             .to_vec(),
             conflicting: None,
-        }],
+        })],
         "the local tip (6) would have listed nothing above it"
     );
 }

@@ -11,6 +11,7 @@ mod recovery;
 #[cfg(feature = "http")]
 mod s3_http;
 mod send;
+mod sessions;
 mod sigv4;
 mod store;
 #[cfg(feature = "http")]

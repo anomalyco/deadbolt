@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use deadbolt_core::v2::{Frame, FrameId, FraudProof, LogKind};
 use deadbolt_core::{DeviceId, VaultId};
 
-use super::{RemoteAnomaly, SyncAnchor};
+use super::{Observed, RemoteAnomaly, SyncAnchor, confirm_missing};
 use crate::error::RemoteError;
 use crate::path::{RemotePath, hex, stream_cursor, stream_prefix};
 use crate::store::{ObjStore, PutOutcome};
@@ -127,23 +127,13 @@ pub fn plan_push(vault: &VaultId, outbox: Outbox) -> Result<PushPlan, RemoteErro
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfRollback {
     pub log: LogKind,
-    /// Own frames the store lists above the acknowledged tip, `<seq>` and
-    /// `<seq>.c` kept apart. GET them: those equal to local frames only
-    /// advance the anchor; import the rest, then re-sign unpushed local
-    /// edits above them.
+    /// Own frames the store holds above the acknowledged tip that the local
+    /// replica lacks, `<seq>` and `<seq>.c` kept apart. GET them: those equal
+    /// to local frames only advance the anchor; import the rest, then re-sign
+    /// unpushed local edits above them.
     pub remote_ahead: Vec<RemotePath>,
     /// The own name where the store holds another frame than the local one.
     pub conflicting: Option<RemotePath>,
-}
-
-/// Why a push stopped before its last step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PushStop {
-    /// An own name already holds a different valid frame.
-    SelfRollback(SelfRollback),
-    /// An own name holds something that is not the frame its name says, or
-    /// vanished between a 412 and the GET.
-    Anomaly(RemoteAnomaly),
 }
 
 /// What a push did.
@@ -156,8 +146,12 @@ pub struct PushReport {
     /// Content-addressed names that held other bytes (a torn upload or
     /// planted garbage) and were overwritten with the verified content.
     pub repaired: usize,
-    /// Set when the push stopped early; later steps were not attempted.
-    pub stopped: Option<PushStop>,
+    /// Set when the push stopped early; later steps were not attempted:
+    /// [`RemoteAnomaly::SelfRollback`] when an own name already holds a
+    /// different valid frame, [`RemoteAnomaly::Mismatched`] when it holds
+    /// something that is not the frame its name says or vanished between a
+    /// 412 and the GET.
+    pub stopped: Option<RemoteAnomaly>,
 }
 
 /// Runs a plan in order. A transport error returns `Err` with the steps
@@ -198,12 +192,12 @@ async fn judge_existing<S: ObjStore>(
     store: &S,
     step: &PushStep,
     name: &str,
-) -> Result<Option<PushStop>, RemoteError> {
+) -> Result<Option<RemoteAnomaly>, RemoteError> {
     let anomaly = |reason| {
-        Some(PushStop::Anomaly(RemoteAnomaly::Mismatched {
+        Some(RemoteAnomaly::Mismatched {
             name: name.to_owned(),
             reason,
-        }))
+        })
     };
     let Some(existing) = store.get(name, None).await? else {
         return Ok(anomaly("create-only PUT refused but GET finds nothing"));
@@ -230,7 +224,7 @@ async fn judge_existing<S: ObjStore>(
     if Some(remote.id()) == step.frame_id {
         return Ok(None);
     }
-    Ok(Some(PushStop::SelfRollback(SelfRollback {
+    Ok(Some(RemoteAnomaly::SelfRollback(SelfRollback {
         log: kind.log_kind(),
         remote_ahead: Vec::new(),
         conflicting: Some(step.path),
@@ -238,30 +232,33 @@ async fn judge_existing<S: ObjStore>(
 }
 
 /// Lists this device's own streams before its first push of a session,
-/// above the tips the store last acknowledged (the anchor's own entries,
-/// never the local tip: unpushed local edits must not hide a restore). Any
-/// own frame there means the device was restored from an older state, or
-/// its keys are in use elsewhere. Catch it before pushing, since a WebDAV
-/// server that ignores `If-None-Match` would let a push overwrite it.
+/// from the tips the store last acknowledged (the anchor's own entries,
+/// never the local tip: unpushed local edits must not hide a restore).
+///
+/// - Any own frame above the acknowledged tip is
+///   [`RemoteAnomaly::SelfRollback`]: the device was restored from an older
+///   state, or its keys are in use elsewhere. Catch it before pushing, since a
+///   WebDAV server that ignores `If-None-Match` would let a push overwrite it.
+/// - The acknowledged tip itself missing (and not collectable behind an
+///   adopted checkpoint) is [`RemoteAnomaly::RemoteRegressed`], once a direct
+///   GET agrees: listing only above it would let the next push land on a
+///   stream the store had wiped.
 pub async fn check_self_rollback<S: ObjStore>(
     store: &S,
     vault: &VaultId,
     me: &DeviceId,
     anchor: &SyncAnchor,
-) -> Result<Vec<SelfRollback>, RemoteError> {
+) -> Result<Vec<RemoteAnomaly>, RemoteError> {
     let mut found = Vec::new();
+    let mut missing = Vec::new();
     for log in [LogKind::Member, LogKind::Data] {
-        let Some(from) = anchor
-            .tip(log, me)
-            .map_or(Some(0), |(seq, _)| seq.checked_add(1))
-        else {
-            continue;
-        };
+        let tip = anchor.tip(log, me);
+        let from = tip.map_or(0, |(seq, _)| seq);
         let after = stream_cursor(vault, log, me, from);
         let names = store
             .list(&stream_prefix(vault, log, me), after.as_deref())
             .await?;
-        let remote_ahead: Vec<RemotePath> = names
+        let listed: Vec<(u64, RemotePath)> = names
             .iter()
             .filter_map(|name| match RemotePath::parse(name) {
                 Ok(
@@ -272,18 +269,38 @@ pub async fn check_self_rollback<S: ObjStore>(
                         seq,
                     },
                 ) if v == *vault && author == *me && kind.log_kind() == log && seq >= from => {
-                    Some(path)
+                    Some((seq, path))
                 }
                 _ => None,
             })
             .collect();
+        if let Some((seq, id)) = tip
+            && !listed.iter().any(|(s, _)| *s == seq)
+            && !anchor.may_be_gone(log, me, seq)
+        {
+            missing.push(RemoteAnomaly::RemoteRegressed {
+                log,
+                author: *me,
+                expected_seq: seq,
+                expected_id: id,
+                observed: Observed::Missing {
+                    max_seq: listed.iter().map(|(s, _)| *s).max(),
+                },
+            });
+        }
+        let remote_ahead: Vec<RemotePath> = listed
+            .into_iter()
+            .filter(|(seq, _)| tip.is_none_or(|(t, _)| *seq > t))
+            .map(|(_, path)| path)
+            .collect();
         if !remote_ahead.is_empty() {
-            found.push(SelfRollback {
+            found.push(RemoteAnomaly::SelfRollback(SelfRollback {
                 log,
                 remote_ahead,
                 conflicting: None,
-            });
+            }));
         }
     }
+    found.extend(confirm_missing(store, vault, missing).await?);
     Ok(found)
 }

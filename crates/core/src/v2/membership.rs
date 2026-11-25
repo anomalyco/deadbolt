@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{DeviceId, VaultId};
 
-use super::crypto::{FrameId, KemPublic};
+use super::crypto::{EpochId, FrameId, KemPublic};
 use super::dag::{DagNode, build_dag};
 use super::frame::{Frame, FrameKind, LogKind, MemberOp};
 pub use super::fraud::{
@@ -88,6 +88,14 @@ impl ResolvedMembership {
                 .flatten()
                 .map(|cutoff| cutoff.min(last))
         }
+    }
+
+    /// True iff `epoch` was minted by an authorized `Member` frame. Counted data must be sealed
+    /// under one: reader duty rewraps only authorized epochs, so data under any other epoch (a
+    /// `Remove` that lost its conflict, a rotation a root fork voided) could stay unreadable to a
+    /// member forever.
+    pub fn is_authorized_epoch(&self, epoch: &EpochId) -> bool {
+        self.authorized_frames.contains(&epoch.as_frame_id())
     }
 
     /// True iff a data frame by `author` at `seq` with membership view `mheads` counts.
