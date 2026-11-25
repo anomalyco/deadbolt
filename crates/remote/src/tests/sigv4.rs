@@ -341,4 +341,55 @@ fn bad_configs_are_refused() {
     assert!(S3Config::new("https://x", "abc", "us east", "", Addressing::Path, c()).is_err());
     assert!(S3Config::new("https://x", "abc", "auto", "../up", Addressing::Path, c()).is_err());
     assert!(S3Config::new("https://x", "abc", "auto", "/ok/", Addressing::Path, c()).is_ok());
+    // A password with no user is still a credential in the URL.
+    assert!(S3Config::new("https://:p@x", "abc", "auto", "", Addressing::Path, c()).is_err());
+    let vhost = |endpoint: &str, bucket: &str| {
+        S3Config::new(endpoint, bucket, "auto", "", Addressing::VirtualHost, c())
+    };
+    assert!(vhost("https://127.0.0.1:9000", "abc").is_err());
+    assert!(vhost("http://[::1]:9000", "abc").is_err());
+    assert!(vhost("https://s3.example.com", "my.bucket").is_err());
+    assert!(vhost("http://s3.example.com", "my.bucket").is_ok());
+    assert!(vhost("https://s3.example.com", "my-bucket").is_ok());
+}
+
+#[test]
+fn whole_keys_stay_within_s3s_limit() {
+    let root = "r".repeat(511);
+    let config = S3Config::new(
+        "https://x.example",
+        "abc",
+        "auto",
+        &root,
+        Addressing::Path,
+        s3_example_credentials(),
+    )
+    .unwrap();
+    let fits = "n".repeat(512);
+    assert!(
+        config.sign_put(&fits, b"", true, 0).is_ok(),
+        "511 + 1 + 512 = 1024"
+    );
+    let root = "r".repeat(512);
+    let config = S3Config::new(
+        "https://x.example",
+        "abc",
+        "auto",
+        &root,
+        Addressing::Path,
+        s3_example_credentials(),
+    )
+    .unwrap();
+    assert!(matches!(
+        config.sign_put(&fits, b"", true, 0),
+        Err(crate::RemoteError::Config(_))
+    ));
+    assert!(config.sign_get(&fits, None, 0).is_err());
+    assert!(config.sign_delete(&fits, 0).is_err());
+    assert!(config.presign_get(&fits, 0, 60).is_err());
+    assert!(
+        config
+            .sign_list(&format!("{}/", "n".repeat(511)), None, None, 0)
+            .is_err()
+    );
 }

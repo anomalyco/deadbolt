@@ -1,6 +1,7 @@
 //! S3 `ListObjectsV2` and WebDAV `PROPFIND` parsing against replies shaped
 //! like real servers'.
 
+use crate::RemoteError;
 use crate::s3::parse_list_objects_v2;
 use crate::webdav::{DavAuth, DavEntry, WebDavConfig, parent_dirs, parse_multistatus};
 
@@ -65,7 +66,7 @@ fn s3_list_refuses_errors_loops_and_garbage() {
 
 fn entry(href: &str, is_collection: bool) -> DavEntry {
     DavEntry {
-        href: href.to_owned(),
+        hrefs: vec![href.to_owned()],
         is_collection,
     }
 }
@@ -111,7 +112,7 @@ fn nextcloud_multistatus() {
     .unwrap();
     let names: Vec<Option<String>> = entries
         .iter()
-        .map(|e| config.name_of_href(&e.href))
+        .map(|e| config.name_of_href(&e.hrefs[0]))
         .collect();
     assert_eq!(
         names,
@@ -139,10 +140,14 @@ fn fastmail_absolute_hrefs_with_uppercase_prefix() {
     let config =
         WebDavConfig::new("https://myfiles.fastmail.com/deadbolt/", DavAuth::None).unwrap();
     assert_eq!(
-        config.name_of_href(&entries[1].href).as_deref(),
+        config.name_of_href(&entries[1].hrefs[0]).as_deref(),
         Some("abc/0000000000000001")
     );
-    assert_eq!(config.name_of_href(&entries[2].href), None, "other host");
+    assert_eq!(
+        config.name_of_href(&entries[2].hrefs[0]),
+        None,
+        "other host"
+    );
 }
 
 #[test]
@@ -173,7 +178,7 @@ fn sabredav_apache_and_nginx_namespace_styles() {
     let names: Vec<_> = parse_multistatus(nginx)
         .unwrap()
         .iter()
-        .map(|e| config.name_of_href(&e.href))
+        .map(|e| config.name_of_href(&e.hrefs[0]))
         .collect();
     assert_eq!(names, [Some(String::new()), Some("sub/".to_owned())]);
     assert_eq!(
@@ -222,4 +227,96 @@ fn webdav_config_and_secrets() {
     assert!(WebDavConfig::new("ftp://h.example/dav", DavAuth::None).is_err());
     assert_eq!(parent_dirs("a/b/c"), ["a/", "a/b/"]);
     assert!(parent_dirs("a").is_empty());
+}
+
+#[test]
+fn s3_list_keeps_token_whitespace_and_decodes_url_encoded_keys() {
+    let body = "<ListBucketResult><EncodingType>url</EncodingType>\
+                <IsTruncated>\n  true\n</IsTruncated>\
+                <NextContinuationToken> tok/en= </NextContinuationToken>\
+                <Contents><Key>v%2Fd%2Fa%25b</Key></Contents>\
+                <Contents><Key>v/d/c</Key></Contents></ListBucketResult>";
+    let page = parse_list_objects_v2(body).unwrap();
+    assert_eq!(page.keys, ["v/d/a%b", "v/d/c"]);
+    assert!(page.is_truncated);
+    assert_eq!(
+        page.next_continuation_token.as_deref(),
+        Some(" tok/en= "),
+        "a token is opaque: never trimmed or decoded"
+    );
+    // Without EncodingType the keys are raw.
+    let raw = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+               <Contents><Key>v%2Fd</Key></Contents></ListBucketResult>";
+    assert_eq!(parse_list_objects_v2(raw).unwrap().keys, ["v%2Fd"]);
+    let bad = "<ListBucketResult><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated>\
+               <Contents><Key>v%zz</Key></Contents></ListBucketResult>";
+    assert!(parse_list_objects_v2(bad).is_err());
+}
+
+const STATUSES: &str = r#"<d:multistatus xmlns:d="DAV:">
+<d:response><d:href>/dav/</d:href>
+ <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+<d:response><d:href>/dav/gone/</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>
+<d:response><d:href>/dav/a</d:href><d:href>/dav/b</d:href><d:status>HTTP/1.1 200 OK</d:status></d:response>
+<d:response><d:href>/dav/notdir</d:href>
+ <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>
+ <d:propstat><d:prop><d:getetag>x</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+</d:multistatus>"#;
+
+#[test]
+fn multistatus_honours_response_and_propstat_status() {
+    let entries = parse_multistatus(STATUSES).unwrap();
+    assert_eq!(
+        entries,
+        [
+            entry("/dav/", true),
+            DavEntry {
+                hrefs: vec!["/dav/a".to_owned(), "/dav/b".to_owned()],
+                is_collection: false,
+            },
+            entry("/dav/notdir", false),
+        ],
+        "404 response skipped, both hrefs kept, collection only from a 2xx propstat"
+    );
+    for (status, code) in [
+        ("403 Forbidden", 403),
+        ("401 Unauthorized", 401),
+        ("503 Busy", 503),
+    ] {
+        let body = format!(
+            r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/x</d:href>
+<d:status>HTTP/1.1 {status}</d:status></d:response></d:multistatus>"#
+        );
+        assert!(
+            matches!(
+                parse_multistatus(&body),
+                Err(RemoteError::Status { status, .. }) if status == code
+            ),
+            "{status}"
+        );
+    }
+    let garbled = r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/x</d:href>
+<d:status>nonsense</d:status></d:response></d:multistatus>"#;
+    assert!(parse_multistatus(garbled).is_err());
+}
+
+#[test]
+fn href_schemes_ports_and_slashes() {
+    let config = WebDavConfig::new("https://h.example/base/", DavAuth::None).unwrap();
+    assert_eq!(
+        config.name_of_href("HTTPS://H.example/base/x").as_deref(),
+        Some("x")
+    );
+    assert_eq!(
+        config
+            .name_of_href("https://h.example:443/base/x")
+            .as_deref(),
+        Some("x")
+    );
+    assert_eq!(config.name_of_href("https://h.example:8443/base/x"), None);
+    assert_eq!(config.name_of_href("http://h.example/base/x"), None);
+    assert_eq!(config.name_of_href("/base/a/").as_deref(), Some("a/"));
+    assert_eq!(config.name_of_href("/base/a//"), None);
+    assert_eq!(config.name_of_href("/base/a///"), None);
+    assert_eq!(config.name_of_href(" /base/x\n").as_deref(), Some("x"));
 }

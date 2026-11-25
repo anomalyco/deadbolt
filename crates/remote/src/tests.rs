@@ -1,8 +1,12 @@
 mod fixture;
 #[cfg(feature = "http")]
+mod limits;
+#[cfg(feature = "http")]
 mod mock_http;
 mod path;
 mod planner;
+mod pulling;
+mod pushing;
 mod recovery;
 #[cfg(feature = "http")]
 mod s3_http;

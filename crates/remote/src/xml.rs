@@ -11,7 +11,9 @@ use crate::error::RemoteError;
 const MAX_DEPTH: usize = 32;
 
 /// Calls `on_close(path, text)` as each element closes; `path` ends with the
-/// element's own local name and `text` is its trimmed direct text.
+/// element's own local name and `text` is its exact direct text, untrimmed
+/// (a continuation token may carry whitespace); parsers trim the fields
+/// that tolerate it.
 pub(crate) fn walk(
     xml: &str,
     mut on_close: impl FnMut(&[String], &str) -> Result<(), RemoteError>,
@@ -41,7 +43,7 @@ pub(crate) fn walk(
                     return Err(RemoteError::Protocol("mismatched XML end tag".into()));
                 }
                 let text = texts.pop().unwrap_or_default();
-                on_close(&path, text.trim())?;
+                on_close(&path, &text)?;
                 path.pop();
             }
             Event::Text(text) => {

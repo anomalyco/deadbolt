@@ -209,6 +209,9 @@ impl ObjStore for FaultyObjStore {
             after: after.map(str::to_owned),
         })?;
         validate_prefix(prefix)?;
+        if let Some(after) = after {
+            validate_prefix(after)?;
+        }
         let stale = self.faults().stale_list.clone();
         let names = match stale {
             Some(snapshot) => {

@@ -79,6 +79,10 @@ pub async fn contract<S: ObjStore>(store: &S) {
         store.list("../", None).await,
         Err(RemoteError::InvalidName(_))
     ));
+    assert!(matches!(
+        store.list("v/", Some("v/../a")).await,
+        Err(RemoteError::InvalidName(_))
+    ));
 }
 
 #[tokio::test]

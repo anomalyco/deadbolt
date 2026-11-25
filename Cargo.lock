@@ -1657,6 +1657,7 @@ dependencies = [
 name = "deadbolt-remote"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "deadbolt-core",
  "getrandom 0.4.3",
  "hmac",

@@ -1,15 +1,19 @@
 //! [`S3ObjStore`]: the S3 requests of [`S3Config`] sent with reqwest.
 
-use reqwest::{Client, Method};
+use std::collections::BTreeSet;
+
+use reqwest::{Client, Method, RequestBuilder};
 
 use super::{S3Config, SignedRequest, parse_list_objects_v2};
 use crate::error::RemoteError;
-use crate::http::{self, Reply, system_clock, unexpected};
+use crate::http::{self, LIST_BODY, system_clock, unexpected};
 use crate::path::validate_prefix;
 use crate::store::{ByteRange, ObjStore, PutOutcome, finish_listing};
 
 /// The most `ListObjectsV2` pages one `list` call follows (1,000 keys each).
 const MAX_LIST_PAGES: usize = 10_000;
+/// The most keys one `list` call collects.
+const MAX_LIST_KEYS: usize = 1_000_000;
 
 /// An S3, R2 or MinIO bucket as an [`ObjStore`].
 #[derive(Debug, Clone)]
@@ -42,13 +46,11 @@ impl S3ObjStore {
         &self.config
     }
 
-    async fn send(
+    fn request(
         &self,
         request: SignedRequest,
         body: Option<&[u8]>,
-        verb: &'static str,
-        name: &str,
-    ) -> Result<Reply, RemoteError> {
+    ) -> Result<RequestBuilder, RemoteError> {
         let method = Method::from_bytes(request.method.as_bytes())
             .map_err(|e| RemoteError::Config(e.to_string()))?;
         let mut builder = self.client.request(method, &request.url);
@@ -58,7 +60,7 @@ impl S3ObjStore {
         if let Some(body) = body {
             builder = builder.body(body.to_vec());
         }
-        http::send(builder, verb, name).await
+        Ok(builder)
     }
 }
 
@@ -72,8 +74,8 @@ impl ObjStore for S3ObjStore {
         let request = self
             .config
             .sign_put(name, bytes, create_only, (self.clock)())?;
-        let reply = self.send(request, Some(bytes), "PUT", name).await?;
-        match reply.status {
+        let status = http::status(self.request(request, Some(bytes))?, "PUT", name).await?;
+        match status {
             200 | 201 | 204 => Ok(PutOutcome::Created),
             412 if create_only => Ok(PutOutcome::AlreadyExists),
             status => Err(unexpected("PUT", name, status)),
@@ -86,29 +88,22 @@ impl ObjStore for S3ObjStore {
         range: Option<ByteRange>,
     ) -> Result<Option<Vec<u8>>, RemoteError> {
         let request = self.config.sign_get(name, range, (self.clock)())?;
-        let reply = self.send(request, None, "GET", name).await?;
-        match reply.status {
-            // A store that ignores Range sends the whole object.
-            200 => Ok(Some(match range {
-                Some(range) => range.slice(&reply.body).to_vec(),
-                None => reply.body,
-            })),
-            206 => Ok(Some(reply.body)),
-            404 => Ok(None),
-            416 => Ok(Some(Vec::new())),
-            status => Err(unexpected("GET", name, status)),
-        }
+        http::get(self.request(request, None)?, name, range).await
     }
 
     async fn list(&self, prefix: &str, after: Option<&str>) -> Result<Vec<String>, RemoteError> {
         validate_prefix(prefix)?;
+        if let Some(after) = after {
+            validate_prefix(after)?;
+        }
         let mut names = Vec::new();
         let mut token: Option<String> = None;
+        let mut seen_tokens = BTreeSet::new();
         for _ in 0..MAX_LIST_PAGES {
             let request = self
                 .config
                 .sign_list(prefix, after, token.as_deref(), (self.clock)())?;
-            let reply = self.send(request, None, "LIST", prefix).await?;
+            let reply = http::send(self.request(request, None)?, "LIST", prefix, LIST_BODY).await?;
             if reply.status != 200 {
                 return Err(unexpected("LIST", prefix, reply.status));
             }
@@ -119,13 +114,18 @@ impl ObjStore for S3ObjStore {
                 page.keys
                     .iter()
                     .filter_map(|key| self.config.name_of_key(key))
+                    // A `<root>/` or `dir/` placeholder is not an object.
+                    .filter(|name| !name.is_empty() && !name.ends_with('/'))
                     .map(str::to_owned),
             );
+            if names.len() > MAX_LIST_KEYS {
+                return Err(RemoteError::Protocol("listing has too many keys".into()));
+            }
             match page.next_continuation_token {
                 Some(next) if page.is_truncated => {
-                    if token.as_deref() == Some(next.as_str()) {
+                    if !seen_tokens.insert(next.clone()) {
                         return Err(RemoteError::Protocol(
-                            "listing token did not advance".into(),
+                            "listing continuation tokens loop".into(),
                         ));
                     }
                     token = Some(next);
@@ -138,8 +138,7 @@ impl ObjStore for S3ObjStore {
 
     async fn delete(&self, name: &str) -> Result<(), RemoteError> {
         let request = self.config.sign_delete(name, (self.clock)())?;
-        let reply = self.send(request, None, "DELETE", name).await?;
-        match reply.status {
+        match http::status(self.request(request, None)?, "DELETE", name).await? {
             200 | 202 | 204 | 404 => Ok(()),
             status => Err(unexpected("DELETE", name, status)),
         }

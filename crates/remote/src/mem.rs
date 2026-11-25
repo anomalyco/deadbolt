@@ -106,6 +106,9 @@ impl MemObjStore {
         after: Option<&str>,
     ) -> Result<Vec<String>, RemoteError> {
         validate_prefix(prefix)?;
+        if let Some(after) = after {
+            validate_prefix(after)?;
+        }
         Ok(list_from(&self.objects(), prefix, after))
     }
 
