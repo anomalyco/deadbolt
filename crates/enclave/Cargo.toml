@@ -1,0 +1,11 @@
+[package]
+name = "deadbolt-enclave"
+description = "The macOS Touch ID helper (deadbolt-enclave), built and pinned once for deadbolt and deadbolt-ui (docs/touch-id.md)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

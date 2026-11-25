@@ -1,15 +1,13 @@
-//! The `deadbolt` binary the app is built into, for the tests that run it:
-//! a real daemon (`support`), and the app itself as `deadbolt ui` headless.
+//! The binaries the tests run: the app itself, `deadbolt-ui`, headless, and
+//! `deadbolt` for a real daemon (`support`).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-/// `deadbolt ui`: the app in its own process, taking Rune's flags.
+/// `deadbolt-ui`: the app in its own process, taking Rune's flags.
 pub fn ui() -> Command {
-    let mut command = Command::new(deadbolt());
-    command.arg("ui");
-    command
+    Command::new(env!("CARGO_BIN_EXE_deadbolt-ui"))
 }
 
 /// `DEADBOLT_BIN`, else the `deadbolt` cargo already built next to this test

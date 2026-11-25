@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")/.."
 out=${1:-hold-down.mp4}
 [ $# -gt 0 ] && shift
-# The app is built into `deadbolt`, and runs in-process as `deadbolt ui`.
-bin=$(cargo build --release --quiet -p deadbolt-cli --features deadbolt-app/keys-overlay --message-format=json | sed -n 's/.*"executable":"\([^"]*\/deadbolt\)".*/\1/p' | tail -1)
-app() { "$bin" ui "$@"; }
+# The app is its own program, `deadbolt-ui`.
+bin=$(cargo build --release --quiet -p deadbolt-app --bin deadbolt-ui --features keys-overlay --message-format=json | sed -n 's/.*"executable":"\([^"]*\/deadbolt-ui\)".*/\1/p' | tail -1)
+app() { "$bin" "$@"; }
 app --scene vault-243 --script scripts/hold-down.json --keys --video "$out" "$@"

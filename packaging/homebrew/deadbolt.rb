@@ -28,6 +28,8 @@ class Deadbolt < Formula
     bin.install "deadbolt"
     # The Touch ID helper; the daemon runs it only from beside its own executable.
     bin.install "deadbolt-enclave" if OS.mac?
+    # The desktop app on Linux, which `deadbolt app` finds beside deadbolt.
+    bin.install "deadbolt-ui" if OS.linux?
   end
 
   test do

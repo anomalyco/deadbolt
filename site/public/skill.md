@@ -13,7 +13,7 @@ Deadbolt is a local-first, decentralized password manager written in Rust. Each 
 
 ### macOS & Linux install script
 
-Installs `deadbolt` to `~/.local/bin` (override with `DEADBOLT_INSTALL`) and verifies SHA-256 against the release manifest. On Linux with glibc 2.28+, it installs the binary with the built-in desktop app; on Alpine/musl or older glibc, it selects the static musl CLI build (override with `DEADBOLT_LIBC=gnu|musl`).
+Installs `deadbolt` to `~/.local/bin` (override with `DEADBOLT_INSTALL`) and verifies SHA-256 against the release manifest. On Linux with glibc 2.28+, it also installs the desktop app (`deadbolt-ui`) beside it; on Alpine/musl or older glibc, it selects the static musl CLI build (override with `DEADBOLT_LIBC=gnu|musl`).
 
 ```sh
 # Latest dev build (current alpha)
@@ -25,7 +25,7 @@ curl -fsSL https://deadbolt.pw/install | sh
 
 ### bun / npm (Node 18+)
 
-On macOS this also brings `Deadbolt.app` (`deadbolt app` opens it and links it into `~/Applications`).
+Installs the CLI and daemon (and on glibc Linux the desktop app beside it). On macOS the app is `Deadbolt.app` (the cask or DMG), which `deadbolt app` opens.
 
 ```sh
 bun add -g @deadbolt/cli@dev

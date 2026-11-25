@@ -611,9 +611,11 @@ fn a_new_device_join_needs_a_passphrase_source() {
     assert!(out.status.success());
 }
 
-/// `deadbolt app` with a stand-in for the app it starts (`deadbolt ui`) that
-/// records each start and the token it was given. The app's window is a
-/// watcher with `app` set. The first opening adds the desktop entry.
+/// `deadbolt app` with a stand-in for the app it starts (the `deadbolt-ui`
+/// beside it) that records each start and the token it was given. The app's
+/// window is a watcher with `app` set. The first opening adds the desktop
+/// entry. `deadbolt ui` runs it in the foreground, arguments and exit status
+/// passed through.
 #[cfg(target_os = "linux")]
 #[test]
 fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
@@ -628,11 +630,11 @@ fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
         std::fs::copy(BIN, &deadbolt).unwrap();
     }
     let starts = a.path("starts");
-    let ui = bin.join("stand-in");
+    let ui = bin.join("deadbolt-ui");
     std::fs::write(
         &ui,
         format!(
-            "#!/bin/sh\necho \"$1 ${{XDG_ACTIVATION_TOKEN:-none}}\" >> '{}'\n",
+            "#!/bin/sh\necho \"${{*:-app}} ${{XDG_ACTIVATION_TOKEN:-none}}\" >> '{}'\nexit 7\n",
             starts.display()
         ),
     )
@@ -654,7 +656,6 @@ fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
             .env_remove("DESKTOP_STARTUP_ID")
             .env_remove("DISPLAY")
             .env("WAYLAND_DISPLAY", "wayland-test")
-            .env("DEADBOLT_TEST_UI", &ui)
             .envs(vars.iter().copied());
         assert!(a.output(&mut cmd).status.success());
     };
@@ -668,7 +669,7 @@ fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
 
     // No daemon: the app starts, and takes the launcher's token itself.
     app(&[("XDG_ACTIVATION_TOKEN", "one")]);
-    eventually("the first start", || started() == ["ui one"]);
+    eventually("the first start", || started() == ["app one"]);
     assert_eq!(a.daemon_pid(), None, "opening the app starts no daemon");
     let written = std::fs::read_to_string(&entry).unwrap();
     assert!(
@@ -681,7 +682,7 @@ fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
     // A daemon, but no app watching: it starts.
     a.run(&["debug", "whoami"]);
     app(&[("XDG_ACTIVATION_TOKEN", "two")]);
-    eventually("the second start", || started() == ["ui one", "ui two"]);
+    eventually("the second start", || started() == ["app one", "app two"]);
     assert_eq!(
         std::fs::read_to_string(&entry).unwrap(),
         "[Desktop Entry]\nExec=/elsewhere app\n"
@@ -725,7 +726,16 @@ fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
     app(&[]);
     assert_eq!(next(&mut watch), Some(Change::Activate { token: None }));
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(started(), ["ui one", "ui two"], "nothing started again");
+    assert_eq!(started(), ["app one", "app two"], "nothing started again");
+
+    // `deadbolt ui` is the app in the foreground, whatever is running.
+    let mut ui = a.cmd_of(&deadbolt, &["ui", "--scene", "vault"]);
+    let out = a.output(ui.env_remove("XDG_ACTIVATION_TOKEN"));
+    assert_eq!(out.status.code(), Some(7));
+    assert_eq!(
+        started().last().map(String::as_str),
+        Some("--scene vault none")
+    );
 }
 
 #[test]
@@ -3007,33 +3017,6 @@ fn a_waiting_send_reports_the_pickup() {
         .read_to_string(&mut err)
         .unwrap();
     assert!(err.contains("picked up"), "{err}");
-}
-
-/// Release builds take `deadbolt-enclave` from `scripts/build-enclave.sh`,
-/// not `build.rs`, so both compile every Swift source in the helper, or a
-/// release ships a helper missing part of it (caller identity, say).
-#[test]
-fn the_release_helper_builds_every_swift_source() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let script = std::fs::read_to_string(root.join("scripts/build-enclave.sh")).unwrap();
-    let build = std::fs::read_to_string(root.join("build.rs")).unwrap();
-    let mut sources: Vec<String> = std::fs::read_dir(root.join("src/daemon"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.ends_with(".swift"))
-        .collect();
-    sources.sort();
-    assert!(sources.len() >= 2, "{sources:?}");
-    for name in &sources {
-        assert!(
-            script.contains(&format!("\"$src/{name}\"")),
-            "build-enclave.sh doesn't compile {name}"
-        );
-        assert!(
-            build.contains(&format!("\"src/daemon/{name}\"")),
-            "build.rs doesn't compile {name}"
-        );
-    }
 }
 
 /// A release service on 127.0.0.1 for `deadbolt update`: serves whatever

@@ -13,8 +13,8 @@ const SECRET: [u8; 32] = [0x42; 32];
 
 #[test]
 fn staged_production_helper_matches_pinned_sha256() {
-    let staged = PathBuf::from(env!("DEADBOLT_ENCLAVE_STAGED_BIN"));
-    let expected = env!("DEADBOLT_ENCLAVE_SHA256");
+    let staged = PathBuf::from(deadbolt_enclave::STAGED_BIN);
+    let expected = deadbolt_enclave::SHA256;
     assert_eq!(expected.len(), 64);
     macos::verify_helper_at(&staged, expected).unwrap();
 }
@@ -32,8 +32,8 @@ fn adhoc_helper_refuses_app_group_without_touching_containermanager() {
 fn helper_sha256_verification_rejects_tampered_binary() {
     let tmp = TempDir::new().unwrap();
     let fake_helper = tmp.path().join("deadbolt-enclave");
-    let expected = env!("DEADBOLT_ENCLAVE_TEST_SHA256");
-    std::fs::copy(env!("DEADBOLT_ENCLAVE_TEST_BIN"), &fake_helper).unwrap();
+    let expected = deadbolt_enclave::TEST_SHA256;
+    std::fs::copy(deadbolt_enclave::TEST_BIN, &fake_helper).unwrap();
     macos::verify_helper_at(&fake_helper, expected).unwrap();
     // Same inode and length, different bytes. A warm digest is not enough.
     std::io::Write::write_all(
@@ -46,7 +46,7 @@ fn helper_sha256_verification_rejects_tampered_binary() {
     .unwrap();
     assert!(macos::verify_helper_at(&fake_helper, expected).is_err());
     std::fs::write(&fake_helper, b"#!/bin/sh\necho tampered\n").unwrap();
-    assert!(macos::verify_helper_at(&fake_helper, env!("DEADBOLT_ENCLAVE_TEST_SHA256")).is_err());
+    assert!(macos::verify_helper_at(&fake_helper, deadbolt_enclave::TEST_SHA256).is_err());
     assert!(macos::verify_helper_at(&fake_helper, "").is_err());
 }
 
@@ -56,7 +56,7 @@ fn helper_sha256_verification_rejects_tampered_binary() {
 fn a_missing_helper_is_named() {
     let tmp = TempDir::new().unwrap();
     let gone = tmp.path().join("deadbolt-enclave");
-    let error = macos::verify_helper_at(&gone, env!("DEADBOLT_ENCLAVE_TEST_SHA256"))
+    let error = macos::verify_helper_at(&gone, deadbolt_enclave::TEST_SHA256)
         .unwrap_err()
         .to_string();
     assert!(

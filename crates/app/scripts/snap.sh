@@ -6,9 +6,9 @@ cd "$(dirname "$0")/.."
 out=${1:-snaps}
 [ $# -gt 0 ] && shift
 mkdir -p "$out"
-# The app is built into `deadbolt`, and runs in-process as `deadbolt ui`.
-bin=$(cargo build --release --quiet -p deadbolt-cli --message-format=json | sed -n 's/.*"executable":"\([^"]*\/deadbolt\)".*/\1/p' | tail -1)
-app() { "$bin" ui "$@"; }
+# The app is its own program, `deadbolt-ui`.
+bin=$(cargo build --release --quiet -p deadbolt-app --bin deadbolt-ui --message-format=json | sed -n 's/.*"executable":"\([^"]*\/deadbolt-ui\)".*/\1/p' | tail -1)
+app() { "$bin" "$@"; }
 for scene in command-offer install-command command-installed locked locked-error vault search revealed code-copied empty failed \
   welcome welcome-set-up create create-typing create-ready create-invalid create-failed \
   join code join-wrong-code join-cancelled join-failed; do

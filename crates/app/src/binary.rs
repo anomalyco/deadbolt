@@ -1,4 +1,5 @@
-//! Bundle discovery is deliberately independent of the shell's PATH.
+//! Finding the `deadbolt` that runs the daemon for `deadbolt-ui`. Bundle
+//! discovery is deliberately independent of the shell's PATH.
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -62,22 +63,36 @@ pub fn search_dirs(path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
 
 /// This program's path with symlinks resolved, so a link named like a
 /// bundle's executable (`Some.app/Contents/MacOS/Deadbolt`) doesn't make its
-/// directory this app's bundle, with that bundle's helper as the daemon.
+/// directory this app's bundle, with that bundle's helper as the daemon, and
+/// a linked `deadbolt-ui` finds the `deadbolt` installed beside the real one.
 pub fn resolved(exe: PathBuf) -> PathBuf {
     std::fs::canonicalize(&exe).unwrap_or(exe)
 }
 
 /// The daemon program for the app at `exe` ([`resolved`]): the bundle's own
 /// helper inside Deadbolt.app, else `override_bin` (`DEADBOLT_BIN`), else
-/// this very binary, which is `deadbolt` with the app built in.
-pub fn discover(exe: Option<&Path>, override_bin: Option<&OsStr>) -> PathBuf {
+/// the `deadbolt` beside `exe` (a build's `target/<profile>`, an install's
+/// directory), else the first in `search` ([`search_dirs`]) that `usable`
+/// takes, else plain `deadbolt`, which fails to start with a message that
+/// says to install it.
+pub fn discover(
+    exe: Option<&Path>,
+    override_bin: Option<&OsStr>,
+    search: &[PathBuf],
+    usable: impl Fn(&Path) -> bool,
+) -> PathBuf {
     if let Some(binary) = exe.and_then(bundled) {
         return binary;
     }
     if let Some(binary) = override_bin.filter(|s| !s.is_empty()) {
         return binary.into();
     }
-    exe.map_or_else(|| "deadbolt".into(), Path::to_path_buf)
+    exe.and_then(Path::parent)
+        .into_iter()
+        .chain(search.iter().map(PathBuf::as_path))
+        .map(|dir| dir.join("deadbolt"))
+        .find(|binary| usable(binary))
+        .unwrap_or_else(|| "deadbolt".into())
 }
 
 pub fn executable(path: &Path) -> bool {
@@ -93,7 +108,9 @@ mod tests {
     fn bundle_wins_even_when_missing_and_override_is_set() {
         let exe = Path::new("/Applications/Deadbolt.app/Contents/MacOS/Deadbolt");
         assert_eq!(
-            discover(Some(exe), Some(OsStr::new("/other/deadbolt"))),
+            discover(Some(exe), Some(OsStr::new("/other/deadbolt")), &[], |_| {
+                true
+            }),
             Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt")
         );
         assert!(bundled(Path::new("/tmp/MacOS/Deadbolt")).is_none());
@@ -112,7 +129,7 @@ mod tests {
         let exe = resolved(link);
         assert!(bundled(&exe).is_none());
         assert_eq!(
-            discover(Some(&exe), Some(OsStr::new("/override"))),
+            discover(Some(&exe), Some(OsStr::new("/override")), &[], |_| true),
             Path::new("/override")
         );
         let gone = dir.path().join("gone");
@@ -162,14 +179,33 @@ mod tests {
     }
 
     #[test]
-    fn outside_a_bundle_the_daemon_is_this_binary_unless_overridden() {
-        let exe = Path::new("/home/alex/.local/bin/deadbolt");
-        assert_eq!(discover(Some(exe), None), exe);
-        assert_eq!(discover(Some(exe), Some(OsStr::new(""))), exe);
+    fn outside_a_bundle_the_daemon_is_the_deadbolt_beside_else_on_the_path() {
+        let exe = Path::new("/home/alex/.local/bin/deadbolt-ui");
+        let beside = Path::new("/home/alex/.local/bin/deadbolt");
+        let search = [
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+        ];
+        let all = |_: &Path| true;
+        assert_eq!(discover(Some(exe), None, &search, all), beside);
         assert_eq!(
-            discover(Some(exe), Some(OsStr::new("/override"))),
+            discover(Some(exe), Some(OsStr::new("")), &search, all),
+            beside
+        );
+        assert_eq!(
+            discover(Some(exe), Some(OsStr::new("/override")), &search, all),
             Path::new("/override")
         );
-        assert_eq!(discover(None, None), Path::new("deadbolt"));
+        let brew = |p: &Path| p == Path::new("/opt/homebrew/bin/deadbolt");
+        assert_eq!(
+            discover(Some(exe), None, &search, brew),
+            Path::new("/opt/homebrew/bin/deadbolt")
+        );
+        let none = |_: &Path| false;
+        assert_eq!(
+            discover(Some(exe), None, &search, none),
+            Path::new("deadbolt")
+        );
+        assert_eq!(discover(None, None, &[], all), Path::new("deadbolt"));
     }
 }
