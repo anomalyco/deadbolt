@@ -261,8 +261,6 @@ export interface FormPlan {
   change?: string
   /** An update's other choice: the same as a new item. */
   asNew?: FormPlan
-  /** A card's update: the typed number, which only the browser-only vault compares with the card's (never kept). */
-  match?: string
 }
 
 /**
@@ -404,9 +402,8 @@ const TRUST_ALL: Trust = { typed: KNOWN_FIELDS, filled: new Set() }
  * and the same brand, both known, is that card, offered as an update of
  * the expiry or name the user typed when either differs, and not at all
  * when neither does; any other is a new card. An update names its change
- * ("Expires 08/28 → 09/30"), never changes the number, carries the typed
- * number for the browser-only vault to check (`match`), and can be saved
- * as a new card instead.
+ * ("Expires 08/28 → 09/30"), never changes or carries the number, and can
+ * be saved as a new card instead.
  */
 export function cardPlan(card: CardValues, cards: FormCard[], trust: Trust = TRUST_ALL): FormPlan | null {
   const number = card.number
@@ -428,7 +425,7 @@ export function cardPlan(card: CardValues, cards: FormCard[], trust: Trust = TRU
     change.push(`Name on card: ${card.cardholder}`)
   }
   if (!Object.keys(fields).length) return null
-  return { ref: match.ref, fields, label: cardLabel(match.brand, last4), what: "card", change: change.join(" · "), asNew, match: number }
+  return { ref: match.ref, fields, label: cardLabel(match.brand, last4), what: "card", change: change.join(" · "), asNew }
 }
 
 /** Enough of an identity to be worth keeping: an address (its street and city or postal code), or a name with an email and a phone. */
@@ -926,13 +923,10 @@ export class Saver {
 
   /**
    * An offer's Pending for a plan, and for an update, its new item's
-   * (`fallback`: Save as new, or what's offered if the vault says the typed
-   * card is another). A card's update carries the typed number only to the
-   * browser-only vault, which compares it and keeps nothing of it.
+   * (`fallback`: Save as new).
    */
   private formPending(tabId: number, c: FormCapture, kind: FormKind, plan: FormPlan): Pending {
-    const match = plan.ref && plan.match && this.host.capabilities.includes("save-form-match") ? { match: { number: plan.match } } : {}
-    const body = { type: "save-form" as const, origin: c.origin, kind, ...(plan.ref ? { ref: plan.ref } : {}), fields: plan.fields, ...match }
+    const body = { type: "save-form" as const, origin: c.origin, kind, ...(plan.ref ? { ref: plan.ref } : {}), fields: plan.fields }
     const abort = new AbortController()
     const fallback = plan.ref && plan.asNew ? this.formPending(tabId, c, kind, plan.asNew) : undefined
     return {
@@ -1167,27 +1161,10 @@ export class Saver {
       return { ok: true, message: reply.created ? "Saved to Deadbolt" : o.offer.what ? UPDATED[o.offer.what] : "Password updated" }
     } catch (err) {
       o.saving = false
-      // The browser-only vault compared the typed number with the card's and
-      // it's another card: offer to save it as a new one instead.
-      if (!asNew && o.offer.what === "card" && o.offer.update && o.fallback && err instanceof HostError && err.code === "not_found" && this.offers.get(tabId) === o) return this.fallBack(tabId, o)
       const said = err instanceof HostError ? SAVE_FAILED.get(err.code) : undefined
       if (said) return { ok: false, message: said }
       return { ok: false, message: (err as Error).message || "Couldn't save." }
     }
-  }
-
-  /**
-   * An update the vault turned down as another card: its new card is offered
-   * in its place, where the old one showed (the page's corner, else the
-   * toolbar), and the old one goes.
-   */
-  private async fallBack(tabId: number, o: Offer): Promise<ChooseReply> {
-    const next = o.fallback!
-    o.fallback = undefined
-    const target = [...this.surfaces.values()].find((s) => s.offer === o.offer.id)?.target
-    this.dropOffer(tabId, o.offer.id)
-    await this.publish(tabId, o.ticket, next, !!target, target)
-    return { ok: false, message: "That's another card. Deadbolt offers to save it as a new one.", gone: true }
   }
 
   private async setNever(site: string, never: boolean) {

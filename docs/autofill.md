@@ -1942,13 +1942,9 @@ login's; only their words change.
   other card (another brand, or a brand unknown on either side) is "Save
   card?". An update never changes a number, says what changes ("Update
   card?", with "Expires 08/28 → 09/30" inside), and has a "Save as new"
-  choice beside Not now. In the browser-only vault the update carries the
-  typed number as `match`, which the vault compares with the card's in
-  constant time (`forms::same_number`) and never keeps or returns: another
-  number is `not_found`, and "Save card?" is offered in the update's place.
-  The native daemon has no such comparison yet, so there a different card
-  with the same last four digits and brand reads as an update of the saved
-  one; its offer names the card and the change, and Save as new keeps it
+  choice beside Not now. The update carries no number, and the daemon has
+  no comparison of a typed number yet, so a different card with the same
+  last four digits and brand reads as an update of the saved one; its offer names the card and the change, and Save as new keeps it
   apart. An identity is compared by the values of the fields that count
   (typed or filled), of up to eight identities that have one of them
   (`fill-form`, which asks for no verification for an identity): one that
@@ -1982,12 +1978,8 @@ login's; only their words change.
   `item-set` (of an identity or card `forms` lists, by its vault and its
   whole id, which the daemon resolves to that item only, never a text
   match), each checked by
-  `deadbolt_core::forms::saved_fields`; the browser-only vault writes the
-  same through that function. Under Strict the browser-only vault asks for
-  the passphrase (or an enrolled platform PRF) before it saves a card, as it
-  does before showing a card's number: the prompt says "Save Visa •••• 4242",
-  and a wrong passphrase saves nothing. The native build has no Strict and
-  asks for nothing more: saving shows nothing.
+  `deadbolt_core::forms::saved_fields`. Saving asks for nothing more and
+  shows nothing.
 - **Activity** records the save as the daemon records the browser host's
   `item-new` and `item-set`, with the fields' names and never a value.
 
@@ -2025,9 +2017,9 @@ login's; only their words change.
 
 ### What's next
 
-- Comparing a typed card's whole number in the native daemon, which needs a
-  daemon command of its own; the browser-only vault does it already
-  (`match`), and the native build compares last four digits and brand.
+- Comparing a typed card's whole number in the daemon, which needs a daemon
+  command of its own; today an update is matched by last four digits and
+  brand.
 - A billing address picker in the app (the field is an item id today).
 - Filling forms from the toolbar popup: only the in-page menu fills them.
 
@@ -2442,10 +2434,6 @@ upper case); one that still doesn't read as valid is left out.
 - **With `ref`:** only those fields of that identity or card, which `forms`
   lists for the origin (else `not_found`), addressed by its whole id; a
   card's `number` never changes (`bad_request`).
-- **`match`** (`{ "number": "…" }`, the browser-only vault only, capability
-  `save-form-match`): a card update's typed number, compared with the card's
-  and never kept or returned; another number is `not_found`. The native host
-  ignores it, and the extension doesn't send it there.
 - **Daemon:** `item-new` or `item-set`, which the browser host may ask; no
   daemon protocol change. Rate-limited with `fill`. Recorded in Activity as
   those commands are, with the fields' names.

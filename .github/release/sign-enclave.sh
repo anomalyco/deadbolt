@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sign-enclave.sh <in> <out>: signs the two thin Touch ID helpers
 # (<in>/aarch64/deadbolt-enclave and <in>/x86_64/deadbolt-enclave, from
-# crates/cli/scripts/build-enclave.sh) with the Developer ID, hardened runtime
+# crates/enclave/scripts/build-enclave.sh) with the Developer ID, hardened runtime
 # and secure timestamp, into the same layout under <out>. build-macos then
 # compiles `deadbolt` against these exact bytes (DEADBOLT_ENCLAVE_PREBUILT), so
 # nothing may sign them again (docs/touch-id.md). They are data here: never run.
