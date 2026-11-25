@@ -1,0 +1,24 @@
+[package]
+name = "deadbolt-pack"
+description = "Deadbolt v2 on-disk storage, not yet wired in: append-only framed logs, immutable checkpoint packs with a head/secret split, alternating sealed local state with a two-phase rollback anchor, and the vault directory's crash rules, over a create/append/delete-only Blocks trait that builds for wasm32-unknown-unknown."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { version = "1.8", features = ["zeroize"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = "0.4"
+thiserror = "2.0"
+zeroize = "1.9"
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
