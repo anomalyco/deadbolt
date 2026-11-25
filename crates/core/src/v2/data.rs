@@ -16,8 +16,9 @@ use super::wire::{PayloadError, Reader, Writer, ascending};
 
 /// Longest item kind, field name, field kind, vault name or device label, in bytes.
 pub const MAX_LABEL_LEN: usize = 1024;
-/// Longest inline field value, in bytes (larger fields become blob objects).
-pub const MAX_FIELD_VALUE_LEN: usize = 64 * 1024;
+/// Longest inline field value, in bytes: a 10 MiB file in base64 with room to spare,
+/// inside one frame's [`super::MAX_BODY_LEN`]. Blob objects for large fields come later.
+pub const MAX_FIELD_VALUE_LEN: usize = 14 * 1024 * 1024;
 /// Most ops in one data frame.
 pub const MAX_OPS: usize = 4096;
 

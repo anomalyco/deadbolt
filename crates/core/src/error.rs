@@ -1,27 +1,21 @@
-use crate::id::{Hash, VaultId};
+use crate::id::VaultId;
 use crate::item::ItemError;
 
-/// Why an entry or operation was rejected.
+/// Why a frame or operation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error("entry is for vault {found}, expected {expected}")]
     WrongVault { expected: VaultId, found: VaultId },
-    #[error("the selected history is no longer available")]
-    HistoryChanged,
-    #[error("invalid signature")]
-    BadSignature,
-    #[error("sequence gap: expected seq {expected}, got {got}")]
-    SeqGap { expected: u64, got: u64 },
-    #[error("author already has a different entry at seq {seq}")]
-    Fork { seq: u64 },
-    #[error("author reached the limit of {max} non-removal membership entries in this vault")]
-    MembershipLimit { max: u64 },
-    #[error("missing {} dependencies", .0.len())]
-    MissingDeps(Vec<Hash>),
-    #[error("invalid dependencies")]
-    InvalidDeps,
-    #[error("join consent signature is invalid")]
-    InvalidConsent,
+    #[error("this vault holds the most frames it can")]
+    TooManyFrames,
+    #[error("invalid frame: {0}")]
+    Frame(String),
+    #[error("waiting for another device to share this vault's current key")]
+    AwaitingKeys,
+    #[error("writes are parked: {0}")]
+    Parked(String),
+    #[error("that recovery kit is not this vault's current recovery root")]
+    NotRecoveryRoot,
     #[error("author is not a member")]
     NotMember,
     #[error("device to add was removed")]
@@ -30,7 +24,7 @@ pub enum Error {
     RemoveNonMember,
     #[error("invalid vault name")]
     InvalidName,
-    #[error("not a valid genesis entry")]
+    #[error("not a valid vault genesis")]
     InvalidGenesis,
     /// A change whose entry could never be sent to another device.
     #[error(

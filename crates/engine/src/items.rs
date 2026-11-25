@@ -23,8 +23,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use deadbolt_core::tag::{MAX_TAGS, Query, fold_tag, item_has_tag, normalize_tag, tag_counts};
 use deadbolt_core::totp::Totp;
+use deadbolt_core::v2::FrameId;
 use deadbolt_core::{
-    DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
+    DataOp, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -332,8 +333,8 @@ fn clean_tags(raw: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Vec<Stri
     Ok(seen.into_values().collect())
 }
 
-fn write(s: &mut Engine, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
-    s.update(vault, |v, secret| Ok(v.write(secret, ops)?))
+fn write(s: &mut Engine, vault: VaultId, ops: Vec<DataOp>) -> Result<FrameId> {
+    s.update(vault, |v, author| Ok(v.write(author, ops)?))
 }
 
 #[expect(

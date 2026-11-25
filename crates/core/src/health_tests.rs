@@ -5,7 +5,8 @@ use crate::health::{
     build_memo, change_password_url, check_weak, directory, evaluate, hibp_key_of, hibp_parts,
     item_fingerprint, passphrase_strength,
 };
-use crate::{DataOp, DeviceSecret, Field, FieldType, Item, Vault};
+use crate::vault::testing::{author, vault as new_vault};
+use crate::{DataOp, Field, FieldType, Item, Vault};
 
 const REUSE_KEY: [u8; 32] = [0x11; 32];
 const HIBP_KEY: [u8; 32] = [0x22; 32];
@@ -22,8 +23,8 @@ fn memos_for(vault: &Vault) -> Vec<crate::health::ItemMemo> {
 
 #[test]
 fn non_password_secrets_and_pins_never_trigger_password_health() {
-    let secret = DeviceSecret::from_bytes(&[1; 32]);
-    let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+    let secret = author(1);
+    let (mut vault, _) = new_vault(&secret, "personal");
     let ops = vec![
         DataOp::create(
             "card",
@@ -135,9 +136,9 @@ fn zxcvbn_catches_common_context_and_pattern_passwords_and_passes_generated() {
 
 #[test]
 fn reuse_collapses_same_account_and_shared_domains_but_flags_distinct_accounts() {
-    let secret = DeviceSecret::from_bytes(&[2; 32]);
-    let (mut personal, _) = Vault::create(&secret, "personal").unwrap();
-    let (mut work, _) = Vault::create(&secret, "work").unwrap();
+    let secret = author(2);
+    let (mut personal, _) = new_vault(&secret, "personal");
+    let (mut work, _) = new_vault(&secret, "work");
     let shared_pw = "Vq7#mRz2!pKx9@wLt4&nBe8";
     let dup_pw = "Kp9$xLm4@qRt7!wNz2&vBc6";
 
@@ -278,8 +279,8 @@ fn directory_rollups_match_google_and_apple_and_passkeys_satisfy_2fa() {
     assert!(directory::passkey_for_url("https://github.com").is_some());
     assert!(change_password_url("https://adobe.com").is_some());
 
-    let secret = DeviceSecret::from_bytes(&[3; 32]);
-    let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+    let secret = author(3);
+    let (mut vault, _) = new_vault(&secret, "personal");
     let (gh_id, _) = vault
         .create_item(
             &secret,
@@ -345,8 +346,8 @@ fn directory_rollups_match_google_and_apple_and_passkeys_satisfy_2fa() {
 
 #[test]
 fn breach_dates_and_synced_ignores_lapse_automatically_when_password_changes() {
-    let secret = DeviceSecret::from_bytes(&[4; 32]);
-    let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+    let secret = author(4);
+    let (mut vault, _) = new_vault(&secret, "personal");
     let (id, _) = vault
         .create_item(
             &secret,
@@ -452,8 +453,8 @@ fn hibp_parts_match_sha1_test_vector_and_incremental_fingerprints_hold() {
     assert_eq!(&*suffix, b"1E4C9B93F3F0682250B6CF8331B7EE68FD8");
     assert_eq!(key, hibp_key_of(&HIBP_KEY, "password"));
 
-    let secret = DeviceSecret::from_bytes(&[5; 32]);
-    let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+    let secret = author(5);
+    let (mut vault, _) = new_vault(&secret, "personal");
     let ops: Vec<DataOp> = (0..500)
         .map(|i| {
             DataOp::create(

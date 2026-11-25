@@ -1,9 +1,7 @@
 use std::fmt;
 
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use zeroize::Zeroizing;
-
-use crate::entry::consent_message;
 
 fn hex(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
     bytes.iter().try_for_each(|b| write!(f, "{b:02x}"))
@@ -54,7 +52,7 @@ macro_rules! bytes_type {
 }
 
 bytes_type!(
-    /// A device's Ed25519 public key. Equal to its iroh `EndpointId`.
+    /// A device's Ed25519 signing public key (`D_sign`), or a recovery root's.
     DeviceId,
     32
 );
@@ -64,7 +62,7 @@ bytes_type!(
     32
 );
 bytes_type!(
-    /// BLAKE3 hash of an entry's canonical encoding (signature excluded).
+    /// A 32-byte digest naming a frame (its `FrameId` bytes) or a finding.
     Hash,
     32
 );
@@ -79,16 +77,6 @@ bytes_type!(
     16
 );
 
-impl DeviceId {
-    pub(crate) fn verify(&self, message: &[u8], signature: &Signature) -> bool {
-        let Ok(key) = VerifyingKey::from_bytes(&self.0) else {
-            return false;
-        };
-        key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&signature.0))
-            .is_ok()
-    }
-}
-
 impl VaultId {
     const CONTEXT: &str = "deadbolt 2026-10-15 vault id v1";
 
@@ -102,22 +90,9 @@ impl VaultId {
 }
 
 impl ItemId {
-    /// A fresh random item id.
-    #[cfg(test)]
+    /// A fresh random item id: what a new item is created under.
     pub fn random() -> Self {
         Self(random())
-    }
-
-    /// The id of the item created by op `index` of entry `entry`.
-    pub fn of_create(entry: &Hash, index: usize) -> Self {
-        const CONTEXT: &str = "deadbolt 2026-10-15 item id v1";
-        let mut material = [0; 40];
-        material[..32].copy_from_slice(&entry.0);
-        material[32..].copy_from_slice(&(index as u64).to_be_bytes());
-        let key = blake3::derive_key(CONTEXT, &material);
-        let mut id = [0; 16];
-        id.copy_from_slice(&key[..16]);
-        Self(id)
     }
 }
 
@@ -146,13 +121,6 @@ impl DeviceSecret {
     /// The public key / device id.
     pub fn device_id(&self) -> DeviceId {
         DeviceId(self.0.verifying_key().to_bytes())
-    }
-
-    /// Signs this device's consent to join `vault` through `inviter`, carried by
-    /// the `Add` op `inviter` writes. Binding the inviter keeps the consent from
-    /// backing an `Add` by any other device.
-    pub fn join_consent(&self, vault: &VaultId, inviter: &DeviceId) -> Signature {
-        self.sign(&consent_message(vault, inviter, &self.device_id()))
     }
 
     pub(crate) fn sign(&self, message: &[u8]) -> Signature {

@@ -36,33 +36,47 @@ fn vault_and_device_prefixes_are_case_insensitive_but_names_win() {
 
 #[test]
 fn failed_write_does_not_advance_log() {
-    let secret = DeviceSecret::from_bytes(&[1; 32]);
-    let (mut vault, _) = Vault::create(&secret, "test").unwrap();
+    let mut engine = testing::engine();
+    let id = engine.resolve(Some("personal")).unwrap();
+    let vault = engine.vaults.get_mut(&id).unwrap();
     let before = vault.heads();
-    let result = vault.transact(
-        |v| Ok(v.rename(&secret, "lost")?),
-        |_| bail!("injected disk full"),
+    let author = Author::new(DeviceKeys::from_seed(&[7; 32]), 0);
+    let result: Result<_> = vault.transact(
+        |v| Ok(v.rename(&author, "lost")?),
+        |_, _| bail!("injected disk full"),
     );
     assert!(result.is_err());
     assert_eq!(vault.heads(), before);
-    assert_eq!(vault.name(), "test");
+    assert_eq!(vault.name(), "personal");
 }
 
 #[test]
-fn the_signing_key_comes_from_the_store_each_time() {
+fn the_keys_come_from_the_store_each_time() {
     let mut engine = testing::engine();
     let me = engine.id;
-    assert_eq!(engine.secret().device_id(), me);
-    assert_eq!(*engine.secret().to_bytes(), *engine.store().device_secret());
+    assert_eq!(engine.keys().device_id(), me);
     let id = engine.resolve(Some("personal")).unwrap();
     engine
-        .update(id, |vault, key| {
-            assert_eq!(key.device_id(), me);
-            Ok(vault.rename(key, "renamed")?)
+        .update(id, |vault, author| {
+            assert_eq!(author.id(), me);
+            Ok(vault.rename(author, "renamed")?)
         })
         .unwrap();
     assert_eq!(engine.vault(&id).name(), "renamed");
+    assert_eq!(engine.vault(&id).device_card(&me).unwrap().1, "test");
 
     let store = crate::store::MemoryStore::new([3; 32]);
-    assert_eq!(store.device_secret(), &[3; 32]);
+    assert_eq!(store.device_seed(), &[3; 32]);
+}
+
+#[test]
+fn a_new_vault_gives_its_kit_once_and_reopens_from_its_frames() {
+    let mut engine = testing::engine();
+    let (id, words) = engine.create_vault_with_kit("work").unwrap();
+    assert_eq!(words.split(' ').count(), 24);
+    let root = recovery::decode(&words).unwrap();
+    assert_eq!(engine.vault(&id).recovery_root(), Some(root.recovery_id()));
+    let frames: Vec<Frame> = engine.vault(&id).frames().cloned().collect();
+    let reopened = Vault::open(&engine.keys(), frames).unwrap();
+    assert_eq!(reopened.name(), "work");
 }

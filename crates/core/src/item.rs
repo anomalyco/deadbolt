@@ -7,16 +7,13 @@
 //! The guarantees ([`check`]) are enforced by every device: an item is
 //! created by one op carrying all required fields; a known field always has
 //! its schema's field type; required fields cannot be removed; the type
-//! cannot change (no op changes it). [`crate::Vault::write`] rejects ops that
-//! break them; [`crate::Vault::apply`] accepts the entry but ignores those
-//! ops, one by one. Whether an op is valid depends only on the op and the
-//! item's `Create` (which must be in the op's causal past), so the result is
-//! the same in every order entries arrive in.
+//! cannot change (no op changes it). A [`crate::VaultWrite`] rejects ops that
+//! break them when they are written.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::entry::{Change, Source, valid_name};
+use crate::ops::{Change, Source, valid_name};
 
 /// How a field's value is interpreted and shown. An open identifier on the
 /// wire; [`FieldType::Other`] holds types this version does not know, which
@@ -135,11 +132,10 @@ impl Field {
 
 /// The most an item's files hold, together: one file, or all of an item's.
 /// A value is base64, 4/3 as long, and an item's create or change travels
-/// in one entry of at most [`crate::MAX_ENTRY_LEN`] (16 MiB), so its files
-/// fit with room to spare; more would need chunking, which the log doesn't
-/// do. Capping the item and not only each file keeps a vault from becoming
+/// in one frame of at most [`crate::v2::MAX_BODY_LEN`] (16 MiB), so its files
+/// fit with room to spare; more would need blob objects, which come later. Capping the item and not only each file keeps a vault from becoming
 /// a blob store. Creates are held to it everywhere ([`check_create`]);
-/// changes when written ([`crate::Vault::write`]), since two devices'
+/// changes when written ([`crate::VaultWrite::write`]), since two devices'
 /// concurrent changes can't see each other.
 pub const MAX_FILE: usize = 10 * 1024 * 1024;
 

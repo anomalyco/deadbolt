@@ -82,6 +82,7 @@ pub(crate) mod testing {
         )
         .unwrap();
         engine.create_vault("personal").unwrap();
+        engine.changes = Default::default();
         engine
     }
 }
