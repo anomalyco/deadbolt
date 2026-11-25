@@ -1727,6 +1727,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "deadbolt-viewer"
+version = "0.0.0"
+dependencies = [
+ "deadbolt-core",
+ "deadbolt-pack",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uniffi",
+ "zeroize",
+]
+
+[[package]]
 name = "der"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
