@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::{SignalKind, signal};
 use zeroize::Zeroizing;
 
+use crate::broker::launch::{self, RouteSpec};
 use crate::paths::Paths;
 use crate::protocol::{Command, Purpose, Reference, Reply, ResolvedSecret, SCHEME, Secret};
 use crate::{client, request};
@@ -45,6 +46,21 @@ pub struct RunArgs {
     /// leaves them on the terminal.
     #[arg(long)]
     no_mask: bool,
+    /// Serve each --route through a broker on 127.0.0.1 that holds the real
+    /// secrets: the command gets placeholders and the broker's URL, never a
+    /// value, and only processes inside this run can use them
+    /// (docs/broker.md).
+    #[arg(long, requires = "route")]
+    broker: bool,
+    /// With --broker: ALIAS=URL[,KEY=VALUE…]. Requests to
+    /// $DEADBOLT_BROKER_URL/ALIAS/… go to URL/… with the secret. Keys:
+    /// bearer=REF with env=NAME (and header=NAME for a bare header like
+    /// x-api-key), or sigv4=REGION/SERVICE with access-key=REF,
+    /// secret-key=REF and session-token=REF; base-env=NAME for the route's
+    /// URL; method=, prefix= and glob= (each repeatable) to scope it;
+    /// max-body=BYTES.
+    #[arg(long, value_name = "ALIAS=URL[,…]", requires = "broker")]
+    route: Vec<String>,
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     command: Vec<OsString>,
@@ -209,7 +225,7 @@ pub struct Masker {
     held: Zeroizing<Vec<u8>>,
 }
 
-fn url_encoded(value: &str) -> String {
+pub(crate) fn url_encoded(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
@@ -342,12 +358,31 @@ async fn pump(
 /// its environment and exits with its code (128 + the signal if one ended
 /// it).
 pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitCode> {
-    let vars = environment(&args)?;
+    let mut vars = environment(&args)?;
+    let routes = args
+        .route
+        .iter()
+        .map(|route| RouteSpec::parse(route))
+        .collect::<Result<Vec<_>>>()?;
+    let inherited = |name: &str| crate::config::env(name).is_ok() || vars.contains_key(name);
+    let placeholders: Vec<(String, String)> = routes
+        .iter()
+        .flat_map(|route| route.placeholders(inherited))
+        .collect();
+    for (name, value) in placeholders {
+        vars.insert(name, EnvValue::Literal(Zeroizing::new(value)));
+    }
     let mut refs: Vec<String> = Vec::new();
-    for value in vars.values() {
-        if let EnvValue::Reference(r) = value
-            && !refs.contains(r)
-        {
+    let route_refs = routes.iter().flat_map(RouteSpec::refs);
+    for r in vars
+        .values()
+        .filter_map(|value| match value {
+            EnvValue::Reference(r) => Some(r),
+            EnvValue::Literal(_) => None,
+        })
+        .chain(route_refs)
+    {
+        if !refs.contains(r) {
             refs.push(r.clone());
         }
     }
@@ -360,7 +395,32 @@ pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitC
     // starts get nothing from the daemon (`daemon/taint.rs`). Registering
     // before the spawn leaves the command no moment untainted.
     let run = taint(paths, from_stdin).await?;
-    let result = supervise(program, rest, &vars, values, !args.no_mask).await;
+    let result = async {
+        // The broker is started after the taint, so it and the command are
+        // both inside the run; its root is this process.
+        let mut unset: Vec<&str> = Vec::new();
+        let broker = if routes.is_empty() {
+            None
+        } else {
+            let running = launch::launch(launch::config(&routes, &values)?).await?;
+            let url = format!("http://127.0.0.1:{}", running.port);
+            vars.insert(
+                launch::BROKER_URL.to_string(),
+                EnvValue::Literal(Zeroizing::new(url)),
+            );
+            for (name, url) in routes.iter().filter_map(|r| r.base_url(running.port)) {
+                vars.insert(name, EnvValue::Literal(Zeroizing::new(url)));
+            }
+            unset.extend(routes.iter().flat_map(|r| r.unset()));
+            Some(running)
+        };
+        let result = supervise(program, rest, &vars, &unset, values, !args.no_mask).await;
+        if let Some(broker) = broker {
+            broker.stop().await;
+        }
+        result
+    }
+    .await;
     let untaint = Command::RunUntaint { run };
     if let Err(error) = request(paths, untaint, from_stdin).await {
         // The daemon drops the run itself once this process is gone.
@@ -384,11 +444,15 @@ async fn supervise(
     program: &OsString,
     rest: &[OsString],
     vars: &IndexMap<String, EnvValue>,
+    unset: &[&str],
     values: HashMap<String, ResolvedSecret>,
     mask: bool,
 ) -> Result<ExitCode> {
     let mut command = tokio::process::Command::new(program);
     command.args(rest).stdin(Stdio::inherit());
+    for name in unset {
+        command.env_remove(name);
+    }
     for (name, value) in vars {
         match value {
             EnvValue::Reference(r) => {

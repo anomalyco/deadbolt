@@ -4324,6 +4324,8 @@ fn ssh_key_items() {
     assert_eq!(a.run(&["get", "copy"]), public);
     assert_eq!(a.run(&["get", "copy", "-f", "fingerprint"]), fingerprint);
 }
+#[path = "cli/broker.rs"]
+mod broker;
 #[path = "cli/health.rs"]
 mod health;
 #[path = "cli/taint.rs"]
