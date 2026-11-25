@@ -15,7 +15,7 @@ use crate::protocol::{ActivityEntry, CallerInfo, Check, Command, Outcome, Reply,
 pub fn install() {
     deadbolt_client::set_daemon_check(Box::new(|socket| {
         let exe = own_exe().map_err(|e| format!("locating this binary: {e}"))?;
-        peer::check(&socket, &exe)
+        peer::check(&socket, &exe).map(drop)
     }));
 }
 

@@ -184,8 +184,10 @@ fn send(
 
     let command = command.into_proto();
     match daemon {
-        Some(daemon) => peer::check(&stream, daemon)
-            .map_err(|reason| call.or_cancelled(DaemonCallError::PeerRejected { reason }))?,
+        Some(daemon) => {
+            peer::check(&stream, daemon)
+                .map_err(|reason| call.or_cancelled(DaemonCallError::PeerRejected { reason }))?;
+        }
         None if command.carries_passphrase() => {
             return Err(DaemonCallError::PeerRejected {
                 reason: "refusing to send passphrase without verifying Deadbolt's daemon signature"

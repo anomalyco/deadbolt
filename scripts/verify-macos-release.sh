@@ -16,6 +16,11 @@
 #   GPU or windowing code in it: it never links Metal.
 # - The app's CLI, helper and app start; the CLI tarballs hold only
 #   `deadbolt` and `deadbolt-enclave`, and their `deadbolt` reports the version.
+# - Live daemons, each in a fresh, isolated home: the app's helper and the
+#   native CLI tarball's `deadbolt` set up a store, start their daemon and
+#   pass their own check of its code signature (team and identifier), and the
+#   CLI takes the app's daemon and the app's helper the CLI's (the split
+#   Homebrew/npm + Deadbolt.app install).
 #
 # Environment: DEADBOLT_TEAM_ID.
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -41,6 +46,28 @@ check_pin() {
   LC_ALL=C grep -aqF "$digest" "$slice" || die "$1 ($3) does not pin $2 ($digest)."
   echo "$1 ($3) pins deadbolt-enclave $digest"
   rm -f "$slice"
+}
+
+# smoke <starts the daemon> <talks to it>: in a fresh home, the first
+# `deadbolt` sets up a store and starts its daemon, and both drive it, so
+# each client's check of the daemon's signature runs for real.
+smoke() {
+  local home
+  home=$(mktemp -d "$check/home.XXXXXX")
+  (
+    export HOME="$home" DEADBOLT_HOME="$home/store" XDG_RUNTIME_DIR="$home/run"
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    trap '"$1" debug daemon stop > /dev/null 2>&1 || true' EXIT
+    DEADBOLT_PASSPHRASE="release check" "$1" init --device-name release < /dev/null
+    for bin in "$1" "$2"; do
+      "$bin" debug daemon status | grep -qx unlocked || die "$bin does not take the daemon $1 started."
+      "$bin" debug whoami > /dev/null || die "$bin's daemon does not answer whoami."
+    done
+    "$2" new login --name Example username=release password=release-check-password < /dev/null
+    "$1" ls < /dev/null | grep Example > /dev/null || die "$1 does not list what $2 saved."
+    "$1" debug daemon stop
+  )
+  echo "$1 and $2 share a live daemon."
 }
 
 # headless <deadbolt>: the CLI and daemon carry none of the app.
@@ -96,6 +123,11 @@ for pair in darwin-arm64=arm64 darwin-x64=x86_64; do
     echo "::warning::Could not confirm the notarization of $platform/deadbolt online."
   if [ "$arch" = "$native" ]; then
     "$cli/deadbolt" --version | grep -qF "deadbolt $v" || die "$platform/deadbolt is not version $v."
+    bundled="$app/Contents/Helpers/deadbolt"
+    smoke "$bundled" "$bundled"
+    smoke "$cli/deadbolt" "$cli/deadbolt"
+    smoke "$bundled" "$cli/deadbolt"
+    smoke "$cli/deadbolt" "$bundled"
   fi
 done
 echo "Verified Deadbolt $v for macOS."
