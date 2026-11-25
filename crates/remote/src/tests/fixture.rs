@@ -2,7 +2,7 @@
 
 use deadbolt_core::v2::{
     DeviceKeys, EpochId, EpochKey, Frame, FrameId, FraudProof, RecoverySecret, build_add_frame,
-    build_create_frame, sign_join_consent,
+    build_create_frame, resolve, sign_join_consent,
 };
 use deadbolt_core::{DeviceId, DeviceSecret, VaultId};
 
@@ -75,6 +75,7 @@ pub fn genesis(adds: u8) -> (VaultId, DeviceId, Vec<Frame>) {
         let add = build_add_frame(
             &root,
             vault,
+            &resolve(&vault, &frames, &[]),
             u64::from(i) + 1,
             prev,
             vec![prev],

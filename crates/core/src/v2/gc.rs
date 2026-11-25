@@ -2,8 +2,12 @@
 //!
 //! There is no ack object: a member's data clock covering a checkpoint frame is its ack.
 //! An undisputed checkpoint becomes GC-eligible once every current member's clock covers
-//! it, or once it is `GC_GRACE_MS` old so a lost device never wedges compaction. A
-//! checkpoint any current member disputed is never eligible.
+//! it, or once this peer has known it for `GC_GRACE_MS` so a lost device never wedges
+//! compaction. A checkpoint any current member disputed is never eligible.
+//!
+//! Every time here is this peer's own clock: an author's wire `timestamp_ms` could be forged
+//! to `0` (instant GC) or `u64::MAX` (pinned forever), so it never decides grace or the base.
+//! Callers pass only checkpoints they verified (`CheckpointVerdict::Agreed`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,7 +35,8 @@ pub struct GcCheckpoint {
     pub id: FrameId,
     pub author: DeviceId,
     pub seq: u64,
-    pub timestamp_ms: u64,
+    /// When this peer first saw the checkpoint, on its own clock.
+    pub first_seen_ms: u64,
     pub frontier: BTreeMap<DeviceId, (u64, FrameId)>,
     /// The tombstones its pack carries.
     pub tombstones: BTreeMap<ItemId, Tombstone>,
@@ -50,7 +55,7 @@ pub struct GcFrame {
 pub enum Eligibility {
     /// Every current member's clock covers it.
     Covered,
-    /// It is at least `GC_GRACE_MS` old.
+    /// This peer has known it for at least `GC_GRACE_MS`.
     Grace,
 }
 
@@ -61,15 +66,23 @@ pub struct GcPlan {
     pub disputed: BTreeSet<FrameId>,
     /// Undisputed checkpoints that are GC-eligible, and why.
     pub eligible: BTreeMap<FrameId, Eligibility>,
-    /// The newest eligible checkpoint, by `(timestamp_ms, id)`: the new base.
+    /// The eligible checkpoint covering the most frames, by `(covered frames, id)`: the new base.
     pub base: Option<FrameId>,
     /// Frames at or below the base's frontier, safe to delete.
     pub delete_frames: Vec<FrameId>,
-    /// Tombstones in the base pack that may be pruned.
+    /// Tombstones in the base pack past their grace (`GC_GRACE_MS` since the delete and since
+    /// this peer first saw the base). Candidates only: nothing prunes folded state locally, so
+    /// `state_mac` stays a pure function of the log until a logged purge op exists.
     pub expired_tombstones: BTreeMap<ItemId, Tombstone>,
 }
 
-/// Plans GC from what this peer knows.
+/// Frames a frontier covers, for choosing the base without trusting any timestamp.
+fn covered_frames(c: &GcCheckpoint) -> u128 {
+    c.frontier.values().map(|(s, _)| u128::from(*s) + 1).sum()
+}
+
+/// Plans GC from what this peer knows. With no current members nothing is eligible: an empty
+/// "every member covered it" must never be vacuously true.
 pub fn plan_gc(
     now_ms: u64,
     current_members: &BTreeSet<DeviceId>,
@@ -85,6 +98,12 @@ pub fn plan_gc(
         .filter(|id| checkpoints.iter().any(|c| c.id == *id))
         .collect();
     let mut eligible = BTreeMap::new();
+    if current_members.is_empty() {
+        return GcPlan {
+            disputed,
+            ..GcPlan::default()
+        };
+    }
     for c in checkpoints {
         if disputed.contains(&c.id) {
             continue;
@@ -96,14 +115,14 @@ pub fn plan_gc(
         });
         if covered {
             eligible.insert(c.id, Eligibility::Covered);
-        } else if now_ms.saturating_sub(c.timestamp_ms) >= GC_GRACE_MS {
+        } else if now_ms.saturating_sub(c.first_seen_ms) >= GC_GRACE_MS {
             eligible.insert(c.id, Eligibility::Grace);
         }
     }
     let base = checkpoints
         .iter()
         .filter(|c| eligible.contains_key(&c.id))
-        .max_by_key(|c| (c.timestamp_ms, c.id));
+        .max_by_key(|c| (covered_frames(c), c.id));
     let Some(base) = base else {
         return GcPlan {
             disputed,
@@ -124,13 +143,17 @@ pub fn plan_gc(
         .collect();
     delete_frames.sort();
     delete_frames.dedup();
+    let base_aged = now_ms.saturating_sub(base.first_seen_ms) >= GC_GRACE_MS;
     let expired_tombstones = base
         .tombstones
         .iter()
         .filter(|(_, t)| {
-            base.frontier
-                .get(&t.dot.author)
-                .is_some_and(|(s, _)| t.dot.seq <= *s)
+            base_aged
+                && now_ms.saturating_sub(t.at_ms) >= GC_GRACE_MS
+                && base
+                    .frontier
+                    .get(&t.dot.author)
+                    .is_some_and(|(s, _)| t.dot.seq <= *s)
         })
         .map(|(id, t)| (*id, *t))
         .collect();

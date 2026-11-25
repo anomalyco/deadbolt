@@ -77,6 +77,12 @@ pub(super) fn op(author: usize, n: usize, spec: (u8, u8, u8, u8, u8)) -> DataOp 
     }
 }
 
+/// Stand-in for `deadbolt-pack` sealing a plaintext pack into its encrypted `DBPK` file: any
+/// bytes that differ from the plaintext prove the checkpoint commits to the sealed file.
+pub(super) fn sealed(plain: &[u8]) -> Vec<u8> {
+    [b"DBPK".as_slice(), blake3::hash(plain).as_bytes(), plain].concat()
+}
+
 /// Synthetic frame id over the author, position and encoded body.
 fn synthetic_id(author: &DeviceId, seq: u64, prev: &FrameId, body: &[u8]) -> FrameId {
     let mut h = blake3::Hasher::new();
@@ -157,6 +163,7 @@ impl Sim {
             author,
             seq,
             prev,
+            epoch: EpochId::ZERO,
             body: DataBody::Data(payload),
         };
         let clock = frame.clock_after(&prev_clock);
@@ -209,7 +216,10 @@ impl Sim {
             })
             .collect();
         let pack = compact(ctx, base, view).unwrap();
-        let (payload, bytes) = build_checkpoint(&K_MAC, &pack, Vec::new(), self.now_ms).unwrap();
+        let bytes = pack.encode().unwrap();
+        let commitment = PackCommitment::of(&sealed(&bytes));
+        let payload = build_checkpoint(&K_MAC, &pack, commitment, Vec::new(), self.now_ms).unwrap();
+        assert_ne!(payload.pack_hash, *blake3::hash(&bytes).as_bytes());
         assert_eq!(Pack::decode(&bytes).unwrap(), pack, "pack must round-trip");
         let encoded = payload.encode().unwrap();
         assert_eq!(CheckpointPayload::decode(&encoded).unwrap(), payload);
@@ -220,6 +230,7 @@ impl Sim {
             author,
             seq,
             prev,
+            epoch: EpochId::ZERO,
             body: DataBody::Checkpoint(payload),
         };
         let clock = frame.clock_after(&prev_clock);

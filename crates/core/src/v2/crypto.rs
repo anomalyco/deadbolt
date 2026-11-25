@@ -44,6 +44,7 @@ const CTX_EPOCH_PACK: &str = "deadbolt/v2 epoch pack";
 const CTX_EPOCH_INDEX: &str = "deadbolt/v2 epoch index";
 const CTX_EPOCH_COMMIT: &str = "deadbolt/v2 epoch commit";
 const CTX_X25519_WRAP: &str = "deadbolt/v2 x25519 wrap";
+const CTX_RECOVERY_WRAP_KEM: &str = "deadbolt/v2 recovery wrap kem";
 
 /// Prefix for wrap `info` strings: `"deadbolt/v2 wrap" || vault || author || seq || recipient`.
 const WRAP_INFO_PREFIX: &[u8] = b"deadbolt/v2 wrap";
@@ -638,11 +639,58 @@ pub fn wrap_epoch_key(
     if suite != SUITE_X25519_WRAP {
         return Err(CryptoError::UnsupportedSuite(suite));
     }
-    let sk_e = KemSecret::generate()?;
+    x25519_wrap_with(&KemSecret::generate()?, recipient_pk, info, aad, key)
+}
+
+/// Wraps `K_e` to the recovery root with an ephemeral scalar derived from
+/// `KDF("recovery wrap kem", K_e || u16(info.len) || info || aad)` instead of fresh randomness.
+///
+/// The cold recovery root is offline, so it cannot notice a bad wrap itself. A deterministic
+/// wrap lets any online peer that holds the `commit`-verified `K_e` recompute it bit for bit
+/// with [`verify_recovery_wrap`], with no access to `R_kem`'s secret.
+pub fn wrap_recovery_epoch_key(
+    suite: u8,
+    recovery_pk: &KemPublic,
+    info: &[u8],
+    aad: &[u8],
+    key: &EpochKey,
+) -> Result<[u8; WRAP_LEN], CryptoError> {
+    if suite != SUITE_X25519_WRAP {
+        return Err(CryptoError::UnsupportedSuite(suite));
+    }
+    let info_len = u16::try_from(info.len()).map_err(|_| CryptoError::InfoTooLong(info.len()))?;
+    let seed = kdf_secret(
+        CTX_RECOVERY_WRAP_KEM,
+        &[key.as_bytes(), &info_len.to_be_bytes(), info, aad],
+    );
+    x25519_wrap_with(&KemSecret::from_bytes(&seed), recovery_pk, info, aad, key)
+}
+
+/// True iff `wrap` is exactly the deterministic recovery wrap of `k_e` to `recovery_kem`.
+/// Needs only the epoch key and public values, never the recovery root's secret.
+pub fn verify_recovery_wrap(
+    k_e: &EpochKey,
+    recovery_kem: &KemPublic,
+    info: &[u8],
+    aad: &[u8],
+    wrap: &[u8; WRAP_LEN],
+) -> bool {
+    wrap_recovery_epoch_key(SUITE_X25519_WRAP, recovery_kem, info, aad, k_e)
+        .is_ok_and(|expected| bool::from(expected.ct_eq(wrap)))
+}
+
+fn x25519_wrap_with(
+    sk_e: &KemSecret,
+    recipient_pk: &KemPublic,
+    info: &[u8],
+    aad: &[u8],
+    key: &EpochKey,
+) -> Result<[u8; WRAP_LEN], CryptoError> {
     let pk_e = sk_e.public_key();
     let dh = sk_e.diffie_hellman(recipient_pk)?;
     let wrap_key = derive_x25519_wrap_key(&dh, &pk_e, recipient_pk, info)?;
-    // Safe: `wrap_key` is freshly derived from single-use ephemeral `sk_e`.
+    // Safe: `wrap_key` seals exactly one plaintext under one `aad`: `sk_e` is either fresh or
+    // (recovery wraps) derived from this very `K_e`, `info` and `aad`.
     let ct = aead_seal_with_nonce(&wrap_key, &[0u8; NONCE_LEN], aad, key.as_bytes())?;
     let mut out = [0u8; WRAP_LEN];
     out[..32].copy_from_slice(pk_e.as_bytes());
@@ -681,23 +729,20 @@ pub fn unwrap_epoch_key(
 /// Computes the canonical Padmé padded length for a plaintext of `plaintext_len` bytes
 /// (including its 4-byte length prefix), with a 256-byte floor and ≤ 12% overhead above the floor.
 pub fn padme_padded_len(plaintext_len: usize) -> Result<usize, CryptoError> {
-    let _ =
+    let len =
         u32::try_from(plaintext_len).map_err(|_| CryptoError::PlaintextTooLarge(plaintext_len))?;
-    let raw = plaintext_len
-        .checked_add(4)
-        .ok_or(CryptoError::PlaintextTooLarge(plaintext_len))?;
-    if raw <= PADME_FLOOR {
+    let raw = u64::from(len) + 4;
+    if raw <= PADME_FLOOR as u64 {
         return Ok(PADME_FLOOR);
     }
-    // Standard Padmé (PURBs, USENIX Security 2019):
-    // e = floor(log2(raw)), s = floor(log2(e)) + 1, last_bits = e - s.
-    let e = usize::BITS - 1 - raw.leading_zeros();
-    let s = usize::BITS - e.leading_zeros();
-    let last_bits = e.saturating_sub(s);
-    let mask = (1usize << last_bits) - 1;
-    raw.checked_add(mask)
-        .map(|v| v & !mask)
-        .ok_or(CryptoError::PlaintextTooLarge(plaintext_len))
+    // Standard Padmé (PURBs, USENIX Security 2019), in `u64` so 32-bit (`wasm32`) and 64-bit
+    // targets agree bit for bit: e = floor(log2(raw)), s = floor(log2(e)) + 1, last_bits = e - s.
+    // `raw > 256` gives `e >= 8` and `s <= e`.
+    let e = raw.ilog2();
+    let s = e.ilog2() + 1;
+    let mask = (1u64 << (e - s)) - 1;
+    let padded = (raw + mask) & !mask;
+    usize::try_from(padded).map_err(|_| CryptoError::PlaintextTooLarge(plaintext_len))
 }
 
 /// Applies canonical Padmé padding: `u32_be(pt.len()) || pt || 0x00*`.

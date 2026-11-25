@@ -1,10 +1,15 @@
 //! A checkpoint pack: the folded state at a frontier plus the `PackMeta` that lets later and
 //! late frames merge into it with zero pre-frontier frames.
+//!
+//! [`Pack`] is the plaintext payload that `deadbolt-pack` seals into its encrypted `DBPK` file.
+//! A checkpoint commits to that encrypted file (see `checkpoint::PackCommitment`), never to
+//! these plaintext bytes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{DeviceId, ItemId};
 
+use super::causal::SeenBy;
 use super::clock::{Dot, VectorClock};
 use super::crypto::FrameId;
 use super::state::{FoldedState, Tombstone};
@@ -29,6 +34,10 @@ pub struct PackMeta {
     pub mheads: BTreeMap<DeviceId, BTreeSet<FrameId>>,
     /// Adder used to judge each third-party `DeviceCard` the fold covered.
     pub card_adders: BTreeMap<DeviceId, DeviceId>,
+    /// For each standing dot and each tail frame a compacted frame saw, the lowest compacted
+    /// seq per author whose closure saw it, so a late frame naming a compacted frame is judged
+    /// exactly as a fold from genesis would.
+    pub seen_by: SeenBy,
 }
 
 impl PackMeta {
@@ -52,6 +61,19 @@ impl PackMeta {
         }
         if self.tombstones != state.tombstones() {
             return Err(PayloadError::Invalid("tombstones disagree with state"));
+        }
+        for (key, thresholds) in &self.seen_by {
+            let above = self.frontier.get(&key.0).is_none_or(|(f, _)| key.1 > *f);
+            if !(self.dots.contains_key(key) || above) || thresholds.is_empty() {
+                return Err(PayloadError::Invalid(
+                    "seen-by must name a standing or tail frame",
+                ));
+            }
+            for (author, seq) in thresholds {
+                if self.frontier.get(author).is_none_or(|(f, _)| seq > f) {
+                    return Err(PayloadError::Invalid("seen-by above frontier"));
+                }
+            }
         }
         Ok(())
     }
@@ -91,6 +113,16 @@ impl PackMeta {
         for (device, adder) in &self.card_adders {
             w.device(device);
             w.device(adder);
+        }
+        w.count(self.seen_by.len(), "seen by")?;
+        for ((author, seq), thresholds) in &self.seen_by {
+            w.device(author);
+            w.u64(*seq);
+            w.count(thresholds.len(), "seen by")?;
+            for (by, at) in thresholds {
+                w.device(by);
+                w.u64(*at);
+            }
         }
         Ok(())
     }
@@ -139,11 +171,24 @@ impl PackMeta {
             ascending(meta.card_adders.keys().next_back(), &device, "card adders")?;
             meta.card_adders.insert(device, r.device()?);
         }
+        let n = r.count(44, "seen by")?;
+        for _ in 0..n {
+            let key = (r.device()?, r.u64()?);
+            ascending(meta.seen_by.keys().next_back(), &key, "seen by")?;
+            let m = r.count(40, "seen by")?;
+            let mut thresholds = BTreeMap::new();
+            for _ in 0..m {
+                let by = r.device()?;
+                ascending(thresholds.keys().next_back(), &by, "seen by")?;
+                thresholds.insert(by, r.u64()?);
+            }
+            meta.seen_by.insert(key, thresholds);
+        }
         Ok(meta)
     }
 }
 
-/// A checkpoint's pack: state plus meta. Its bytes are what `pack_hash` and `pack_len` name.
+/// A checkpoint's plaintext pack: state plus meta, sealed by `deadbolt-pack` before upload.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pack {
     pub state: FoldedState,
@@ -172,9 +217,4 @@ impl Pack {
         meta.validate(&state)?;
         Ok(Self { state, meta })
     }
-}
-
-/// `BLAKE3(pack bytes)`.
-pub fn pack_hash(bytes: &[u8]) -> [u8; 32] {
-    blake3::hash(bytes).into()
 }

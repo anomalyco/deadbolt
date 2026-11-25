@@ -5,7 +5,7 @@
 use proptest::prelude::*;
 
 use super::super::*;
-use super::sim::{DAY_MS, K_MAC, Sim, adders, membership, op};
+use super::sim::{DAY_MS, K_MAC, Sim, adders, membership, op, sealed};
 
 type OpSpec = (u8, u8, u8, u8, u8);
 
@@ -198,7 +198,7 @@ fn prove(sc: &Scenario) -> Result<(), TestCaseError> {
         &ckpt_ctx,
         id,
         payload,
-        Some(&bytes1),
+        Some((&decoded1, PackCommitment::of(&sealed(&bytes1)))),
         frames.iter().copied(),
     );
     prop_assert_eq!(verdict.unwrap(), CheckpointVerdict::Agreed);

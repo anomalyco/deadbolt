@@ -1,19 +1,29 @@
 //! Security, wire-format, epoch, and property test suite for `deadbolt_core::v2`.
 
+mod causality;
 mod checkpoints;
+mod compaction;
+mod continuity;
 mod dataplane;
 mod epochs;
 mod lineage;
 mod model;
 mod order;
+mod revocation;
 mod scenarios;
 mod sim;
+mod wraps;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{DeviceId, DeviceSecret, Signature, VaultId};
 
 use super::*;
+
+/// The membership a builder sees after `frames` (all in one vault).
+pub(super) fn view(frames: &[&Frame]) -> ResolvedMembership {
+    resolve(&frames[0].header().vault, frames.iter().copied(), &[])
+}
 
 #[expect(
     clippy::disallowed_methods,
@@ -431,6 +441,7 @@ fn e1_atomicity_and_non_canonical_deps_rejected() {
     let bad_consent = build_add_frame(
         &root_sk,
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -484,6 +495,7 @@ fn e2_bad_commit_and_graft1_recovery_repair_rewrap() {
     let add_a = build_add_frame(
         &root_sk,
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -496,6 +508,7 @@ fn e2_bad_commit_and_graft1_recovery_repair_rewrap() {
     let add_b = build_add_frame(
         &root_sk,
         vault,
+        &view(&[&create, &add_a]),
         2,
         add_a.id(),
         vec![add_a.id()],
@@ -581,14 +594,13 @@ fn e2_bad_commit_and_graft1_recovery_repair_rewrap() {
     assert_eq!(
         build_recovery_repair_rewrap(
             &graph,
+            &resolved,
             b.sign_key(),
             0,
             FrameId::ZERO,
             vec![frames[3].id()],
             e1,
             &k_bogus,
-            root_id,
-            root_kem,
         )
         .unwrap_err(),
         EpochError::CommitMismatch(e1)
@@ -596,14 +608,13 @@ fn e2_bad_commit_and_graft1_recovery_repair_rewrap() {
 
     let repair = build_recovery_repair_rewrap(
         &graph,
+        &resolved,
         b.sign_key(),
         0,
         FrameId::ZERO,
         vec![frames[3].id()],
         e1,
         &b_k1,
-        root_id,
-        root_kem,
     )
     .unwrap();
 
@@ -640,6 +651,7 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
     let add_a = build_add_frame(
         &root_sk,
         vault,
+        &view(&[&create]),
         1,
         create.id(),
         vec![create.id()],
@@ -652,6 +664,7 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
     let add_b = build_add_frame(
         &root_sk,
         vault,
+        &view(&[&create, &add_a]),
         2,
         add_a.id(),
         vec![add_a.id()],
@@ -693,6 +706,7 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
     let rem_a = build_remove_frame(
         b.sign_key(),
         vault,
+        &view(&[&create, &add_a, &add_b]),
         0,
         FrameId::ZERO,
         vec![add_b.id()],
@@ -719,6 +733,7 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
     let rem_b = build_remove_frame(
         a.sign_key(),
         vault,
+        &view(&[&create, &add_a, &add_b]),
         0,
         FrameId::ZERO,
         vec![add_b.id()],

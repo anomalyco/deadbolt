@@ -63,10 +63,15 @@ fn next_data_slot(frames: &[Frame], author: DeviceId) -> (u64, FrameId) {
         .map_or((0, FrameId::ZERO), |f| (f.header().seq + 1, f.id()))
 }
 
+/// Heads of the placed `Member` DAG: builders refuse unplaced deps.
 pub(super) fn member_heads(frames: &[Frame]) -> Vec<FrameId> {
+    let Some(first) = frames.first() else {
+        return Vec::new();
+    };
+    let placed = resolve(&first.header().vault, frames, &[]).dag_frames;
     let mut referenced = BTreeSet::new();
     let mut all = BTreeSet::new();
-    for f in frames {
+    for f in frames.iter().filter(|f| placed.contains(&f.id())) {
         if let Some(body) = f.member_body() {
             all.insert(f.id());
             for &d in &body.deps {
@@ -189,6 +194,7 @@ proptest! {
             let add = build_add_frame(
                 r0_sk,
                 vault,
+                &resolve(&vault, &m_frames, &[]),
                 seq,
                 prev,
                 deps,
@@ -249,6 +255,7 @@ proptest! {
                     let add = build_add_frame(
                         actor_dev.sign_key(),
                         vault,
+                        &res_view,
                         seq,
                         prev,
                         deps,
@@ -294,6 +301,7 @@ proptest! {
                     let rem = build_remove_frame(
                         actor_dev.sign_key(),
                         vault,
+                        &res_view,
                         seq,
                         prev,
                         deps,
@@ -364,6 +372,7 @@ proptest! {
                     let rot = build_rotate_recovery_frame(
                         r0_sk,
                         vault,
+                        &full_res,
                         seq,
                         prev,
                         deps,
@@ -409,6 +418,7 @@ proptest! {
                 let frame = build_standalone_rotate_frame(
                     dev.sign_key(),
                     vault,
+                    &res_q1,
                     seq,
                     prev,
                     all_deps_with_prev(snapshot_heads.clone(), prev),
@@ -460,6 +470,7 @@ proptest! {
                     let rw = build_rewrap_frame(
                         dev.sign_key(),
                         vault,
+                        &resolve(&vault, &m_frames, &[]),
                         seq,
                         prev,
                         all_deps_with_prev(member_heads(&m_frames), prev),

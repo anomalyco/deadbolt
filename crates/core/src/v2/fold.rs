@@ -1,21 +1,22 @@
 //! Deterministic folds of data frames: from genesis, from a checkpoint pack, and compaction.
 //!
-//! Every fold walks each author's data log as a gap-free `prev` chain, rebuilds each frame's
-//! full clock from its `dclock`, and applies the ops of frames the resolved membership
-//! counts. Register merges are order-independent, so delivery order never matters.
+//! Every fold walks each author's data log as a gap-free `prev` chain, closes each frame's
+//! clock transitively over the frames it names (see `causal`), and applies the ops of frames
+//! the resolved membership counts. A frame naming a frame the fold cannot resolve waits.
+//! Register merges are order-independent, so delivery order never matters.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::DeviceId;
 
+use super::causal::{Book, Closure, SeenBy};
 use super::checkpoint::CheckpointError;
-use super::clock::VectorClock;
 use super::crypto::FrameId;
 use super::data::{DataBody, DataFrame, DataOp};
 use super::frame::{Frame, FrameKind, MemberOp};
 use super::membership::ResolvedMembership;
 use super::pack::{Pack, PackMeta};
-use super::state::{ClockBook, FoldedState};
+use super::state::FoldedState;
 
 /// What a fold needs from the membership plane.
 #[derive(Debug, Clone, Copy)]
@@ -75,13 +76,14 @@ pub fn adders_from_frames<'a>(
     out
 }
 
-/// Where an author's chain resumes: its next seq, the frame it must chain from, and that
-/// frame's full clock.
+/// Where an author's chain resumes: its next seq, the frame it must chain from, that frame's
+/// closure, and the author's compacted frontier seq.
 #[derive(Debug, Clone)]
 struct Start {
     next: u64,
     prev: FrameId,
-    clock: VectorClock,
+    closure: Closure,
+    frontier: Option<u64>,
 }
 
 impl Default for Start {
@@ -89,30 +91,84 @@ impl Default for Start {
         Self {
             next: 0,
             prev: FrameId::ZERO,
-            clock: VectorClock::new(),
+            closure: Closure::default(),
+            frontier: None,
         }
     }
 }
 
-type Chains<'f> = BTreeMap<DeviceId, Vec<(&'f DataFrame, VectorClock)>>;
+type Chains<'f> = BTreeMap<DeviceId, Vec<(&'f DataFrame, Closure)>>;
 
 fn starts_of(meta: &PackMeta) -> BTreeMap<DeviceId, Start> {
     meta.frontier
         .iter()
         .map(|(author, (seq, id))| {
+            let mut closure = Closure {
+                clock: meta.stream_clocks.get(author).cloned().unwrap_or_default(),
+                ..Closure::default()
+            };
+            closure.note_pre(*author, *seq);
             let start = Start {
                 next: seq.saturating_add(1),
                 prev: *id,
-                clock: meta.stream_clocks.get(author).cloned().unwrap_or_default(),
+                closure,
+                frontier: Some(*seq),
             };
             (*author, start)
         })
         .collect()
 }
 
-/// Per author, the gap-free, fork-free `prev` chain from its start, each with its full clock.
-/// Frames at or below an author's start are skipped; two different frames at one seq end the
-/// chain there (the fraud filter removes forked streams anyway).
+/// The `(author, count)` streams a frame claims to have seen: a `Data` frame's `dclock`, or a
+/// `Checkpoint` frame's frontier.
+fn refs(f: &DataFrame) -> Vec<(DeviceId, u64)> {
+    match &f.body {
+        DataBody::Data(p) => p.dclock.entries().to_vec(),
+        DataBody::Checkpoint(c) => c
+            .frontier
+            .iter()
+            .map(|(a, s, _)| (*a, s.saturating_add(1)))
+            .collect(),
+    }
+}
+
+/// `f`'s closure, or `None` while some frame it names is neither compacted nor resolved (a
+/// gap, a forged future count, or a cycle back through `f`).
+fn close(f: &DataFrame, starts: &BTreeMap<DeviceId, Start>, done: &Chains<'_>) -> Option<Closure> {
+    let mut closure = match done.get(&f.author).and_then(|c| c.last()) {
+        Some((_, c)) => c.clone(),
+        None => starts
+            .get(&f.author)
+            .map(|s| s.closure.clone())
+            .unwrap_or_default(),
+    };
+    for (author, count) in refs(f) {
+        let seq = count.checked_sub(1)?;
+        closure.clock.raise(author, count);
+        let start = starts.get(&author);
+        if let Some(frontier) = start.and_then(|s| s.frontier)
+            && seq <= frontier
+        {
+            closure.note_pre(author, seq);
+            if seq == frontier
+                && let Some(s) = start
+            {
+                closure.join(&s.closure);
+            }
+            continue;
+        }
+        let idx = seq.checked_sub(start.map_or(0, |s| s.next))?;
+        let (_, named) = done.get(&author)?.get(usize::try_from(idx).ok()?)?;
+        closure.join(named);
+    }
+    closure.clock.observe(f.author, f.seq);
+    Some(closure)
+}
+
+/// Per author, the gap-free, fork-free `prev` chain from its start, each frame with its causal
+/// closure, cut at the first frame that cannot be resolved yet. Frames at or below an author's
+/// start are skipped; two different frames at one seq end the chain there (the fraud filter
+/// removes forked streams anyway).
 fn chains<'f>(
     frames: impl IntoIterator<Item = &'f DataFrame>,
     starts: &BTreeMap<DeviceId, Start>,
@@ -132,40 +188,57 @@ fn chains<'f>(
         }
     }
     let empty = Start::default();
-    by_author
+    let raw: BTreeMap<DeviceId, Vec<&'f DataFrame>> = by_author
         .into_iter()
         .map(|(author, seqs)| {
             let start = starts.get(&author).unwrap_or(&empty);
-            let (mut seq, mut prev, mut clock) = (start.next, start.prev, start.clock.clone());
+            let (mut seq, mut prev) = (start.next, start.prev);
             let mut chain = Vec::new();
             while let Some(Some(f)) = seqs.get(&seq) {
                 if f.prev != prev {
                     break;
                 }
-                clock = f.clock_after(&clock);
-                chain.push((*f, clock.clone()));
+                chain.push(*f);
                 prev = f.id;
                 seq += 1;
             }
             (author, chain)
         })
-        .collect()
+        .collect();
+    let mut done: Chains<'f> = raw.keys().map(|a| (*a, Vec::new())).collect();
+    loop {
+        let mut progress = false;
+        for (author, chain) in &raw {
+            while let Some(&f) = chain.get(done[author].len()) {
+                let Some(closure) = close(f, starts, &done) else {
+                    break;
+                };
+                if let Some(c) = done.get_mut(author) {
+                    c.push((f, closure));
+                }
+                progress = true;
+            }
+        }
+        if !progress {
+            return done;
+        }
+    }
 }
 
 fn apply_chains(
     ctx: &FoldContext<'_>,
     state: &mut FoldedState,
-    book: &mut ClockBook,
+    book: &mut Book<'_>,
     chains: &Chains<'_>,
 ) {
-    for (f, clock) in chains.values().flatten() {
-        book.insert((f.author, f.seq), clock.clone());
+    for (f, closure) in chains.values().flatten() {
+        book.insert((f.author, f.seq), closure.clone());
     }
-    for (f, clock) in chains.values().flatten() {
+    for (f, _) in chains.values().flatten() {
         if let DataBody::Data(p) = &f.body
             && ctx.counts(f)
         {
-            state.apply(f.dot(), p, clock, book, |a, d| ctx.card_ok(a, d));
+            state.apply(f.dot(), p, book, |a, d| ctx.card_ok(a, d));
         }
     }
 }
@@ -177,8 +250,38 @@ pub fn fold_from_scratch<'f>(
 ) -> FoldedState {
     let chains = chains(frames, &BTreeMap::new());
     let mut state = FoldedState::default();
-    apply_chains(ctx, &mut state, &mut ClockBook::new(), &chains);
+    let seen_by = SeenBy::new();
+    apply_chains(ctx, &mut state, &mut Book::new(&seen_by), &chains);
     state
+}
+
+/// Folds from genesis applying only the frames in `apply` (each a prefix of its author's log),
+/// with every clock closed over all of `frames`; `None` while any of them cannot be resolved.
+pub(crate) fn fold_subset<'f>(
+    ctx: &FoldContext<'_>,
+    frames: impl IntoIterator<Item = &'f DataFrame>,
+    apply: &BTreeSet<FrameId>,
+) -> Option<FoldedState> {
+    let mut chains = chains(frames, &BTreeMap::new());
+    let resolved = chains
+        .values()
+        .flatten()
+        .filter(|(f, _)| apply.contains(&f.id))
+        .count();
+    if resolved != apply.len() {
+        return None;
+    }
+    let seen_by = SeenBy::new();
+    let mut book = Book::new(&seen_by);
+    for (f, closure) in chains.values().flatten() {
+        book.insert((f.author, f.seq), closure.clone());
+    }
+    for chain in chains.values_mut() {
+        chain.retain(|(f, _)| apply.contains(&f.id));
+    }
+    let mut state = FoldedState::default();
+    apply_chains(ctx, &mut state, &mut book, &chains);
+    Some(state)
 }
 
 /// Fails if the membership no longer counts what the checkpoint covered, or a covered
@@ -213,14 +316,13 @@ pub fn fold_from_checkpoint<'f>(
     check_still_valid(ctx, &pack.meta)?;
     let chains = chains(tail, &starts_of(&pack.meta));
     let mut state = pack.state.clone();
-    let mut book = pack.meta.dots.clone();
-    apply_chains(ctx, &mut state, &mut book, &chains);
+    apply_chains(ctx, &mut state, &mut Book::new(&pack.meta.seen_by), &chains);
     Ok(state)
 }
 
 /// Compacts `base` (or genesis) plus the frames in `view` into a new pack. Each author's
-/// frontier stops before its first frame that does not count or cannot be judged yet;
-/// those frames stay in the tail.
+/// frontier stops before its first frame that does not count or cannot be judged yet; those
+/// frames stay in the tail.
 pub fn compact<'f>(
     ctx: &FoldContext<'_>,
     base: Option<&Pack>,
@@ -234,7 +336,8 @@ pub fn compact<'f>(
         }
         None => (FoldedState::default(), PackMeta::default()),
     };
-    let mut chains = chains(view, &starts_of(&meta));
+    let resolved = chains(view, &starts_of(&meta));
+    let mut chains = resolved.clone();
     for chain in chains.values_mut() {
         let keep = chain
             .iter()
@@ -242,14 +345,20 @@ pub fn compact<'f>(
             .unwrap_or(chain.len());
         chain.truncate(keep);
     }
-    let mut book = std::mem::take(&mut meta.dots);
+    let base_meta = meta.clone();
+    let mut book = Book::new(&base_meta.seen_by);
     apply_chains(ctx, &mut state, &mut book, &chains);
+    // Book closures for resolved frames left in the tail, so compacted frames' coverage of
+    // them is recorded below.
+    for (f, closure) in resolved.values().flatten() {
+        book.insert((f.author, f.seq), closure.clone());
+    }
     for (author, chain) in &chains {
-        let Some((last, clock)) = chain.last() else {
+        let Some((last, closure)) = chain.last() else {
             continue;
         };
         meta.frontier.insert(*author, (last.seq, last.id));
-        meta.stream_clocks.insert(*author, clock.clone());
+        meta.stream_clocks.insert(*author, closure.clock.clone());
         let heads = meta.mheads.entry(*author).or_default();
         for (f, _) in chain {
             heads.extend(f.body.mheads().iter().copied());
@@ -268,10 +377,42 @@ pub fn compact<'f>(
             meta.mheads.remove(author);
         }
     }
-    meta.dots = state
-        .dots()
-        .into_iter()
-        .filter_map(|key| Some((key, book.remove(&key)?)))
+    let standing: BTreeSet<(DeviceId, u64)> = state.dots();
+    meta.dots = standing
+        .iter()
+        .filter_map(|key| {
+            let clock = match book.get(key) {
+                Some(closure) => closure.clock.clone(),
+                None => base_meta.dots.get(key)?.clone(),
+            };
+            Some((*key, clock))
+        })
+        .collect();
+    let above =
+        |(author, seq): &(DeviceId, u64)| meta.frontier.get(author).is_none_or(|(f, _)| seq > f);
+    // Thresholds for every frame a later fold may still ask about: standing writes, resolved
+    // tail frames, and earlier packs' tail frames still above the frontier.
+    let targets: BTreeSet<(DeviceId, u64)> = standing
+        .iter()
+        .copied()
+        .chain(resolved.values().flatten().map(|(f, _)| (f.author, f.seq)))
+        .chain(base_meta.seen_by.keys().copied())
+        .filter(|key| standing.contains(key) || above(key))
+        .collect();
+    meta.seen_by = targets
+        .iter()
+        .filter_map(|key| {
+            let mut thresholds = base_meta.seen_by.get(key).cloned().unwrap_or_default();
+            for (author, chain) in &chains {
+                if thresholds.contains_key(author) {
+                    continue;
+                }
+                if let Some((f, _)) = chain.iter().find(|(_, c)| book.closure_covers(c, *key)) {
+                    thresholds.insert(*author, f.seq);
+                }
+            }
+            (!thresholds.is_empty()).then_some((*key, thresholds))
+        })
         .collect();
     meta.tombstones = state.tombstones();
     let pack = Pack { state, meta };
