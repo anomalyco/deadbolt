@@ -4328,6 +4328,8 @@ fn ssh_key_items() {
 mod broker;
 #[path = "cli/health.rs"]
 mod health;
+#[path = "cli/mcp.rs"]
+mod mcp;
 #[path = "cli/taint.rs"]
 mod taint;
 #[path = "cli/updates.rs"]

@@ -12,6 +12,7 @@ mod desktop;
 mod health;
 mod import;
 mod items;
+mod mcp;
 mod prompt;
 mod receive;
 mod secrets;
@@ -282,6 +283,15 @@ enum Commands {
     /// Homebrew or another package manager get its command instead. The daemon
     /// restarts on the new build, locked. Works while the vault is locked.
     Update(update::UpdateArgs),
+    /// Serve AI coding agents over MCP (stdin/stdout): vault and item
+    /// metadata, status, a health summary and `deadbolt run --broker`
+    /// commands, never a secret value.
+    ///
+    /// Add it to an agent as a stdio server running `deadbolt mcp`. It
+    /// neither starts the daemon nor unlocks the store: while locked its
+    /// tools say so.
+    #[command(verbatim_doc_comment)]
+    Mcp,
     /// Diagnostics: how the daemon sees you, its live change stream, the
     /// daemon itself.
     #[command(subcommand)]
@@ -477,7 +487,8 @@ fn run_main() -> ExitCode {
 
 /// Whether `command` may end with the daemon's update notice: not the
 /// daemon, hosts and helpers other programs run, `update` (which says it
-/// itself), `debug watch`, the app, or `run`, whose output is its program's.
+/// itself), `debug watch`, the app, `run`, whose output is its program's, or
+/// `mcp`, whose stdout is its protocol.
 fn notices_updates(command: &Commands) -> bool {
     !matches!(
         command,
@@ -488,6 +499,7 @@ fn notices_updates(command: &Commands) -> bool {
             | Commands::Debug(DebugCommand::Watch)
             | Commands::App
             | Commands::Run(_)
+            | Commands::Mcp
     )
 }
 
@@ -525,6 +537,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::BrowserHost { .. }
                 | Commands::Update(_)
                 | Commands::Receive(_)
+                | Commands::Mcp
         ) || matches!(&cli.command, Commands::Send(args) if args.manages()))
     {
         bail!("--vault does not apply to this command");
@@ -533,6 +546,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Commands::Send(args) => return send::send(&paths, args, vault, from_stdin).await,
         Commands::Receive(args) => return receive::run(args).await,
+        Commands::Mcp => mcp::run(&paths).await?,
         Commands::Item(command) => {
             client::ensure_running(&paths).await?;
             items::run(&paths, command, vault, from_stdin).await?;
