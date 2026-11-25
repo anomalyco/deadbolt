@@ -1,6 +1,6 @@
 //! What `security-framework` doesn't wrap: a code object's signing
-//! information, a file's code for this process's own architecture, and
-//! validity checks with no requirement.
+//! information and App Group entitlements, a file's code for this process's
+//! own architecture, and validity checks with no requirement.
 
 #![expect(
     unsafe_code,
@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::ptr;
 
+use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::data::CFData;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -24,6 +25,8 @@ use security_framework_sys::code_signing::{
 
 /// `kSecCSSigningInformation`.
 const SIGNING_INFORMATION: SecCSFlags = 1 << 1;
+/// `kSecCSRequirementInformation`, which carries the entitlements.
+const REQUIREMENT_INFORMATION: SecCSFlags = 1 << 2;
 /// `kSecCSDynamicInformation`.
 const DYNAMIC_INFORMATION: SecCSFlags = 1 << 3;
 
@@ -51,6 +54,7 @@ unsafe extern "C" {
     safe static kSecCodeInfoMainExecutable: CFStringRef;
     safe static kSecCodeInfoTeamIdentifier: CFStringRef;
     safe static kSecCodeInfoUnique: CFStringRef;
+    safe static kSecCodeInfoEntitlementsDict: CFStringRef;
     safe static kSecCodeAttributeArchitecture: CFStringRef;
 }
 
@@ -110,17 +114,7 @@ pub fn signing_information(code: &impl Code, dynamic: bool) -> Option<SigningInf
     if dynamic {
         flags |= DYNAMIC_INFORMATION;
     }
-    let mut info: CFDictionaryRef = ptr::null();
-    // SAFETY: `code` is a live code object (`Code` is sealed to the two
-    // types the call takes), and `info` is a valid place for its answer.
-    let status = unsafe { SecCodeCopySigningInformation(code.static_ref(), flags, &mut info) };
-    if status != errSecSuccess || info.is_null() {
-        return None;
-    }
-    // SAFETY: on success the call returns a dictionary it created (the
-    // "Copy" rule), which this now owns and releases.
-    let info: CFDictionary<CFString, CFType> =
-        unsafe { CFDictionary::wrap_under_create_rule(info) };
+    let info = copy_information(code, flags)?;
     let get = |constant| info.find(key(constant));
     Some(SigningInformation {
         main_executable: get(kSecCodeInfoMainExecutable)
@@ -136,6 +130,57 @@ pub fn signing_information(code: &impl Code, dynamic: bool) -> Option<SigningInf
             .and_then(|v| v.downcast::<CFData>())
             .map(|d| d.bytes().to_vec()),
     })
+}
+
+/// The App Groups `code`'s entitlements name
+/// (`com.apple.security.application-groups`), as its signature claims them;
+/// empty when it has none. Check the signature before trusting them.
+pub fn application_groups(code: &impl Code, dynamic: bool) -> Vec<String> {
+    let mut flags = SIGNING_INFORMATION | REQUIREMENT_INFORMATION;
+    if dynamic {
+        flags |= DYNAMIC_INFORMATION;
+    }
+    let groups = copy_information(code, flags)
+        .and_then(|info| {
+            info.find(key(kSecCodeInfoEntitlementsDict))?
+                .downcast::<CFDictionary>()
+        })
+        .and_then(|entitlements| {
+            // SAFETY: `entitlements` is a live dictionary (just checked by its
+            // type id) of property-list values, every one a CF object; keys
+            // are only compared with the CFString passed to `find`.
+            let entitlements: CFDictionary<CFString, CFType> =
+                unsafe { CFDictionary::wrap_under_get_rule(entitlements.as_concrete_TypeRef()) };
+            let name = CFString::from_static_string("com.apple.security.application-groups");
+            entitlements.find(name)?.downcast::<CFArray>()
+        });
+    let Some(groups) = groups else {
+        return Vec::new();
+    };
+    // SAFETY: `groups` is a live array (just checked by its type id) of
+    // property-list values, every one a CF object.
+    let groups: CFArray<CFType> =
+        unsafe { CFArray::wrap_under_get_rule(groups.as_concrete_TypeRef()) };
+    groups
+        .iter()
+        .filter_map(|group| group.downcast::<CFString>())
+        .map(|group| group.to_string())
+        .collect()
+}
+
+/// `SecCodeCopySigningInformation` for `code` with `flags`, or `None`
+/// when Security.framework has none to give.
+fn copy_information(code: &impl Code, flags: SecCSFlags) -> Option<CFDictionary<CFString, CFType>> {
+    let mut info: CFDictionaryRef = ptr::null();
+    // SAFETY: `code` is a live code object (`Code` is sealed to the two
+    // types the call takes), and `info` is a valid place for its answer.
+    let status = unsafe { SecCodeCopySigningInformation(code.static_ref(), flags, &mut info) };
+    if status != errSecSuccess || info.is_null() {
+        return None;
+    }
+    // SAFETY: on success the call returns a dictionary it created (the
+    // "Copy" rule), which this now owns and releases.
+    Some(unsafe { CFDictionary::wrap_under_create_rule(info) })
 }
 
 /// The code at `path`, its slice for this process's architecture in a
@@ -228,6 +273,24 @@ mod tests {
         let file = signing_information(&file_code(&me).unwrap(), false).unwrap();
         assert!(info.unique.is_some());
         assert_eq!(info.unique, file.unique);
+    }
+
+    /// Notes is entitled to its own App Group; `ls` and this ad-hoc test
+    /// binary to none.
+    #[test]
+    fn app_groups_come_from_the_entitlements() {
+        let notes = Path::new("/System/Applications/Notes.app");
+        if let Some(code) = file_code(notes) {
+            let groups = application_groups(&code, false);
+            assert!(
+                groups.iter().any(|g| g == "group.com.apple.notes"),
+                "{groups:?}"
+            );
+        }
+        let ls = file_code(Path::new("/bin/ls")).unwrap();
+        assert!(application_groups(&ls, false).is_empty());
+        let running = SecCode::for_self(Flags::NONE).unwrap();
+        assert!(application_groups(&running, true).is_empty());
     }
 
     #[test]

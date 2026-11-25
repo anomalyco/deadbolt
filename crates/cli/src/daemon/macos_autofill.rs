@@ -35,10 +35,6 @@ use crate::protocol::{
 };
 use crate::webauthn;
 
-/// Short filename so `~/Library/Group Containers/<TEAM>.anomaly.deadbolt/s` stays
-/// well within `sockaddr_un.sun_path`'s 104-byte limit on macOS.
-pub const SOCKET_NAME: &str = "s";
-
 /// Maximum UTF-8 byte length of a Unix domain socket path on macOS (`104 - 1`).
 pub const SUN_PATH_MAX: usize = 103;
 
@@ -57,7 +53,7 @@ pub enum SocketKind {
 pub fn bind_in(container: &Path) -> Result<(UnixListener, PathBuf)> {
     deadbolt_client::paths::secure_dir(container)
         .with_context(|| format!("checking {}", container.display()))?;
-    let path = container.join(SOCKET_NAME);
+    let path = container.join(crate::protocol::AUTOFILL_SOCKET);
     let len = path.as_os_str().as_encoded_bytes().len();
     if len > SUN_PATH_MAX {
         bail!(

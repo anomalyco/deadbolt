@@ -91,3 +91,8 @@ pub const MAX_LINE: usize = 64 * 1024 * 1024;
 
 /// The longest line the daemon reads on the macOS AutoFill App Group socket.
 pub const MAX_AUTOFILL_LINE: usize = 64 * 1024;
+
+/// The macOS AutoFill socket's name in the App Group container
+/// (`~/Library/Group Containers/<TEAM_ID>.anomaly.deadbolt/s`), short for
+/// `sun_path`.
+pub const AUTOFILL_SOCKET: &str = "s";
