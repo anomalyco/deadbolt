@@ -144,11 +144,13 @@ pub async fn serve(paths: Paths, old_name: bool) -> Result<()> {
 }
 
 /// Keeps keys out of core dumps and, where the OS allows, away from other
-/// processes and debuggers, before the daemon holds any. A refusal (a
-/// sandbox or container) is logged, and the daemon runs on without it.
+/// processes and debuggers, before the daemon holds any. In release builds,
+/// macOS `PT_DENY_ATTACH` is unconditional; debug builds and tests leave it
+/// off so debuggers can attach. A refusal (a sandbox or container) is logged,
+/// and the daemon runs on without it.
 fn harden() {
     let report = deadbolt_os::mem::harden_process(deadbolt_os::mem::HardeningOptions {
-        deny_debugger: crate::config::Environment::deny_debugger(),
+        deny_debugger: !cfg!(any(debug_assertions, test)),
     });
     info!(
         core_dumps = %report.core_dumps,
