@@ -48,7 +48,7 @@ pub fn set_json<T: Serialize>(store: &dyn VaultStore, name: &str, value: &T) -> 
 
 /// A store in memory, gone when dropped.
 pub struct MemoryStore {
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
     log: Mutex<Vec<Zeroizing<Vec<u8>>>>,
     meta: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
 }
@@ -56,7 +56,7 @@ pub struct MemoryStore {
 impl MemoryStore {
     pub fn new(device_secret: [u8; 32]) -> Self {
         Self {
-            secret: device_secret,
+            secret: Zeroizing::new(device_secret),
             log: Mutex::default(),
             meta: Mutex::default(),
         }

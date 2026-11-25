@@ -877,7 +877,7 @@ impl Daemon {
 
     async fn start(self: &Arc<Self>, loaded: Loaded, timeout_secs: Option<u64>) -> Result<()> {
         loaded.ensure_usable()?;
-        let secret = *loaded.secret.to_bytes();
+        let secret = *loaded.secret().to_bytes();
         let config = if self.local_net {
             NodeConfig::local_only(secret)
         } else {

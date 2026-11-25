@@ -47,3 +47,22 @@ fn failed_write_does_not_advance_log() {
     assert_eq!(vault.heads(), before);
     assert_eq!(vault.name(), "test");
 }
+
+#[test]
+fn the_signing_key_comes_from_the_store_each_time() {
+    let mut engine = testing::engine();
+    let me = engine.id;
+    assert_eq!(engine.secret().device_id(), me);
+    assert_eq!(*engine.secret().to_bytes(), *engine.store().device_secret());
+    let id = engine.resolve(Some("personal")).unwrap();
+    engine
+        .update(id, |vault, key| {
+            assert_eq!(key.device_id(), me);
+            Ok(vault.rename(key, "renamed")?)
+        })
+        .unwrap();
+    assert_eq!(engine.vault(&id).name(), "renamed");
+
+    let store = crate::store::MemoryStore::new([3; 32]);
+    assert_eq!(store.device_secret(), &[3; 32]);
+}

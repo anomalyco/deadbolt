@@ -111,7 +111,6 @@ pub struct UnavailableVault {
 pub struct Engine {
     store: Box<dyn VaultStore>,
     clock: Box<dyn Clock>,
-    pub secret: DeviceSecret,
     pub id: DeviceId,
     pub meta: Meta,
     pub vaults: IndexMap<VaultId, Vault>,
@@ -196,12 +195,11 @@ impl Engine {
     }
 
     fn empty(store: Box<dyn VaultStore>, clock: Box<dyn Clock>) -> Self {
-        let secret = DeviceSecret::from_bytes(store.device_secret());
+        let id = DeviceSecret::from_bytes(store.device_secret()).device_id();
         Self {
             store,
             clock,
-            id: secret.device_id(),
-            secret,
+            id,
             meta: Meta::default(),
             vaults: IndexMap::new(),
             unavailable: IndexMap::new(),
@@ -213,6 +211,13 @@ impl Engine {
     /// Where this engine persists.
     pub fn store(&self) -> &dyn VaultStore {
         self.store.as_ref()
+    }
+
+    /// This device's signing key, fresh from the store (which keeps it in
+    /// locked memory). The engine holds no copy of its own: take it for one
+    /// signing step and let it drop, which wipes it.
+    pub fn secret(&self) -> DeviceSecret {
+        DeviceSecret::from_bytes(self.store.device_secret())
     }
 
     /// Now, since the Unix epoch.
@@ -263,15 +268,15 @@ impl Engine {
         change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T>,
     ) -> Result<T> {
         self.available(id)?;
+        let secret = self.secret();
         let store = &self.store;
-        let secret = &self.secret;
         let changes = &mut self.changes;
         let result = self
             .vaults
             .get_mut(&id)
             .context("vault not held")?
             .transact(
-                |vault| change(vault, secret),
+                |vault| change(vault, &secret),
                 |entries| {
                     persist(store.as_ref(), entries.iter().copied())?;
                     changes.committed(id, entries);
@@ -507,7 +512,7 @@ impl Engine {
         if self.name_taken(name, None) {
             bail!("a vault named {name} already exists");
         }
-        let (vault, _) = Vault::create(&self.secret, name)?;
+        let (vault, _) = Vault::create(&self.secret(), name)?;
         let id = vault.id();
         self.add_vault(vault)?;
         Ok(id)

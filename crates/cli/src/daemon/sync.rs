@@ -689,7 +689,7 @@ mod tests {
         import(&mut a, items);
         let offer_blob = super::super::pairing::offer(&a, vault, &b.id, None).unwrap();
         let (offer, _) = super::super::pairing::read_offer(&offer_blob).unwrap();
-        let join = super::super::pairing::join_blob(&b.secret, "b", a.id, &vault, None).unwrap();
+        let join = super::super::pairing::join_blob(&b.secret(), "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
             super::super::pairing::welcome(&mut a, vault, b.id, &join, None).unwrap();
         super::super::pairing::apply_welcome(
@@ -751,9 +751,9 @@ mod tests {
             .create_item(&peer, "login", Some("fork".into()), [])
             .unwrap();
         let mut source = target.vault(&id).clone();
-        let removal = source.remove(&target.secret, peer.device_id()).unwrap();
+        let removal = source.remove(&target.secret(), peer.device_id()).unwrap();
         let (private, data) = source
-            .create_item(&target.secret, "login", Some("private".into()), [])
+            .create_item(&target.secret(), "login", Some("private".into()), [])
             .unwrap();
         let added = receive(
             &mut target,
@@ -961,7 +961,7 @@ mod tests {
         let store = deadbolt_store::init_with_params(
             dir.path(),
             b"test",
-            *secret.to_bytes(),
+            &secret.to_bytes(),
             deadbolt_store::KdfParams {
                 m_cost_kib: 64,
                 t_cost: 1,
@@ -977,7 +977,7 @@ mod tests {
             .insert(id, Vault::from_genesis(genesis).unwrap());
         let (_, entry) = source
             .create_item(
-                &loaded.secret,
+                &loaded.secret(),
                 "login",
                 None,
                 [("password".into(), Field::new(FieldType::Secret, "private"))],

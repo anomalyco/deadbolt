@@ -1,7 +1,6 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use chacha20poly1305::XChaCha20Poly1305;
 use redb::{
     Database, ReadableDatabase, ReadableTable, StorageBackend, Table, TableDefinition,
     WriteTransaction,
@@ -62,15 +61,14 @@ const CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub fn init_with_backend(
     backend: impl StorageBackend,
     passphrase: &[u8],
-    device_secret: [u8; 32],
+    device_secret: &[u8; 32],
     params: KdfParams,
 ) -> Result<Unlocked> {
-    let device_secret = Zeroizing::new(device_secret);
     params.validate()?;
     if backend.len()? != 0 {
         return Err(Error::AlreadyExists(PathBuf::from(DB_FILE)));
     }
-    let keyset = KeySet::new(&device_secret)?;
+    let keyset = KeySet::new(device_secret)?;
     let kdf = KdfHeader::generate(params)?;
     let wrapped = keyset.wrap(&kdf, passphrase)?;
     let keys = Keys::new(keyset);
@@ -474,30 +472,26 @@ impl KeySet {
 
     fn wrap(&self, kdf: &KdfHeader, passphrase: &[u8]) -> Result<Vec<u8>> {
         let unlock_key = kdf.derive(passphrase)?;
-        crypto::seal(
-            &crypto::cipher(&unlock_key),
-            &keyset_aad(kdf),
-            &[self.encode().as_slice()],
-        )
+        crypto::seal(&unlock_key, &keyset_aad(kdf), &[self.encode().as_slice()])
     }
 
     fn unwrap(kdf: &KdfHeader, wrapped: &[u8], passphrase: &[u8]) -> Result<Self> {
         let unlock_key = kdf.derive(passphrase)?;
-        let plain = crypto::open(&crypto::cipher(&unlock_key), &keyset_aad(kdf), wrapped)
-            .ok_or(Error::WrongPassphrase)?;
+        let plain =
+            crypto::open(&unlock_key, &keyset_aad(kdf), wrapped).ok_or(Error::WrongPassphrase)?;
         Self::decode(&plain)
     }
 
     fn wrap_biometric(&self, key: &[u8; KEY_LEN], token: &[u8]) -> Result<Vec<u8>> {
         crypto::seal(
-            &crypto::cipher(key),
+            key,
             &biometric_keyset_aad(token),
             &[self.encode().as_slice()],
         )
     }
 
     fn unwrap_biometric(key: &[u8; KEY_LEN], token: &[u8], wrapped: &[u8]) -> Result<Self> {
-        let plain = crypto::open(&crypto::cipher(key), &biometric_keyset_aad(token), wrapped)
+        let plain = crypto::open(key, &biometric_keyset_aad(token), wrapped)
             .ok_or(Error::InvalidBiometric)?;
         Self::decode(&plain).map_err(|_| Error::InvalidBiometric)
     }
@@ -517,17 +511,19 @@ impl KeySet {
     }
 }
 
+/// The open store's keys, each in a [`LiveKey`] for as long as it's open.
+/// Ciphers are built per call from `data`, never kept.
 pub(crate) struct Keys {
     keyset: KeySet,
-    data: XChaCha20Poly1305,
+    /// The `CTX_DATA` subkey that seals every log, meta and activity row.
+    data: LiveKey,
     meta_index: LiveKey,
 }
 
 impl Keys {
     fn new(keyset: KeySet) -> Self {
-        let data = crypto::subkey(CTX_DATA, &keyset.data_key);
         Self {
-            data: crypto::cipher(&data),
+            data: crypto::live_key(&crypto::subkey(CTX_DATA, &keyset.data_key)),
             meta_index: crypto::live_key(&crypto::subkey(CTX_META_INDEX, &keyset.data_key)),
             keyset,
         }
@@ -648,5 +644,12 @@ fn begin_write(db: &Database) -> Result<WriteTransaction> {
 impl Unlocked {
     pub(crate) fn keys_for_test(&self) -> &Keys {
         &self.keys
+    }
+}
+
+#[cfg(test)]
+impl Keys {
+    pub(crate) fn data_for_test(&self) -> &LiveKey {
+        &self.data
     }
 }

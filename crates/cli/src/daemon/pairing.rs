@@ -228,7 +228,7 @@ impl Joiner for NewDevice<'_> {
                     bail!("this device already holds vault {}", offer.vault_name);
                 }
                 join_blob(
-                    &s.secret,
+                    &s.secret(),
                     &s.meta.device_name,
                     inviter,
                     &vault,
@@ -565,7 +565,7 @@ mod tests {
         let daemon = Daemon::new(super::super::tests::test_paths(dir), true, KDF);
         daemon.ready.send_replace(true);
         let node = Node::spawn(
-            NodeConfig::local_only(*loaded.secret.to_bytes()),
+            NodeConfig::local_only(*loaded.secret().to_bytes()),
             Arc::new(|_: &PeerId| false),
             super::super::sync::Handler(daemon.clone()),
         )
@@ -754,7 +754,15 @@ mod tests {
 
         // The inviter commits b's Add, but b never stores the welcome.
         let join = b
-            .with(|s| join_blob(&s.secret, "beta", DeviceId::from_bytes(a_id), &vault, None))
+            .with(|s| {
+                join_blob(
+                    &s.secret(),
+                    "beta",
+                    DeviceId::from_bytes(a_id),
+                    &vault,
+                    None,
+                )
+            })
             .unwrap();
         a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
         let entries = a.with(|s| Ok(s.vault(&vault).entries().len())).unwrap();

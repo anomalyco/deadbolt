@@ -48,10 +48,6 @@ pub(crate) fn random_live_key() -> Result<LiveKey> {
     Ok(key)
 }
 
-pub(crate) fn cipher(key: &[u8; KEY_LEN]) -> XChaCha20Poly1305 {
-    XChaCha20Poly1305::new(key.into())
-}
-
 /// Derives an independent subkey from `key` for one purpose (BLAKE3 KDF mode).
 pub(crate) fn subkey(context: &str, key: &[u8; KEY_LEN]) -> SecretKey {
     Zeroizing::new(blake3::derive_key(context, key))
@@ -68,7 +64,11 @@ pub(crate) fn blind(key: &[u8; KEY_LEN], parts: &[&[u8]]) -> [u8; 32] {
 
 /// Encrypts the concatenation of `parts` with a fresh random nonce.
 /// Output: `nonce (24) || ciphertext || tag (16)`.
-pub(crate) fn seal(cipher: &XChaCha20Poly1305, aad: &[u8], parts: &[&[u8]]) -> Result<Vec<u8>> {
+///
+/// The cipher's key schedule lives only for this call (and is wiped when it
+/// drops), so a long-lived key stays in its [`LiveKey`] pages.
+pub(crate) fn seal(key: &[u8; KEY_LEN], aad: &[u8], parts: &[&[u8]]) -> Result<Vec<u8>> {
+    let cipher = XChaCha20Poly1305::new(key.into());
     let nonce = random::<NONCE_LEN>()?;
     let len: usize = parts.iter().map(|p| p.len()).sum();
     let mut out = Vec::with_capacity(NONCE_LEN + len + TAG_LEN);
@@ -88,14 +88,11 @@ pub(crate) fn seal(cipher: &XChaCha20Poly1305, aad: &[u8], parts: &[&[u8]]) -> R
 }
 
 /// Inverse of [`seal`]. Returns `None` if authentication fails.
-pub(crate) fn open(
-    cipher: &XChaCha20Poly1305,
-    aad: &[u8],
-    sealed: &[u8],
-) -> Option<Zeroizing<Vec<u8>>> {
+pub(crate) fn open(key: &[u8; KEY_LEN], aad: &[u8], sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     if sealed.len() < NONCE_LEN + TAG_LEN {
         return None;
     }
+    let cipher = XChaCha20Poly1305::new(key.into());
     let (nonce, rest) = sealed.split_at(NONCE_LEN);
     let (ciphertext, tag) = rest.split_at(rest.len() - TAG_LEN);
     let nonce: [u8; NONCE_LEN] = nonce.try_into().ok()?;

@@ -14,7 +14,7 @@ pub fn is_initialized(dir: &Path) -> bool {
 
 /// Creates a new store in `dir` with [`KdfParams::DEFAULT`] and returns it
 /// unlocked. See [`init_with_params`].
-pub fn init(dir: &Path, passphrase: &[u8], device_secret: [u8; 32]) -> Result<Unlocked> {
+pub fn init(dir: &Path, passphrase: &[u8], device_secret: &[u8; 32]) -> Result<Unlocked> {
     init_with_params(dir, passphrase, device_secret, KdfParams::DEFAULT)
 }
 
@@ -30,10 +30,9 @@ pub fn init(dir: &Path, passphrase: &[u8], device_secret: [u8; 32]) -> Result<Un
 pub fn init_with_params(
     dir: &Path,
     passphrase: &[u8],
-    device_secret: [u8; 32],
+    device_secret: &[u8; 32],
     params: KdfParams,
 ) -> Result<Unlocked> {
-    let device_secret = Zeroizing::new(device_secret);
     let db_path = dir.join(DB_FILE);
     params.validate()?;
     create_private_dir(dir)?;
@@ -41,7 +40,7 @@ pub fn init_with_params(
         return Err(Error::AlreadyExists(dir.to_path_buf()));
     }
 
-    let keyset = KeySet::new(&device_secret)?;
+    let keyset = KeySet::new(device_secret)?;
     let kdf = KdfHeader::generate(params)?;
     let wrapped = keyset.wrap(&kdf, passphrase)?;
     let keys = Keys::new(keyset);

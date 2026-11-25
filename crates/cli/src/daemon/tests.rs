@@ -186,7 +186,7 @@ async fn ambiguous_append_closes_the_gate_and_cannot_be_reopened_by_readiness() 
         .unwrap();
     let members = daemon.members.clone();
     let node = Node::spawn(
-        NodeConfig::local_only(*loaded.secret.to_bytes()),
+        NodeConfig::local_only(*loaded.secret().to_bytes()),
         Arc::new(move |id: &PeerId| members.read().unwrap().contains(id)),
         sync::Handler(daemon.clone()),
     )
@@ -278,7 +278,7 @@ async fn quarantine_unlock_authenticates_and_replays_without_a_separate_lock() {
             .set_biometric(&key, &make_valid_biometric_token(session::now()))
             .unwrap();
         let node = Node::spawn(
-            NodeConfig::local_only(*loaded.secret.to_bytes()),
+            NodeConfig::local_only(*loaded.secret().to_bytes()),
             Arc::new(|_: &PeerId| false),
             sync::Handler(daemon.clone()),
         )
@@ -345,7 +345,7 @@ async fn quarantine_explicit_lock_still_closes_the_failed_handle() {
     let (mut loaded, fault) = session::tests::fault_store(dir.path(), [7; 32]);
     let id = loaded.create_vault("personal").unwrap();
     let node = Node::spawn(
-        NodeConfig::local_only(*loaded.secret.to_bytes()),
+        NodeConfig::local_only(*loaded.secret().to_bytes()),
         Arc::new(|_: &PeerId| false),
         sync::Handler(daemon.clone()),
     )
@@ -382,7 +382,7 @@ async fn locking_wakes_membership_waiters_with_the_locked_error() {
     )
     .unwrap();
     let node = Node::spawn(
-        NodeConfig::local_only(*loaded.secret.to_bytes()),
+        NodeConfig::local_only(*loaded.secret().to_bytes()),
         Arc::new(|_: &PeerId| false),
         sync::Handler(daemon.clone()),
     )
@@ -463,7 +463,7 @@ async fn local_item_commands_work_immediately_after_unlock_with_offline_peers() 
     let store = deadbolt_store::init_with_params(
         dir.path(),
         b"test",
-        key,
+        &key,
         deadbolt_store::KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
