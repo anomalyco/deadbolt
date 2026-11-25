@@ -132,7 +132,7 @@ private actor CountingMockClient: AutofillDaemonClient {
     func send(
         _ command: AutofillCommand,
         timeout: TimeInterval,
-        handle: SocketCallHandle?
+        handle: CallHandle?
     ) async throws -> AutofillReply {
         calls.append(command)
         switch command {
@@ -292,7 +292,7 @@ private func testSocketCancellation() throws {
         }
     }
 
-    let handle = SocketCallHandle()
+    let handle = CallHandle()
     DispatchQueue.global().async {
         _ = accepted.wait(timeout: .now() + 2.0)
         usleep(40_000)
@@ -300,25 +300,17 @@ private func testSocketCancellation() throws {
     }
 
     let started = DispatchTime.now().uptimeNanoseconds
-    do {
-        _ = try UnixSocketDaemonClient.performBlockingCall(
-            socketPath: sockPath,
-            command: .autofillStatus,
-            timeout: 10.0,
-            handle: handle,
-            peerVerifier: nil
-        )
-        releasePeer.signal()
-        throw TestFailure("expected cancelled error")
-    } catch let err as DaemonCallError {
-        releasePeer.signal()
-        let elapsedMS = (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-        try check(err == .cancelled, "expected .cancelled, got \(err)")
-        try check(elapsedMS < 2_000, "cancel took too long: \(elapsedMS)ms")
-    } catch {
-        releasePeer.signal()
-        throw error
-    }
+    let outcome = autofillCall(
+        socketPath: sockPath,
+        command: .autofillStatus,
+        timeoutSecs: 10.0,
+        handle: handle,
+        daemon: nil
+    )
+    releasePeer.signal()
+    let elapsedMS = (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+    try check(outcome == .failed(.cancelled), "expected .cancelled, got \(outcome)")
+    try check(elapsedMS < 2_000, "cancel took too long: \(elapsedMS)ms")
 }
 
 // MARK: - Offscreen UI Snapshot & Rendering Test
@@ -375,7 +367,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
         func send(
             _ command: AutofillCommand,
             timeout: TimeInterval,
-            handle: SocketCallHandle?
+            handle: CallHandle?
         ) async throws -> AutofillReply {
             switch mode {
             case .notInitialized:
@@ -519,14 +511,7 @@ private func testLiveDaemon(
     daemonBinaryPath: String,
     passphrase: String
 ) async throws {
-    let daemonURL = URL(fileURLWithPath: daemonBinaryPath)
-    let verifiedClient = UnixSocketDaemonClient(socketPath: socketPath) { fd in
-        try PeerCheck.verifyDaemon(
-            socketFD: fd,
-            expectedDaemonURL: daemonURL,
-            requiredTeamID: nil
-        )
-    }
+    let verifiedClient = UnixSocketDaemonClient(socketPath: socketPath, daemonBinary: daemonBinaryPath)
 
     let tmp = FileManager.default.temporaryDirectory
         .appendingPathComponent("deadbolt-live-af-\(UUID().uuidString)", isDirectory: true)
@@ -631,25 +616,16 @@ private func testLiveDaemon(
         ]
     )
 
-    // 6. Confined command check: AutoFill socket rejects non-AutoFill commands even from Swift.
+    // 6. The daemon's code check refuses a peer that isn't the expected
+    // binary before the passphrase is sent.
     do {
-        let badLine = Data("{\"v\":\(AutofillWire.protocolVersion),\"cmd\":\"lock\"}\n".utf8)
-        _ = badLine
-        // Lock the daemon from outside is tested in step 7 when `--locked-phase` runs,
-        // while here we verify PeerCheck rejects a mismatched binary path before sending passphrase!
-        let wrongBinaryClient = UnixSocketDaemonClient(socketPath: socketPath) { fd in
-            try PeerCheck.verifyDaemon(
-                socketFD: fd,
-                expectedDaemonURL: URL(fileURLWithPath: "/usr/bin/true"),
-                requiredTeamID: nil
-            )
-        }
+        let wrongBinaryClient = UnixSocketDaemonClient(socketPath: socketPath, daemonBinary: "/usr/bin/true")
         _ = try await wrongBinaryClient.send(
             .unlock(passphrase: passphrase),
             timeout: 2.0,
             handle: nil
         )
-        throw TestFailure("PeerCheck should have rejected /usr/bin/true as daemon binary")
+        throw TestFailure("the daemon check should have rejected /usr/bin/true as daemon binary")
     } catch let err as DaemonCallError {
         guard case .peerRejected = err else {
             throw TestFailure("expected .peerRejected, got \(err)")
@@ -664,14 +640,7 @@ private func testLiveLockedDaemon(
     passphrase: String,
     recordId: String
 ) async throws {
-    let daemonURL = URL(fileURLWithPath: daemonBinaryPath)
-    let verifiedClient = UnixSocketDaemonClient(socketPath: socketPath) { fd in
-        try PeerCheck.verifyDaemon(
-            socketFD: fd,
-            expectedDaemonURL: daemonURL,
-            requiredTeamID: nil
-        )
-    }
+    let verifiedClient = UnixSocketDaemonClient(socketPath: socketPath, daemonBinary: daemonBinaryPath)
 
     // 1. Silent fill while locked returns .userInteractionRequired so macOS opens our UI.
     let silentCompleter = RecordingCompleter()

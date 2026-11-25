@@ -80,16 +80,15 @@ impl AutofillDaemonHarness {
         // Stage a real `Deadbolt.app` layout so the daemon's caller check
         // classifies `Contents/MacOS/Deadbolt` as `CallerClass::App` and
         // `Contents/PlugIns/DeadboltAutoFill.appex` as `CallerClass::AutoFill`
-        // by kernel audit token + ad-hoc cdhash, and `PeerCheck.verifyDaemon`
-        // verifies `Contents/Helpers/deadbolt`.
+        // by kernel audit token + ad-hoc cdhash, and the extension's
+        // daemon check (deadbolt-ffi) verifies `Contents/Helpers/deadbolt`.
         let app_dir = home_dir.path().join("Deadbolt.app");
         let macos_dir = app_dir.join("Contents/MacOS");
         let helpers_dir = app_dir.join("Contents/Helpers");
         let appex_dir = app_dir.join("Contents/PlugIns/DeadboltAutoFill.appex");
-        let appex_macos = appex_dir.join("Contents/MacOS");
         fs::create_dir_all(&macos_dir).unwrap();
         fs::create_dir_all(&helpers_dir).unwrap();
-        fs::create_dir_all(&appex_macos).unwrap();
+        fs::create_dir_all(app_dir.join("Contents/PlugIns")).unwrap();
 
         let built_cli = fs::canonicalize(deadbolt()).expect("canonicalize deadbolt binary");
         let built_enclave = built_cli.with_file_name("deadbolt-enclave");
@@ -120,7 +119,7 @@ impl AutofillDaemonHarness {
         );
 
         let app_bin = compile_app_socket_helper(&app_dir, home_dir.path());
-        let runner = compile_swift_test_appex(&appex_dir, home_dir.path());
+        let runner = compile_swift_test_appex(&appex_dir);
 
         let sign_app = ProcessCommand::new("codesign")
             .args(["--force", "--identifier", "anomaly.deadbolt", "--sign", "-"])
@@ -313,109 +312,43 @@ int main(int argc, char **argv) {
     fs::canonicalize(&app_bin).unwrap()
 }
 
-fn compile_swift_test_appex(appex_dir: &Path, scratch: &Path) -> PathBuf {
-    let root = repo_root();
-    let autofill_dir = root.join("crates/app/autofill");
-    let proto_swift = scratch.join("ProtocolVersion.swift");
-    fs::write(
-        &proto_swift,
-        format!("public let generatedProtocolVersion: UInt32 = {PROTOCOL_VERSION}\n"),
-    )
-    .expect("write ProtocolVersion.swift");
-
-    let plist_template =
-        fs::read_to_string(autofill_dir.join("Info.plist.in")).expect("read Info.plist.in");
-    let plist_rendered = plist_template
-        .replace("@VERSION@", "0.0.0")
-        .replace("@BUILD@", "1");
-    fs::write(appex_dir.join("Contents/Info.plist"), plist_rendered).expect("write Info.plist");
-
-    let runner = appex_dir.join("Contents/MacOS/DeadboltAutoFill");
-    let sources = [
-        proto_swift,
-        autofill_dir.join("Protocol.swift"),
-        autofill_dir.join("PeerCheck.swift"),
-        autofill_dir.join("SocketClient.swift"),
-        autofill_dir.join("IdentitySync.swift"),
-        autofill_dir.join("ControllerModel.swift"),
-        autofill_dir.join("AutoFillView.swift"),
-        autofill_dir.join("CredentialProviderViewController.swift"),
-        autofill_dir.join("tests/AutoFillTests.swift"),
-    ];
-
-    let triple = if cfg!(target_arch = "aarch64") {
-        "arm64-apple-macosx14.0"
-    } else {
-        "x86_64-apple-macosx14.0"
-    };
-
-    let out = ProcessCommand::new("swiftc")
-        .args([
-            "-O",
-            "-swift-version",
-            "6",
-            "-warnings-as-errors",
-            "-module-name",
-            "DeadboltAutoFill",
-            "-parse-as-library",
-            "-target",
-            triple,
-        ])
-        .args(&sources)
-        .args([
-            "-framework",
-            "AppKit",
-            "-framework",
-            "AuthenticationServices",
-            "-framework",
-            "Security",
-            "-o",
-        ])
-        .arg(&runner)
-        .output()
-        .expect("invoke swiftc for AutoFillTests");
+/// `build-autofill.sh --tests`: the AutoFillTests.swift runner, linked with
+/// deadbolt-ffi like the extension and signed ad hoc as it, at `appex_dir`.
+fn compile_swift_test_appex(appex_dir: &Path) -> PathBuf {
+    let out = build_autofill(&["--tests"], appex_dir);
     assert!(
         out.status.success(),
-        "swiftc failed:\n{}",
+        "build-autofill.sh --tests failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::canonicalize(appex_dir.join("Contents/MacOS/DeadboltAutoFill")).unwrap()
+}
 
-    let sign = ProcessCommand::new("codesign")
-        .args([
-            "--force",
-            "--identifier",
-            "anomaly.deadbolt.autofill",
-            "--sign",
-            "-",
-        ])
-        .arg(appex_dir)
+/// Runs `crates/app/scripts/build-autofill.sh` for `appex`, signed ad hoc.
+fn build_autofill(options: &[&str], appex: &Path) -> std::process::Output {
+    let root = repo_root();
+    ProcessCommand::new("bash")
+        .arg(root.join("crates/app/scripts/build-autofill.sh"))
+        .args(options)
+        .arg(appex)
+        .args(["0.2.3", "203"])
+        .current_dir(&root)
+        .env_remove("DEADBOLT_APPLE_SIGNING_IDENTITY")
+        .env_remove("DEADBOLT_APPLE_TEAM_ID")
+        .env_remove("DEADBOLT_AUTOFILL_PROVISION_PROFILE")
         .output()
-        .expect("ad-hoc sign staged DeadboltAutoFill.appex");
-    assert!(
-        sign.status.success(),
-        "codesign DeadboltAutoFill.appex failed: {}",
-        String::from_utf8_lossy(&sign.stderr)
-    );
-    fs::canonicalize(&runner).unwrap()
+        .expect("run build-autofill.sh")
 }
 
 #[test]
 fn autofill_appex_bundle_is_valid() {
-    let root = repo_root();
     let tmp = tempfile::Builder::new()
         .prefix("dbaf-bundle-")
         .tempdir()
         .unwrap();
     let appex = tmp.path().join("DeadboltAutoFill.appex");
 
-    let out = ProcessCommand::new("bash")
-        .arg(root.join("crates/app/scripts/build-autofill.sh"))
-        .arg(&appex)
-        .args(["0.2.3", "203"])
-        .current_dir(&root)
-        .output()
-        .expect("run build-autofill.sh");
+    let out = build_autofill(&[], &appex);
     assert!(
         out.status.success(),
         "build-autofill.sh failed:\n{}",
@@ -465,6 +398,15 @@ fn autofill_appex_bundle_is_valid() {
     assert!(
         nm_text.contains("_NSExtensionMain"),
         "DeadboltAutoFill must link _NSExtensionMain: {nm_text}"
+    );
+    let defined = ProcessCommand::new("nm")
+        .arg(&bin)
+        .output()
+        .expect("nm DeadboltAutoFill");
+    assert!(
+        String::from_utf8_lossy(&defined.stdout)
+            .contains("_uniffi_deadbolt_ffi_fn_func_autofill_call"),
+        "DeadboltAutoFill must link deadbolt-ffi's libdeadbolt_ffi.a"
     );
 
     let verify = ProcessCommand::new("codesign")
@@ -557,7 +499,7 @@ fn autofill_swift_extension_end_to_end() {
 
     // Phase 1: Unlocked end-to-end from staged `DeadboltAutoFill.appex`
     // (unit, socket cancel, snapshots, identity sync, silent fill, domain
-    // mismatch refusal, unassociated app picker, PeerCheck).
+    // mismatch refusal, unassociated app picker, the daemon check).
     let unlocked = ProcessCommand::new(&harness.runner)
         .arg("--live-socket")
         .arg(&harness.autofill_socket)

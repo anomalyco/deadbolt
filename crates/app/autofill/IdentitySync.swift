@@ -84,8 +84,7 @@ public struct FileIdentityHashStore: IdentityHashPersisting {
     }
 
     public static func live() -> FileIdentityHashStore {
-        let group = AppGroupContainer.resolve()
-        let url = group.socketURL?.deletingLastPathComponent()
+        let url = AppGroupContainer.socketURL()?.deletingLastPathComponent()
             .appendingPathComponent("identities.hash", isDirectory: false)
         return FileIdentityHashStore(fileURL: url)
     }

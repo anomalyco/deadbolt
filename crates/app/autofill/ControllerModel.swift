@@ -72,7 +72,7 @@ public final class AutoFillControllerModel {
     private var unlockError: String?
     private var pendingPickerFill: SiteLogin?
 
-    private var activeCall: SocketCallHandle?
+    private var activeCall: CallHandle?
     private var currentTask: Task<Void, Never>?
     private var finished = false
 
@@ -706,7 +706,7 @@ public final class AutoFillControllerModel {
         _ command: AutofillCommand,
         timeout: TimeInterval
     ) async throws -> AutofillReply {
-        let handle = SocketCallHandle()
+        let handle = CallHandle()
         activeCall = handle
         defer {
             if activeCall === handle {
