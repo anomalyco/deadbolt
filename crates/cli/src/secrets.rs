@@ -20,7 +20,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use zeroize::Zeroizing;
 
 use crate::paths::Paths;
-use crate::protocol::{Command, Purpose, Reference, Reply, ResolvedSecret, SCHEME};
+use crate::protocol::{Command, Purpose, Reference, Reply, ResolvedSecret, SCHEME, Secret};
 use crate::{client, request};
 
 /// What a masked value becomes in a command's output.
@@ -356,9 +356,40 @@ pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitC
         .command
         .split_first()
         .context("name a command to run after --")?;
+    // From here until the command exits, this process and everything it
+    // starts get nothing from the daemon (`daemon/taint.rs`). Registering
+    // before the spawn leaves the command no moment untainted.
+    let run = taint(paths, from_stdin).await?;
+    let result = supervise(program, rest, &vars, values, !args.no_mask).await;
+    let untaint = Command::RunUntaint { run };
+    if let Err(error) = request(paths, untaint, from_stdin).await {
+        // The daemon drops the run itself once this process is gone.
+        tracing::debug!("ending the run: {error:#}");
+    }
+    result
+}
+
+/// Registers this process as a run's (`run-taint`); the id ends it.
+async fn taint(paths: &Paths, from_stdin: bool) -> Result<Secret> {
+    client::ensure_running(paths).await?;
+    let Reply::RunTainted { run } = request(paths, Command::RunTaint, from_stdin).await? else {
+        bail!("unexpected reply");
+    };
+    Ok(run)
+}
+
+/// Runs the command with `vars` set, masking `values` in its output, and
+/// returns its exit code.
+async fn supervise(
+    program: &OsString,
+    rest: &[OsString],
+    vars: &IndexMap<String, EnvValue>,
+    values: HashMap<String, ResolvedSecret>,
+    mask: bool,
+) -> Result<ExitCode> {
     let mut command = tokio::process::Command::new(program);
     command.args(rest).stdin(Stdio::inherit());
-    for (name, value) in &vars {
+    for (name, value) in vars {
         match value {
             EnvValue::Reference(r) => {
                 command.env(name, values[r].value.expose());
@@ -368,7 +399,6 @@ pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitC
             }
         }
     }
-    let mask = !args.no_mask;
     let masker = || mask.then(|| Masker::new(values.values().map(|s| s.value.expose())));
     if mask {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());

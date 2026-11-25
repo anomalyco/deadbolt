@@ -25,6 +25,7 @@ mod ssh_keys;
 mod status;
 mod sync;
 mod system;
+mod taint;
 #[cfg(test)]
 mod tests;
 mod updates;
@@ -135,6 +136,8 @@ pub struct Daemon {
     watchers: Watchers,
     /// Who connections come from.
     callers: caller::Callers,
+    /// The `deadbolt run`s going on, whose processes get nothing.
+    taints: Mutex<taint::TaintTable>,
     /// Activity not stored yet: entries recorded while locked, and each
     /// caller's count against its limit.
     activity: Mutex<activity::Ledger>,
@@ -180,6 +183,7 @@ impl Daemon {
             shutdown: Notify::new(),
             watchers: Watchers::default(),
             callers: caller::Callers::new(),
+            taints: Mutex::default(),
             activity: Mutex::default(),
             autofill_fill_rate: Mutex::default(),
             autofill_passkey_rate: Mutex::default(),
@@ -957,6 +961,7 @@ impl Daemon {
             session.health_task.take();
             session.sync_task.take();
             session.node.shutdown().await;
+            session.engine.lock();
             drop(session);
             info!("locked");
         }

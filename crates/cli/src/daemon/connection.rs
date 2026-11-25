@@ -172,15 +172,23 @@ impl Daemon {
             closed,
         };
         let mut stop = false;
-        let result = match request {
-            Ok(Request {
-                v,
-                command: Command::Watch { app },
-                ..
-            }) if v == protocol() && socket == macos_autofill::SocketKind::Control => {
+        let screened = match &request {
+            Ok(request) => self.screen(peer.as_ref().ok(), &request.command),
+            Err(_) => None,
+        };
+        let result = match (request, screened) {
+            (Ok(_), Some(screened)) => screened,
+            (
+                Ok(Request {
+                    v,
+                    command: Command::Watch { app },
+                    ..
+                }),
+                None,
+            ) if v == protocol() && socket == macos_autofill::SocketKind::Control => {
                 return self.watch(&conversation, app).await;
             }
-            Ok(request) => {
+            (Ok(request), None) => {
                 let asked_stop = matches!(request.command, Command::Stop);
                 let always = matches!(request.command, Command::Status | Command::Stop);
                 if request.v != protocol() && !always {
@@ -206,7 +214,7 @@ impl Daemon {
                     result
                 }
             }
-            Err(error) => Err(error),
+            (Err(error), _) => Err(error),
         };
         let message = match result {
             Ok(reply) => Message::Ok { reply },

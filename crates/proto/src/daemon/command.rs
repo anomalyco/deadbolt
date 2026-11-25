@@ -504,6 +504,15 @@ pub enum Command {
         passphrase: Option<Secret>,
         comment: Option<String>,
     },
+    /// `deadbolt run`, about to start its command: registers the caller's
+    /// own process, so it and everything it starts get nothing from the
+    /// daemon. Replies `run-tainted` with the run id that ends it, which
+    /// must never reach the command. Needs no unlock.
+    RunTaint,
+    /// Ends the run `run` (hex) names, once its command has exited.
+    RunUntaint {
+        run: Secret,
+    },
 }
 
 impl Command {
@@ -583,6 +592,8 @@ impl Command {
             Self::BreachChecksSet { .. } => "breach-checks-set",
             Self::SshGenerate { .. } => "ssh-generate",
             Self::SshInspect { .. } => "ssh-inspect",
+            Self::RunTaint => "run-taint",
+            Self::RunUntaint { .. } => "run-untaint",
         }
     }
 }

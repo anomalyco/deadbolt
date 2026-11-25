@@ -12,8 +12,8 @@ deadbolt read deadbolt://personal/GitHub/password
 ```
 
 **Who gets values.** Anyone who can run commands as you, while the vault is
-unlocked, exactly as with `deadbolt get`. There is no per-caller gate: see
-the threat model in `docs/design.md`. Locked, every resolve fails `locked`
+unlocked, exactly as with `deadbolt get`, except what `deadbolt run`
+starts (below). See the threat model in `docs/design.md`. Locked, every resolve fails `locked`
 (exit 3). The browser host and macOS AutoFill never resolve references
 (`forbidden`, exit 4).
 
@@ -46,6 +46,24 @@ UIs, and a pager may behave differently. `--no-mask` turns masking off and
 leaves them on the terminal. Masking stops accidents, such as a value
 landing in a log or a transcript, not a command that means to show it.
 
+**A run's command gets nothing more.** Once its values are resolved,
+`deadbolt run` registers its own process with the daemon (`run-taint`)
+and only then starts the command, so the command never has a moment
+outside the run. While the run lasts, the daemon walks the ancestry of
+every caller by pid and start time (`proc_pidinfo`/`sysctl` on macOS,
+`/proc/<pid>/stat` on Linux): the command, a shell it starts, and
+anything below them are refused every request but `status` (`forbidden`,
+"process is running inside deadbolt run and cannot access daemon
+secrets"): no item, no reference, no list, no lock or unlock. A start time
+that doesn't match ends the walk, so a reused pid neither inherits a run
+nor escapes one. When the command exits, `deadbolt run` ends the run with
+its id, which the command never sees; a run whose process has died is
+dropped as the daemon finds it. A process that outlives the run, or
+detaches from it with a double fork, is no longer anyone's descendant and
+is served as any other caller. The daemon's code is
+`crates/cli/src/daemon/taint.rs`; capabilities a run may carry are
+`crates/engine/src/cap.rs`.
+
 **`deadbolt inject`.** Replaces each `{{ deadbolt://… }}` in the template
 (`-i`, default stdin; other `{{ … }}` are left alone) and writes the result
 to `-o` through a 0600 temporary file renamed into place. Written to
@@ -66,4 +84,5 @@ lock.
 **Protocol.** `resolve {refs, purpose}` → `secrets {secrets: [{vault,
 item, title, field, value, file}]}` in reference order. A file field goes
 only into a file `inject` writes from a template that is that one
-reference.
+reference. `run-taint` → `run-tainted {run}` registers the caller;
+`run-untaint {run}` → `done` ends it (protocol 30).

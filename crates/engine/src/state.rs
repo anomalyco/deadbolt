@@ -13,6 +13,7 @@ use deadbolt_proto::peer::{Addr, Hint, clean_name};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::cap::{CapAudit, CapCheck, CapError, CapId, CapTable};
 use crate::clock::{Clock, utc_date};
 use crate::store::{VaultStore, get_json, set_json};
 use crate::{fail, unhex};
@@ -118,6 +119,9 @@ pub struct Engine {
     pub changes: Changes,
     /// Sticky until the store is closed and replayed; readiness cannot heal it.
     pub append_uncertain: bool,
+    /// The capabilities callers hold: in memory only, wiped by [`Engine::lock`]
+    /// and when the engine drops.
+    pub caps: CapTable,
 }
 
 impl Engine {
@@ -205,7 +209,19 @@ impl Engine {
             unavailable: IndexMap::new(),
             changes: Changes::default(),
             append_uncertain: false,
+            caps: CapTable::new(),
         }
+    }
+
+    /// Wipes everything granted while unlocked, as the device locks. The
+    /// host drops the engine next; until then no capability answers.
+    pub fn lock(&mut self) {
+        self.caps.clear();
+    }
+
+    /// [`CapTable::authorize`] at this engine's now.
+    pub fn authorize_cap(&mut self, id: &CapId, required: &CapCheck) -> Result<CapAudit, CapError> {
+        self.caps.authorize(self.clock.as_ref(), id, required)
     }
 
     /// Where this engine persists.

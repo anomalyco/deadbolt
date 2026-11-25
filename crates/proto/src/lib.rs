@@ -23,7 +23,7 @@ pub mod typescript;
 /// as `protocol` in `status`. Clients and the daemon must speak the same
 /// one; `deadbolt_client::ensure_running` replaces an older daemon and
 /// refuses a newer one. Bump it on any change to [`daemon`]'s messages.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 29;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 30;
 
 /// The browser native messaging protocol's version, sent as `protocol` in
 /// the host's `hello` reply and checked by the extension (`PROTOCOL` in

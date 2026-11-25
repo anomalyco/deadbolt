@@ -367,4 +367,8 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         comment: Option<String>,
     },
+    /// `run-taint` registered the caller: `run` (hex) ends it.
+    RunTainted {
+        run: Secret,
+    },
 }
