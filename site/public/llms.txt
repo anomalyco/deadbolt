@@ -14,7 +14,7 @@ Status: alpha (dev builds ship on every push to `dev`).
 ## Components
 
 - **CLI & daemon (`deadbolt`):** Local vault management, background sync daemon, secret injection (`deadbolt run`, `deadbolt inject`, `deadbolt read`), one-time peer-to-peer sharing (`deadbolt send` / `deadbolt receive`), and self-updating (`deadbolt update`).
-- **Desktop app (`Deadbolt.app` / `deadbolt app`):** Native desktop UI built into the `deadbolt` binary (macOS universal app bundle and Linux desktop build).
+- **Desktop app (`Deadbolt.app` / `deadbolt app`):** Native desktop UI, its own program (`deadbolt-ui`) beside the headless `deadbolt` (macOS universal app bundle and Linux desktop build).
 - **Browser extension (Chromium MV3):** Fills and saves through the local app/CLI over native messaging.
 
 ## Install (dev channel)

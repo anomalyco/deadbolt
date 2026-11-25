@@ -32,17 +32,17 @@ shown by `deadbolt --version`, e.g. `deadbolt 0.0.0-dev-42 (dev)`), which
 ```text
 Release (push dev | production | v*, or workflow_dispatch: channel)
 ├─ plan               plan.sh: channel, version, tag, notes                               [build]
-├─ build-linux-*      deadbolt-<v>-linux-{x64,arm64}.tar.gz (glibc 2.28+, app built in)  [build]
+├─ build-linux-*      deadbolt-<v>-linux-{x64,arm64}.tar.gz (glibc 2.28+, deadbolt-ui beside) [build]
 ├─ build-linux-*-musl deadbolt-<v>-linux-{x64,arm64}-musl.tar.gz (static, no app)         [build]
 ├─ build-extension    deadbolt-extension-<v>.zip (manifest version stamped)                [build]
 ├─ build-enclave      deadbolt-enclave for arm64 + x86_64, ad hoc                           [build]
 ├─ sign-enclave       Developer ID-signs the two helpers; decides "signed"                  [release]
-├─ build-macos        deadbolt pinned to those helpers; universal Deadbolt.app (ad hoc);
-│                     deadbolt-<v>-darwin-{arm64,x64}.tar.gz                                [build]
+├─ build-macos        deadbolt + deadbolt-ui pinned to those helpers; universal Deadbolt.app
+│                     (ad hoc); deadbolt-<v>-darwin-{arm64,x64}.tar.gz (headless)           [build]
 ├─ sign-macos         sign-macos.sh: CLI + app inside-out, notarize, staple, zip + DMG       [release]
 ├─ verify-macos       Gatekeeper, staple, update requirement, Touch ID pin, launch            [build]
 ├─ build-npm          signed only: @deadbolt/cli + 6 platform packages (scripts/package-npm.sh),
-│                     the app's signature and an install checked                            [build]
+│                     the CLI's signatures and an install checked                           [build]
 ├─ publish            OIDC: cli, desktop, extension to the release service; provenance      [release]
 ├─ publish-attestations  build provenance for the npm tarballs                             [id-token]
 ├─ publish-npm        OIDC trusted publishing: npm, dist-tag dev / latest                   [release]
@@ -72,28 +72,32 @@ boundary. Protect `.github/` with CODEOWNERS and a ruleset on `dev` and
 
 ### Linux
 
-Two builds of `deadbolt` per architecture:
+Two builds per architecture. `deadbolt` itself is headless in both; the
+desktop app is the separate `deadbolt-ui`:
 
-- **glibc, with the app** (`linux-x64`, `linux-arm64`): built in
+- **glibc, with the app** (`linux-x64`, `linux-arm64`): `deadbolt` and
+  `deadbolt-ui` beside it, built in
   `quay.io/pypa/manylinux_2_28` (AlmaLinux 8, glibc 2.28), pinned by tag and
   digest, so it runs on glibc 2.28 and later (Debian 10, Ubuntu 18.10,
   RHEL 8 and newer). The runner's own Ubuntu 24.04 would require glibc 2.39,
   as Hex's builds do; 2.28 is the manylinux baseline Python wheels use. Rune
   loads Wayland, X11 and the GPU drivers when a window opens, so the job fails
-  unless every `NEEDED` library is glibc's (libc, libm, libdl, libpthread,
-  the loader) or libgcc_s, and no symbol needs a glibc newer than 2.28. It then runs `--version`,
+  unless every `NEEDED` library of either binary is glibc's (libc, libm,
+  libdl, libpthread, the loader) or libgcc_s, no symbol needs a glibc newer
+  than 2.28, and `deadbolt` has no wgpu in it. It then runs `--version`,
   `--help`, `init`, `debug daemon status`, `new`, `ls` and `app` (which
   must say there's no graphical session) in AlmaLinux 8 minimal, which has no display and no
   desktop libraries.
 - **musl, static, without the app** (`linux-x64-musl`, `linux-arm64-musl`):
-  `--no-default-features`, for Alpine, containers and glibc older than 2.28.
-  The job checks it's static and that `deadbolt app` says the app isn't in it.
+  `deadbolt` alone, for Alpine, containers and glibc older than 2.28. The job
+  checks it's static and that `deadbolt app` says the app isn't installed.
 
 ### macOS and the Touch ID helper
 
-`deadbolt` pins the exact bytes, signature included, of the `deadbolt-enclave`
-it ships with (`DEADBOLT_ENCLAVE_SHA256`, [touch-id.md](touch-id.md)), so the
-helper is signed before `deadbolt` is compiled: `build-enclave` →
+`deadbolt` and `deadbolt-ui` pin the exact bytes, signature included, of the
+`deadbolt-enclave` they ship with (`DEADBOLT_ENCLAVE_SHA256`, from
+`crates/enclave`, [touch-id.md](touch-id.md)), so the helper is signed before
+they are compiled: `build-enclave` →
 `sign-enclave` → `build-macos` (`DEADBOLT_ENCLAVE_PREBUILT`) → `sign-macos`,
 which signs `deadbolt` and the app around the helper and fails if the helper's
 bytes change. `verify-macos` checks every architecture slice's pin.
@@ -103,16 +107,18 @@ bytes change. `verify-macos` checks every architecture slice's pin.
   Mac, at about twice the size. The service lists the same files under both
   `macos-arm64` and `macos-x64`, so an updater looks up its own target as
   Hex's does.
-- `Contents/MacOS/Deadbolt` and `Contents/Helpers/deadbolt` are the same
-  `deadbolt` (the app built in), built once and signed twice, so the daemon
-  tells the app from the CLI ([app.md](app.md#one-bundle-one-daemon)).
+- `Contents/MacOS/Deadbolt` is `deadbolt-ui`, the app, and
+  `Contents/Helpers/deadbolt` the headless `deadbolt`, signed apart, so the
+  daemon tells the app from the CLI ([app.md](app.md#one-bundle-one-daemon)).
+  `verify-macos` checks both pin the helper and that the CLI links no Metal.
 - Code identities: `anomaly.deadbolt` (the app), `anomaly.deadbolt.cli` (`deadbolt`,
   in the app and the tarballs), `anomaly.deadbolt.enclave` (the helper), all
   Developer ID team `5NZ4Q7NXJ4` with the hardened runtime and a secure
   timestamp. `sign-macos.sh` refuses any Mach-O in the app other than
   `Contents/MacOS/Deadbolt`, `Contents/Helpers/deadbolt` and
   `Contents/Helpers/deadbolt-enclave`.
-- The CLI tarballs hold `deadbolt` and `deadbolt-enclave`; both are notarized
+- The CLI tarballs hold the headless `deadbolt` and `deadbolt-enclave`, and
+  nothing of the app (`verify-macos` checks); both are notarized
   (bare executables cannot be stapled). The app and DMG are notarized and
   stapled. `crates/app/update-requirement.txt` is what an updater must require
   of a new `Deadbolt.app` (identifier, team, Developer ID, notarized).
@@ -137,7 +143,7 @@ Deadbolt has three artifacts, each with a manifest at
 
 | Artifact | Targets | File |
 | --- | --- | --- |
-| `cli` | `macos-arm64`, `macos-x64`, `linux-x64`, `linux-arm64` (glibc, app built in) | `deadbolt-<v>-{darwin,linux}-<arch>.tar.gz` |
+| `cli` | `macos-arm64`, `macos-x64`, `linux-x64`, `linux-arm64` (glibc, with `deadbolt-ui`) | `deadbolt-<v>-{darwin,linux}-<arch>.tar.gz` |
 | | `linux-x64-musl`, `linux-arm64-musl` (static, no app) | `deadbolt-<v>-linux-<arch>-musl.tar.gz` |
 | `desktop` | `macos-arm64`, `macos-x64` | `Deadbolt-<v>-macos-universal.zip` (root `Deadbolt.app`, for an updater) |
 | | `macos-arm64-dmg`, `macos-x64-dmg` | `Deadbolt-<v>-macos-universal.dmg` |
@@ -164,8 +170,8 @@ with `repository` `anomalyco/deadbolt` (provenance requires it):
 | Package | Holds | `os` / `cpu` / `libc` |
 | --- | --- | --- |
 | `@deadbolt/cli` | `bin/deadbolt` (a placeholder), `postinstall.mjs`; every platform package as an exact-version `optionalDependency` | darwin, linux / arm64, x64 |
-| `@deadbolt/cli-darwin-arm64`, `-darwin-x64` | `Deadbolt.app`, signed, notarized and stapled (universal, the release's app zip) | darwin / its cpu |
-| `@deadbolt/cli-linux-x64`, `-linux-arm64` | `bin/deadbolt`, glibc with the app | linux / its cpu / glibc |
+| `@deadbolt/cli-darwin-arm64`, `-darwin-x64` | `bin/deadbolt` and `bin/deadbolt-enclave`, signed and notarized (the release's CLI tarball; the app is Deadbolt.app, apart) | darwin / its cpu |
+| `@deadbolt/cli-linux-x64`, `-linux-arm64` | `bin/deadbolt` and `bin/deadbolt-ui`, glibc | linux / its cpu / glibc |
 | `@deadbolt/cli-linux-x64-musl`, `-linux-arm64-musl` | `bin/deadbolt`, static without the app | linux / its cpu / musl |
 
 The wrapper's postinstall (`packaging/npm/postinstall.mjs`, as OpenCode's)
@@ -183,24 +189,23 @@ serve the platform package yet, say), it says so in one line, exits 0 and
 leaves the placeholder, whose next run tries again and otherwise says why and
 exits 1, deleting nothing. A link replaces the placeholder only once it runs.
 It links rather than copies, since Deadbolt knows its files by real
-path: on macOS the command is the app's own `Contents/Helpers/deadbolt`, so
-the CLI, the daemon and the app are one install, Touch ID's helper sits beside
-it, and `deadbolt app` opens that Deadbolt.app, first linking it as
-`~/Applications/Deadbolt.app` when neither Applications folder has one (so
-Launchpad and Finder list it). `deadbolt update` updates an npm, pnpm, bun or
+path: Touch ID's helper (macOS) and the app, `deadbolt-ui` (glibc Linux), sit
+beside the package's `deadbolt`. On macOS `deadbolt app` opens a Deadbolt.app
+installed in Applications (the DMG or the cask); the darwin packages used to
+carry one, at about 166 MB unpacked, and now carry only the CLI. `deadbolt update` updates an npm, pnpm, bun or
 yarn install by running that manager (see Updater).
 
 - `build-npm` (macOS, no secrets) packs from the verified Linux tarballs and
-  the signed app zip, so a run without the Apple values publishes no npm.
-  It checks the packed apps with `codesign --verify --deep --strict`,
-  `spctl` and `stapler validate`, then installs the darwin-arm64 package and
+  the signed macOS CLI tarballs, so a run without the Apple values publishes
+  no npm. It checks the packed binaries with `codesign --verify --strict` and
+  that `deadbolt` links no Metal, then installs the darwin-arm64 package and
   the wrapper into a temporary prefix and runs `deadbolt --version`.
 - `publish-attestations` signs build provenance for every tarball;
   `publish-npm` (`release` environment) verifies it with `gh attestation
   verify`, reads each tarball's `package.json` as data and requires exactly
   the seven names at `DEADBOLT_VERSION`, no `publishConfig` beyond `access`, no
-  install script but the wrapper's, the app in the darwin packages and only
-  `bin/deadbolt` in the Linux ones. It publishes with a clean npmrc,
+  install script but the wrapper's, and exactly the CLI tarball's files in
+  each platform package's `bin/`. It publishes with a clean npmrc,
   `--tag <dev|beta|latest> --access public --ignore-scripts --provenance`,
   platform packages first and the wrapper last, skipping versions the
   registry already has. The registry shows large platform packages minutes
@@ -249,15 +254,16 @@ channel's current release isn't the build it runs, a rollback included.
   - Anything else (the install script, a tarball, a build): the `cli`
     artifact's tarball for this OS and architecture (`linux-<arch>-musl` for
     the static build), read in-process: only
-    regular files named `deadbolt` and `deadbolt-enclave` are written, never
-    links, devices, other names or owners, into the 0700 staging directory
-    beside the install. On macOS a release without `deadbolt-enclave` doesn't
-    replace a `deadbolt` that has one beside it (the new one pins its own
-    helper). The running files are moved into the stage, the new pair renamed
-    in, and on any failure both old files come back. If the running daemon is
+    regular files named `deadbolt`, `deadbolt-enclave` and `deadbolt-ui` are
+    written, never links, devices, other names or owners, into the 0700
+    staging directory beside the install. On macOS a release without
+    `deadbolt-enclave` doesn't replace a `deadbolt` that has one beside it (the
+    new one pins its own helper). A `deadbolt-ui` in the release (glibc Linux)
+    is written beside `deadbolt`. The running files are moved into the stage,
+    the new ones renamed in, and on any failure the old files come back. If the running daemon is
     this binary it is stopped and started again from the new one.
-  - npm's package (checked before the bundle, as npm's darwin package
-    carries Deadbolt.app): a path under `node_modules` whose package (the
+  - npm's package (checked before the bundle, as older darwin packages
+    carried Deadbolt.app): a path under `node_modules` whose package (the
     directory under `node_modules/@deadbolt/`) is `@deadbolt/cli` or one of
     its platform packages, and whose `@deadbolt/cli` (beside it or above it)
     has a `bin` resolving to this `deadbolt`. As OpenCode's updater does,
