@@ -788,6 +788,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_batch_with_the_peers_removal_keeps_data_written_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
+        let id = target.create_vault("personal").unwrap();
+        let peer = DeviceSecret::from_bytes(&[2; 32]);
+        let honest = DeviceSecret::from_bytes(&[3; 32]);
+        target
+            .update(id, |v, key| {
+                for device in [&peer, &honest] {
+                    let consent = device.join_consent(&id, &key.device_id());
+                    v.add(key, device.device_id(), consent)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        // The peer relays its own write and an honest member's, both from
+        // before that member removed it, plus the member's write after it.
+        let mut source = target.vault(&id).clone();
+        let (own, own_entry) = source
+            .create_item(&peer, "login", Some("own".into()), [])
+            .unwrap();
+        let (relayed, relayed_entry) = source
+            .create_item(&honest, "login", Some("relayed".into()), [])
+            .unwrap();
+        let mut concurrent = source.clone();
+        let removal = source.remove(&honest, peer.device_id()).unwrap();
+        let (after, after_entry) = source
+            .create_item(&honest, "login", Some("after".into()), [])
+            .unwrap();
+        let (late, late_entry) = concurrent
+            .create_item(&peer, "login", Some("late".into()), [])
+            .unwrap();
+        let peer = peer.device_id();
+        let batch = [removal, own_entry, relayed_entry, after_entry];
+        let added = receive(
+            &mut target,
+            &peer,
+            batch.iter().map(deadbolt_core::Entry::encode).collect(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(added, 3);
+        let vault = target.vault(&id);
+        assert!(!vault.is_member(&peer));
+        let has = |item| vault.items().iter().any(|i| i.id == item);
+        assert!(has(own) && has(relayed), "data from before the removal");
+        assert!(!has(after), "the removed peer never held data after it");
+        // Once the removal is known, nothing more from the peer is accepted,
+        // not even a write it made before learning of it.
+        let added = receive(&mut target, &peer, vec![late_entry.encode()], true).unwrap();
+        assert_eq!(added, 0);
+        assert!(target.vault(&id).items().iter().all(|i| i.id != late));
+    }
+
     fn two_shared_vaults() -> (tempfile::TempDir, Loaded, DeviceId, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
