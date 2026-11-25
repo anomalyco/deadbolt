@@ -24,7 +24,7 @@ fn a_run_and_everything_it_starts_get_nothing_from_the_daemon() {
         sh -c '"{BIN}" read deadbolt://GitHub/token; echo "grandchild=$?"'
         sh -c 'sh -c "\"{BIN}\" ls; echo deep=\$?"'
         "{BIN}" lock; echo "lock=$?"
-        "{BIN}" debug daemon status >/dev/null; echo "status=$?"
+        "{BIN}" debug daemon status; echo "status=$?"
         "#
     );
     let (code, out, err) = piped_code(
@@ -47,7 +47,10 @@ fn a_run_and_everything_it_starts_get_nothing_from_the_daemon() {
             "{denied}: {out}"
         );
     }
-    assert!(out.contains("status=0"), "{out}");
+    assert!(
+        out.contains("status=0") && out.contains("unlocked"),
+        "{out}"
+    );
     assert!(!out.contains(TOKEN) && !err.contains(TOKEN), "{out}{err}");
     assert_eq!(
         err.matches("process is running inside deadbolt run")

@@ -241,6 +241,21 @@ pub fn caller_start(
     Some(start)
 }
 
+impl Daemon {
+    /// `status` for a process inside a run: whether a daemon of which
+    /// protocol is there and unlocked, so its client can tell, and none of
+    /// the vaults, devices or peers.
+    fn status_for_run(&self) -> crate::protocol::Status {
+        let mut status = self.status();
+        status.device = None;
+        status.vaults = Vec::new();
+        status.peers = 0;
+        status.peers_online = 0;
+        status.home = String::new();
+        status
+    }
+}
+
 /// What `command` needs of a run's capability, if a capability can allow
 /// it at all.
 fn needs(command: &Command) -> Option<CapCheck> {
@@ -303,7 +318,11 @@ impl Daemon {
                         }),
                 )
             }
-            (None, _) | (Some(_), Command::Status) => None,
+            (None, _) => None,
+            (Some(_), Command::Status) => {
+                drop(taints);
+                Some(Ok(Reply::Status(Box::new(self.status_for_run()))))
+            }
             (Some(Some(cap)), command) => {
                 drop(taints);
                 let Some(check) = needs(command) else {
