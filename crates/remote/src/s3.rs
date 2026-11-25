@@ -10,19 +10,24 @@ mod list;
 pub use client::S3ObjStore;
 pub use list::{ListPage, parse_list_objects_v2};
 
-use url::Url;
+use url::{Host, Url};
 
 use crate::error::RemoteError;
 use crate::path::{validate_name, validate_prefix};
 use crate::sigv4::{self, AmzDate, Credentials, EMPTY_SHA256, Scope, sha256_hex, uri_encode};
 use crate::store::ByteRange;
 
+/// S3's limit on a whole object key, root included.
+pub const MAX_KEY_LEN: usize = 1024;
+
 /// How the bucket appears in URLs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Addressing {
     /// `https://endpoint/<bucket>/<key>`: MinIO, R2, and any IP endpoint.
     Path,
-    /// `https://<bucket>.endpoint/<key>`: AWS's default.
+    /// `https://<bucket>.endpoint/<key>`: AWS's default. Not for an IP
+    /// endpoint, nor for a dotted bucket over `https` (its name would not
+    /// match the wildcard certificate).
     VirtualHost,
 }
 
@@ -68,9 +73,10 @@ impl S3Config {
         if endpoint.query().is_some()
             || endpoint.fragment().is_some()
             || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
         {
             return Err(RemoteError::Config(
-                "endpoint may not carry a query, fragment or user".into(),
+                "endpoint may not carry a query, fragment or credentials".into(),
             ));
         }
         if endpoint.path() != "/" {
@@ -95,6 +101,18 @@ impl S3Config {
             return Err(RemoteError::Config(
                 "region must be like us-east-1 or auto".into(),
             ));
+        }
+        if addressing == Addressing::VirtualHost {
+            if matches!(endpoint.host(), Some(Host::Ipv4(_) | Host::Ipv6(_))) {
+                return Err(RemoteError::Config(
+                    "an IP endpoint needs path-style addressing".into(),
+                ));
+            }
+            if endpoint.scheme() == "https" && bucket.contains('.') {
+                return Err(RemoteError::Config(
+                    "a dotted bucket over https needs path-style addressing".into(),
+                ));
+            }
         }
         let root = root.trim_matches('/');
         if !root.is_empty() {
@@ -144,13 +162,20 @@ impl S3Config {
         format!("{}://{}", self.endpoint.scheme(), self.host())
     }
 
-    /// The object key for a name: `<root>/<name>`.
-    fn key(&self, name: &str) -> String {
-        if self.root.is_empty() {
+    /// The object key for a name or prefix: `<root>/<name>`, at most
+    /// [`MAX_KEY_LEN`] bytes.
+    fn key(&self, name: &str) -> Result<String, RemoteError> {
+        let key = if self.root.is_empty() {
             name.to_owned()
         } else {
             format!("{}/{name}", self.root)
+        };
+        if key.len() > MAX_KEY_LEN {
+            return Err(RemoteError::Config(format!(
+                "S3 key longer than {MAX_KEY_LEN} bytes; shorten the root"
+            )));
         }
+        Ok(key)
     }
 
     /// The name for a listed key, if it lies under the root.
@@ -229,7 +254,7 @@ impl S3Config {
         } else {
             Vec::new()
         };
-        let key = self.key(name);
+        let key = self.key(name)?;
         Ok(self.signed("PUT", Some(&key), &[], extra, &sha256_hex(body), unix_now))
     }
 
@@ -244,11 +269,12 @@ impl S3Config {
         let extra = range
             .map(|r| vec![("range".to_owned(), r.header())])
             .unwrap_or_default();
-        let key = self.key(name);
+        let key = self.key(name)?;
         Ok(self.signed("GET", Some(&key), &[], extra, EMPTY_SHA256, unix_now))
     }
 
-    /// One `ListObjectsV2` page.
+    /// One `ListObjectsV2` page, keys URL-encoded. `start_after` is sent
+    /// only on the first page: the continuation token carries it after.
     pub fn sign_list(
         &self,
         prefix: &str,
@@ -258,14 +284,19 @@ impl S3Config {
     ) -> Result<SignedRequest, RemoteError> {
         validate_prefix(prefix)?;
         let mut query: Vec<(String, String)> = vec![
+            ("encoding-type".to_owned(), "url".to_owned()),
             ("list-type".to_owned(), "2".to_owned()),
-            ("prefix".to_owned(), self.key(prefix)),
+            ("prefix".to_owned(), self.key(prefix)?),
         ];
-        if let Some(after) = start_after {
-            query.push(("start-after".to_owned(), self.key(after)));
-        }
-        if let Some(token) = continuation {
-            query.push(("continuation-token".to_owned(), token.to_owned()));
+        match (continuation, start_after) {
+            (Some(token), _) => {
+                query.push(("continuation-token".to_owned(), token.to_owned()));
+            }
+            (None, Some(after)) => {
+                validate_prefix(after)?;
+                query.push(("start-after".to_owned(), self.key(after)?));
+            }
+            (None, None) => {}
         }
         Ok(self.signed("GET", None, &query, Vec::new(), EMPTY_SHA256, unix_now))
     }
@@ -273,7 +304,7 @@ impl S3Config {
     /// `DELETE`.
     pub fn sign_delete(&self, name: &str, unix_now: u64) -> Result<SignedRequest, RemoteError> {
         validate_name(name)?;
-        let key = self.key(name);
+        let key = self.key(name)?;
         Ok(self.signed(
             "DELETE",
             Some(&key),
@@ -298,7 +329,7 @@ impl S3Config {
                 "presigned URLs last 1 s to 7 days".into(),
             ));
         }
-        let path = self.path(Some(&self.key(name)));
+        let path = self.path(Some(&self.key(name)?));
         let query = sigv4::presign_get_query(
             &self.credentials,
             &AmzDate::from_unix(unix_now),

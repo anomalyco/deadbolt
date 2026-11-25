@@ -9,8 +9,8 @@ use super::fixture::{data_chain, data_frame, device, fraud, genesis};
 use crate::path::{Area, RemotePath, area_prefix};
 use crate::planner::check_fetched;
 use crate::{
-    Call, FaultyObjStore, ObjStore, Observed, Outbox, OwnTips, PushStop, RemoteAnomaly,
-    RemoteError, SelfRollback, SyncAnchor, check_self_rollback, plan_pull, plan_push, push,
+    Call, FaultyObjStore, ObjStore, Observed, Outbox, PushStop, RemoteAnomaly, RemoteError,
+    SelfRollback, SyncAnchor, check_self_rollback, plan_pull, plan_push, push,
 };
 
 fn area_of(call: &Call) -> Option<Area> {
@@ -33,8 +33,10 @@ async fn push_lands_blobs_packs_proofs_members_then_data_in_seq_order() {
     frames.extend(members.iter().cloned());
     frames.reverse();
     let outbox = Outbox {
-        blobs: vec![([9; 32], b"blob".to_vec()), ([3; 32], b"blob2".to_vec())],
-        packs: vec![([7; 32], b"pack".to_vec())],
+        blobs: [&b"blob"[..], b"blob2"]
+            .map(|b| (*blake3::hash(b).as_bytes(), b.to_vec()))
+            .to_vec(),
+        packs: vec![(*blake3::hash(b"pack").as_bytes(), b"pack".to_vec())],
         frauds: vec![fraud(&b, vault)],
         frames,
     };
@@ -160,8 +162,8 @@ async fn own_name_holding_another_frame_is_a_self_rollback() {
         report.stopped,
         Some(PushStop::SelfRollback(SelfRollback {
             log: LogKind::Data,
-            remote_ahead_seqs: Vec::new(),
-            conflicting_seq: Some(1),
+            remote_ahead: Vec::new(),
+            conflicting: Some(RemotePath::frame(vault, FrameKind::Data, a.device_id(), 1)),
         }))
     );
     let seq2 = RemotePath::frame(vault, FrameKind::Data, a.device_id(), 2).to_name();
@@ -198,14 +200,15 @@ async fn own_name_holding_garbage_is_an_anomaly_not_a_fork() {
 }
 
 #[tokio::test]
-async fn own_stream_ahead_of_local_is_found_before_pushing() {
+async fn own_stream_ahead_of_the_acknowledged_tip_is_found_before_pushing() {
     let (vault, _, _) = genesis(0);
     let a = device(1);
     let store = FaultyObjStore::new();
+    let chain = data_chain(&a, vault, 6, 1, &[4]);
     let plan = plan_push(
         &vault,
         Outbox {
-            frames: data_chain(&a, vault, 6, 1, &[4]),
+            frames: chain.clone(),
             ..Outbox::default()
         },
     )
@@ -213,41 +216,49 @@ async fn own_stream_ahead_of_local_is_found_before_pushing() {
     push(&store, &plan).await.unwrap();
 
     let me = a.device_id();
-    let restored = OwnTips {
-        member: None,
-        data: Some(2),
+    let acknowledged = |n: usize| {
+        let mut anchor = SyncAnchor::default();
+        for frame in &chain[..n] {
+            anchor.observe(frame).unwrap();
+        }
+        anchor
+    };
+    let path = |seq, checkpoint| {
+        let kind = if checkpoint {
+            FrameKind::Checkpoint
+        } else {
+            FrameKind::Data
+        };
+        RemotePath::frame(vault, kind, me, seq)
     };
     assert_eq!(
-        check_self_rollback(&store, &vault, &me, restored)
+        check_self_rollback(&store, &vault, &me, &acknowledged(3))
             .await
             .unwrap(),
         [SelfRollback {
             log: LogKind::Data,
-            remote_ahead_seqs: vec![3, 4, 5],
-            conflicting_seq: None
+            remote_ahead: vec![path(3, false), path(4, true), path(5, false)],
+            conflicting: None
         }]
     );
-    let fresh = OwnTips::default();
+    let fresh = SyncAnchor::default();
     assert_eq!(
-        check_self_rollback(&store, &vault, &me, fresh)
+        check_self_rollback(&store, &vault, &me, &fresh)
             .await
             .unwrap()[0]
-            .remote_ahead_seqs,
-        [0, 1, 2, 3, 4, 5]
+            .remote_ahead
+            .len(),
+        6
     );
-    let current = OwnTips {
-        member: None,
-        data: Some(5),
-    };
     assert!(
-        check_self_rollback(&store, &vault, &me, current)
+        check_self_rollback(&store, &vault, &me, &acknowledged(6))
             .await
             .unwrap()
             .is_empty()
     );
     let other = device(2).device_id();
     assert!(
-        check_self_rollback(&store, &vault, &other, fresh)
+        check_self_rollback(&store, &vault, &other, &fresh)
             .await
             .unwrap()
             .is_empty()
@@ -406,7 +417,10 @@ async fn wiped_or_rolled_back_streams_are_remote_regressed() {
     store.rollback(&before);
 
     // Collection after an accepted checkpoint is not an alarm.
-    anchor.note_compacted([(a, 4)]);
+    let tip = anchor.tip(LogKind::Data, &a).unwrap();
+    anchor
+        .adopt_checkpoint(&std::collections::BTreeMap::from([(a, tip)]))
+        .unwrap();
     store.wipe(|n| last_two.iter().any(|x| x == n));
     assert!(
         plan_pull(&store, &vault, &anchor, None)

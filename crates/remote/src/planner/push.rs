@@ -7,17 +7,17 @@ use std::collections::BTreeMap;
 use deadbolt_core::v2::{Frame, FrameId, FraudProof, LogKind};
 use deadbolt_core::{DeviceId, VaultId};
 
-use super::RemoteAnomaly;
+use super::{RemoteAnomaly, SyncAnchor};
 use crate::error::RemoteError;
-use crate::path::{RemotePath, stream_cursor, stream_prefix};
+use crate::path::{RemotePath, hex, stream_cursor, stream_prefix};
 use crate::store::{ObjStore, PutOutcome};
 
 /// Everything waiting to leave this device.
 #[derive(Debug, Clone, Default)]
 pub struct Outbox {
-    /// Attachments by content hash.
+    /// Attachments by content hash (BLAKE3 of the stored bytes).
     pub blobs: Vec<([u8; 32], Vec<u8>)>,
-    /// Checkpoint packs by `pack_hash`.
+    /// Checkpoint packs by `pack_hash` (BLAKE3 of the stored bytes).
     pub packs: Vec<([u8; 32], Vec<u8>)>,
     /// Fraud proofs to publish.
     pub frauds: Vec<FraudProof>,
@@ -41,8 +41,9 @@ pub struct PushPlan {
 }
 
 /// Orders an outbox for pushing to `vault`. Refuses anything of another
-/// vault, an invalid fraud proof, and two different local frames at one
-/// stream position (a local fork must never reach the store).
+/// vault, a blob or pack whose bytes do not hash to its name, an invalid
+/// fraud proof, and two different local frames at one stream position (a
+/// local fork must never reach the store).
 pub fn plan_push(vault: &VaultId, outbox: Outbox) -> Result<PushPlan, RemoteError> {
     let mut steps = Vec::new();
     let content = |path: RemotePath, bytes: Vec<u8>| PushStep {
@@ -50,29 +51,32 @@ pub fn plan_push(vault: &VaultId, outbox: Outbox) -> Result<PushPlan, RemoteErro
         bytes,
         frame_id: None,
     };
-    let mut blobs = outbox.blobs;
-    blobs.sort_by_key(|a| a.0);
-    blobs.dedup_by(|a, b| a.0 == b.0);
-    for (hash, bytes) in blobs {
-        steps.push(content(
-            RemotePath::Blob {
-                vault: *vault,
-                hash,
-            },
-            bytes,
-        ));
+    let checked = |what: &str, mut objects: Vec<([u8; 32], Vec<u8>)>| {
+        objects.sort_by_key(|a| a.0);
+        objects.dedup_by(|a, b| a.0 == b.0);
+        for (hash, bytes) in &objects {
+            if blake3::hash(bytes).as_bytes() != hash {
+                return Err(RemoteError::Plan(format!(
+                    "{what} {} does not hash to its name",
+                    hex(hash)
+                )));
+            }
+        }
+        Ok(objects)
+    };
+    for (hash, bytes) in checked("blob", outbox.blobs)? {
+        let path = RemotePath::Blob {
+            vault: *vault,
+            hash,
+        };
+        steps.push(content(path, bytes));
     }
-    let mut packs = outbox.packs;
-    packs.sort_by_key(|a| a.0);
-    packs.dedup_by(|a, b| a.0 == b.0);
-    for (hash, bytes) in packs {
-        steps.push(content(
-            RemotePath::Pack {
-                vault: *vault,
-                hash,
-            },
-            bytes,
-        ));
+    for (hash, bytes) in checked("pack", outbox.packs)? {
+        let path = RemotePath::Pack {
+            vault: *vault,
+            hash,
+        };
+        steps.push(content(path, bytes));
     }
     let mut frauds = BTreeMap::new();
     for proof in outbox.frauds {
@@ -85,13 +89,11 @@ pub fn plan_push(vault: &VaultId, outbox: Outbox) -> Result<PushPlan, RemoteErro
         frauds.insert(proof.proof_hash(), proof.encode().to_vec());
     }
     for (hash, bytes) in frauds {
-        steps.push(content(
-            RemotePath::Fraud {
-                vault: *vault,
-                hash,
-            },
-            bytes,
-        ));
+        let path = RemotePath::Fraud {
+            vault: *vault,
+            hash,
+        };
+        steps.push(content(path, bytes));
     }
     let mut frames: BTreeMap<(LogKind, DeviceId, u64), &Frame> = BTreeMap::new();
     for frame in &outbox.frames {
@@ -125,11 +127,13 @@ pub fn plan_push(vault: &VaultId, outbox: Outbox) -> Result<PushPlan, RemoteErro
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfRollback {
     pub log: LogKind,
-    /// Own frames the store holds above the local tip. Import them, then
-    /// re-sign unpushed local edits at `remote_max + 1`.
-    pub remote_ahead_seqs: Vec<u64>,
-    /// The `seq` where the store holds another own frame than the local one.
-    pub conflicting_seq: Option<u64>,
+    /// Own frames the store lists above the acknowledged tip, `<seq>` and
+    /// `<seq>.c` kept apart. GET them: those equal to local frames only
+    /// advance the anchor; import the rest, then re-sign unpushed local
+    /// edits above them.
+    pub remote_ahead: Vec<RemotePath>,
+    /// The own name where the store holds another frame than the local one.
+    pub conflicting: Option<RemotePath>,
 }
 
 /// Why a push stopped before its last step.
@@ -137,8 +141,8 @@ pub struct SelfRollback {
 pub enum PushStop {
     /// An own name already holds a different valid frame.
     SelfRollback(SelfRollback),
-    /// An own name holds something that is not a valid frame, or vanished
-    /// between a 412 and the GET.
+    /// An own name holds something that is not the frame its name says, or
+    /// vanished between a 412 and the GET.
     Anomaly(RemoteAnomaly),
 }
 
@@ -149,6 +153,9 @@ pub struct PushReport {
     pub created: usize,
     /// PUTs that found the identical object already there (a retry).
     pub already_present: usize,
+    /// Content-addressed names that held other bytes (a torn upload or
+    /// planted garbage) and were overwritten with the verified content.
+    pub repaired: usize,
     /// Set when the push stopped early; later steps were not attempted.
     pub stopped: Option<PushStop>,
 }
@@ -163,8 +170,15 @@ pub async fn push<S: ObjStore>(store: &S, plan: &PushPlan) -> Result<PushReport,
         match store.put(&name, &step.bytes, true).await? {
             PutOutcome::Created => report.created += 1,
             PutOutcome::AlreadyExists if step.path.is_content_addressed() => {
-                // The name is the content's hash; readers verify it.
-                report.already_present += 1;
+                // The plan verified these bytes against the name, so the
+                // stored object must be the same bytes; anything else is
+                // overwritten with them.
+                if store.get(&name, None).await?.as_deref() == Some(&step.bytes[..]) {
+                    report.already_present += 1;
+                } else {
+                    store.put(&name, &step.bytes, false).await?;
+                    report.repaired += 1;
+                }
             }
             PutOutcome::AlreadyExists => match judge_existing(store, step, &name).await? {
                 None => report.already_present += 1,
@@ -198,7 +212,10 @@ async fn judge_existing<S: ObjStore>(
         return Ok(None);
     }
     let RemotePath::Frame {
-        kind, author, seq, ..
+        vault,
+        kind,
+        author,
+        seq,
     } = step.path
     else {
         return Ok(anomaly("not a frame name"));
@@ -207,7 +224,7 @@ async fn judge_existing<S: ObjStore>(
         return Ok(anomaly("does not verify as a frame"));
     };
     let h = remote.header();
-    if h.author != author || h.seq != seq || h.kind.log_kind() != kind.log_kind() {
+    if h.vault != vault || h.author != author || h.seq != seq || h.kind != kind {
         return Ok(anomaly("frame header disagrees with its name"));
     }
     if Some(remote.id()) == step.frame_id {
@@ -215,50 +232,56 @@ async fn judge_existing<S: ObjStore>(
     }
     Ok(Some(PushStop::SelfRollback(SelfRollback {
         log: kind.log_kind(),
-        remote_ahead_seqs: Vec::new(),
-        conflicting_seq: Some(seq),
+        remote_ahead: Vec::new(),
+        conflicting: Some(step.path),
     })))
 }
 
-/// The newest `seq` this device holds of its own streams (`None`: empty).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OwnTips {
-    pub member: Option<u64>,
-    pub data: Option<u64>,
-}
-
-/// Lists this device's own streams before its first push of a session. Any
-/// own frame above the local tip means the device was restored from an older
-/// state: import those frames and re-sign the unpushed suffix above them.
+/// Lists this device's own streams before its first push of a session,
+/// above the tips the store last acknowledged (the anchor's own entries,
+/// never the local tip: unpushed local edits must not hide a restore). Any
+/// own frame there means the device was restored from an older state, or
+/// its keys are in use elsewhere. Catch it before pushing, since a WebDAV
+/// server that ignores `If-None-Match` would let a push overwrite it.
 pub async fn check_self_rollback<S: ObjStore>(
     store: &S,
     vault: &VaultId,
     me: &DeviceId,
-    local: OwnTips,
+    anchor: &SyncAnchor,
 ) -> Result<Vec<SelfRollback>, RemoteError> {
     let mut found = Vec::new();
-    for (log, tip) in [(LogKind::Member, local.member), (LogKind::Data, local.data)] {
-        let Some(from) = tip.map_or(Some(0), |t| t.checked_add(1)) else {
+    for log in [LogKind::Member, LogKind::Data] {
+        let Some(from) = anchor
+            .tip(log, me)
+            .map_or(Some(0), |(seq, _)| seq.checked_add(1))
+        else {
             continue;
         };
         let after = stream_cursor(vault, log, me, from);
         let names = store
             .list(&stream_prefix(vault, log, me), after.as_deref())
             .await?;
-        let ahead: Vec<u64> = names
+        let remote_ahead: Vec<RemotePath> = names
             .iter()
             .filter_map(|name| match RemotePath::parse(name) {
-                Ok(RemotePath::Frame { seq, author, .. }) if author == *me && seq >= from => {
-                    Some(seq)
+                Ok(
+                    path @ RemotePath::Frame {
+                        vault: v,
+                        kind,
+                        author,
+                        seq,
+                    },
+                ) if v == *vault && author == *me && kind.log_kind() == log && seq >= from => {
+                    Some(path)
                 }
                 _ => None,
             })
             .collect();
-        if !ahead.is_empty() {
+        if !remote_ahead.is_empty() {
             found.push(SelfRollback {
                 log,
-                remote_ahead_seqs: ahead,
-                conflicting_seq: None,
+                remote_ahead,
+                conflicting: None,
             });
         }
     }

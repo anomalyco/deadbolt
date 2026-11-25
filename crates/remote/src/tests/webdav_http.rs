@@ -108,7 +108,10 @@ fn handle(state: &Mutex<Dav>, req: &MockRequest) -> MockResponse {
                     let end = b
                         .parse::<usize>()
                         .map_or(bytes.len(), |e| (e + 1).min(bytes.len()));
-                    MockResponse::body(206, bytes[start..end].to_vec())
+                    MockResponse::body(206, bytes[start..end].to_vec()).header(
+                        "content-range",
+                        &format!("bytes {start}-{}/{}", end - 1, bytes.len()),
+                    )
                 }
             },
         },
@@ -263,4 +266,62 @@ async fn webdav_redirects_and_auth_failures_are_errors() {
         Err(RemoteError::Status { status: 401, .. })
     ));
     assert!(!format!("{store:?}").contains("tok\""));
+}
+
+#[tokio::test]
+async fn parents_wiped_mid_session_are_made_again() {
+    let (store, state, log) = mock_dav().await;
+    store
+        .put("vault/d/author/0000000000000000", b"0", true)
+        .await
+        .unwrap();
+    // Another client (or a cleanup) removes the whole tree.
+    {
+        let mut dav = state.lock().unwrap();
+        dav.dirs = BTreeSet::from([String::new()]);
+        dav.files.clear();
+    }
+    let before = requests(&log).len();
+    assert_eq!(
+        store
+            .put("vault/d/author/0000000000000001", b"1", true)
+            .await
+            .unwrap(),
+        PutOutcome::Created
+    );
+    let mkcols = requests(&log)[before..]
+        .iter()
+        .filter(|r| r.method == "MKCOL")
+        .count();
+    assert_eq!(mkcols, 3, "the stale cache was dropped");
+}
+
+#[tokio::test]
+async fn a_collection_cycle_cannot_spin_the_listing() {
+    // Every collection claims a child collection (a symlink loop), and the
+    // root lists one child twice.
+    let (addr, log) = serve(|req| {
+        let rel = req.path.trim_start_matches("/dav/").to_owned();
+        let mut xml = String::from(r#"<d:multistatus xmlns:d="DAV:">"#);
+        let mut child = |href: &str| {
+            xml.push_str(&format!(
+                "<d:response><d:href>/dav/{href}</d:href><d:propstat><d:prop><d:resourcetype>\
+                 <d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status>\
+                 </d:propstat></d:response>"
+            ));
+        };
+        child(&format!("{rel}loop/"));
+        child(&format!("{rel}loop/"));
+        xml.push_str("</d:multistatus>");
+        MockResponse::body(207, xml)
+    })
+    .await;
+    let config = WebDavConfig::new(&format!("http://{addr}/dav/"), DavAuth::None).unwrap();
+    let store = WebDavObjStore::new(config).unwrap();
+    assert!(store.list("", None).await.unwrap().is_empty());
+    assert_eq!(
+        requests(&log).len(),
+        9,
+        "the base, then one PROPFIND per level up to the depth cap, each once"
+    );
 }

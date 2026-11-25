@@ -1,13 +1,13 @@
 //! Pull: list `m/`, then `d/`, then `x/` (the membership-before-data
-//! barrier), compare with the anchor, and name the frames to fetch. Also
-//! the zero-state recovery bootstrap, which needs nothing but LIST.
+//! barrier), compare with the anchor, and name the objects to fetch.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use deadbolt_core::v2::{FrameKind, LogKind};
+use deadbolt_core::v2::LogKind;
 use deadbolt_core::{DeviceId, VaultId};
 
-use super::{RemoteAnomaly, RemoteIndex, SyncAnchor, check_regressions};
+use super::index::first_hole;
+use super::{Observed, RemoteAnomaly, RemoteIndex, StreamKey, SyncAnchor};
 use crate::error::RemoteError;
 use crate::path::{Area, RemotePath, area_prefix, stream_cursor, stream_prefix};
 use crate::store::ObjStore;
@@ -17,25 +17,105 @@ use crate::store::ObjStore;
 pub struct PullPlan {
     /// Everything the LISTs returned.
     pub index: RemoteIndex,
-    /// Frames newer than the anchor, to GET and apply in this order: every
+    /// Objects newer than the anchor, to GET and apply in this order: every
     /// Member frame, then every Data and Checkpoint frame, each stream
-    /// ascending, then the fraud proofs.
+    /// ascending (a twin's `<seq>` before its `<seq>.c`), then the fraud
+    /// proofs the anchor does not know yet.
     pub fetch: Vec<RemotePath>,
     /// The anchored tip of every listed stream, to GET and pass through
     /// [`check_fetched`](super::check_fetched) when the caller wants proof
     /// the store did not swap it.
     pub verify: Vec<RemotePath>,
+    /// Positions listed as both `<seq>` and `<seq>.c`: both names are in
+    /// `fetch` or `verify`; judge each pair with
+    /// [`resolve_twin`](super::resolve_twin) instead of applying both.
+    pub twins: Vec<(RemotePath, RemotePath)>,
     /// What the LISTs already prove.
     pub anomalies: Vec<RemoteAnomaly>,
+    /// Missing anchored data frames that a checkpoint in `fetch` may have
+    /// let the store collect. Adopt the checkpoints that verify, then call
+    /// [`confirm_deferred`](Self::confirm_deferred).
+    pub deferred: Vec<RemoteAnomaly>,
+}
+
+impl PullPlan {
+    /// The deferred regressions no adopted checkpoint explains.
+    pub fn confirm_deferred(&self, anchor: &SyncAnchor) -> Vec<RemoteAnomaly> {
+        self.deferred
+            .iter()
+            .filter(|anomaly| match anomaly {
+                RemoteAnomaly::RemoteRegressed {
+                    log,
+                    author,
+                    expected_seq,
+                    ..
+                } => !anchor.may_be_gone(*log, author, *expected_seq),
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// The two halves of [`check_regressions`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Regressions {
+    /// Regressions nothing listed can explain.
+    pub anomalies: Vec<RemoteAnomaly>,
+    /// Missing data frames an unseen listed checkpoint might cover.
+    pub deferred: Vec<RemoteAnomaly>,
+}
+
+/// Compares listed streams with the anchor: every anchored frame must
+/// still be listed, unless an accepted checkpoint let it be collected.
+/// A missing data frame is deferred, not alarmed, while the index lists a
+/// checkpoint this device has not seen yet, since that checkpoint may
+/// legitimately cover it. `listed` says which streams the LISTs covered.
+pub fn check_regressions(
+    anchor: &SyncAnchor,
+    index: &RemoteIndex,
+    listed: impl Fn(&StreamKey) -> bool,
+) -> Regressions {
+    let unseen_checkpoint = index.streams.iter().any(|(&(log, author), seqs)| {
+        log == LogKind::Data
+            && seqs.iter().any(|(&seq, s)| {
+                s.checkpoint && anchor.tip(log, &author).is_none_or(|(a, _)| seq > a)
+            })
+    });
+    let mut out = Regressions::default();
+    for (&(log, author), &(seq, id)) in &anchor.seen {
+        if !listed(&(log, author)) {
+            continue;
+        }
+        let seqs = index.streams.get(&(log, author));
+        if seqs.is_some_and(|s| s.contains_key(&seq)) || anchor.may_be_gone(log, &author, seq) {
+            continue;
+        }
+        let anomaly = RemoteAnomaly::RemoteRegressed {
+            log,
+            author,
+            expected_seq: seq,
+            expected_id: id,
+            observed: Observed::Missing {
+                max_seq: index.tip(log, &author),
+            },
+        };
+        if log == LogKind::Data && unseen_checkpoint {
+            out.deferred.push(anomaly);
+        } else {
+            out.anomalies.push(anomaly);
+        }
+    }
+    out
 }
 
 /// Lists the store and plans a pull.
 ///
 /// `m/` and `x/` are always listed whole (Member frames are few and never
-/// compacted). `d/` is listed whole when `data_authors` is `None`, the
-/// discovery pull; otherwise only those authors' streams, plus every data
-/// stream the anchor knows, each from its anchored `seq` on, so a steady
-/// pull costs one LIST page per stream.
+/// compacted, so a hole in one is an anomaly). `d/` is listed whole when
+/// `data_authors` is `None`, the discovery pull; otherwise only those
+/// authors' streams, plus every data stream the anchor knows, each from its
+/// anchored `seq` on, so a steady pull costs one LIST page per stream.
 pub async fn plan_pull<S: ObjStore>(
     store: &S,
     vault: &VaultId,
@@ -75,128 +155,70 @@ pub async fn plan_pull<S: ObjStore>(
 
     // Every stream the anchor knows was listed: Member and fraud areas
     // whole, and each anchored data stream from its anchored seq.
-    let anomalies = check_regressions(anchor, &index, |_| true);
+    let Regressions {
+        mut anomalies,
+        deferred,
+    } = check_regressions(anchor, &index, |_| true);
+    for (&(log, author), seqs) in &index.streams {
+        if log != LogKind::Member {
+            continue;
+        }
+        if let Some(missing_seq) = first_hole(seqs.keys().copied(), 0) {
+            anomalies.push(RemoteAnomaly::StreamHole {
+                log,
+                author,
+                missing_seq,
+                max_seq: seqs.keys().next_back().copied().unwrap_or_default(),
+            });
+        }
+    }
+    let listed_frauds: BTreeSet<[u8; 32]> = index
+        .frauds
+        .iter()
+        .filter_map(|p| match p {
+            RemotePath::Fraud { hash, .. } => Some(*hash),
+            _ => None,
+        })
+        .collect();
+    anomalies.extend(
+        anchor
+            .frauds
+            .difference(&listed_frauds)
+            .map(|&hash| RemoteAnomaly::FraudWiped { hash }),
+    );
+
     let mut fetch = Vec::new();
     let mut verify = Vec::new();
+    let mut twins = Vec::new();
     for (&(log, author), seqs) in &index.streams {
         let anchored = anchor.tip(log, &author).map(|(seq, _)| seq);
-        for (&seq, &kind) in seqs {
-            let path = RemotePath::frame(*vault, kind, author, seq);
-            match anchored {
-                Some(a) if seq < a => {}
-                Some(a) if seq == a => verify.push(path),
-                _ => fetch.push(path),
+        for (&seq, spellings) in seqs {
+            if anchored.is_some_and(|a| seq < a) {
+                continue;
+            }
+            let paths = spellings.paths(*vault, log, author, seq);
+            if let [bare, checkpoint] = paths[..] {
+                twins.push((bare, checkpoint));
+            }
+            if anchored == Some(seq) {
+                verify.extend(paths);
+            } else {
+                fetch.extend(paths);
             }
         }
     }
     // LogKind orders Member before Data in the index, so `fetch` is
-    // already m/ then d/; proofs go last.
-    fetch.extend(index.frauds.iter().copied());
+    // already m/ then d/; new proofs go last.
+    fetch.extend(index.frauds.iter().copied().filter(|p| match p {
+        RemotePath::Fraud { hash, .. } => !anchor.frauds.contains(hash),
+        _ => false,
+    }));
     Ok(PullPlan {
         index,
         fetch,
         verify,
+        twins,
         anomalies,
+        deferred,
     })
-}
-
-/// What a device with zero local state fetches to rebuild a vault from the
-/// recovery words and the store (Fable §2.5 steps 2–4).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RecoveryPlan {
-    /// Every Member frame, each stream ascending: resolve these first.
-    pub members: Vec<RemotePath>,
-    /// Each author's newest checkpoint, highest `seq` first. The caller
-    /// opens them, keeps the newest undisputed frontier and fetches its pack.
-    pub checkpoints: Vec<RemotePath>,
-    /// Holes in Member streams (never compacted, so a hole is withholding).
-    pub anomalies: Vec<RemoteAnomaly>,
-    data: BTreeMap<DeviceId, BTreeMap<u64, FrameKind>>,
-    vault: Option<VaultId>,
-}
-
-impl RecoveryPlan {
-    /// The first checkpoint candidate.
-    pub fn checkpoint(&self) -> Option<&RemotePath> {
-        self.checkpoints.first()
-    }
-
-    /// The data tail above a checkpoint's frontier (every frame when the
-    /// frontier omits an author), each stream ascending.
-    pub fn tail(&self, frontier: &BTreeMap<DeviceId, u64>) -> Vec<RemotePath> {
-        let Some(vault) = self.vault else {
-            return Vec::new();
-        };
-        self.data
-            .iter()
-            .flat_map(|(author, seqs)| {
-                let floor = frontier.get(author).copied();
-                seqs.iter()
-                    .filter(move |(seq, _)| floor.is_none_or(|f| **seq > f))
-                    .map(move |(&seq, &kind)| RemotePath::frame(vault, kind, *author, seq))
-            })
-            .collect()
-    }
-}
-
-/// Plans a zero-state recovery from `LIST <vault>/m/` and `LIST <vault>/d/`
-/// alone: no head pointer, device id or locator secret.
-pub fn plan_recovery_bootstrap(
-    vault: &VaultId,
-    listed_m: &[String],
-    listed_d: &[String],
-) -> Result<RecoveryPlan, RemoteError> {
-    let index = RemoteIndex::from_names(vault, listed_m.iter().chain(listed_d));
-    let mut plan = RecoveryPlan {
-        vault: Some(*vault),
-        ..RecoveryPlan::default()
-    };
-    for (&(log, author), seqs) in &index.streams {
-        match log {
-            LogKind::Member => {
-                let max = seqs.keys().next_back().copied().unwrap_or_default();
-                if let Some(hole) = (0..=max).find(|s| !seqs.contains_key(s)) {
-                    plan.anomalies.push(RemoteAnomaly::Withheld {
-                        author,
-                        required_seq: hole,
-                        remote_max_seq: Some(max),
-                    });
-                }
-                plan.members.extend(
-                    seqs.iter()
-                        .map(|(&seq, &kind)| RemotePath::frame(*vault, kind, author, seq)),
-                );
-            }
-            LogKind::Data => {
-                if let Some((&seq, _)) = seqs
-                    .iter()
-                    .rev()
-                    .find(|(_, kind)| **kind == FrameKind::Checkpoint)
-                {
-                    plan.checkpoints.push(RemotePath::frame(
-                        *vault,
-                        FrameKind::Checkpoint,
-                        author,
-                        seq,
-                    ));
-                }
-                plan.data.insert(author, seqs.clone());
-            }
-        }
-    }
-    if plan.members.is_empty() {
-        return Err(RemoteError::Plan(
-            "no Member frames under this vault: wrong vault id, bucket or root".into(),
-        ));
-    }
-    plan.checkpoints
-        .sort_by(|a, b| seq_of(b).cmp(&seq_of(a)).then(a.cmp(b)));
-    Ok(plan)
-}
-
-fn seq_of(path: &RemotePath) -> u64 {
-    match path {
-        RemotePath::Frame { seq, .. } => *seq,
-        _ => 0,
-    }
 }

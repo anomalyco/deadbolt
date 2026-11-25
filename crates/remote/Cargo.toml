@@ -16,6 +16,7 @@ default = ["http"]
 http = ["dep:reqwest", "dep:rustls"]
 
 [dependencies]
+blake3 = "1.8"
 deadbolt-core = { path = "../core", default-features = false }
 hmac = "0.13.0"
 quick-xml = "0.42"

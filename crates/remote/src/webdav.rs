@@ -111,9 +111,17 @@ impl WebDavConfig {
     /// the base; directories keep their trailing `/` and the base itself is
     /// `""`. `None` for anything outside the base or not a valid name.
     pub fn name_of_href(&self, href: &str) -> Option<String> {
-        let path = if href.starts_with("http://") || href.starts_with("https://") {
+        let href = href.trim();
+        let absolute = |scheme: &str| {
+            href.get(..scheme.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+        };
+        let path = if absolute("http://") || absolute("https://") {
             let url = Url::parse(href).ok()?;
-            if url.host_str() != self.base.host_str() {
+            if url.scheme() != self.base.scheme()
+                || url.host_str() != self.base.host_str()
+                || url.port_or_known_default() != self.base.port_or_known_default()
+            {
                 return None;
             }
             url.path().to_owned()
@@ -129,7 +137,8 @@ impl WebDavConfig {
         if rel.is_empty() {
             return Some(String::new());
         }
-        validate_name(rel.trim_end_matches('/')).ok()?;
+        // One trailing slash marks a collection; `a//` is no name at all.
+        validate_name(rel.strip_suffix('/').unwrap_or(rel)).ok()?;
         Some(rel.to_owned())
     }
 }

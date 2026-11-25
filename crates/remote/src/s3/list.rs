@@ -1,16 +1,18 @@
 //! `ListObjectsV2` response parsing.
 
 use crate::error::RemoteError;
+use crate::webdav::percent_decode;
 use crate::xml;
 
 /// One page of a `ListObjectsV2` response.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListPage {
-    /// Object keys, in the order the store sent them.
+    /// Object keys, in the order the store sent them, decoded when the
+    /// page says `<EncodingType>url</EncodingType>`.
     pub keys: Vec<String>,
     /// True if another page follows.
     pub is_truncated: bool,
-    /// The token for the next page.
+    /// The token for the next page, exactly as sent (never decoded).
     pub next_continuation_token: Option<String>,
 }
 
@@ -19,6 +21,7 @@ pub struct ListPage {
 pub fn parse_list_objects_v2(body: &str) -> Result<ListPage, RemoteError> {
     let mut page = ListPage::default();
     let mut root_seen = false;
+    let mut url_encoded = false;
     xml::walk(body, |path, text| {
         match path {
             [root] if root == "ListBucketResult" => root_seen = true,
@@ -27,8 +30,15 @@ pub fn parse_list_objects_v2(body: &str) -> Result<ListPage, RemoteError> {
             {
                 page.keys.push(text.to_owned());
             }
+            [root, field] if root == "ListBucketResult" && field == "EncodingType" => {
+                url_encoded = match text.trim() {
+                    "url" => true,
+                    "" => false,
+                    _ => return Err(RemoteError::Protocol("unknown EncodingType".into())),
+                };
+            }
             [root, field] if root == "ListBucketResult" && field == "IsTruncated" => {
-                page.is_truncated = match text {
+                page.is_truncated = match text.trim() {
                     "true" => true,
                     "false" => false,
                     _ => return Err(RemoteError::Protocol("IsTruncated is not a boolean".into())),
@@ -51,6 +61,12 @@ pub fn parse_list_objects_v2(body: &str) -> Result<ListPage, RemoteError> {
         return Err(RemoteError::Protocol(
             "truncated listing without NextContinuationToken".into(),
         ));
+    }
+    if url_encoded {
+        for key in &mut page.keys {
+            *key = percent_decode(key)
+                .ok_or_else(|| RemoteError::Protocol("listed key is not URL-encoded".into()))?;
+        }
     }
     Ok(page)
 }

@@ -132,7 +132,10 @@ fn handle(objects: &Objects, req: &MockRequest) -> MockResponse {
                     let end = b
                         .parse::<usize>()
                         .map_or(bytes.len(), |e| (e + 1).min(bytes.len()));
-                    MockResponse::body(206, bytes[start..end].to_vec())
+                    MockResponse::body(206, bytes[start..end].to_vec()).header(
+                        "content-range",
+                        &format!("bytes {start}-{}/{}", end - 1, bytes.len()),
+                    )
                 }
             },
         },
@@ -194,10 +197,12 @@ async fn list_follows_continuation_tokens_under_a_root() {
     for i in 0..7 {
         store.put(&format!("v/d/{i}"), b"x", true).await.unwrap();
     }
-    objects
-        .lock()
-        .unwrap()
-        .insert("elsewhere/v/d/9".into(), b"x".to_vec());
+    for placeholder in ["elsewhere/v/d/9", "deadbolt/sub/", "deadbolt/sub/v/d/"] {
+        objects
+            .lock()
+            .unwrap()
+            .insert(placeholder.into(), b"x".to_vec());
+    }
     assert!(objects.lock().unwrap().contains_key("deadbolt/sub/v/d/0"));
     let before = requests(&log).len();
     let names = store.list("v/d/", None).await.unwrap();
@@ -215,6 +220,21 @@ async fn list_follows_continuation_tokens_under_a_root() {
     assert_eq!(
         store.list("v/d/", Some("v/d/4")).await.unwrap(),
         ["v/d/5", "v/d/6"]
+    );
+    // start-after rides only on the first page; the token carries it after.
+    let before = requests(&log).len();
+    assert_eq!(store.list("v/d/", Some("v/d/0")).await.unwrap().len(), 6);
+    let pages = &requests(&log)[before..];
+    assert_eq!(pages.len(), 3);
+    assert_eq!(
+        pages[0].param("start-after").as_deref(),
+        Some("deadbolt/sub/v/d/0")
+    );
+    assert!(pages[1..].iter().all(|r| r.param("start-after").is_none()));
+    assert!(
+        pages
+            .iter()
+            .all(|r| r.param("encoding-type").as_deref() == Some("url"))
     );
     assert!(store.list("v/x/", None).await.unwrap().is_empty());
 }
@@ -329,4 +349,62 @@ async fn the_planner_pushes_and_pulls_through_s3() {
             .unwrap();
     }
     assert_eq!(anchor.seen.len(), 2);
+}
+
+fn page(keys: &[&str], token: Option<&str>) -> MockResponse {
+    let mut xml = String::from("<ListBucketResult><EncodingType>url</EncodingType>");
+    for key in keys {
+        xml.push_str(&format!("<Contents><Key>{key}</Key></Contents>"));
+    }
+    match token {
+        Some(token) => xml.push_str(&format!(
+            "<IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken>"
+        )),
+        None => xml.push_str("<IsTruncated>false</IsTruncated>"),
+    }
+    xml.push_str("</ListBucketResult>");
+    MockResponse::body(200, xml)
+}
+
+async fn scripted(
+    handler: impl Fn(&MockRequest) -> MockResponse + Send + Sync + 'static,
+) -> (S3ObjStore, super::mock_http::Log) {
+    let (addr, log) = serve(handler).await;
+    let config = S3Config::new(
+        &format!("http://{addr}"),
+        "bucket",
+        "auto",
+        "",
+        Addressing::Path,
+        credentials(),
+    )
+    .unwrap();
+    (S3ObjStore::new(config).unwrap().with_clock(|| NOW), log)
+}
+
+#[tokio::test]
+async fn listing_decodes_keys_and_sends_tokens_back_verbatim() {
+    let (store, log) = scripted(|req| match req.param("continuation-token").as_deref() {
+        None => page(&["v%2Fd%2F1"], Some(" tok/en= ")),
+        Some(" tok/en= ") => page(&["v/d/2"], None),
+        Some(_) => MockResponse::status(400),
+    })
+    .await;
+    assert_eq!(store.list("v/d/", None).await.unwrap(), ["v/d/1", "v/d/2"]);
+    assert_eq!(requests(&log).len(), 2);
+}
+
+#[tokio::test]
+async fn a_continuation_token_cycle_is_refused() {
+    // A -> B -> A: the old check only caught a token repeating at once.
+    let (store, log) = scripted(|req| match req.param("continuation-token").as_deref() {
+        None | Some("B") => page(&["v/1"], Some("A")),
+        Some(_) => page(&["v/2"], Some("B")),
+    })
+    .await;
+    assert!(matches!(
+        store.list("v/", None).await,
+        Err(RemoteError::Protocol(e)) if e.contains("loop")
+    ));
+    assert_eq!(requests(&log).len(), 3);
 }

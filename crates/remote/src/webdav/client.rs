@@ -1,18 +1,23 @@
 //! [`WebDavObjStore`]: the four verbs over WebDAV with reqwest.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use reqwest::{Client, Method, RequestBuilder};
 
 use super::{DavAuth, PROPFIND_BODY, WebDavConfig, parent_dirs, parse_multistatus};
 use crate::error::RemoteError;
-use crate::http::{self, Reply, unexpected};
+use crate::http::{self, LIST_BODY, unexpected};
 use crate::path::{validate_name, validate_prefix};
 use crate::store::{ByteRange, ObjStore, PutOutcome, finish_listing};
 
 /// The most `PROPFIND` requests one `list` call makes.
-const MAX_PROPFINDS: usize = 100_000;
+const MAX_PROPFINDS: usize = 10_000;
+/// The deepest collection one `list` call descends into, counted in
+/// segments from the base (canonical names sit 3 deep).
+const MAX_DEPTH: usize = 8;
+/// The most entries one `list` call collects.
+const MAX_ENTRIES: usize = 1_000_000;
 
 /// A WebDAV collection as an [`ObjStore`].
 ///
@@ -43,6 +48,10 @@ impl WebDavObjStore {
         &self.config
     }
 
+    fn made(&self) -> MutexGuard<'_, BTreeSet<String>> {
+        self.made.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn request(&self, method: Method, name: &str) -> RequestBuilder {
         let builder = self.client.request(method, self.config.url(name));
         match self.config.auth() {
@@ -57,35 +66,26 @@ impl WebDavObjStore {
         name: &str,
         bytes: &[u8],
         create_only: bool,
-    ) -> Result<Reply, RemoteError> {
+    ) -> Result<u16, RemoteError> {
         let mut builder = self.request(Method::PUT, name).body(bytes.to_vec());
         if create_only {
             builder = builder.header("if-none-match", "*");
         }
-        http::send(builder, "PUT", name).await
+        http::status(builder, "PUT", name).await
     }
 
     /// `MKCOL` every missing parent of `name`, outermost first.
     async fn make_parents(&self, name: &str) -> Result<(), RemoteError> {
         for dir in parent_dirs(name) {
-            if self
-                .made
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains(dir)
-            {
+            if self.made().contains(dir) {
                 continue;
             }
             let method =
                 Method::from_bytes(b"MKCOL").map_err(|e| RemoteError::Config(e.to_string()))?;
-            let reply = http::send(self.request(method, dir), "MKCOL", dir).await?;
-            match reply.status {
+            match http::status(self.request(method, dir), "MKCOL", dir).await? {
                 // 405: it already exists.
                 200 | 201 | 204 | 405 => {
-                    self.made
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(dir.to_owned());
+                    self.made().insert(dir.to_owned());
                 }
                 status => return Err(unexpected("MKCOL", dir, status)),
             }
@@ -103,7 +103,7 @@ impl WebDavObjStore {
             .header("depth", "1")
             .header("content-type", "application/xml; charset=utf-8")
             .body(PROPFIND_BODY);
-        let reply = http::send(builder, "PROPFIND", dir).await?;
+        let reply = http::send(builder, "PROPFIND", dir, LIST_BODY).await?;
         match reply.status {
             207 => {}
             404 => return Ok(Vec::new()),
@@ -113,19 +113,21 @@ impl WebDavObjStore {
             .map_err(|_| RemoteError::Protocol("PROPFIND reply is not UTF-8".into()))?;
         let mut out = Vec::new();
         for entry in parse_multistatus(&body)? {
-            let Some(rel) = self.config.name_of_href(&entry.href) else {
-                continue;
-            };
-            if rel == dir || rel.trim_end_matches('/') == dir.trim_end_matches('/') {
-                continue;
+            for href in &entry.hrefs {
+                let Some(rel) = self.config.name_of_href(href) else {
+                    continue;
+                };
+                if rel == dir || rel.trim_end_matches('/') == dir.trim_end_matches('/') {
+                    continue;
+                }
+                let is_dir = entry.is_collection || rel.ends_with('/');
+                let rel = if is_dir && !rel.ends_with('/') {
+                    format!("{rel}/")
+                } else {
+                    rel
+                };
+                out.push((rel, is_dir));
             }
-            let is_dir = entry.is_collection || rel.ends_with('/');
-            let rel = if is_dir && !rel.ends_with('/') {
-                format!("{rel}/")
-            } else {
-                rel
-            };
-            out.push((rel, is_dir));
         }
         Ok(out)
     }
@@ -148,12 +150,20 @@ impl ObjStore for WebDavObjStore {
         create_only: bool,
     ) -> Result<PutOutcome, RemoteError> {
         validate_name(name)?;
-        let mut reply = self.put_once(name, bytes, create_only).await?;
-        if matches!(reply.status, 404 | 409) {
+        let mut status = self.put_once(name, bytes, create_only).await?;
+        if matches!(status, 404 | 409) {
+            // A parent is missing, even if this session made it once: the
+            // tree was wiped or moved under us. Forget it and make it again.
+            {
+                let mut made = self.made();
+                for dir in parent_dirs(name) {
+                    made.remove(dir);
+                }
+            }
             self.make_parents(name).await?;
-            reply = self.put_once(name, bytes, create_only).await?;
+            status = self.put_once(name, bytes, create_only).await?;
         }
-        match reply.status {
+        match status {
             200 | 201 | 204 => Ok(PutOutcome::Created),
             412 if create_only => Ok(PutOutcome::AlreadyExists),
             status => Err(unexpected("PUT", name, status)),
@@ -170,23 +180,17 @@ impl ObjStore for WebDavObjStore {
         if let Some(range) = range {
             builder = builder.header("range", range.header());
         }
-        let reply = http::send(builder, "GET", name).await?;
-        match reply.status {
-            200 => Ok(Some(match range {
-                Some(range) => range.slice(&reply.body).to_vec(),
-                None => reply.body,
-            })),
-            206 => Ok(Some(reply.body)),
-            404 => Ok(None),
-            416 => Ok(Some(Vec::new())),
-            status => Err(unexpected("GET", name, status)),
-        }
+        http::get(builder, name, range).await
     }
 
     async fn list(&self, prefix: &str, after: Option<&str>) -> Result<Vec<String>, RemoteError> {
         validate_prefix(prefix)?;
+        if let Some(after) = after {
+            validate_prefix(after)?;
+        }
         let start = prefix.rfind('/').map_or("", |i| &prefix[..=i]);
         let mut queue = VecDeque::from([start.to_owned()]);
+        let mut visited = BTreeSet::from([start.to_owned()]);
         let mut names = Vec::new();
         let mut requests = 0;
         while let Some(dir) = queue.pop_front() {
@@ -200,12 +204,17 @@ impl ObjStore for WebDavObjStore {
                 if is_dir {
                     if rel.len() > dir.len()
                         && rel.starts_with(&dir)
+                        && rel.matches('/').count() <= MAX_DEPTH
                         && worth_visiting(&rel, prefix, after)
+                        && visited.insert(rel.clone())
                     {
                         queue.push_back(rel);
                     }
                 } else {
                     names.push(rel);
+                    if names.len() > MAX_ENTRIES {
+                        return Err(RemoteError::Protocol("listing has too many entries".into()));
+                    }
                 }
             }
         }
@@ -214,8 +223,7 @@ impl ObjStore for WebDavObjStore {
 
     async fn delete(&self, name: &str) -> Result<(), RemoteError> {
         validate_name(name)?;
-        let reply = http::send(self.request(Method::DELETE, name), "DELETE", name).await?;
-        match reply.status {
+        match http::status(self.request(Method::DELETE, name), "DELETE", name).await? {
             200 | 202 | 204 | 404 => Ok(()),
             status => Err(unexpected("DELETE", name, status)),
         }
