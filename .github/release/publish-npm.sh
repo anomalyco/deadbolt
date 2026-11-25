@@ -74,29 +74,33 @@ cd "$(mktemp -d)"
 
 # The registry shows a large platform package minutes after publishing it,
 # and a wrapper served before its platform package fails to install, so the
-# wrapper waits until every one shows (up to 10 minutes; a rerun resumes).
+# wrapper waits until every one shows (up to 30 minutes; a rerun resumes).
+# Each check skips npm's cache, and a package once shown isn't asked again.
 wait_for_platform_packages() {
-  for _ in $(seq 60); do
-    missing=""
-    for target in $targets; do
-      [ "$(npm view "@deadbolt/cli-$target@$v" version 2> /dev/null)" = "$v" ] || missing="$missing @deadbolt/cli-$target"
+  local pending="" still
+  for target in $targets; do pending="$pending @deadbolt/cli-$target"; done
+  for _ in $(seq 180); do
+    still=""
+    for name in $pending; do
+      [ "$(npm view --prefer-online "$name@$v" version 2> /dev/null)" = "$v" ] || still="$still $name"
     done
-    [ -n "$missing" ] || return 0
-    echo "waiting for the registry to show$missing"
+    pending=$still
+    [ -n "$pending" ] || return 0
+    echo "waiting for the registry to show$pending"
     sleep 10
   done
-  die "The registry doesn't show$missing at $v after 10 minutes."
+  die "The registry doesn't show$pending at $v after 30 minutes."
 }
 
 while IFS=$'\t' read -r name file; do
   [ "$name" != @deadbolt/cli ] || wait_for_platform_packages
-  if npm view "$name@$v" version > /dev/null 2>&1; then
+  if npm view --prefer-online "$name@$v" version > /dev/null 2>&1; then
     echo "already published $name@$v"
     continue
   fi
   npm publish "$file" --tag "$tag" --access public --ignore-scripts --provenance
 done < "$order"
 for name in $expected; do
-  [ "$(npm view "$name@$v" version 2> /dev/null)" = "$v" ] || echo "::warning::The registry doesn't show $name@$v yet."
+  [ "$(npm view --prefer-online "$name@$v" version 2> /dev/null)" = "$v" ] || echo "::warning::The registry doesn't show $name@$v yet."
 done
 { echo "### npm"; echo; echo "\`npm i -g @deadbolt/cli@$tag\` ($v)"; } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

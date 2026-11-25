@@ -23,8 +23,9 @@ esac
 target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 # Two programs from one build: the app, `deadbolt-ui`, as Contents/MacOS/Deadbolt
 # (signed as anomaly.deadbolt), and the headless CLI and daemon, `deadbolt`, as
-# Contents/Helpers/deadbolt (signed as deadbolt). The daemon tells the app from
-# the CLI by signature and path. Both pin the same deadbolt-enclave. The same
+# Contents/Helpers/deadbolt (signed as anomaly.deadbolt.cli, deadbolt-client's
+# DAEMON_ID and the release's DEADBOLT_CLI_ID). The daemon tells the app from
+# the CLI by signature (and, ad hoc, by path). Both pin the same deadbolt-enclave. The same
 # build makes deadbolt-ffi's library, which build-autofill.sh links into
 # DeadboltAutoFill.appex.
 if $universal; then
@@ -102,7 +103,7 @@ fi
 # break the daemon's SHA-256 verification.
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
 if [[ $sign_id != "-" ]]; then
-  team_id=${DEADBOLT_APPLE_TEAM_ID:-}
+  team_id=${DEADBOLT_APPLE_TEAM_ID:-${DEADBOLT_TEAM_ID:-}}
   if [[ -z $team_id && $sign_id =~ \(([A-Za-z0-9]{10})\)$ ]]; then
     team_id=${BASH_REMATCH[1]}
   fi
@@ -116,14 +117,14 @@ if [[ $sign_id != "-" ]]; then
 </dict></plist>
 ENTITLEMENTS
     plutil -lint "$scratch/app.entitlements" >/dev/null
-    codesign --force --options runtime --timestamp --identifier deadbolt --entitlements "$scratch/app.entitlements" --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
+    codesign --force --options runtime --timestamp --identifier anomaly.deadbolt.cli --entitlements "$scratch/app.entitlements" --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
     codesign --force --options runtime --timestamp --entitlements "$scratch/app.entitlements" --sign "$sign_id" "$app"
   else
-    codesign --force --options runtime --timestamp --identifier deadbolt --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
+    codesign --force --options runtime --timestamp --identifier anomaly.deadbolt.cli --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
     codesign --force --options runtime --timestamp --sign "$sign_id" "$app"
   fi
 else
-  codesign --force --identifier deadbolt --sign - "$app/Contents/Helpers/deadbolt"
+  codesign --force --identifier anomaly.deadbolt.cli --sign - "$app/Contents/Helpers/deadbolt"
   codesign --force --sign - "$app"
 fi
 plutil -lint "$app/Contents/Info.plist"

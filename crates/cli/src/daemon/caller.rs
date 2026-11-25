@@ -303,12 +303,13 @@ fn browser_ancestor(parent: &Ancestor) -> bool {
 
 /// The class `evidence` supports. Nothing a client says enters here.
 ///
-/// A Developer ID build knows its own code by team and identifier. An
-/// ad-hoc build knows it by path and code hash: the peer runs from the
-/// daemon's own binary or its bundle's app, and is the code signed there.
-/// The app must run from the daemon's bundle either way: its executable is
-/// the whole `deadbolt` binary signed as the app, which runs only the app
-/// there, but a copy elsewhere would run CLI commands under its signature.
+/// A Developer ID build knows its own code by team and identifier, wherever
+/// it runs: a Homebrew or npm `deadbolt`'s daemon takes
+/// `/Applications/Deadbolt.app` as the app, and the app's own bundled daemon
+/// takes it too. The app's executable is `deadbolt-ui`, which has no CLI
+/// commands, so its signature vouches only for the app. An ad-hoc build
+/// knows its code by path and code hash: the peer runs from the daemon's own
+/// binary or its bundle's app, and is the code signed there.
 fn classify(evidence: &Evidence, args: &[String], ancestry: &[Ancestor]) -> (CallerClass, Check) {
     match evidence {
         Evidence::Signature {
@@ -324,8 +325,9 @@ fn classify(evidence: &Evidence, args: &[String], ancestry: &[Ancestor]) -> (Cal
                     code.runs_from(known.path) && code.signed_as(known.file, None, id)
                 }),
             };
-            let in_bundle = app.is_some_and(|known| code.runs_from(known.path));
-            let class = if in_bundle && is(app, APP_ID) {
+            // Only an ad-hoc build needs the app at its bundle's path.
+            let placed = team.is_some() || app.is_some_and(|known| code.runs_from(known.path));
+            let class = if placed && is(app, APP_ID) {
                 CallerClass::App
             } else if is(autofill, AUTOFILL_ID) {
                 CallerClass::AutoFill
@@ -652,11 +654,10 @@ pub(super) mod tests {
     }
 
     /// A Developer ID build's app is the app its own team signed as
-    /// `anomaly.deadbolt`, and nothing ad-hoc, run from the daemon's bundle:
-    /// that executable is the whole `deadbolt`, so a copy elsewhere could run
-    /// CLI commands under the app's signature.
+    /// `anomaly.deadbolt`, and nothing ad-hoc, wherever it runs: its
+    /// executable is `deadbolt-ui`, which runs only the app.
     #[test]
-    fn a_signed_build_knows_its_app_by_team_and_identifier_in_its_bundle() {
+    fn a_signed_build_knows_its_app_by_team_and_identifier() {
         let team = Some("TEAM123456");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -685,7 +686,7 @@ pub(super) mod tests {
         );
         assert_eq!(
             class_of(at(&elsewhere, "a1", team, APP_ID), &[]),
-            CallerClass::Caller
+            CallerClass::App
         );
         assert_eq!(
             class_of(at(&elsewhere, "af1", team, AUTOFILL_ID), &[]),
@@ -713,15 +714,59 @@ pub(super) mod tests {
             class_of(at(&elsewhere, "e1", team, DAEMON_ID), &host),
             CallerClass::BrowserHost
         );
-        // Without a bundle beside the daemon, nothing is the app.
-        let evidence = Evidence::Signature {
-            code: &at(&path, "a1", team, APP_ID),
-            exe: None,
-            app: None,
-            autofill: None,
-            team,
+    }
+
+    /// The split install: a signed Homebrew/npm `deadbolt` runs the daemon
+    /// outside any bundle, and a signed `/Applications/Deadbolt.app` talks to
+    /// it. The daemon takes the app as the app; an ad-hoc build doesn't, since
+    /// it knows its app only by its own bundle's path.
+    #[test]
+    fn a_signed_standalone_daemon_takes_the_signed_app() {
+        let app = Path::new("/Applications/Deadbolt.app/Contents/MacOS/Deadbolt");
+        let autofill = Path::new(
+            "/Applications/Deadbolt.app/Contents/PlugIns/DeadboltAutoFill.appex/Contents/MacOS/DeadboltAutoFill",
+        );
+        let exe = Path::new("/opt/homebrew/bin/deadbolt");
+        assert_eq!(app_beside(exe), None);
+        let class_of = |code: CodeSignature, team: Option<&str>| {
+            let evidence = Evidence::Signature {
+                code: &code,
+                exe: Some(Known {
+                    path: exe,
+                    file: None,
+                }),
+                app: None,
+                autofill: None,
+                team,
+            };
+            classify(&evidence, &[], &[]).0
         };
-        assert_eq!(classify(&evidence, &[], &[]).0, CallerClass::Caller);
+        let team = Some("TEAM123456");
+        assert_eq!(
+            class_of(at(app, "a1", team, APP_ID), team),
+            CallerClass::App
+        );
+        assert_eq!(
+            class_of(at(autofill, "af1", team, AUTOFILL_ID), team),
+            CallerClass::AutoFill
+        );
+        assert_eq!(
+            class_of(at(app, "a1", Some("OTHER12345"), APP_ID), team),
+            CallerClass::Caller
+        );
+        assert_eq!(
+            class_of(at(app, "a1", team, DAEMON_ID), team),
+            CallerClass::Caller
+        );
+        // Ad hoc: with no bundle beside the daemon, nothing is the app.
+        assert_eq!(
+            class_of(at(app, "a1", None, APP_ID), None),
+            CallerClass::Caller
+        );
+        assert_eq!(
+            class_of(at(autofill, "af1", None, AUTOFILL_ID), None),
+            CallerClass::Caller
+        );
     }
 
     /// Linux names a peer's program from `/proc`, which a process can race:
@@ -805,7 +850,10 @@ pub(super) mod tests {
     fn the_daemon_check_wants_that_very_binary() {
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         let me = crate::caller::own_exe().unwrap();
-        deadbolt_client::peer::check(&ours, &me).unwrap();
+        assert_eq!(
+            deadbolt_client::peer::check(&ours, &me).unwrap(),
+            deadbolt_client::peer::Accepted::Expected
+        );
         let other = std::fs::canonicalize("/bin/sh").unwrap();
         let refused = deadbolt_client::peer::check(&ours, &other).unwrap_err();
         assert!(refused.contains("not /bin/sh"), "{refused}");

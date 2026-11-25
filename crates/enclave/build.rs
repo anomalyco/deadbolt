@@ -16,6 +16,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=swift");
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_TEAM_ID");
+    println!("cargo:rerun-if-env-changed=DEADBOLT_TEAM_ID");
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_SIGNING_IDENTITY");
     println!("cargo:rerun-if-env-changed=DEADBOLT_ENCLAVE_PREBUILT");
 
@@ -72,10 +73,15 @@ fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "-");
-    let signing_team = std::env::var("DEADBOLT_APPLE_TEAM_ID")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "-")
+    // As crates/client/build.rs: the Release workflow sets DEADBOLT_TEAM_ID.
+    let given = |name| {
+        std::env::var(name)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "-")
+    };
+    let signing_team = given("DEADBOLT_APPLE_TEAM_ID")
+        .or_else(|| given("DEADBOLT_TEAM_ID"))
         .or_else(|| signing_identity.as_deref().and_then(team_of));
     // Where the production helper came from: a prebuilt directory or the
     // signing identity and team. A change rebuilds both helpers.

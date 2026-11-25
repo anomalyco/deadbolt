@@ -158,7 +158,7 @@ fi
 
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
 if [[ $sign_id != "-" ]]; then
-  team_id=${DEADBOLT_APPLE_TEAM_ID:-}
+  team_id=${DEADBOLT_APPLE_TEAM_ID:-${DEADBOLT_TEAM_ID:-}}
   if [[ -z $team_id && $sign_id =~ \(([A-Za-z0-9]{10})\)$ ]]; then
     team_id=${BASH_REMATCH[1]}
   fi

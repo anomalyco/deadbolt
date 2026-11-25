@@ -165,8 +165,9 @@ pub fn team() -> Option<&'static str> {
 }
 
 /// The signing identifier of Deadbolt's daemon (`Contents/Helpers/deadbolt`,
-/// and the CLI), as `bundle.sh` signs it.
-pub const DAEMON_ID: &str = "deadbolt";
+/// and the CLI), as `bundle.sh` and the release (`.github/release/lib.sh`'s
+/// `DEADBOLT_CLI_ID`) sign it.
+pub const DAEMON_ID: &str = "anomaly.deadbolt.cli";
 /// The signing identifier of Deadbolt.app, its bundle identifier.
 pub const APP_ID: &str = "anomaly.deadbolt";
 /// The signing identifier of Deadbolt's macOS AutoFill extension
@@ -181,15 +182,29 @@ pub fn app_group() -> Option<String> {
     team().map(|t| format!("{t}.{APP_GROUP_SUFFIX}"))
 }
 
-/// Checks that `socket`'s peer is the daemon at `expected` (this client's own
-/// binary, or its bundle's helper), before a passphrase goes to it.
+/// Which daemon [`check`] accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accepted {
+    /// The daemon at `expected` itself, or any daemon off macOS, where
+    /// nothing tells.
+    Expected,
+    /// Another daemon this build's team signed: a Homebrew or npm
+    /// `deadbolt`'s, or Deadbolt.app's. It checks its own `deadbolt-enclave`
+    /// against its own pin.
+    Elsewhere,
+}
+
+/// Checks that `socket`'s peer is Deadbolt's daemon, before a passphrase goes
+/// to it. `expected` is the daemon this client would run (its own binary, or
+/// its bundle's helper).
 ///
-/// On macOS the peer's code is looked up by its audit token: it must run from
-/// `expected` itself, not a copy elsewhere, and be Deadbolt's daemon by
-/// signature (`daemon_is`). On Linux nothing tells two processes of one user
-/// apart, so this checks only that the peer runs as this user; the socket's
-/// 0700 directory is what keeps others out.
-pub fn check(socket: &impl AsFd, expected: &Path) -> Result<(), String> {
+/// On macOS the peer's code is looked up by its audit token and must be
+/// Deadbolt's daemon by signature (`daemon_is`): any daemon its team signed,
+/// for a Developer ID build, else `expected` itself, not a copy elsewhere.
+/// On Linux nothing tells two processes of one user apart, so this checks
+/// only that the peer runs as this user; the socket's 0700 directory is what
+/// keeps others out.
+pub fn check(socket: &impl AsFd, expected: &Path) -> Result<Accepted, String> {
     let peer = Peer::of(socket).map_err(|e| format!("reading the daemon's credentials: {e}"))?;
     if peer.uid != rustix::process::getuid().as_raw() {
         return Err(format!(
@@ -211,12 +226,17 @@ pub fn check(socket: &impl AsFd, expected: &Path) -> Result<(), String> {
                 "the daemon (pid {}) {why}; run `deadbolt debug daemon stop`",
                 peer.pid
             )
+        })?;
+        Ok(if code.runs_from(&expected) {
+            Accepted::Expected
+        } else {
+            Accepted::Elsewhere
         })
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = expected;
-        Ok(())
+        Ok(Accepted::Expected)
     }
 }
 
@@ -229,17 +249,19 @@ pub fn missing_helper(helper: &Path) -> String {
     )
 }
 
-/// Whether running `code` is the daemon at `expected` (canonical): it runs
-/// from that very file, and is Deadbolt's daemon by signature, by `team` and
-/// [`DAEMON_ID`] for a Developer ID build, else by the code hash of `file`,
-/// the signature on disk at `expected`.
+/// Whether running `code` is Deadbolt's daemon. A Developer ID build knows
+/// it by `team` and [`DAEMON_ID`] wherever it runs, so a Homebrew or npm
+/// `deadbolt` and `/Applications/Deadbolt.app` share one daemon, whichever
+/// started it. An ad-hoc build knows it only as the daemon at `expected`
+/// (canonical): it runs from that very file, with the code hash of `file`,
+/// the signature on disk there.
 pub fn daemon_is(
     code: &CodeSignature,
     file: Option<&CodeSignature>,
     expected: &Path,
     team: Option<&str>,
 ) -> Result<(), String> {
-    if !code.runs_from(expected) {
+    if team.is_none() && !code.runs_from(expected) {
         let running = code.path.as_deref().unwrap_or("an unknown program");
         return Err(format!("runs {running}, not {}", expected.display()));
     }
@@ -603,13 +625,13 @@ mod tests {
 
     #[test]
     fn code_is_the_files_code_or_the_teams_identifier() {
-        let file = sig("aa", None, "deadbolt", true);
-        assert!(sig("aa", None, "x", true).signed_as(Some(&file), None, "deadbolt"));
-        assert!(!sig("bb", None, "deadbolt", true).signed_as(Some(&file), None, "deadbolt"));
-        assert!(!sig("aa", None, "deadbolt", false).signed_as(Some(&file), None, "deadbolt"));
-        assert!(!sig("aa", None, "deadbolt", true).signed_as(None, None, "deadbolt"));
-        let unsigned = sig("aa", None, "deadbolt", false);
-        assert!(!sig("aa", None, "deadbolt", true).signed_as(Some(&unsigned), None, "deadbolt"));
+        let file = sig("aa", None, DAEMON_ID, true);
+        assert!(sig("aa", None, "x", true).signed_as(Some(&file), None, DAEMON_ID));
+        assert!(!sig("bb", None, DAEMON_ID, true).signed_as(Some(&file), None, DAEMON_ID));
+        assert!(!sig("aa", None, DAEMON_ID, false).signed_as(Some(&file), None, DAEMON_ID));
+        assert!(!sig("aa", None, DAEMON_ID, true).signed_as(None, None, DAEMON_ID));
+        let unsigned = sig("aa", None, DAEMON_ID, false);
+        assert!(!sig("aa", None, DAEMON_ID, true).signed_as(Some(&unsigned), None, DAEMON_ID));
 
         let team = Some("T");
         assert!(sig("bb", team, "anomaly.deadbolt", true).signed_as(
@@ -690,6 +712,35 @@ mod tests {
         );
         assert!(daemon_is(&running(&real, team, "anomaly.deadbolt"), None, &real, team).is_err());
         assert!(daemon_is(&running(&real, None, DAEMON_ID), Some(&file), &real, team).is_err());
-        assert!(daemon_is(&running(&copy, team, DAEMON_ID), None, &real, team).is_err());
+        // ... wherever that daemon runs from.
+        assert_eq!(
+            daemon_is(&running(&copy, team, DAEMON_ID), None, &real, team),
+            Ok(())
+        );
+    }
+
+    /// The split install: a signed Homebrew or npm `deadbolt` and a signed
+    /// `/Applications/Deadbolt.app` each take the daemon the other started.
+    /// An ad-hoc build takes only the daemon at the path it expects.
+    #[test]
+    fn signed_cli_and_app_share_either_daemon() {
+        let team = Some("TEAM123456");
+        let cli = Path::new("/opt/homebrew/bin/deadbolt");
+        let helper = Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt");
+        let running = |path: &Path, team: Option<&str>| CodeSignature {
+            path: Some(path.display().to_string()),
+            signing_id: Some(DAEMON_ID.into()),
+            team_id: team.map(Into::into),
+            cdhash: Some("aa".into()),
+            valid: true,
+        };
+        // The app reaches the CLI's daemon, and the CLI the app's.
+        assert_eq!(daemon_is(&running(cli, team), None, helper, team), Ok(()));
+        assert_eq!(daemon_is(&running(helper, team), None, cli, team), Ok(()));
+        assert!(daemon_is(&running(cli, Some("OTHER12345")), None, helper, team).is_err());
+        // Ad hoc, the path is part of the daemon's identity.
+        let file = sig("aa", None, DAEMON_ID, true);
+        let refused = daemon_is(&running(cli, None), Some(&file), helper, None).unwrap_err();
+        assert!(refused.contains("not "), "{refused}");
     }
 }

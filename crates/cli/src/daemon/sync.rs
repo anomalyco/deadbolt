@@ -41,8 +41,16 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
 }
 
+/// One incoming stream: removals it delivered, and whether item or label
+/// changes still need forwarding once it completes.
+#[derive(Default)]
+pub struct Receiving {
+    stream: application::ReceiveStream,
+    pending_forward: bool,
+}
+
 impl SyncHandler for Handler {
-    type ReceiveState = bool;
+    type ReceiveState = Receiving;
 
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.0
@@ -73,15 +81,19 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         entries: Vec<Blob>,
-        pending_forward: &mut bool,
+        state: &mut Receiving,
         done: bool,
     ) -> Result<(), HandlerError> {
         let daemon = &self.0;
         let peer = DeviceId::from_bytes(peer);
+        let Receiving {
+            stream,
+            pending_forward,
+        } = state;
         daemon
             .with(|s| {
                 let ready = *daemon.ready.borrow();
-                let received = receive(s, &peer, entries, ready);
+                let received = receive(s, &peer, entries, ready, stream);
                 // Even an errored batch may have committed an earlier vault's removal.
                 daemon.refresh(s);
                 // Defer only item and label forwarding, not watcher delivery, admission
@@ -119,9 +131,10 @@ pub(super) fn receive(
     peer: &DeviceId,
     entries: Vec<Blob>,
     ready: bool,
+    stream: &mut application::ReceiveStream,
 ) -> Result<usize> {
     s.ensure_usable()?;
-    application::receive(s, peer, entries, ready)
+    application::receive(s, peer, entries, ready, stream)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -607,7 +620,7 @@ mod tests {
     struct Plain(std::sync::Mutex<Loaded>, std::sync::atomic::AtomicUsize);
 
     impl SyncHandler for Plain {
-        type ReceiveState = ();
+        type ReceiveState = application::ReceiveStream;
 
         async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
             let s = self.0.lock().unwrap();
@@ -629,12 +642,12 @@ mod tests {
             &self,
             peer: PeerId,
             entries: Vec<Blob>,
-            _: &mut (),
+            stream: &mut application::ReceiveStream,
             _: bool,
         ) -> Result<(), HandlerError> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut s = self.0.lock().unwrap();
-            receive(&mut s, &DeviceId::from_bytes(peer), entries, true)
+            receive(&mut s, &DeviceId::from_bytes(peer), entries, true, stream)
                 .map(drop)
                 .map_err(handler_error)
         }
@@ -765,6 +778,7 @@ mod tests {
                 data.encode(),
             ],
             true,
+            &mut Default::default(),
         )
         .unwrap();
         assert_eq!(added, 1);
@@ -827,6 +841,7 @@ mod tests {
             &peer,
             batch.iter().map(deadbolt_core::Entry::encode).collect(),
             true,
+            &mut Default::default(),
         )
         .unwrap();
         assert_eq!(added, 3);
@@ -837,9 +852,139 @@ mod tests {
         assert!(!has(after), "the removed peer never held data after it");
         // Once the removal is known, nothing more from the peer is accepted,
         // not even a write it made before learning of it.
-        let added = receive(&mut target, &peer, vec![late_entry.encode()], true).unwrap();
+        let added = receive(
+            &mut target,
+            &peer,
+            vec![late_entry.encode()],
+            true,
+            &mut Default::default(),
+        )
+        .unwrap();
         assert_eq!(added, 0);
         assert!(target.vault(&id).items().iter().all(|i| i.id != late));
+    }
+
+    /// A peer that sends a fixed list of entries and wants nothing back.
+    struct Replay(Vec<Blob>);
+
+    impl SyncHandler for Replay {
+        type ReceiveState = ();
+
+        async fn heads(&self, _: PeerId) -> Result<Vec<u8>, HandlerError> {
+            let hello = application::Hello {
+                v: 1,
+                name: "peer".into(),
+                addr: None,
+                peers: BTreeMap::new(),
+                vaults: BTreeMap::new(),
+            };
+            Ok(serde_json::to_vec(&hello)?)
+        }
+
+        async fn missing_for(
+            &self,
+            _: PeerId,
+            _: Vec<u8>,
+        ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+            Ok(Box::new(self.0.clone().into_iter().map(Ok)))
+        }
+
+        async fn receive(
+            &self,
+            _: PeerId,
+            _: Vec<Blob>,
+            _: &mut (),
+            _: bool,
+        ) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    /// The wire commits a stream in prefixes of 1, 2, 4, ... entries, so the
+    /// peer's removal lands alone in the first batch and the data it wrote
+    /// before the removal in later ones. That data still lands; data after the
+    /// removal, and anything in a later stream, does not.
+    #[tokio::test]
+    async fn a_streamed_removal_keeps_data_written_before_it_in_later_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
+        let id = target.create_vault("personal").unwrap();
+        let peer = DeviceSecret::from_bytes(&[2; 32]);
+        let honest = DeviceSecret::from_bytes(&[3; 32]);
+        target
+            .update(id, |v, key| {
+                for device in [&peer, &honest] {
+                    let consent = device.join_consent(&id, &key.device_id());
+                    v.add(key, device.device_id(), consent)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let mut source = target.vault(&id).clone();
+        let mut sent = Vec::new();
+        let mut before = Vec::new();
+        for i in 0..5 {
+            let (item, entry) = source
+                .create_item(&peer, "login", Some(format!("own {i}")), [])
+                .unwrap();
+            before.push(item);
+            sent.push(entry.encode());
+        }
+        let (relayed, entry) = source
+            .create_item(&honest, "login", Some("relayed".into()), [])
+            .unwrap();
+        before.push(relayed);
+        sent.push(entry.encode());
+        let mut concurrent = source.clone();
+        let removal = source.remove(&honest, peer.device_id()).unwrap();
+        sent.insert(0, removal.encode());
+        let (after, entry) = source
+            .create_item(&honest, "login", Some("after".into()), [])
+            .unwrap();
+        sent.push(entry.encode());
+        let (late, late_entry) = concurrent
+            .create_item(&peer, "login", Some("late".into()), [])
+            .unwrap();
+
+        let (peer_id, target_id) = (*peer.device_id().as_bytes(), *target.id.as_bytes());
+        let target = Plain(std::sync::Mutex::new(target), Default::default());
+        let stream = |entries: Vec<Blob>| {
+            let target = &target;
+            async move {
+                let (left, right) = tokio::io::duplex(64 * 1024);
+                let (mut pr, mut pw) = tokio::io::split(left);
+                let (mut tr, mut tw) = tokio::io::split(right);
+                let max = deadbolt_net::DEFAULT_MAX_FRAME_LEN;
+                let replay = Replay(entries);
+                let (sent, received) = tokio::join!(
+                    deadbolt_net::run_sync_session(&replay, target_id, &mut pw, &mut pr, max, true),
+                    deadbolt_net::run_sync_session(target, peer_id, &mut tw, &mut tr, max, false),
+                );
+                assert_eq!(sent.unwrap().sent, received.unwrap().received);
+            }
+        };
+        stream(sent).await;
+        let batches = target.1.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            batches >= 4,
+            "the stream was committed in {batches} batches"
+        );
+        {
+            let s = target.0.lock().unwrap();
+            let vault = s.vault(&id);
+            assert!(!vault.is_member(&peer.device_id()));
+            let has = |item| vault.items().iter().any(|i| i.id == item);
+            assert!(
+                before.iter().all(|item| has(*item)),
+                "data from before the removal"
+            );
+            assert!(!has(after), "the removed peer never held data after it");
+        }
+        // A later stream from the peer is refused, even a write it made before
+        // learning of its removal.
+        stream(vec![late_entry.encode()]).await;
+        let s = target.0.lock().unwrap();
+        assert!(s.vault(&id).items().iter().all(|i| i.id != late));
     }
 
     fn two_shared_vaults() -> (tempfile::TempDir, Loaded, DeviceId, Vec<u8>) {
@@ -985,9 +1130,23 @@ mod tests {
             .unwrap();
         let peer = loaded.id;
         let heads = hello(&loaded, &peer, None).unwrap();
-        receive(&mut loaded, &peer, vec![entry.encode()], false).unwrap();
+        receive(
+            &mut loaded,
+            &peer,
+            vec![entry.encode()],
+            false,
+            &mut Default::default(),
+        )
+        .unwrap();
         assert!(loaded.vault(&id).items().is_empty());
-        receive(&mut loaded, &peer, vec![entry.encode()], true).unwrap();
+        receive(
+            &mut loaded,
+            &peer,
+            vec![entry.encode()],
+            true,
+            &mut Default::default(),
+        )
+        .unwrap();
         assert!(
             missing_for(&mut loaded, &peer, &heads, false)
                 .unwrap()

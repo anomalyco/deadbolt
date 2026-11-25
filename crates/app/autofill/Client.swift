@@ -136,22 +136,30 @@ public struct UnixSocketDaemonClient: AutofillDaemonClient {
             )
         }
         let daemon = daemonBinary
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let outcome = autofillCall(
-                    socketPath: socketPath,
-                    command: command,
-                    timeoutSecs: timeout,
-                    handle: handle,
-                    daemon: daemon
-                )
-                switch outcome {
-                case let .replied(reply):
-                    continuation.resume(returning: reply)
-                case let .failed(error):
-                    continuation.resume(throwing: error)
+        // Every call gets a handle, so cancelling the Swift task cancels the
+        // call (and dismisses any Touch ID sheet the daemon has up), even
+        // when the caller passed none.
+        let callHandle = handle ?? CallHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let outcome = autofillCall(
+                        socketPath: socketPath,
+                        command: command,
+                        timeoutSecs: timeout,
+                        handle: callHandle,
+                        daemon: daemon
+                    )
+                    switch outcome {
+                    case let .replied(reply):
+                        continuation.resume(returning: reply)
+                    case let .failed(error):
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
+        } onCancel: {
+            callHandle.cancel()
         }
     }
 }

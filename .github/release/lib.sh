@@ -25,8 +25,10 @@ posix() {
 }
 
 # The code identities a release signs with. The Touch ID helper's identifier
-# comes from its embedded Info.plist (crates/cli/src/daemon/enclave-Info.plist);
-# the app's from Deadbolt.app's Info.plist (crates/app/scripts/bundle.sh).
+# comes from its embedded Info.plist (crates/enclave/swift/Info.plist); the
+# app's from Deadbolt.app's Info.plist (crates/app/scripts/bundle.sh). The
+# CLI's must match deadbolt-client's DAEMON_ID (crates/client/src/peer.rs),
+# which clients and the daemon check, and bundle.sh's --identifier.
 # shellcheck disable=SC2034 # Used by the scripts that source this.
 DEADBOLT_APP_ID=anomaly.deadbolt
 # shellcheck disable=SC2034

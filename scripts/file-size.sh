@@ -45,7 +45,7 @@ measure() {
     }
     FNR == 1 {
       flush(); reset(); name = FILENAME
-      skip = (FILENAME ~ /(^|\/)node_modules\// || FILENAME ~ /\.d\.ts$/ || FILENAME ~ /\.(generated|gen|g|pb)\.(rs|tsx?|swift)$/ || FILENAME ~ /_generated\.rs$/)
+      skip = (FILENAME ~ /(^|\/)node_modules\// || FILENAME ~ /^extension\/src\/gen\// || FILENAME ~ /\.d\.ts$/ || FILENAME ~ /\.(generated|gen|g|pb)\.(rs|tsx?|swift)$/ || FILENAME ~ /_generated\.rs$/)
       if (skip) { name = ""; next }
       isrs = (FILENAME ~ /\.rs$/)
       testfile = (FILENAME ~ /(^|\/)(tests?|benches|e2e|__tests__)\// || FILENAME ~ /(^|\/)[^\/]*Tests\// || FILENAME ~ /(^|\/)tests?\.rs$/ || FILENAME ~ /_tests?\.rs$/ || FILENAME ~ /\.(test|spec)\.tsx?$/ || FILENAME ~ /Tests\.swift$/)

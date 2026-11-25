@@ -1,6 +1,10 @@
 //! Compiles in the Apple team that signs this build (`DEADBOLT_TEAM_ID`), so
 //! the daemon and its clients know Deadbolt's own code by team and identifier.
 //! Empty for ad-hoc builds, which know it by path and code hash instead.
+//!
+//! The team comes from `DEADBOLT_APPLE_TEAM_ID`, else `DEADBOLT_TEAM_ID` (the
+//! Release workflow's, which builds unsigned and signs later), else the
+//! signing identity's name.
 
 #[expect(
     clippy::disallowed_methods,
@@ -8,6 +12,7 @@
 )]
 fn main() {
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_TEAM_ID");
+    println!("cargo:rerun-if-env-changed=DEADBOLT_TEAM_ID");
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_SIGNING_IDENTITY");
     let given = |name| {
         std::env::var(name)
@@ -16,7 +21,9 @@ fn main() {
             .filter(|v| !v.is_empty() && v != "-")
     };
     let identity = given("DEADBOLT_APPLE_SIGNING_IDENTITY");
-    let team = given("DEADBOLT_APPLE_TEAM_ID").or_else(|| identity.as_deref().and_then(team_of));
+    let team = given("DEADBOLT_APPLE_TEAM_ID")
+        .or_else(|| given("DEADBOLT_TEAM_ID"))
+        .or_else(|| identity.as_deref().and_then(team_of));
     if let (Some(identity), None) = (&identity, &team) {
         panic!(
             "DEADBOLT_APPLE_SIGNING_IDENTITY ({identity}) names no team: set DEADBOLT_APPLE_TEAM_ID"

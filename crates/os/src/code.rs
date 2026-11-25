@@ -29,6 +29,10 @@ const SIGNING_INFORMATION: SecCSFlags = 1 << 1;
 const REQUIREMENT_INFORMATION: SecCSFlags = 1 << 2;
 /// `kSecCSDynamicInformation`.
 const DYNAMIC_INFORMATION: SecCSFlags = 1 << 3;
+/// `kSecCSNoNetworkAccess`: validity checks never wait on `trustd`'s online
+/// revocation (OCSP) lookups, which stall offline, behind a captive portal or
+/// in a sandboxed extension.
+const NO_NETWORK_ACCESS: SecCSFlags = 1 << 29;
 
 /// The architecture files are read for: this process's own, the one
 /// Deadbolt's binaries run as (`CPU_TYPE_ARM64`, `CPU_TYPE_X86_64`).
@@ -210,19 +214,20 @@ pub fn file_code(path: &Path) -> Option<SecStaticCode> {
     Some(unsafe { SecStaticCode::wrap_under_create_rule(code) })
 }
 
-/// `SecCodeCheckValidity` on running `code` with default flags: its
+/// `SecCodeCheckValidity` on running `code`, without network access: its
 /// signature is valid (the kernel's view of its pages and the code
 /// directory's signature) and, if given, it satisfies `requirement`.
 pub fn running_is_valid(code: &SecCode, requirement: Option<&SecRequirement>) -> bool {
     let requirement = requirement.map_or(ptr::null_mut(), TCFType::as_concrete_TypeRef);
     // SAFETY: `code` is a live code object, and `requirement` is a live
     // requirement or null, which asks for validity alone.
-    let status = unsafe { SecCodeCheckValidity(code.as_concrete_TypeRef(), 0, requirement) };
+    let status =
+        unsafe { SecCodeCheckValidity(code.as_concrete_TypeRef(), NO_NETWORK_ACCESS, requirement) };
     status == errSecSuccess
 }
 
-/// `SecStaticCodeCheckValidity` on `code` with `flags`, and, if given,
-/// `requirement`.
+/// `SecStaticCodeCheckValidity` on `code` with `flags`, never with network
+/// access, and, if given, `requirement`.
 pub fn file_is_valid(
     code: &SecStaticCode,
     flags: Flags,
@@ -232,7 +237,11 @@ pub fn file_is_valid(
     // SAFETY: `code` is a live static code object, and `requirement` is a
     // live requirement or null, which asks for validity alone.
     let status = unsafe {
-        SecStaticCodeCheckValidity(code.as_concrete_TypeRef(), flags.bits(), requirement)
+        SecStaticCodeCheckValidity(
+            code.as_concrete_TypeRef(),
+            flags.bits() | NO_NETWORK_ACCESS,
+            requirement,
+        )
     };
     status == errSecSuccess
 }

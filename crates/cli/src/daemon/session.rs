@@ -330,7 +330,16 @@ pub(super) mod tests {
         assert!(
             super::super::sync::missing_for(&mut loaded, &peer.device_id(), b"{}", true).is_err()
         );
-        assert!(super::super::sync::receive(&mut loaded, &peer.device_id(), vec![], true).is_err());
+        assert!(
+            super::super::sync::receive(
+                &mut loaded,
+                &peer.device_id(),
+                vec![],
+                true,
+                &mut Default::default()
+            )
+            .is_err()
+        );
         assert!(super::super::pairing::offer(&loaded, id, &peer.device_id(), None).is_err());
         assert!(loaded.create_vault("another").is_err());
         drop(loaded);
