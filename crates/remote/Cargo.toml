@@ -1,0 +1,35 @@
+[package]
+name = "deadbolt-remote"
+description = "Deadbolt v2 blind remote storage, not yet wired in: a four-verb ObjStore (create-only PUT, ranged GET, sorted LIST, idempotent DELETE) over S3/R2 (SigV4) and WebDAV, canonical object names, the push/pull planner and the rollback, withholding and self-rollback detector. The pure core builds for wasm32-unknown-unknown; the reqwest transport sits behind the default http feature."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["http"]
+# The native reqwest transport for S3ObjStore and WebDavObjStore.
+http = ["dep:reqwest", "dep:rustls"]
+
+[dependencies]
+deadbolt-core = { path = "../core", default-features = false }
+hmac = "0.13.0"
+quick-xml = "0.42"
+sha2 = { version = "0.11.1", default-features = false }
+thiserror = "2.0"
+url = "2.5.8"
+zeroize = "1.9"
+# Already in the tree through deadbolt-cli (`deadbolt update`), with ring.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+
+# deadbolt-core draws keys from the browser's crypto in a wasm32 host.
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["rt", "macros", "net", "io-util", "sync"] }

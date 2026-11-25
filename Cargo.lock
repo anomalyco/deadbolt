@@ -1654,6 +1654,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "deadbolt-remote"
+version = "0.0.0"
+dependencies = [
+ "deadbolt-core",
+ "getrandom 0.4.3",
+ "hmac",
+ "quick-xml 0.42.0",
+ "reqwest",
+ "rustls",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "deadbolt-send"
 version = "0.0.0"
 dependencies = [

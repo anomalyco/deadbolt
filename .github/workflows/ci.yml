@@ -52,7 +52,8 @@ jobs:
         run: cargo +stable check -p deadbolt-net --features private-relay-fixture --locked
 
   # The Rust that runs in browsers, or must be able to: the vault core,
-  # engine and v2 storage, Send, and the wire schemas the extension shares.
+  # engine, v2 storage and remote planner, Send, and the wire schemas the
+  # extension shares.
   wasm:
     name: Browser cores (wasm32)
     if: github.event_name != 'schedule'
@@ -63,6 +64,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: rustup target add wasm32-unknown-unknown --toolchain stable
       - run: cargo +stable clippy -p deadbolt-pack -p deadbolt-engine -p deadbolt-proto -p deadbolt-core -p deadbolt-send -p deadbolt-send-web --target wasm32-unknown-unknown --locked -- -D warnings
+      # The remote's pure core (ObjStore, planner, SigV4, XML) without the reqwest transport.
+      - run: cargo +stable clippy -p deadbolt-remote --no-default-features --target wasm32-unknown-unknown --locked -- -D warnings
 
   extension:
     name: Browser extension
