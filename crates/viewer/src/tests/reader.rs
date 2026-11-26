@@ -5,7 +5,7 @@ use deadbolt_pack::pack::HEADER_LEN;
 use deadbolt_pack::{FsBlocks, MemBlocks, PackReader};
 use zeroize::Zeroizing;
 
-use super::{NOW, VAULT, bundle_for, head, item_id, password, write_pack};
+use super::{NOW, VAULT, bundle_for, core_pack, head, item_id, password, write_pack};
 use crate::{PackViewer, ViewerError};
 
 const ITEMS: usize = 5_000;
@@ -234,4 +234,13 @@ fn an_altered_record_is_refused() {
         PackViewer::open(&copy, &bundle, NOW),
         Err(ViewerError::PackNotFound)
     ));
+}
+
+#[test]
+fn the_app_reads_a_whole_pack_back_into_the_core_pack() {
+    let blocks = MemBlocks::new();
+    let bundle = bundle_for(&write_pack(&blocks, 40, 1));
+    let reader = PackReader::open(&blocks, "gen-1.pack").unwrap();
+    let pack = crate::read_pack(&reader, &bundle.pack_keys()).unwrap();
+    assert_eq!(pack, core_pack(40));
 }

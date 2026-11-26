@@ -1,22 +1,23 @@
-//! The viewer's Head and Secret records: what `deadbolt-pack` seals as each
-//! item's two records, as JSON.
+//! What the viewer shows and fills, projected from a pack's Head and
+//! Secret records (`deadbolt_core::v2::pack`: each item's canonical CRDT
+//! registers, the secret ones in the Secret).
 //!
 //! ```text
-//! Head   = ViewerHit    {item_id, title, username, urls, passkey…, has_password, has_totp}
-//! Secret = ViewerSecret {item_id, password, totp, passkey {credential_id, user_handle, private_key}}
-//! keys   = "item\0" || item id 16       one per item
-//!          "site\0" || registrable domain of each saved URL
-//!          "rp\0"   || passkey rp id
+//! ViewerHit    {item_id, title, username, urls, passkey…, has_password, has_totp}   from Head
+//! ViewerSecret {item_id, password, totp, passkey {credential_id, user_handle, private_key}} from Secret
+//! keys = "item\0" || item id 16       one per item
+//!        "site\0" || registrable domain of each saved URL
+//!        "rp\0"   || passkey rp id
 //! ```
 //!
-//! Both records repeat the item id, and a reader checks it: a record the
+//! Both records carry the item id, and a reader checks it: a record the
 //! index points at for the wrong item is refused, not shown.
 
 use std::fmt;
 
 use deadbolt_core::site;
 use deadbolt_core::totp::Totp;
-use deadbolt_pack::PackItem;
+use deadbolt_core::v2::pack::{ItemHead, ItemSecret};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -146,26 +147,84 @@ pub(crate) fn sites_of(hit: &ViewerHit) -> Vec<String> {
     out
 }
 
-/// One item as `deadbolt-pack` input, for the foreground app's repack:
-/// its Head and Secret records and every key that finds it.
-pub fn pack_item(head: &ViewerHit, secret: &ViewerSecret) -> Result<PackItem> {
-    if head.item_id != secret.item_id {
-        return Err(ViewerError::invalid("head and secret name different items"));
+/// The winning values of a Head's public fields of type `url`, in name order.
+fn urls_of(head: &ItemHead) -> Vec<String> {
+    head.fields
+        .keys()
+        .filter_map(|name| head.value(name))
+        .filter(|v| v.kind == "url")
+        .map(|v| v.value.clone())
+        .collect()
+}
+
+pub(crate) fn hex_id(id: &[u8; 16]) -> String {
+    id.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl ViewerHit {
+    /// What a picker shows for the item a Head record holds; `None` for a
+    /// deleted item or one never created.
+    pub fn from_head(head: &ItemHead) -> Option<Self> {
+        let kind = head.kind()?;
+        if head.deleted() {
+            return None;
+        }
+        let text = |name: &str| head.value(name).map(|v| v.value.clone());
+        let passkey = kind == "passkey";
+        Some(Self {
+            item_id: hex_id(head.id.as_bytes()),
+            title: text("@name").unwrap_or_default(),
+            username: text("username"),
+            urls: urls_of(head),
+            passkey_rp_id: passkey.then(|| text("rp-id")).flatten(),
+            passkey_credential_id: passkey.then(|| text("credential-id")).flatten(),
+            has_password: head
+                .secret_fields
+                .get("password")
+                .is_some_and(|kind| !kind.is_empty()),
+            has_totp: head.secret_fields.values().any(|kind| kind == "otp"),
+        })
     }
-    let id = parse_item_id(&head.item_id)?;
-    let mut keys = vec![item_key(&id)];
-    keys.extend(sites_of(head).iter().map(|domain| site_key(domain)));
-    if let Some(rp_id) = &head.passkey_rp_id {
-        let rp_id = site::valid_rp_id(rp_id).map_err(ViewerError::invalid)?;
+}
+
+impl ViewerSecret {
+    /// What a fill needs from a Secret record.
+    pub fn from_record(secret: &ItemSecret) -> Self {
+        let value = |name: &str| secret.value(name).map(|v| Zeroizing::new(v.value.clone()));
+        let totp = secret
+            .fields
+            .keys()
+            .filter_map(|name| secret.value(name))
+            .find(|v| v.kind == "otp")
+            .map(|v| Zeroizing::new(v.value.clone()));
+        let passkey = match (value("private-key"), secret.fill.get("credential-id")) {
+            (Some(private_key), Some(credential_id)) => Some(ViewerPasskey {
+                credential_id: credential_id.clone(),
+                user_handle: secret.fill.get("user-handle").cloned().unwrap_or_default(),
+                private_key,
+            }),
+            _ => None,
+        };
+        Self {
+            item_id: hex_id(secret.id.as_bytes()),
+            password: value("password"),
+            totp,
+            passkey,
+        }
+    }
+}
+
+/// Every key the index files an item's Head under.
+pub(crate) fn keys_of(id: &[u8; 16], hit: Option<&ViewerHit>) -> crate::Result<Vec<Vec<u8>>> {
+    let mut keys = vec![item_key(id)];
+    let Some(hit) = hit else {
+        return Ok(keys);
+    };
+    keys.extend(sites_of(hit).iter().map(|domain| site_key(domain)));
+    if let Some(rp_id) = &hit.passkey_rp_id
+        && let Ok(rp_id) = site::valid_rp_id(rp_id)
+    {
         keys.push(rp_key(&rp_id));
     }
-    let head = serde_json::to_vec(head).map_err(|err| ViewerError::invalid(err.to_string()))?;
-    let secret = Zeroizing::new(
-        serde_json::to_vec(secret).map_err(|err| ViewerError::invalid(err.to_string()))?,
-    );
-    Ok(PackItem {
-        keys,
-        head: Zeroizing::new(head),
-        secret,
-    })
+    Ok(keys)
 }

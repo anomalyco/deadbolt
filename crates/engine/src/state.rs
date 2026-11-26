@@ -78,7 +78,7 @@ impl Changes {
     }
 
     /// Records frames newly committed to `vault`.
-    fn committed(&mut self, id: VaultId, vault: &Vault, frames: &[&Frame]) {
+    pub(crate) fn committed(&mut self, id: VaultId, vault: &Vault, frames: &[&Frame]) {
         for frame in frames {
             let touch = vault.touched(frame);
             if touch.items {
@@ -109,7 +109,7 @@ pub struct UnavailableVault {
 /// Every change goes through [`Engine::update`], which commits it to the
 /// store before anyone sees it.
 pub struct Engine {
-    store: Box<dyn VaultStore>,
+    pub(crate) store: Box<dyn VaultStore>,
     clock: Box<dyn Clock>,
     pub id: DeviceId,
     pub meta: Meta,
@@ -180,6 +180,12 @@ impl Engine {
                             .filter_map(|d| unhex(d).ok().map(DeviceId::from_bytes)),
                     );
                     engine.vaults.insert(id, vault);
+                    if let Err(error) = engine.load_proofs(&id) {
+                        tracing::warn!(vault = %id, %error, "stored fraud proofs unreadable");
+                    }
+                    if let Err(error) = engine.load_base(id) {
+                        tracing::warn!(vault = %id, %error, "local pack unusable; folding from genesis");
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(vault = %id, %error, "vault unavailable; stored frames retained");
@@ -281,7 +287,7 @@ impl Engine {
         Ok(())
     }
 
-    fn check_append<T>(&mut self, result: Result<T>) -> Result<T> {
+    pub(crate) fn check_append<T>(&mut self, result: Result<T>) -> Result<T> {
         if let Some(diagnostic) = result
             .as_ref()
             .err()
@@ -325,11 +331,12 @@ impl Engine {
         {
             self.save_removed(&id)?;
         }
+        self.maybe_checkpoint(id);
         Ok(result)
     }
 
     /// Saves the parking rule's memory for `vault`.
-    fn save_removed(&self, vault: &VaultId) -> Result<()> {
+    pub(crate) fn save_removed(&self, vault: &VaultId) -> Result<()> {
         let removed: Vec<String> = self.vaults[vault]
             .previously_removed()
             .iter()
@@ -382,6 +389,46 @@ impl Engine {
             .filter(|id| *id != self.id)
             .map(|id| *id.as_bytes())
             .collect()
+    }
+
+    /// The transport key (`D_net`) `device` named in a held vault's
+    /// `DeviceCard`: the iroh id it is dialed and admitted by.
+    pub fn net_of(&self, device: &DeviceId) -> Option<PeerId> {
+        self.vaults
+            .values()
+            .find_map(|v| v.device_card(device).map(|(net, _)| *net.as_bytes()))
+    }
+
+    /// The device, member or removed, whose card names the transport key
+    /// `net`, if exactly one held vault's cards agree on it.
+    pub fn device_for_net(&self, net: &PeerId) -> Option<DeviceId> {
+        let mut found = self.vaults.values().filter_map(|v| v.device_with_net(net));
+        let first = found.next()?;
+        found.all(|d| d == first).then_some(first)
+    }
+
+    /// The transport keys of every other member: who this device dials.
+    pub fn peer_nets(&self) -> HashSet<PeerId> {
+        self.peer_set()
+            .into_iter()
+            .filter_map(|id| self.net_of(&DeviceId::from_bytes(id)))
+            .collect()
+    }
+
+    /// Who the membership gate admits: every other member, and every device
+    /// a held vault removed, which may still push membership frames only
+    /// (`deadbolt_net::application::hello`), so a removal that lost to its
+    /// target's concurrent one can be undone without a third device.
+    pub fn admitted_nets(&self) -> HashSet<PeerId> {
+        let mut nets = self.peer_nets();
+        nets.extend(
+            self.vaults
+                .values()
+                .flat_map(|v| v.removed_devices())
+                .filter(|d| *d != self.id)
+                .filter_map(|d| self.net_of(&d)),
+        );
+        nets
     }
 
     pub fn peer(&self, id: &DeviceId) -> Option<&Peer> {
@@ -448,7 +495,7 @@ impl Engine {
         }
     }
 
-    fn available(&self, id: VaultId) -> Result<VaultId> {
+    pub(crate) fn available(&self, id: VaultId) -> Result<VaultId> {
         self.ensure_usable()?;
         if let Some(vault) = self.unavailable.get(&id) {
             bail!(

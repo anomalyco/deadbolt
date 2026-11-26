@@ -17,6 +17,7 @@ mod mcp;
 mod prompt;
 mod receive;
 mod recovery;
+mod remote;
 mod secrets;
 mod send;
 use deadbolt_core::site;
@@ -121,6 +122,21 @@ enum Commands {
     },
     /// Lock the store.
     Lock,
+    /// Each vault's state: why it is parked, frames no key opens yet, its
+    /// newest pack and its remote.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// A vault's blind remote: S3, R2, MinIO or WebDAV.
+    #[command(subcommand)]
+    Remote(remote::RemoteCommand),
+    /// Rebuild a vault on this device from its recovery kit and its remote
+    /// alone, when every device is lost. Removes every other device.
+    Recover(remote::RecoverArgs),
+    /// The vault's recovery kit.
+    #[command(subcommand)]
+    Recovery(remote::RecoveryCommand),
     /// Sync now with every device (or only the devices in --vault).
     Sync,
     /// List what callers asked Deadbolt for, and what the app showed or
@@ -367,7 +383,17 @@ struct DevicesArgs {
 #[derive(Subcommand)]
 enum DevicesCommand {
     /// Remove a device from the vault (by name or id).
-    Remove { device: String },
+    Remove {
+        device: String,
+        /// It was stolen: undo what it did to the membership, and count
+        /// only its data written before --since.
+        #[arg(long)]
+        stolen: bool,
+        /// With --stolen: when it was taken (Unix seconds); default: keep
+        /// all of its data.
+        #[arg(long, requires = "stolen")]
+        since: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -378,6 +404,9 @@ enum VaultCommand {
     Rename { old: String, new: String },
     /// Make a vault the default.
     Default { name: String },
+    /// Confirm that a removed device, now back, belongs: the vault stops
+    /// being parked on it.
+    ConfirmReinstated { device: String },
 }
 
 #[derive(Subcommand)]
@@ -751,8 +780,20 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                         );
                     }
                 }
-                Some(DevicesCommand::Remove { device }) => {
-                    let command = Command::DeviceRemove { vault, device };
+                Some(DevicesCommand::Remove {
+                    device,
+                    stolen,
+                    since,
+                }) => {
+                    let command = if stolen {
+                        Command::DeviceRemoveStolen {
+                            vault,
+                            device,
+                            since_secs: since,
+                        }
+                    } else {
+                        Command::DeviceRemove { vault, device }
+                    };
                     let Reply::Device { vault, device } =
                         request(&paths, command, from_stdin).await?
                     else {
@@ -785,6 +826,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     };
                     println!("renamed {old} to {}", vault.name);
                 }
+                VaultCommand::ConfirmReinstated { device } => {
+                    let command = Command::VaultConfirmReinstated { vault, device };
+                    let Reply::Vault { vault } = request(&paths, command, from_stdin).await? else {
+                        bail!("unexpected reply");
+                    };
+                    println!("{} is no longer parked", vault.name);
+                }
                 VaultCommand::Default { name } => {
                     let command = Command::VaultDefault { vault: name };
                     let Reply::Vault { vault } = request(&paths, command, from_stdin).await? else {
@@ -810,6 +858,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             unlock(&paths, timeout_secs, from_stdin).await?;
             println!("unlocked");
         }
+        Commands::Status { json } => remote::status(&paths, vault, json, from_stdin).await?,
+        Commands::Remote(command) => remote::remote(&paths, vault, command, from_stdin).await?,
+        Commands::Recover(args) => remote::recover(&paths, args, from_stdin).await?,
+        Commands::Recovery(command) => remote::recovery(&paths, vault, command, from_stdin).await?,
         Commands::Lock => {
             client::ensure_running(&paths).await?;
             client::simple(&paths, Command::Lock).await?;

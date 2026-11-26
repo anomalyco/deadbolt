@@ -84,10 +84,11 @@ impl Daemon {
         result
     }
 
-    /// Updates the membership gate and closes open sync connections to devices
-    /// that are no longer members of any vault.
+    /// Updates the membership gate (by transport key: every other member,
+    /// and removed devices, which may only push membership) and closes open
+    /// sync connections to devices no held vault knows any more.
     pub(super) fn refresh(&self, session: &Session) {
-        *self.members.write().unwrap_or_else(|e| e.into_inner()) = session.peer_set();
+        *self.members.write().unwrap_or_else(|e| e.into_inner()) = session.admitted_nets();
         let closed = session.node.enforce_membership();
         if closed > 0 {
             info!(closed, "closed sync connections to removed devices");
@@ -151,7 +152,7 @@ impl Daemon {
         let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let session = guard.as_ref().filter(|s| !s.append_uncertain);
         let connected: HashSet<PeerId> = session
-            .map(|s| s.node.connected_peers().into_iter().collect())
+            .map(|s| s.connected_devices(s.node.connected_peers()))
             .unwrap_or_default();
         let peers = session.map(|s| s.peer_set()).unwrap_or_default();
         let idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());

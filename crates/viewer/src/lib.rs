@@ -12,7 +12,8 @@
 //!   and reads one Head record per hit and one Secret record per fill.
 //! - [`queue_save`] seals a save or a use to `D_kem` in
 //!   `outbox/<rand>.wrap`; the app's [`drain_outbox`] applies and deletes it.
-//! - [`pack_item`] is the app's side of the Head/Secret format.
+//! - [`pack_input`] and [`read_pack`] are the app's side: a core pack laid
+//!   out as records, and read back.
 //!
 //! With `ffi` (the default), [`ffi`] is the UniFFI surface for Swift.
 
@@ -26,12 +27,14 @@ pub mod ffi;
 mod item;
 mod outbox;
 mod reader;
+mod repack;
 
 #[cfg(test)]
 mod tests;
 
 pub use bundle::ViewerKeyBundle;
 pub use error::{Result, ViewerError};
-pub use item::{ViewerHit, ViewerPasskey, ViewerSecret, item_key, pack_item, rp_key, site_key};
+pub use item::{ViewerHit, ViewerPasskey, ViewerSecret, item_key, rp_key, site_key};
 pub use outbox::{Drained, OutboxMutation, drain_outbox, open_entry, queue_save};
 pub use reader::PackViewer;
+pub use repack::{PackPlace, pack_input, read_pack};

@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 
 use super::{
     AppAction, AutofillService, ExportFile, FieldInput, Fill, FindingKind, FormKind, LoginRef,
-    PagePassword, Purpose, Secret, SiteField, SshKeyKind, Verify,
+    PagePassword, Purpose, RemoteInput, Secret, SiteField, SshKeyKind, Verify,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,6 +74,59 @@ pub enum Command {
     DeviceRemove {
         vault: Option<String>,
         device: String,
+    },
+    /// Removes a device that was stolen: only its data frames written before
+    /// `since_secs` (Unix seconds; `None` keeps them all) keep counting, and
+    /// the removal is judged as of before the theft, so whoever it added
+    /// gets no new key and whoever it removed does. Replies `device`.
+    DeviceRemoveStolen {
+        vault: Option<String>,
+        device: String,
+        #[serde(default)]
+        since_secs: Option<u64>,
+    },
+    /// The person confirmed that `device`, removed and now back, belongs:
+    /// the vault stops being parked on it. Replies `vault`.
+    VaultConfirmReinstated {
+        vault: Option<String>,
+        device: String,
+    },
+    /// Each vault's state beyond `vault-list` (why it is parked, frames no
+    /// key opens yet, its remote), or only `vault`'s. Replies `vault-states`.
+    VaultStatus {
+        vault: Option<String>,
+    },
+    /// Hands a vault's recovery root on to a new kit, given the current 24
+    /// words. Replies `recovery-rotated` with the new words, shown once.
+    RecoveryRotate {
+        vault: Option<String>,
+        words: Secret,
+    },
+    /// Sets the vault's blind remote. Replies `remote`.
+    RemoteSet {
+        vault: Option<String>,
+        remote: RemoteInput,
+    },
+    /// Replies `remote`, redacted.
+    RemoteShow {
+        vault: Option<String>,
+    },
+    /// Pulls from and pushes to the vault's remote, then collects behind its
+    /// checkpoints. Replies `remote-synced`.
+    RemoteSync {
+        vault: Option<String>,
+    },
+    /// Forgets the vault's remote and its credentials. Replies `remote`.
+    RemoteRemove {
+        vault: Option<String>,
+    },
+    /// Rebuilds vault `vault` (its id) on this unlocked device from its
+    /// recovery kit and remote alone, adding this device and removing the
+    /// lost ones. Replies `vault`.
+    Recover {
+        vault: String,
+        words: Secret,
+        remote: RemoteInput,
     },
     Sync {
         vault: Option<String>,
@@ -520,9 +573,15 @@ impl Command {
     /// check who it is talking to before sending it.
     pub fn carries_passphrase(&self) -> bool {
         // A join asks for one if the device isn't set up.
+        // So do the recovery kit and a remote's credentials.
         matches!(
             self,
-            Self::Setup { .. } | Self::Unlock { .. } | Self::Join { .. }
+            Self::Setup { .. }
+                | Self::Unlock { .. }
+                | Self::Join { .. }
+                | Self::RecoveryRotate { .. }
+                | Self::RemoteSet { .. }
+                | Self::Recover { .. }
         )
     }
 
@@ -545,6 +604,15 @@ impl Command {
             Self::VaultDefault { .. } => "vault-default",
             Self::Devices { .. } => "devices",
             Self::DeviceRemove { .. } => "device-remove",
+            Self::DeviceRemoveStolen { .. } => "device-remove-stolen",
+            Self::VaultConfirmReinstated { .. } => "vault-confirm-reinstated",
+            Self::VaultStatus { .. } => "vault-status",
+            Self::RecoveryRotate { .. } => "recovery-rotate",
+            Self::RemoteSet { .. } => "remote-set",
+            Self::RemoteShow { .. } => "remote-show",
+            Self::RemoteSync { .. } => "remote-sync",
+            Self::RemoteRemove { .. } => "remote-remove",
+            Self::Recover { .. } => "recover",
             Self::Sync { .. } => "sync",
             Self::Join { .. } => "join",
             Self::Pair { .. } => "pair",

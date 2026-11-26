@@ -156,10 +156,45 @@ impl<B: Blocks> VaultDir<B> {
         carried: &[Vec<u8>],
     ) -> Result<PackSummary> {
         self.check_carried(carried)?;
+        input.generation = self.next_gen;
+        let encoded = pack::encode(&input, epoch_key)?;
+        self.install(&encoded.bytes, carried)?;
+        Ok(encoded.summary)
+    }
+
+    /// W5 with a pack already laid out and sealed: `bytes` exactly as a
+    /// checkpoint frame committed to them (its nonces are random, so a
+    /// re-encode would not hash the same). Its header must name
+    /// [`VaultDir::next_generation`] or a later one (a pack another device
+    /// sealed, fetched whole), which becomes this directory's generation.
+    pub fn compact_encoded(&mut self, bytes: &[u8], carried: &[Vec<u8>]) -> Result<PackSummary> {
+        let header = pack::PackHeader::decode(bytes).ok_or(Error::InvalidInput("not a pack"))?;
+        if header.generation < self.next_gen {
+            return Err(Error::InvalidInput("the pack names an older generation"));
+        }
+        let (body, trailer) = bytes
+            .split_last_chunk::<{ pack::TRAILER_LEN }>()
+            .ok_or(Error::InvalidInput("not a pack"))?;
+        let hash: [u8; 32] = blake3::hash(body).into();
+        if hash != *trailer {
+            return Err(Error::InvalidInput("the pack's trailer does not verify"));
+        }
+        self.check_carried(carried)?;
+        self.next_gen = header.generation;
+        self.install(bytes, carried)?;
+        Ok(PackSummary {
+            header,
+            id: header.id(),
+            hash,
+            len: bytes.len() as u64,
+        })
+    }
+
+    /// Steps 1–3 of W5 for a verified pack at the next generation.
+    fn install(&mut self, bytes: &[u8], carried: &[Vec<u8>]) -> Result<()> {
         let m = self.next_gen;
-        input.generation = m;
         // 1. The new pack, synced.
-        let summary = pack::write(&self.blocks, &names::gen_pack(m), &input, epoch_key)?;
+        self.blocks.create_new(&names::gen_pack(m), bytes)?;
         // 2. The new WAL with the carried tail, synced in one write: torn, it
         //    is cut back on open, and the old WAL still holds those frames.
         let mut tail = Vec::new();
@@ -182,7 +217,7 @@ impl<B: Blocks> VaultDir<B> {
         {
             self.blocks.delete(&names::wal_log(n))?;
         }
-        Ok(summary)
+        Ok(())
     }
 
     /// Every carried frame is a record of some WAL on disk.

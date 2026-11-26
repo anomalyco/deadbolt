@@ -180,8 +180,8 @@ async fn pairing_offer_rejects_a_removed_inviter() {
         vault: world.vault,
     };
     let ctx = PairingContext {
-        local: world.devices[1].id,
-        remote: world.devices[2].id,
+        local: world.devices[1].net,
+        remote: world.devices[2].net,
     };
     let error = invite.offer(&ctx).await.unwrap_err();
     assert_eq!(
@@ -201,8 +201,8 @@ async fn pairing_offer_rejects_a_removed_joiner() {
         vault: world.vault,
     };
     let ctx = PairingContext {
-        local: world.devices[0].id,
-        remote: world.devices[1].id,
+        local: world.devices[0].net,
+        remote: world.devices[1].net,
     };
     // Exercise the offer adapter directly: World::pair skips removed peers.
     let error = invite.offer(&ctx).await.unwrap_err();
@@ -211,7 +211,7 @@ async fn pairing_offer_rejects_a_removed_joiner() {
         "that device was removed from sim and can't rejoin it"
     );
     let fresh = PairingContext {
-        remote: world.devices[2].id,
+        remote: world.devices[2].net,
         ..ctx
     };
     invite.offer(&fresh).await.unwrap();
@@ -486,9 +486,11 @@ fn startup_learns_removal_before_sending_locally_written_data() {
         Ordering::SeqCst,
     );
     assert!(world.devices[1].ready.load(Ordering::SeqCst));
+    // The removed peer is still admitted, for membership only: it learns
+    // of its removal and is sent no data.
     assert_eq!(
         world.sync(1, 2, 13, None, None).unwrap(),
-        sync::Attempt::Unreachable
+        sync::Attempt::Complete
     );
     world.devices[2]
         .with(|s| {
@@ -532,7 +534,7 @@ async fn outgoing_catchup_is_a_snapshot_and_rechecks_revocation() {
     world.pair(1).unwrap();
     let source = world.devices[0].handler();
     let target = world.devices[1].handler();
-    let (a, b) = (world.devices[0].id, world.devices[1].id);
+    let (a, b) = (world.devices[0].net, world.devices[1].net);
     let heads = target.heads(a).await.unwrap();
     for i in 1..=2 {
         world.step(&Action::Add(0, i)).unwrap();
@@ -622,7 +624,7 @@ async fn reordered_batches_land_whole_and_replay_as_no_ops_after_a_crash() {
         }
         let source = world.devices[0].handler();
         let target = world.devices[1].handler();
-        let (a, b) = (world.devices[0].id, world.devices[1].id);
+        let (a, b) = (world.devices[0].net, world.devices[1].net);
         let entries = source
             .missing_for(b, target.heads(a).await.unwrap())
             .await
@@ -699,7 +701,7 @@ async fn a_bad_frame_does_not_block_removal_or_other_members() {
         let handler = world.devices[1].handler();
         handler
             .receive(
-                world.devices[0].id,
+                world.devices[0].net,
                 vec![forged, removal],
                 &mut Default::default(),
                 true,
@@ -808,8 +810,8 @@ async fn full_size_files_sync_and_concurrent_files_survive_reload() {
             let (mut br, mut bw) = tokio::io::split(right);
             let max = deadbolt_net::DEFAULT_MAX_FRAME_LEN;
             let (sent, received) = tokio::join!(
-                run_sync_session(&a, world.devices[1].id, &mut aw, &mut ar, max, true),
-                run_sync_session(&b, world.devices[0].id, &mut bw, &mut br, max, false),
+                run_sync_session(&a, world.devices[1].net, &mut aw, &mut ar, max, true),
+                run_sync_session(&b, world.devices[0].net, &mut bw, &mut br, max, false),
             );
             assert_eq!(sent.unwrap().sent, received.unwrap().received);
             assert!(world.converged().unwrap());

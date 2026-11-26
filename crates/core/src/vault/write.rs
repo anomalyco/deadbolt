@@ -225,7 +225,10 @@ impl<'a> VaultWrite<'a> {
 
     /// The epoch `author` writes under now (rule E4), minting a `Rotate`
     /// first if there is no clean tip.
-    fn write_epoch(&mut self, author: &DeviceSecret) -> Result<(EpochId, EpochKey), Error> {
+    pub(super) fn write_epoch(
+        &mut self,
+        author: &DeviceSecret,
+    ) -> Result<(EpochId, EpochKey), Error> {
         let me = author.device_id();
         let current = self
             .data
@@ -284,7 +287,7 @@ impl<'a> VaultWrite<'a> {
     }
 
     /// Seals `ops` as `author`'s next data frame.
-    fn seal(&mut self, author: &Author, ops: Vec<v2::DataOp>) -> Result<FrameId, Error> {
+    pub(super) fn seal(&mut self, author: &Author, ops: Vec<v2::DataOp>) -> Result<FrameId, Error> {
         let me = author.id();
         if !self.is_member(&me) {
             return Err(Error::NotMember);
@@ -520,17 +523,24 @@ pub(super) fn member_heads(
 pub(crate) fn describe_parking(reasons: &[v2::ParkingReason]) -> String {
     reasons
         .iter()
-        .map(|r| match r {
-            v2::ParkingReason::ReinstatedRemovedDevice { device } => {
-                format!("device {device} was removed and is back: confirm it, or contest it with the recovery kit")
-            }
-            v2::ParkingReason::MutualRemoval { a, b } => {
-                format!("devices {a} and {b} removed each other: settle it with the recovery kit")
-            }
-            v2::ParkingReason::RecoveryLineageFrozen => {
-                "the recovery kit was used twice at once: the vault has no recovery root".to_owned()
-            }
-        })
+        .map(parking_message)
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// One line about one reason writes are parked, and what settles it.
+pub fn parking_message(reason: &v2::ParkingReason) -> String {
+    match reason {
+        v2::ParkingReason::ReinstatedRemovedDevice { device } => {
+            format!(
+                "device {device} was removed and is back: confirm it, or contest it with the recovery kit"
+            )
+        }
+        v2::ParkingReason::MutualRemoval { a, b } => {
+            format!("devices {a} and {b} removed each other: settle it with the recovery kit")
+        }
+        v2::ParkingReason::RecoveryLineageFrozen => {
+            "the recovery kit was used twice at once: the vault has no recovery root".to_owned()
+        }
+    }
 }

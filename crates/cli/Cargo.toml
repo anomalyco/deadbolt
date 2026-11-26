@@ -30,9 +30,12 @@ deadbolt-engine = { path = "../engine" }
 deadbolt-net = { path = "../net", features = ["application"] }
 deadbolt-os = { path = "../os" }
 deadbolt-pack = { path = "../pack" }
-# `deadbolt broker` re-signs AWS requests with its pure SigV4.
-deadbolt-remote = { path = "../remote", default-features = false }
+# `deadbolt broker` re-signs AWS requests with its pure SigV4; `deadbolt
+# remote` syncs a vault through S3/R2 or WebDAV.
+deadbolt-remote = { path = "../remote" }
 deadbolt-send = { path = "../send" }
+# Lays checkpoint packs out as the viewer reads them; no UniFFI.
+deadbolt-viewer = { path = "../viewer", default-features = false }
 # `deadbolt broker`'s HTTP/1 server; all three are already in the tree through reqwest.
 http-body-util = "0.1.5"
 hyper = { version = "1.12", features = ["http1", "server"] }

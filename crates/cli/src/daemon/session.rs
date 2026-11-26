@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::disk::{KdfParams, Unlocked};
 use anyhow::Result;
-use deadbolt_core::v2::{DeviceKeys, Frame};
-use deadbolt_core::{Author, DeviceId, Vault, VaultId, VaultWrite};
+use deadbolt_core::v2::{DeviceKeys, EpochId, EpochKey, Frame, Pack};
+use deadbolt_core::{Author, DeviceId, PackSite, Vault, VaultId, VaultWrite};
 use deadbolt_engine::{Engine, VaultStore};
 use deadbolt_net::application;
 pub use deadbolt_net::application::{Addr, Hint, clean_name};
@@ -21,11 +21,12 @@ pub use crate::config::now;
 pub use deadbolt_engine::store::{get_json, set_json};
 pub use deadbolt_engine::{Changes, hex, unhex};
 
-/// The transport key iroh runs on for the device seeded `seed`: its signing
-/// key, so a peer's transport id is its device id. A `DeviceCard` also
-/// names a separate `D_net`, which transport doesn't use yet.
+/// The transport key iroh runs on for the device seeded `seed`: `D_net`,
+/// never `D_sign`. Peers know it from the device's `DeviceCard`, which is
+/// how a connection's iroh id maps back to a device
+/// ([`deadbolt_engine::Engine::device_for_net`]).
 pub fn node_key(seed: &[u8; 32]) -> [u8; 32] {
-    *DeviceKeys::from_seed(seed).sign_key().to_bytes()
+    *DeviceKeys::from_seed(seed).net_key().to_bytes()
 }
 
 /// The sealed device directory as the engine's [`VaultStore`].
@@ -56,6 +57,31 @@ impl VaultStore for NativeStore {
         error
             .downcast_ref::<crate::disk::Error>()
             .and_then(crate::disk::Error::append_diagnostic)
+    }
+
+    fn keeps_packs(&self) -> bool {
+        true
+    }
+
+    fn seal_pack(&self, pack: &Pack, site: &PackSite) -> Result<Vec<u8>> {
+        Ok(self.0.seal_pack(pack, site)?)
+    }
+
+    fn install_pack(&self, vault: VaultId, sealed: &[u8]) -> Result<()> {
+        self.0.install_pack(vault, sealed)?;
+        Ok(())
+    }
+
+    fn load_pack(&self, vault: VaultId) -> Result<Option<Vec<u8>>> {
+        Ok(self.0.load_pack(vault)?)
+    }
+
+    fn open_pack(
+        &self,
+        sealed: &[u8],
+        key_for: &dyn Fn(&EpochId) -> Option<EpochKey>,
+    ) -> Result<Pack> {
+        Ok(crate::disk::open_pack(sealed, key_for)?)
     }
 }
 
@@ -139,12 +165,33 @@ impl Loaded {
         node_key(self.store.device_seed())
     }
 
-    pub fn addr_of(&self, id: &DeviceId) -> PeerAddr {
+    /// Where to dial `id`: its card's transport key and its last address.
+    /// `None` while no held vault has its card.
+    pub fn addr_of(&self, id: &DeviceId) -> Option<PeerAddr> {
+        let net = self.net_of(id)?;
         let addr = self
             .peer(id)
             .and_then(|p| p.addr.clone())
             .unwrap_or_default();
-        PeerAddr::of(*id.as_bytes(), &addr)
+        Some(PeerAddr::of(net, &addr))
+    }
+
+    /// The device on the other end of a sync connection from transport key
+    /// `peer`, member or removed.
+    pub fn device_of(&self, peer: &deadbolt_net::PeerId) -> Result<DeviceId> {
+        self.device_for_net(peer)
+            .ok_or_else(|| anyhow::anyhow!("no held vault has a card for that transport key"))
+    }
+
+    /// The devices behind connected transport keys.
+    pub fn connected_devices(
+        &self,
+        nets: impl IntoIterator<Item = deadbolt_net::PeerId>,
+    ) -> std::collections::HashSet<deadbolt_net::PeerId> {
+        nets.into_iter()
+            .filter_map(|net| self.device_for_net(&net))
+            .map(|d| *d.as_bytes())
+            .collect()
     }
 }
 
@@ -315,11 +362,8 @@ pub(super) mod tests {
         assert_eq!(application::State::vaults(&loaded).count(), 0);
         assert!(super::super::sync::hello(&loaded, &pid, None).is_err());
         assert!(super::super::sync::missing_for(&mut loaded, &pid, b"{}", true).is_err());
-        assert!(
-            super::super::sync::receive(&mut loaded, &pid, vec![], true, &mut Default::default())
-                .is_err()
-        );
-        assert!(super::super::pairing::offer(&loaded, id, &pid, None).is_err());
+        assert!(super::super::sync::receive(&mut loaded, &pid, vec![], true).is_err());
+        assert!(super::super::pairing::offer(&loaded, id, pid.as_bytes(), None).is_err());
         assert!(loaded.create_vault("another").is_err());
         drop(loaded);
         let reopened = Loaded::open(dir.path(), b"test").unwrap();
@@ -386,9 +430,10 @@ pub(super) mod tests {
         let id = inviter.create_vault("personal").unwrap();
         let peer = DeviceKeys::from_seed(&[8; 32]);
         let pid = peer.device_id();
-        let offer = pairing::read_offer(&pairing::offer(&inviter, id, &pid, None).unwrap())
-            .unwrap()
-            .0;
+        let offer =
+            pairing::read_offer(&pairing::offer(&inviter, id, pid.as_bytes(), None).unwrap())
+                .unwrap()
+                .0;
         let join = pairing::join_blob(&peer, "peer", inviter.id, &id, None).unwrap();
         fault.store(1, Ordering::SeqCst);
         assert!(pairing::welcome(&mut inviter, id, pid, &join, None).is_err());

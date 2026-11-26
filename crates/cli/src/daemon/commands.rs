@@ -194,7 +194,7 @@ impl Daemon {
             Command::Devices { vault } => {
                 let devices = self.with(|s| {
                     let id = s.resolve(vault.as_deref())?;
-                    let connected: HashSet<PeerId> = s.node.connected_peers().into_iter().collect();
+                    let connected: HashSet<PeerId> = s.connected_devices(s.node.connected_peers());
                     let mut devices: Vec<_> = s
                         .vault(&id)
                         .members()
@@ -223,6 +223,15 @@ impl Daemon {
                 self.sync_now.notify_one();
                 Ok(Reply::Device { vault, device })
             }
+            command @ (Command::DeviceRemoveStolen { .. }
+            | Command::VaultConfirmReinstated { .. }
+            | Command::VaultStatus { .. }
+            | Command::RecoveryRotate { .. }) => self.recovery_command(command),
+            command @ (Command::RemoteSet { .. }
+            | Command::RemoteShow { .. }
+            | Command::RemoteSync { .. }
+            | Command::RemoteRemove { .. }
+            | Command::Recover { .. }) => self.remote_command(command).await,
             Command::Sync { vault } => {
                 let only =
                     self.with(|s| vault.as_deref().map(|v| s.resolve(Some(v))).transpose())?;

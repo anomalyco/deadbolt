@@ -166,13 +166,14 @@ impl World {
         };
         let members =
             reference.with(|s| Ok(s.vault(&self.vault).members().collect::<BTreeSet<_>>()))?;
-        let (heads, items, deleted, name) = reference.with(|s| {
+        let (heads, items, deleted, name, parked) = reference.with(|s| {
             let vault = s.vault(&self.vault);
             Ok((
                 vault.heads(),
                 vault.items(),
                 vault.deleted(),
                 vault.name().to_owned(),
+                !vault.parked().is_empty(),
             ))
         })?;
         for (i, d) in self.devices.iter().enumerate() {
@@ -187,11 +188,17 @@ impl World {
                     .vaults
                     .get(&self.vault)
                     .ok_or_else(|| anyhow::anyhow!("member missing vault"))?;
+                // A parked vault (a mutual removal, a removed device back)
+                // waits on a person: no member rewraps keys to the others
+                // (`fulfill_reader_duty`), so only its frames and
+                // membership converge, not what each device can read.
+                let readable = parked
+                    || !vault.parked().is_empty()
+                    || (vault.items() == items && vault.deleted() == deleted);
                 Ok(vault.heads() == heads
                     && vault.members().collect::<BTreeSet<_>>() == members
                     && vault.name() == name
-                    && vault.items() == items
-                    && vault.deleted() == deleted)
+                    && readable)
             })?;
             if !same {
                 return Ok(false);

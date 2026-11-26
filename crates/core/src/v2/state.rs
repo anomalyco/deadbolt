@@ -486,7 +486,7 @@ pub fn state_mac(k_mac: &[u8; 32], state: &FoldedState) -> Result<[u8; 32], Payl
     Ok(blake3::keyed_hash(k_mac, &state.encode()?).into())
 }
 
-fn non_empty<V>(reg: Register<V>) -> Result<Register<V>, PayloadError> {
+pub(crate) fn non_empty<V>(reg: Register<V>) -> Result<Register<V>, PayloadError> {
     if reg.is_empty() {
         Err(PayloadError::Invalid("empty register"))
     } else {
@@ -562,7 +562,10 @@ impl RegValue for DeviceCardValue {
     }
 }
 
-fn encode_register<V: RegValue>(w: &mut Writer, reg: &Register<V>) -> Result<(), PayloadError> {
+pub(crate) fn encode_register<V: RegValue>(
+    w: &mut Writer,
+    reg: &Register<V>,
+) -> Result<(), PayloadError> {
     w.count(reg.writes.len(), "register")?;
     for write in &reg.writes {
         write.dot.encode(w);
@@ -572,7 +575,9 @@ fn encode_register<V: RegValue>(w: &mut Writer, reg: &Register<V>) -> Result<(),
     Ok(())
 }
 
-fn decode_register<V: RegValue>(r: &mut Reader<'_>) -> Result<Register<V>, PayloadError> {
+pub(crate) fn decode_register<V: RegValue>(
+    r: &mut Reader<'_>,
+) -> Result<Register<V>, PayloadError> {
     let n = r.count(77, "register")?;
     let mut writes: Vec<Write<V>> = Vec::with_capacity(n);
     for _ in 0..n {

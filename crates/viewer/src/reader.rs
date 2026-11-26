@@ -19,10 +19,11 @@ use deadbolt_core::site;
 use deadbolt_pack::names::{GEN_PREFIX, GEN_SUFFIX, parse_numbered};
 use deadbolt_pack::pack::{ItemRef, PackIndex};
 use deadbolt_pack::{BlockReader, Blocks, FsBlocks, PackKeys, PackReader};
-use zeroize::Zeroizing;
 
 use crate::bundle::ViewerKeyBundle;
 use crate::error::{Result, ViewerError};
+use deadbolt_core::v2::pack::{ItemHead, ItemSecret};
+
 use crate::item::{ViewerHit, ViewerSecret, item_key, parse_item_id, rp_key, site_key, sites_of};
 
 /// One pack generation, open for lookups and fills.
@@ -111,7 +112,9 @@ impl<R: BlockReader> PackViewer<R> {
         let page = format!("https://{host}");
         let mut hits = Vec::with_capacity(refs.len());
         for item in &refs {
-            let hit = self.head(item)?;
+            let Some(hit) = self.head(item)? else {
+                continue;
+            };
             // The index is a 128-bit hash: keep only what the Head confirms.
             let on_site = sites_of(&hit).contains(&domain)
                 || hit
@@ -141,7 +144,9 @@ impl<R: BlockReader> PackViewer<R> {
         let rp_id = rp_id.to_ascii_lowercase();
         let mut hits = Vec::new();
         for item in self.refs(&rp_key(&rp_id)) {
-            let hit = self.head(&item)?;
+            let Some(hit) = self.head(&item)? else {
+                continue;
+            };
             if hit.passkey_rp_id.as_deref() == Some(rp_id.as_str()) {
                 hits.push(hit);
             }
@@ -154,9 +159,9 @@ impl<R: BlockReader> PackViewer<R> {
     pub fn lookup_item(&self, item_id: &str) -> Result<Option<ViewerHit>> {
         let id = parse_item_id(item_id)?;
         for item in self.refs(&item_key(&id)) {
-            let hit = self.head(&item)?;
-            if parse_item_id(&hit.item_id)? == id {
-                return Ok(Some(hit));
+            let head = self.read_head(&item)?;
+            if *head.id.as_bytes() == id {
+                return Ok(ViewerHit::from_head(&head));
             }
         }
         Ok(None)
@@ -168,9 +173,9 @@ impl<R: BlockReader> PackViewer<R> {
         let id = parse_item_id(item_id)?;
         for item in self.refs(&item_key(&id)) {
             let plain = self.reader.read_secret(&self.keys, &item)?;
-            let secret = parse::<ViewerSecret>(&plain)?;
-            if parse_item_id(&secret.item_id)? == id {
-                return Ok(secret);
+            let secret = ItemSecret::decode(&plain).map_err(corrupt)?;
+            if *secret.id.as_bytes() == id {
+                return Ok(ViewerSecret::from_record(&secret));
             }
         }
         Err(ViewerError::NotFound)
@@ -180,13 +185,18 @@ impl<R: BlockReader> PackViewer<R> {
         self.index.lookup_by_key(&self.keys, key)
     }
 
-    fn head(&self, item: &ItemRef) -> Result<ViewerHit> {
-        parse(&self.reader.read_head(&self.keys, item)?)
+    fn read_head(&self, item: &ItemRef) -> Result<ItemHead> {
+        ItemHead::decode(&self.reader.read_head(&self.keys, item)?).map_err(corrupt)
+    }
+
+    /// The Head's hit; `None` for a deleted item, which no lookup shows.
+    fn head(&self, item: &ItemRef) -> Result<Option<ViewerHit>> {
+        Ok(ViewerHit::from_head(&self.read_head(item)?))
     }
 }
 
-fn parse<T: serde::de::DeserializeOwned>(plain: &Zeroizing<Vec<u8>>) -> Result<T> {
-    serde_json::from_slice(plain).map_err(|err| ViewerError::corrupt(err.to_string()))
+fn corrupt(err: impl std::fmt::Display) -> ViewerError {
+    ViewerError::corrupt(err.to_string())
 }
 
 /// The newest `gen-<n>.pack` whose header hashes to `pack_id`. Reads 136

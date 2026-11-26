@@ -145,8 +145,8 @@ impl World {
         // Fixed code and scalar seeds: the PAKE replays byte for byte.
         let code = PairingCode::from_str("violin-garden-tiger-lamp-zoo")?;
         let dial = PairingStream::new(
-            self.devices[0].id,
-            self.devices[to].id,
+            self.devices[0].net,
+            self.devices[to].net,
             &code,
             [7; 32],
             [9; 32],
@@ -154,8 +154,8 @@ impl World {
             [to as u8; 32],
         );
         let listen = PairingStream::new(
-            self.devices[to].id,
-            self.devices[0].id,
+            self.devices[to].net,
+            self.devices[0].net,
             &code,
             [7; 32],
             [9; 32],
@@ -185,7 +185,7 @@ impl World {
         }
         let (a, b) = result.ok_or_else(|| anyhow::anyhow!("pair protocol stalled"))?;
         ensure!(
-            a?.peer == self.devices[to].id && b?.peer == self.devices[0].id,
+            a?.peer == self.devices[to].net && b?.peer == self.devices[0].net,
             "paired with the wrong device"
         );
         Ok(())
@@ -208,11 +208,11 @@ impl World {
         }
         if self.devices[a]
             .gate
-            .check_dial(&self.devices[b].id)
+            .check_dial(&self.devices[b].net)
             .is_err()
             || self.devices[b]
                 .gate
-                .check_dial(&self.devices[a].id)
+                .check_dial(&self.devices[a].net)
                 .is_err()
         {
             return Ok(sync::Attempt::Unreachable);
@@ -225,8 +225,8 @@ impl World {
         let mut removal = None;
         let mut failure = None;
         let (result, wires) = drive(
-            run_sync_session(&ah, self.devices[b].id, &mut at, &mut ar, MAX, true),
-            run_sync_session(&bh, self.devices[a].id, &mut bt, &mut br, MAX, false),
+            run_sync_session(&ah, self.devices[b].net, &mut at, &mut ar, MAX, true),
+            run_sync_session(&bh, self.devices[a].net, &mut bt, &mut br, MAX, false),
             aw,
             bw,
             seed,
@@ -252,11 +252,11 @@ impl World {
                 failure.is_some()
                     || self.devices[a]
                         .gate
-                        .check_dial(&self.devices[b].id)
+                        .check_dial(&self.devices[b].net)
                         .is_err()
                     || self.devices[b]
                         .gate
-                        .check_dial(&self.devices[a].id)
+                        .check_dial(&self.devices[a].net)
                         .is_err()
             },
         );
@@ -272,11 +272,11 @@ impl World {
                 || removal.is_some()
                 || self.devices[a]
                     .gate
-                    .check_dial(&self.devices[b].id)
+                    .check_dial(&self.devices[b].net)
                     .is_err()
                 || self.devices[b]
                     .gate
-                    .check_dial(&self.devices[a].id)
+                    .check_dial(&self.devices[a].net)
                     .is_err(),
             "sync protocol stalled, network seed {seed}"
         );
@@ -561,19 +561,18 @@ impl World {
         })
     }
 
-    /// Device `by` removes `target`, if `by` is open, a member, sees
-    /// `target` as one, and is senior to it.
+    /// Device `by` removes `target`, if `by` is open, a member and sees
+    /// `target` as one, whichever of them is senior.
     ///
-    /// Junior-removes-senior is left out on purpose: the fold voids such a
-    /// removal when the senior removed someone concurrently, but the junior's
-    /// gate then refuses the senior, so nothing tells the junior and the two
-    /// never reconverge unless a third device relays. A known gap in v2's
-    /// membership gate, not modelled here until it's fixed.
+    /// A junior device's removal of a senior one loses when the senior
+    /// removed someone concurrently. The junior's gate still admits the
+    /// removed senior for a membership-only push
+    /// (`deadbolt_net::application::hello`), so the senior's winning frames
+    /// reach it and the two reconverge without a third device.
     fn remove(&mut self, by: usize, target: usize) -> Result<()> {
         let peer = DeviceId::from_bytes(self.devices[target].id);
-        match (self.seniority(by)?, self.seniority(target)?) {
-            (Some(b), Some(t)) if b < t => {}
-            _ => return Ok(()),
+        if self.seniority(by)?.is_none() || self.seniority(target)?.is_none() {
+            return Ok(());
         }
         if !self.can_write(by)
             || !self.devices[by].with(|s| Ok(s.vault(&self.vault).is_member(&peer)))?

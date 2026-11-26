@@ -42,11 +42,10 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
 }
 
-/// One incoming stream: removals it delivered, and whether item or label
-/// changes still need forwarding once it completes.
+/// One incoming stream: whether item or label changes still need
+/// forwarding once it completes.
 #[derive(Default)]
 pub struct Receiving {
-    stream: application::ReceiveStream,
     pending_forward: bool,
 }
 
@@ -55,7 +54,7 @@ impl SyncHandler for Handler {
 
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.0
-            .with(|s| hello(s, &DeviceId::from_bytes(peer), Some(s.own_addr())))
+            .with(|s| hello(s, &s.device_of(&peer)?, Some(s.own_addr())))
             .map_err(handler_error)
     }
 
@@ -68,7 +67,14 @@ impl SyncHandler for Handler {
             .0
             .with(|s| {
                 let ready = *self.0.ready.borrow();
-                missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready)
+                let peer = s.device_of(&peer)?;
+                let history = missing_for(s, &peer, &peer_heads, ready)?;
+                let mut removed_by = self.0.removed_by.lock().unwrap_or_else(|e| e.into_inner());
+                match history.removed_by() {
+                    [] => removed_by.remove(&peer),
+                    vaults => removed_by.insert(peer, vaults.to_vec()),
+                };
+                Ok(history)
             })
             .map_err(handler_error)?;
         Ok(history.outgoing(|h| {
@@ -86,15 +92,12 @@ impl SyncHandler for Handler {
         done: bool,
     ) -> Result<(), HandlerError> {
         let daemon = &self.0;
-        let peer = DeviceId::from_bytes(peer);
-        let Receiving {
-            stream,
-            pending_forward,
-        } = state;
+        let peer = daemon.with(|s| s.device_of(&peer)).map_err(handler_error)?;
+        let Receiving { pending_forward } = state;
         daemon
             .with(|s| {
                 let ready = *daemon.ready.borrow();
-                let received = receive(s, &peer, entries, ready, stream);
+                let received = receive(s, &peer, entries, ready);
                 // Even an errored batch may have committed an earlier vault's removal.
                 daemon.refresh(s);
                 // Defer only item and label forwarding, not watcher delivery, admission
@@ -132,10 +135,9 @@ pub(super) fn receive(
     peer: &DeviceId,
     entries: Vec<Blob>,
     ready: bool,
-    stream: &mut application::ReceiveStream,
 ) -> Result<usize> {
     s.ensure_usable()?;
-    application::receive(s, peer, entries, ready, stream)
+    application::receive(s, peer, entries, ready)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,15 +231,19 @@ async fn sync_round(
         };
         let targets: Vec<_> = peers
             .into_iter()
-            .map(|id| s.addr_of(&DeviceId::from_bytes(id)))
+            .map(|id| (id, s.addr_of(&DeviceId::from_bytes(id))))
             .collect();
         Ok((s.node.clone(), targets))
     })?;
     let mut tasks = JoinSet::new();
-    for addr in targets {
+    for (id, addr) in targets {
         let node = node.clone();
         tasks.spawn(async move {
-            let id = addr.id;
+            // A member whose card hasn't arrived has no transport key to dial.
+            let Some(addr) = addr else {
+                let error = "no device card yet, so no transport key to dial".to_owned();
+                return (id, Attempt::Unreachable, Err(error));
+            };
             let (attempt, result) = attempt(node.connect(addr), |conn| async move {
                 let result = conn.sync().await;
                 conn.close();
@@ -251,8 +257,8 @@ async fn sync_round(
     while let Some(joined) = tasks.join_next().await {
         results.push(joined?);
     }
-    let connected: HashSet<PeerId> = node.connected_peers().into_iter().collect();
     daemon.with(|s| {
+        let connected = s.connected_devices(node.connected_peers());
         let attempts = results
             .iter()
             .map(|(id, attempt, _)| (*id, *attempt))
@@ -261,6 +267,33 @@ async fn sync_round(
             .into_iter()
             .map(|(id, _, result)| {
                 let device = s.device_info(&DeviceId::from_bytes(id), &connected);
+                // A peer that removed this device takes its membership
+                // frames and sends nothing back: name that, unless another
+                // vault is still shared.
+                let peer = DeviceId::from_bytes(id);
+                let by = daemon
+                    .removed_by
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&peer);
+                let by = by.unwrap_or_default();
+                let removed: Vec<&str> = s
+                    .vaults
+                    .values()
+                    .filter(|v| by.contains(&v.id()))
+                    .map(|v| v.name())
+                    .collect();
+                let shares = s
+                    .vaults
+                    .values()
+                    .any(|v| !by.contains(&v.id()) && v.is_member(&s.id) && v.is_member(&peer));
+                let result = match result {
+                    Ok(_) if !shares && !removed.is_empty() => Err(format!(
+                        "rejected: this device was removed from {}",
+                        removed.join(", ")
+                    )),
+                    result => result,
+                };
                 match result {
                     Ok(outcome) => PeerSync {
                         device,
@@ -455,6 +488,8 @@ mod tests {
             for seed in seeds {
                 let (keys, consent) = peer(*seed, &vault, &me);
                 v.add(a, keys.device_id(), keys.kem_public(), consent)?;
+                // Connections name a device by the transport key its card gives.
+                v.card(a, keys.device_id(), keys.net_public(), "peer")?;
             }
             Ok(())
         })
@@ -485,7 +520,7 @@ mod tests {
             .unwrap();
         let sender = author(2);
         let third = author(3);
-        let peer = *sender.id().as_bytes();
+        let peer = *sender.keys().net_public().as_bytes();
         let (mut shared, mut sole_sender) = daemon
             .with(|s| {
                 s.sync_task.take();
@@ -625,7 +660,7 @@ mod tests {
     struct Plain(std::sync::Mutex<Loaded>, std::sync::atomic::AtomicUsize);
 
     impl SyncHandler for Plain {
-        type ReceiveState = application::ReceiveStream;
+        type ReceiveState = ();
 
         async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
             let s = self.0.lock().unwrap();
@@ -647,12 +682,12 @@ mod tests {
             &self,
             peer: PeerId,
             entries: Vec<Blob>,
-            stream: &mut application::ReceiveStream,
+            _: &mut (),
             _: bool,
         ) -> Result<(), HandlerError> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut s = self.0.lock().unwrap();
-            receive(&mut s, &DeviceId::from_bytes(peer), entries, true, stream)
+            receive(&mut s, &DeviceId::from_bytes(peer), entries, true)
                 .map(drop)
                 .map_err(handler_error)
         }
@@ -705,7 +740,7 @@ mod tests {
         let mut items: Vec<_> = (0..3000).map(login).collect();
         items.extend((0..4).map(|i| note(&format!("big {i}"), 1 << 20)));
         import(&mut a, items);
-        let offer_blob = super::super::pairing::offer(&a, vault, &b.id, None).unwrap();
+        let offer_blob = super::super::pairing::offer(&a, vault, b.id.as_bytes(), None).unwrap();
         let (offer, _) = super::super::pairing::read_offer(&offer_blob).unwrap();
         let join = super::super::pairing::join_blob(&b.keys(), "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
@@ -745,7 +780,20 @@ mod tests {
         assert_eq!(sent.unwrap().sent, received.unwrap().received);
         assert!(b.1.load(std::sync::atomic::Ordering::SeqCst) >= 1);
         let (a, b) = (a.0.into_inner().unwrap(), b.0.into_inner().unwrap());
-        assert_eq!(b.vault(&vault).heads(), a.vault(&vault).heads());
+        // b holds all of a's history; past it, only its own card and the
+        // checkpoints it compacted its large tail into after joining.
+        let (bh, ah) = (b.vault(&vault).heads(), a.vault(&vault).heads());
+        for (log, author, seq) in ah.iter().filter(|(_, d, _)| *d != b.id) {
+            assert_eq!(
+                (bh.get(log, &author), bh.tip(log, &author)),
+                (seq, ah.tip(log, &author))
+            );
+        }
+        for (log, author, _) in bh.iter().filter(|(l, d, _)| ah.tip(*l, d).is_none()) {
+            assert_eq!((log, author), (LogKind::Data, b.id), "only b's own frames");
+        }
+        assert!(bh.get(LogKind::Data, &b.id) >= ah.get(LogKind::Data, &b.id));
+        assert!(b.vault(&vault).base().is_some());
         assert_eq!(b.vault(&vault).items().len(), 6005);
     }
 
@@ -778,7 +826,6 @@ mod tests {
                 blob(&source, removal),
             ],
             true,
-            &mut Default::default(),
         )
         .unwrap();
         assert!(added >= 1);
@@ -851,7 +898,7 @@ mod tests {
         let mut batch = vec![r.removal.clone()];
         batch.extend(r.before.iter().map(|(_, b)| b.clone()));
         batch.push(r.after.1.clone());
-        let added = receive(&mut r.target, &peer, batch, true, &mut Default::default()).unwrap();
+        let added = receive(&mut r.target, &peer, batch, true).unwrap();
         assert_eq!(added, 4);
         let vault = r.target.vault(&r.id);
         assert!(!vault.is_member(&peer));
@@ -863,11 +910,11 @@ mod tests {
         // The honest member's later write counts whoever relays it: the peer
         // couldn't read or forge it, only pass it on.
         assert!(has(r.after.0));
-        // Once the removal is known, nothing more from the peer is accepted,
-        // not even a write it made before learning of it.
+        // Once the removal is known, a write the peer made before learning
+        // of it never counts: the fold cuts its data at the removal, though
+        // the frame is held (later member frames may depend on it).
         let late = vec![r.late.1.clone()];
-        let added = receive(&mut r.target, &peer, late, true, &mut Default::default()).unwrap();
-        assert_eq!(added, 0);
+        receive(&mut r.target, &peer, late, true).unwrap();
         assert!(
             r.target
                 .vault(&r.id)
@@ -890,6 +937,7 @@ mod tests {
                 addr: None,
                 peers: BTreeMap::new(),
                 vaults: BTreeMap::new(),
+                members: BTreeMap::new(),
             };
             Ok(serde_json::to_vec(&hello)?)
         }
@@ -986,6 +1034,7 @@ mod tests {
             addr: None,
             peers: BTreeMap::new(),
             vaults,
+            members: BTreeMap::new(),
         })
         .unwrap();
         (dir, source, author(2).id(), hello)
@@ -1091,23 +1140,9 @@ mod tests {
         let entry = blob(&source, frame);
         let peer = loaded.id;
         let heads = hello(&loaded, &peer, None).unwrap();
-        receive(
-            &mut loaded,
-            &peer,
-            vec![entry.clone()],
-            false,
-            &mut Default::default(),
-        )
-        .unwrap();
+        receive(&mut loaded, &peer, vec![entry.clone()], false).unwrap();
         assert!(loaded.vault(&id).items().is_empty());
-        receive(
-            &mut loaded,
-            &peer,
-            vec![entry.clone()],
-            true,
-            &mut Default::default(),
-        )
-        .unwrap();
+        receive(&mut loaded, &peer, vec![entry.clone()], true).unwrap();
         assert!(
             missing_for(&mut loaded, &peer, &heads, false)
                 .unwrap()

@@ -5,6 +5,8 @@
 //! A checkpoint commits to that encrypted file (see `checkpoint::PackCommitment`), never to
 //! these plaintext bytes.
 
+mod records;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{DeviceId, ItemId};
@@ -14,6 +16,10 @@ use super::clock::{Dot, VectorClock};
 use super::crypto::{EpochId, FrameId};
 use super::state::{FoldedState, Tombstone};
 use super::wire::{PayloadError, Reader, Writer, ascending};
+
+pub use records::{
+    FILL_COPIES, ItemHead, ItemRecords, ItemSecret, PackRecords, is_secret_register,
+};
 
 const PACK_DOMAIN: &[u8] = b"deadbolt/v2 pack\0";
 

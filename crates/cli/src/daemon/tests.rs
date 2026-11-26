@@ -181,7 +181,8 @@ async fn ambiguous_append_closes_the_gate_and_cannot_be_reopened_by_readiness() 
     let (peer, consent) = session::tests::peer(8, &id, &loaded.id);
     loaded
         .update(id, |v, a| {
-            Ok(v.add(a, peer.device_id(), peer.kem_public(), consent)?)
+            v.add(a, peer.device_id(), peer.kem_public(), consent)?;
+            Ok(v.card(a, peer.device_id(), peer.net_public(), "peer")?)
         })
         .unwrap();
     let members = daemon.members.clone();
@@ -210,7 +211,10 @@ async fn ambiguous_append_closes_the_gate_and_cannot_be_reopened_by_readiness() 
     // whose membership is revoked below, without waiting for the accept task.
     let conn = node.connect(peer_node.addr()).await.unwrap();
     let frames = daemon.with(|s| Ok(s.vault(&id).frames().count())).unwrap();
-    assert!(node.connected_peers().contains(peer.device_id().as_bytes()));
+    assert!(
+        node.connected_peers()
+            .contains(peer.net_public().as_bytes())
+    );
     fault.store(1, Ordering::SeqCst);
     let error = daemon
         .with(|s| s.update(id, |v, key| Ok(v.remove(key, peer.device_id())?)))

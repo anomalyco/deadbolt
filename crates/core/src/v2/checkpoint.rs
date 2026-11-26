@@ -266,7 +266,10 @@ pub fn verify_checkpoint<'f>(
     })
 }
 
-fn pack_matches(
+/// Whether `pack`, whose encrypted file hashed to `seen`, is the one `payload` commits to:
+/// same file, a consistent meta, the same frontier and the same `state_mac`. What a peer
+/// holding none of the covered frames can check.
+pub fn pack_matches(
     k_mac: &[u8; 32],
     payload: &CheckpointPayload,
     pack: &Pack,

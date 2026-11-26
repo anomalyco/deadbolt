@@ -12,6 +12,7 @@
 //! makes them durable before anyone sees them. If the change or the commit
 //! fails, the frames are taken back out.
 
+mod checkpoint;
 mod duty;
 mod remove;
 mod sync;
@@ -24,13 +25,14 @@ use crate::error::Error;
 use crate::id::{DeviceId, ItemId, VaultId};
 use crate::v2::{
     self, DataFrame, DeviceKeys, EpochGraph, EpochId, EpochKeyring, FoldContext, FoldedState,
-    Frame, FrameId, FrameKind, FraudProof, KemSecret, LogKind, MemberOp, NetPublic, ParkingReason,
-    ResolvedMembership, check_parking,
+    Frame, FrameId, FrameKind, FraudProof, KemSecret, LogKind, MemberOp, NetPublic, Pack,
+    ParkingReason, ResolvedMembership, check_parking,
 };
 
+pub use checkpoint::{Checkpointed, PackSite};
 pub use sync::Heads;
 pub use view::{Deleted, Item};
-pub use write::{Author, MAX_FRAME_LEN, VaultWrite};
+pub use write::{Author, MAX_FRAME_LEN, VaultWrite, parking_message};
 
 /// The most frames one vault accepts: a bound on what a member can make
 /// every device hold.
@@ -66,6 +68,11 @@ pub struct Vault {
     /// Devices this device has seen removed: the parking rule's memory.
     previously_removed: BTreeSet<DeviceId>,
     parked: Vec<ParkingReason>,
+    /// The checkpoint pack the fold starts from, when one is installed:
+    /// frames at or below its frontier may be gone (a recovered vault).
+    base: Option<Pack>,
+    /// Checkpoints by others this session has judged (`judge_checkpoints`).
+    judged: BTreeSet<FrameId>,
     /// Frames the open transaction added.
     staged: Vec<FrameId>,
 }
@@ -88,6 +95,8 @@ impl Vault {
             state: FoldedState::default(),
             previously_removed: BTreeSet::new(),
             parked: Vec::new(),
+            base: None,
+            judged: BTreeSet::new(),
             staged: Vec::new(),
         }
     }
@@ -220,7 +229,12 @@ impl Vault {
             membership: &self.resolved,
             adders: &self.adders,
         };
-        self.state = v2::fold_from_scratch(&ctx, self.fold_inputs());
+        self.state = match &self.base {
+            // A base the membership no longer counts falls back to genesis.
+            Some(base) => v2::fold_from_checkpoint(&ctx, base, self.fold_inputs())
+                .unwrap_or_else(|_| v2::fold_from_scratch(&ctx, self.fold_inputs())),
+            None => v2::fold_from_scratch(&ctx, self.fold_inputs()),
+        };
         self.note_removed();
     }
 
@@ -328,6 +342,25 @@ impl Vault {
             self.device_card(d)
                 .is_some_and(|(pk, _)| pk.as_bytes() == net)
         })
+    }
+
+    /// The one device, member or removed, whose `DeviceCard` names `net` as
+    /// its transport key. `None` when no card names it, or more than one
+    /// does (a card is the device's own or its adder's word, so a second
+    /// claim on one key decides nothing).
+    pub fn device_with_net(&self, net: &[u8; 32]) -> Option<DeviceId> {
+        let mut found = self.state.device_cards.iter().filter_map(|(device, reg)| {
+            reg.winner()
+                .filter(|w| w.value.net_pk.as_bytes() == net)
+                .map(|_| *device)
+        });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
+    /// Devices this vault's membership removed.
+    pub fn removed_devices(&self) -> impl Iterator<Item = DeviceId> + '_ {
+        self.resolved.removed.keys().copied()
     }
 
     /// Every frame, membership first.
