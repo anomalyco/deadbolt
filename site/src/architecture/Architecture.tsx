@@ -10,7 +10,7 @@ import { MergeStory } from "./stories/MergeStory"
 import { PairStory } from "./stories/PairStory"
 import { RemoveStory } from "./stories/RemoveStory"
 
-const repo = "https://github.com/anomalyco/deadbolt/blob/main/"
+const repo = "https://github.com/anomalyco/deadbolt/blob/dev/"
 const Src = ({ path, children }: { path: string; children?: ReactNode }) =>
   <a className="link" href={repo + path} target="_blank" rel="noopener"><code>{children ?? path}</code></a>
 
@@ -35,7 +35,7 @@ const chapters: Chapter[] = [
     </>,
     scene: <DaemonStory />,
     why: <p>the cli was built agent-first: every command works from flags, env and stdin, and it never waits on a human without a terminal. an ai agent can drive it the same way you do.</p>,
-    code: [["crates/cli/src/main.rs", "the commands"], ["crates/cli/src/client.rs", "starts, replaces and talks to the daemon"], ["crates/cli/src/protocol.rs", "the socket protocol: one json line per request"], ["crates/cli/src/daemon/mod.rs", "the daemon: lock, unlock, the membership gate"], ["crates/cli/src/paths.rs", "where the socket, store and logs live"]],
+    code: [["crates/cli/src/main.rs", "the commands"], ["crates/cli/src/client.rs", "starts, replaces and talks to the daemon"], ["crates/proto/src/daemon.rs", "the socket protocol: one json line per request"], ["crates/cli/src/daemon.rs", "the daemon: lock, unlock, the membership gate"], ["crates/client/src/paths.rs", "where the socket, store and logs live"]],
   },
   {
     id: "keys", title: "two keys",
@@ -113,7 +113,7 @@ export function Architecture() {
     <main>
       <nav className="nav"><a href="/">← deadbolt</a><span>architecture</span></nav>
       <Masthead />
-      <p className="description">how deadbolt works, one moving diagram at a time. each diagram loops while it's on screen; hover the bar under it to hold, click a segment to jump, or drag to scrub.</p>
+      <p className="description">how deadbolt works, one moving diagram at a time. each diagram waits on its first step: press play to run it through, step with prev and next (or ← and → while it's under the pointer), click a segment of the bar under it to jump, or drag along the bar to scrub.</p>
       {showSounds && <Suspense fallback={null}><Audition /></Suspense>}
       <ol className="toc">
         {chapters.map(c => <li key={c.id}><a href={`#${c.id}`}>{c.title}</a></li>)}
@@ -163,7 +163,7 @@ $ cargo build --release -j 2 `}<span className="output">{"# target/release/deadb
         </ol>
       </section>
 
-      <footer>deadbolt · <a className="link" href="/">home</a> · <a className="link" href="https://github.com/anomalyco/deadbolt">github</a></footer>
+      <footer>deadbolt · <a className="link" href="/">home</a> · <a className="link" href="/changelog">changelog</a> · <a className="link" href="https://github.com/anomalyco/deadbolt">github</a></footer>
     </main>
   </div>
 }

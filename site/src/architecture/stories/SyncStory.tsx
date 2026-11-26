@@ -52,7 +52,7 @@ const LAPTOP_IMPULSES = [sHeadsB.at, timing(sHeadsA).lands, sMem.at, sLapData.at
 
 export const syncScene: StoryScene = {
   label: "The desktop and the laptop exchange log heads, send missing membership entries first, then exchange missing data entries and confirm.",
-  width: W, height: H, duration: 15.6, poster: 4,
+  width: W, height: H, duration: 15.6,
   sounds: [
     ...soundOfSend(sHeadsA, W, .75).cues,
     { at: DIFF_AT, cue: "write", detail: { pan: 0, gain: .65 } },

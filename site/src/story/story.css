@@ -28,6 +28,21 @@
 .story-bar:hover .story-tick { scale: 1 1.5; }
 .story-bar:focus-visible { outline: 1px dotted #ffffff66; outline-offset: 2px; }
 
+/* Under the bar: prev, where you are, next, and play. Quiet until hovered, like the install tabs. */
+.story-controls {
+  display: flex; align-items: baseline; justify-content: center; gap: 8px 24px; width: min(100%, 66ch); margin: 2px auto 0;
+  font-size: 13px; line-height: 1.7;
+}
+.story-controls button {
+  appearance: none; margin: 0; padding: 2px 0; border: 0; background: none; color: #fff; font: inherit; cursor: pointer;
+  opacity: .55; transition: opacity .12s;
+}
+.story-controls button:hover:not(:disabled), .story-controls button[aria-pressed="true"] { opacity: 1; }
+.story-controls button:disabled { opacity: .2; cursor: default; }
+.story-controls button:focus-visible { outline: 1px dotted #ffffff66; outline-offset: 3px; opacity: 1; }
+.story-count { min-width: 7ch; text-align: center; font-variant-numeric: tabular-nums; color: var(--light); opacity: .8; }
+.story-play { min-width: 6ch; }
+
 /* A narrow stage: the diagram shrinks to fit, and the caption sits on a rail under it at a readable size. The
    leader keeps only its anchor dot, grown so it still marks the spot. Words riding the light are too small to
    read at this size, so they go. */

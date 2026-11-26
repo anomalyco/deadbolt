@@ -55,7 +55,7 @@ const DESKTOP_IMPULSES = [REVEAL, SIGN_AT]
 
 export const keysScene: StoryScene = {
   label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the sealed keyset holding the data key and the desktop's device key.",
-  width: W, height: H, duration: REFUSED + 2.3, poster: 4,
+  width: W, height: H, duration: REFUSED + 2.3,
   sounds: [
     ...soundOfSend(sPass, W, .8).cues,
     ...soundOfSend(sKey, W, .8).cues,

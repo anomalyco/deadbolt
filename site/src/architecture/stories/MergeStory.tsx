@@ -43,7 +43,7 @@ const LAPTOP_IMPULSES = [EDIT_AT + .16, timing(sSyncAB).lands, COMPARE_AT + .25]
 
 export const mergeScene: StoryScene = {
   label: "Two concurrent edits to the same field: the higher entry hash wins on every device, and the other value moves to history.",
-  width: W, height: H, duration: 14.2, poster: 2,
+  width: W, height: H, duration: 14.2,
   sounds: [
     { at: EDIT_AT, cue: "write", detail: { pan: panX(DESKTOP[0] + DESKTOP[2] / 2, W) } },
     { at: EDIT_AT + .16, cue: "write", detail: { pan: panX(LAPTOP[0] + LAPTOP[2] / 2, W) } },

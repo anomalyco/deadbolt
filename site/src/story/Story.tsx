@@ -1,18 +1,20 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react"
 import { Knobs } from "knobs/react"
 import { useCues, type Flight, type SceneCue } from "../sound/useCues"
 import { createRenderer, emptyLight, pack, packedLength, toneColor, type Light, type Renderer } from "./light"
-import { clamp01, ease, smoothstep, span, springAt, springs, type Point } from "./motion"
+import { clamp01, ease, span, springAt, springs, type Point } from "./motion"
 import { onFrame } from "./ticker"
 import { lightParams, lightTuning } from "./tuning"
 import "./story.css"
 import "../dev/motion/lint"
 
-// A story: one diagram that tells itself. Each step plays one action and puts one short caption beside the thing
-// it's about, joined by a leader line. Under the stage there's a thin step bar with no text: one tick per step.
-// Hovering the bar holds the story, clicking a tick plays that step, dragging scrubs the clock 1:1. Every frame
-// is a pure function of the clock, so scrubbing and replaying are exact. On a narrow stage the captions move to a
-// rail under it and the leader shrinks to its anchor dot.
+// A story: one diagram told a step at a time. Each step plays one action and puts one short caption beside the
+// thing it's about, joined by a leader line. It opens held on its first step and never plays by itself: prev and
+// next (or ← and → while it's focused or under the pointer) play one step and hold, play runs to the end and
+// holds on the last, and any other key or click stops it. Under the stage there's a thin step bar with no text,
+// one tick per step: clicking a tick plays that step, dragging scrubs the clock 1:1. Every frame is a pure
+// function of the clock, so scrubbing and replaying are exact. On a narrow stage the captions move to a rail
+// under it and the leader shrinks to its anchor dot.
 //
 // The SVG carries everything crisp (frames, text, wires, device glyphs). Light is a WebGPU canvas over it.
 
@@ -41,11 +43,9 @@ export type StoryScene = {
   label: string
   width: number
   height: number
-  /** When the last step ends. The story then fades out and starts again. */
+  /** When the last step ends. Playing stops there, on the last step's settled pose. */
   duration: number
   steps: readonly Step[]
-  /** The step whose settled pose is shown under reduced motion. Defaults to the last. */
-  poster?: number
   /** Discrete sound cues along the scene clock. */
   sounds?: readonly SceneCue[]
   /** Continuous send-voice flights along the scene clock. */
@@ -66,21 +66,17 @@ export type StoryApi = {
   reduced: boolean
 }
 
-/** The loop: the scene dims out over FADE after its last step, then comes back up at its first pose over REFADE
- *  (negative clock time), like house lights. The very first paint is already up. */
-const FADE = .8, REFADE = .5
 const reducedQuery = () => matchMedia("(prefers-reduced-motion: reduce)")
 
-/** How far up the scene's lights are at time t. */
-const sceneFade = (t: number, duration: number) =>
-  t < 0 ? smoothstep(span(t, -REFADE, 0)) : 1 - smoothstep(span(t, duration, duration + FADE))
+/** Index of the step playing at time t. */
+const stepAt = (scene: StoryScene, t: number) => {
+  let index = 0
+  scene.steps.forEach((s, i) => { if (t >= s.at) index = i })
+  return index
+}
 
 export function storyApi(scene: StoryScene, reduced = false): StoryApi {
-  const step = (t: number) => {
-    let index = 0
-    scene.steps.forEach((s, i) => { if (t >= s.at) index = i })
-    return index
-  }
+  const step = (t: number) => stepAt(scene, t)
   return {
     step,
     reduced,
@@ -97,13 +93,22 @@ const stepEnd = (scene: StoryScene, i: number) => scene.steps[i + 1]?.at ?? scen
 /** A step's settled pose: just before the next one starts. */
 const settled = (scene: StoryScene, i: number) => stepEnd(scene, i) - .05
 
-type Mode = "auto" | "held" | "step"
+/** Held: the clock stands still. Step: it runs to `stopAt` (one step's settled pose), then holds. Playing: it runs
+ *  to the last step's settled pose, then holds. */
+type Mode = "held" | "step" | "playing"
+
+/** Keys typed into a field are the field's. */
+const editable = (target: EventTarget | null) =>
+  target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
 
 export function Story({ scene }: { scene: StoryScene }) {
   const [reduced, setReduced] = useState(() => reducedQuery().matches)
-  const poster = scene.poster ?? scene.steps.length - 1
-  const [t, setT] = useState(() => reduced ? settled(scene, poster) : 0)
-  const clock = useRef({ t, mode: "auto" as Mode, stopAt: 0, hover: false, previous: 0 })
+  /** The last step's index. */
+  const final = scene.steps.length - 1
+  // Opens on the first step's settled pose, held.
+  const [t, setT] = useState(() => settled(scene, 0))
+  const clock = useRef({ t, mode: "held" as Mode, stopAt: 0, hover: false, previous: 0 })
+  const [playing, setPlaying] = useState(false)
   const [live, setLive] = useState(false)
   const host = useRef<HTMLElement>(null)
   const stage = useRef<HTMLDivElement>(null)
@@ -123,13 +128,14 @@ export function Story({ scene }: { scene: StoryScene }) {
   })
 
   const seek = (time: number) => { clock.current.t = time; setT(time) }
+  const setMode = (mode: Mode) => { clock.current.mode = mode; setPlaying(mode === "playing") }
 
   useEffect(() => {
     const media = reducedQuery()
     const change = () => {
       setReduced(media.matches)
-      clock.current.mode = "auto"
-      seek(media.matches ? settled(scene, poster) : 0)
+      setMode("held")
+      seek(settled(scene, stepAt(scene, clock.current.t)))
     }
     media.addEventListener("change", change)
     let visible = false
@@ -138,7 +144,7 @@ export function Story({ scene }: { scene: StoryScene }) {
     if (host.current) observer.observe(host.current)
     document.addEventListener("visibilitychange", update)
     return () => { media.removeEventListener("change", change); observer.disconnect(); document.removeEventListener("visibilitychange", update) }
-  }, [scene, poster])
+  }, [scene])
 
   // The shared frame loop, only while the story is on screen in a visible tab.
   useEffect(() => {
@@ -148,13 +154,13 @@ export function Story({ scene }: { scene: StoryScene }) {
     return onFrame(now => {
       const dt = Math.min(.1, (now - c.previous) / 1000)
       c.previous = now
-      if (c.mode === "held" || (c.mode === "auto" && c.hover)) return
+      if (c.mode === "held") return
+      const stop = c.mode === "step" ? c.stopAt : settled(scene, final)
       let next = c.t + dt
-      if (c.mode === "step" && next >= c.stopAt) { next = c.stopAt; c.mode = "held" }
-      if (next > scene.duration + FADE) next = -REFADE
+      if (next >= stop) { next = stop; setMode("held") }
       seek(next)
     })
-  }, [live, reduced, scene])
+  }, [live, reduced, scene, final])
 
   useEffect(() => {
     const element = canvas.current
@@ -169,13 +175,10 @@ export function Story({ scene }: { scene: StoryScene }) {
   }, [])
 
   const light = emptyLight()
-  const fade = sceneFade(t, scene.duration)
-  // The scene's clock keeps running while the house lights dim, so a glow still cooling at the end keeps cooling
-  // instead of freezing; before the first step (the lights coming up) it holds the first pose.
   const at = Math.max(0, t)
   const drawn = scene.draw(at, light, story)
-  const frame = useRef({ light, fade })
-  frame.current = { light, fade }
+  const frame = useRef({ light })
+  frame.current = { light }
   const data = useRef(new Float32Array(packedLength))
   const last = useRef(new Float32Array(packedLength))
   // The canvas's CSS size, kept by a ResizeObserver so a frame never reads layout after React has written to it.
@@ -190,7 +193,7 @@ export function Story({ scene }: { scene: StoryScene }) {
     const width = Math.max(1, Math.round(box.width * scale)), height = Math.max(1, Math.round(box.height * scale))
     const resized = element.width !== width || element.height !== height
     if (resized) { element.width = width; element.height = height }
-    const packed = pack(frame.current.light, data.current, { width, height, scale: width / scene.width }, lightParams(), frame.current.fade)
+    const packed = pack(frame.current.light, data.current, { width, height, scale: width / scene.width }, lightParams())
     // Quiet at rest: a frame identical to the last one (nothing lit, or only still prints) isn't drawn again.
     if (!resized && (packed ? !blank.current && same(packed, last.current) : blank.current)) return
     blank.current = !packed
@@ -214,12 +217,52 @@ export function Story({ scene }: { scene: StoryScene }) {
   const current = story.step(at)
 
   const playStep = (i: number) => {
-    const index = Math.max(0, Math.min(scene.steps.length - 1, i))
-    if (reduced) { seek(settled(scene, index)); return }
-    clock.current.mode = "step"
+    const index = Math.max(0, Math.min(final, i))
+    if (reduced) { setMode("held"); seek(settled(scene, index)); return }
     clock.current.stopAt = settled(scene, index)
+    setMode("step")
     seek(scene.steps[index]!.at)
   }
+  // At the end, play starts over from the first step.
+  const ended = current === final && t >= settled(scene, final) - .001
+  const play = () => {
+    if (reduced) return
+    if (ended) seek(0)
+    setMode("playing")
+  }
+  const toggle = () => clock.current.mode === "playing" ? setMode("held") : play()
+
+  // A key while the story is focused (`within`) or under the pointer. Any key stops playing; ← → step, and when
+  // focused, ↑ ↓ step too, Home and End jump, and space plays or pauses. A focused button's own Enter and space
+  // are its click.
+  const onKey = (event: globalThis.KeyboardEvent, within: boolean) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || editable(event.target)) return
+    const button = event.target instanceof Element && event.target.closest("button")
+    if (button && (event.key === "Enter" || event.key === " ")) return
+    const keys: Record<string, () => void> = within
+      ? {
+        ArrowRight: () => playStep(current + 1), ArrowDown: () => playStep(current + 1),
+        ArrowLeft: () => playStep(current - 1), ArrowUp: () => playStep(current - 1),
+        Home: () => playStep(0), End: () => playStep(final), " ": toggle,
+      }
+      : { ArrowRight: () => playStep(current + 1), ArrowLeft: () => playStep(current - 1) }
+    const action = keys[event.key]
+    if (event.key !== " " && clock.current.mode === "playing") setMode("held")
+    if (!action) return
+    event.preventDefault()
+    action()
+  }
+  const keyHandler = useRef(onKey)
+  keyHandler.current = onKey
+  useEffect(() => {
+    const onWindowKey = (event: globalThis.KeyboardEvent) => {
+      if (!clock.current.hover || event.defaultPrevented) return
+      if (event.target instanceof Node && host.current?.contains(event.target)) return
+      keyHandler.current(event, false)
+    }
+    window.addEventListener("keydown", onWindowKey)
+    return () => window.removeEventListener("keydown", onWindowKey)
+  }, [])
 
   const timeAt = (x: number) => {
     const ticks = [...(bar.current?.children ?? [])]
@@ -230,14 +273,12 @@ export function Story({ scene }: { scene: StoryScene }) {
     return { index: 0, time: 0 }
   }
 
-  // Hover pauses only on the step bar; dragging scrubs 1:1 without spring lag ("don't animate my own hand").
+  // Dragging scrubs 1:1 without spring lag ("don't animate my own hand"); a click plays the tick's step.
   const bindings = {
-    onPointerEnter: () => { clock.current.hover = true },
-    onPointerLeave: () => { clock.current.hover = false; if (!drag.current) clock.current.mode = "auto" },
     onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
       event.currentTarget.setPointerCapture(event.pointerId)
       drag.current = { x: event.clientX, moved: false }
-      clock.current.mode = "held"
+      setMode("held")
     },
     onPointerMove: (event: PointerEvent<HTMLDivElement>) => {
       const d = drag.current
@@ -250,44 +291,44 @@ export function Story({ scene }: { scene: StoryScene }) {
       drag.current = null
       if (d && !d.moved) playStep(timeAt(event.clientX).index)
     },
-    onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
-      const keys: Record<string, () => void> = {
-        ArrowRight: () => playStep(current + 1), ArrowDown: () => playStep(current + 1),
-        ArrowLeft: () => playStep(current - 1), ArrowUp: () => playStep(current - 1),
-        Home: () => playStep(0), End: () => playStep(scene.steps.length - 1),
-        " ": () => { clock.current.mode = clock.current.mode === "auto" ? "held" : "auto" },
-      }
-      const action = keys[event.key]
-      if (!action) return
-      event.preventDefault()
-      action()
-    },
   }
 
   const backend = renderer === "pending" ? undefined : renderer?.backend ?? "svg"
 
-  return <Knobs controls={lightTuning}><figure className="story" ref={host} data-reduced={reduced || undefined} data-light={backend}>
+  // Any click but the controls' own stops playing.
+  return <Knobs controls={lightTuning}><figure className="story" ref={host} data-reduced={reduced || undefined} data-light={backend}
+    onPointerEnter={() => { clock.current.hover = true }}
+    onPointerLeave={() => { clock.current.hover = false }}
+    onPointerDown={event => {
+      if (!(event.target instanceof Element && event.target.closest("button")) && clock.current.mode === "playing") setMode("held")
+    }}
+    onKeyDown={event => onKey(event.nativeEvent, true)}>
     <div className="story-stage" ref={stage} style={{ aspectRatio: `${scene.width} / ${scene.height}` }}>
       <svg viewBox={`0 0 ${scene.width} ${scene.height}`} role="img" aria-label={scene.label}>
-        <g opacity={fade}>
+        <g>
           {drawn}
           {scene.steps.map((_, i) => <Leader key={i} scene={scene} index={i} t={at} reduced={reduced} current={current} />)}
           {backend === "svg" && <FallbackLight light={light} />}
         </g>
       </svg>
       <canvas ref={canvas} className="story-light" aria-hidden="true" />
-      {scene.steps.map((_, i) => <CaptionText key={i} scene={scene} index={i} t={at} fade={fade} reduced={reduced} current={current} />)}
+      {scene.steps.map((_, i) => <CaptionText key={i} scene={scene} index={i} t={at} reduced={reduced} current={current} />)}
     </div>
     <div ref={bar} className="story-bar" role="slider" tabIndex={0} aria-label="step" aria-valuemin={1} aria-valuemax={scene.steps.length}
       aria-valuenow={current + 1} aria-valuetext={scene.steps[current]!.caption.text} {...bindings}>
       {scene.steps.map((step, i) => {
         const length = stepEnd(scene, i) - step.at
         const fill = t >= scene.duration ? 1 : clamp01((t - step.at) / length)
-        // The fills dim out with the scene at the end of the loop, so they're dark when they reset.
         return <span key={i} className="story-tick" data-state={i < current ? "past" : i === current ? "current" : undefined} style={{ flexGrow: length }}>
-          <i style={{ transform: `scaleX(${i < current ? 1 : i === current ? fill : 0})`, opacity: t > scene.duration ? fade : undefined }} />
+          <i style={{ transform: `scaleX(${i < current ? 1 : i === current ? fill : 0})` }} />
         </span>
       })}
+    </div>
+    <div className="story-controls">
+      <button type="button" onClick={() => playStep(current - 1)} disabled={current === 0}><span aria-hidden="true">← </span>prev</button>
+      <span className="story-count" aria-live="polite">{current + 1} of {scene.steps.length}</span>
+      <button type="button" onClick={() => playStep(current + 1)} disabled={current === final}>next<span aria-hidden="true"> →</span></button>
+      {!reduced && <button type="button" className="story-play" onClick={toggle} aria-pressed={playing}>{playing ? "pause" : ended ? "replay" : "play"}</button>}
     </div>
   </figure></Knobs>
 }
@@ -326,12 +367,11 @@ function Leader({ scene, index, t, reduced, current }: { scene: StoryScene; inde
   </g>
 }
 
-function CaptionText({ scene, index, t, fade, reduced, current }: { scene: StoryScene; index: number; t: number; fade: number; reduced: boolean; current: number }) {
+function CaptionText({ scene, index, t, reduced, current }: { scene: StoryScene; index: number; t: number; reduced: boolean; current: number }) {
   const { text, place, align = "start", width } = scene.steps[index]!.caption
   const { enter, scaleIn, exit } = captionPhase(scene, index, t, reduced, current)
   const e = reduced ? enter : ease.enter(enter), x = reduced ? 0 : ease.exit(exit)
-  // The scene dimming at the end of the loop takes the caption with it, as an exit.
-  const out = reduced ? 0 : Math.max(x, 1 - fade)
+  const out = x
   const opacity = e * (1 - out)
   const style = {
     "--x": `${(place[0] / scene.width) * 100}%`, "--y": `${(place[1] / scene.height) * 100}%`, opacity,
