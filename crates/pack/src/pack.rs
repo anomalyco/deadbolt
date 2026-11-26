@@ -195,9 +195,10 @@ pub struct PackInput {
 pub struct PackSummary {
     pub header: PackHeader,
     pub id: PackId,
-    /// The trailer: `BLAKE3` of every byte before it. The remote name is
-    /// `p/<pack_hash>`.
-    pub hash: [u8; 32],
+    /// The trailer: `BLAKE3` of every byte before it. Not the pack's
+    /// remote name: `p/<pack_hash>` hashes the whole file, trailer
+    /// included (`PackCommitment::of` in deadbolt-core).
+    pub trailer: [u8; 32],
     pub len: u64,
 }
 
@@ -299,7 +300,7 @@ pub fn encode(input: &PackInput, epoch_key: &[u8; KEY_LEN]) -> Result<EncodedPac
     let summary = PackSummary {
         header,
         id,
-        hash,
+        trailer: hash,
         len: bytes.len() as u64,
     };
     Ok(EncodedPack { summary, bytes })

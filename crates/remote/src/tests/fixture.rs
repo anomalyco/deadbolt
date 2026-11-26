@@ -81,7 +81,7 @@ pub fn genesis(adds: u8) -> (VaultId, DeviceId, Vec<Frame>) {
             vec![prev],
             dev.device_id(),
             dev.kem_public(),
-            sign_join_consent(dev.sign_key(), &vault, &root_id, &dev.kem_public()),
+            sign_join_consent(&dev, &vault, &root_id),
             Some((e0, &k0)),
         )
         .unwrap();

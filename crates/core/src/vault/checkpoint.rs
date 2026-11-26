@@ -43,11 +43,84 @@ impl Vault {
         self.base.as_ref()
     }
 
-    /// Folds from `pack` from now on. A pack the membership no longer
-    /// counts is kept but folded around (from genesis).
-    pub fn set_base(&mut self, pack: Pack) {
+    /// The checkpoint frame the installed pack belongs to.
+    pub fn base_checkpoint(&self) -> Option<FrameId> {
+        self.base_checkpoint
+    }
+
+    /// Folds from `pack`, which `checkpoint` (this device's own, just
+    /// committed) commits to, from now on. A pack the membership no longer
+    /// counts is kept but folded around (from genesis); one whose checkpoint
+    /// is disputed or stops counting is dropped.
+    pub fn set_base(&mut self, checkpoint: FrameId, pack: Pack) {
         self.base = Some(pack);
+        self.base_checkpoint = Some(checkpoint);
         self.refresh(None);
+    }
+
+    /// Installs a pack from elsewhere (disk, a store) as the base, if it
+    /// is what a checkpoint this vault counts and no member disputed
+    /// commits to, `sealed` its encrypted bytes, and the membership still
+    /// counts what it covers. Returns whether it was installed.
+    pub fn adopt_base(&mut self, checkpoint: FrameId, pack: Pack, sealed: &[u8]) -> bool {
+        if !self.verify_base(&checkpoint, &pack, sealed) {
+            return false;
+        }
+        self.set_base(checkpoint, pack);
+        true
+    }
+
+    /// Whether [`Vault::adopt_base`] would take `pack` for `checkpoint`.
+    pub fn verify_base(&self, checkpoint: &FrameId, pack: &Pack, sealed: &[u8]) -> bool {
+        let ctx = FoldContext {
+            membership: &self.resolved,
+            adders: &self.adders,
+        };
+        self.checkpoints().any(|(f, _)| f.id == *checkpoint)
+            && !self.is_disputed(checkpoint)
+            && self.pack_matches(checkpoint, pack, sealed)
+            && v2::check_still_valid(&ctx, &pack.meta).is_ok()
+    }
+
+    /// Installs this device's own stored pack as the base: the one a
+    /// counted, undisputed checkpoint commits to the contents of (the file
+    /// may be this device's re-sealing), while the membership still counts
+    /// what it covers. Returns the checkpoint, or None (nothing installed).
+    pub fn adopt_local_base(&mut self, pack: Pack) -> Option<FrameId> {
+        let ctx = FoldContext {
+            membership: &self.resolved,
+            adders: &self.adders,
+        };
+        if v2::check_still_valid(&ctx, &pack.meta).is_err() {
+            return None;
+        }
+        let checkpoint = self
+            .checkpoints()
+            .filter(|(f, _)| !self.is_disputed(&f.id))
+            .find(|(f, payload)| {
+                self.keyring.get(&f.epoch).is_some_and(|key| {
+                    let k_mac = key.mac_key(&self.id, &f.epoch);
+                    v2::checkpoint::content_matches(&k_mac, payload, &pack)
+                })
+            })
+            .map(|(f, _)| f.id)?;
+        self.set_base(checkpoint, pack);
+        Some(checkpoint)
+    }
+
+    /// Drops a base whose checkpoint a member disputed or the membership no
+    /// longer counts, refolding from genesis. Returns whether it did.
+    pub(super) fn drop_untrusted_base(&mut self) -> bool {
+        let Some(id) = self.base_checkpoint else {
+            return false;
+        };
+        let counted = self.checkpoints().any(|(f, _)| f.id == id);
+        if counted && !self.is_disputed(&id) {
+            return false;
+        }
+        self.base = None;
+        self.base_checkpoint = None;
+        true
     }
 
     /// The epoch key this device holds for `epoch`.
@@ -77,12 +150,45 @@ impl Vault {
         should_checkpoint(bytes, frames)
     }
 
-    /// Every checkpoint frame this vault holds and opened, with its payload.
+    /// Every checkpoint frame this vault holds, opened and counts (signed
+    /// by a principal at a seq its membership counts, under an authorized
+    /// epoch), with its payload. A removed device's later checkpoint, or
+    /// one sealed under a throwaway key, is never among them.
     pub fn checkpoints(&self) -> impl Iterator<Item = (&v2::DataFrame, &v2::CheckpointPayload)> {
-        self.opened.values().filter_map(|f| match &f.body {
-            DataBody::Checkpoint(p) => Some((f, p)),
-            DataBody::Data(_) => None,
+        let ctx = FoldContext {
+            membership: &self.resolved,
+            adders: &self.adders,
+        };
+        self.opened.values().filter_map(move |f| match &f.body {
+            DataBody::Checkpoint(p) if ctx.counts(f) => Some((f, p)),
+            _ => None,
         })
+    }
+
+    /// Whether `frontier` contradicts what this device knows for certain
+    /// about its own log: a seq past its tip, or a frame other than the one
+    /// it wrote there.
+    pub fn contradicts(&self, frontier: &BTreeMap<DeviceId, (u64, FrameId)>) -> bool {
+        let Some((seq, id)) = frontier.get(&self.me) else {
+            return false;
+        };
+        let held = self
+            .data
+            .values()
+            .find(|f| f.header().author == self.me && f.header().seq == *seq);
+        match held {
+            Some(f) => f.id() != *id,
+            None => self.position_of(&self.me).is_none_or(|tip| *seq > tip),
+        }
+    }
+
+    /// The highest data seq `author` has here.
+    fn position_of(&self, author: &DeviceId) -> Option<u64> {
+        self.data
+            .values()
+            .filter(|f| f.header().author == *author)
+            .map(|f| f.header().seq)
+            .max()
     }
 
     /// Whether `pack`, with `sealed` its encrypted bytes, is what
@@ -233,6 +339,24 @@ impl VaultWrite<'_> {
                 continue;
             };
             let k_mac = key.mac_key(&self.id, &f.epoch);
+            // A frontier past this device's own tip, or naming a frame it
+            // knows is another, is disputed at once: no fold can agree.
+            if self.contradicts(&payload.frontier_map()) {
+                let mine = self
+                    .state
+                    .disputes
+                    .iter()
+                    .any(|d| d.checkpoint == f.id && d.author == me);
+                if !mine {
+                    disputes.push(v2::DataOp::Dispute {
+                        checkpoint: f.id,
+                        expected_state_mac: v2::state_mac(&k_mac, &self.state)
+                            .map_err(frame_err)?,
+                    });
+                }
+                self.judged.insert(f.id);
+                continue;
+            }
             let ctx = FoldContext {
                 membership: &self.resolved,
                 adders: &self.adders,

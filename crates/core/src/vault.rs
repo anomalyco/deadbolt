@@ -32,6 +32,8 @@ use crate::v2::{
 pub use checkpoint::{Checkpointed, PackSite};
 pub use sync::Heads;
 pub use view::{Deleted, Item};
+#[cfg(test)]
+pub(crate) use write::MAX_REMOVED_UNAUTHORIZED;
 pub use write::{Author, MAX_FRAME_LEN, VaultWrite, parking_message};
 
 /// The most frames one vault accepts: a bound on what a member can make
@@ -71,6 +73,8 @@ pub struct Vault {
     /// The checkpoint pack the fold starts from, when one is installed:
     /// frames at or below its frontier may be gone (a recovered vault).
     base: Option<Pack>,
+    /// The checkpoint frame `base` belongs to.
+    base_checkpoint: Option<FrameId>,
     /// Checkpoints by others this session has judged (`judge_checkpoints`).
     judged: BTreeSet<FrameId>,
     /// Frames the open transaction added.
@@ -96,6 +100,7 @@ impl Vault {
             previously_removed: BTreeSet::new(),
             parked: Vec::new(),
             base: None,
+            base_checkpoint: None,
             judged: BTreeSet::new(),
             staged: Vec::new(),
         }
@@ -235,6 +240,15 @@ impl Vault {
                 .unwrap_or_else(|_| v2::fold_from_scratch(&ctx, self.fold_inputs())),
             None => v2::fold_from_scratch(&ctx, self.fold_inputs()),
         };
+        // A base whose checkpoint was disputed (the dispute may be in the
+        // fold it fed) is never folded from again.
+        if self.drop_untrusted_base() {
+            let ctx = FoldContext {
+                membership: &self.resolved,
+                adders: &self.adders,
+            };
+            self.state = v2::fold_from_scratch(&ctx, self.fold_inputs());
+        }
         self.note_removed();
     }
 
@@ -330,32 +344,42 @@ impl Vault {
         self.parked = check_parking(&self.previously_removed, &self.resolved).reasons;
     }
 
-    /// A device's transport key and label, from its `DeviceCard`.
+    /// A device's transport key (from its card) and label. The label is the
+    /// device's own word once it has written a card, its adder's before; the
+    /// transport key to trust is [`Vault::device_net`].
     pub fn device_card(&self, device: &DeviceId) -> Option<(NetPublic, &str)> {
         let card = &self.state.device_cards.get(device)?.winner()?.value;
         Some((card.net_pk, card.label.as_str()))
     }
 
-    /// The member whose `DeviceCard` names `net` as its transport key.
-    pub fn device_for_net(&self, net: &[u8; 32]) -> Option<DeviceId> {
-        self.members().find(|d| {
-            self.device_card(d)
-                .is_some_and(|(pk, _)| pk.as_bytes() == net)
-        })
+    /// The transport key `device` signed into its `Add`, for a member or a
+    /// removed device: never anyone else's word, so no card can claim it.
+    pub fn device_net(&self, device: &DeviceId) -> Option<NetPublic> {
+        self.resolved.nets.get(device).copied()
     }
 
-    /// The one device, member or removed, whose `DeviceCard` names `net` as
-    /// its transport key. `None` when no card names it, or more than one
-    /// does (a card is the device's own or its adder's word, so a second
-    /// claim on one key decides nothing).
+    /// The member whose transport key is `net`.
+    pub fn device_for_net(&self, net: &[u8; 32]) -> Option<DeviceId> {
+        self.device_with_net(net).filter(|d| self.is_member(d))
+    }
+
+    /// The device, member or removed, whose transport key is `net`. Only
+    /// the key's holder can bind it (its `Add` carries the key's signature),
+    /// so two devices naming one key are one holder: a member wins.
     pub fn device_with_net(&self, net: &[u8; 32]) -> Option<DeviceId> {
-        let mut found = self.state.device_cards.iter().filter_map(|(device, reg)| {
-            reg.winner()
-                .filter(|w| w.value.net_pk.as_bytes() == net)
-                .map(|_| *device)
-        });
+        let mut found = self
+            .resolved
+            .nets
+            .iter()
+            .filter(|(_, pk)| pk.as_bytes() == net)
+            .map(|(d, _)| *d);
         let first = found.next()?;
-        found.next().is_none().then_some(first)
+        Some(
+            std::iter::once(first)
+                .chain(found)
+                .find(|d| self.is_member(d))
+                .unwrap_or(first),
+        )
     }
 
     /// Devices this vault's membership removed.

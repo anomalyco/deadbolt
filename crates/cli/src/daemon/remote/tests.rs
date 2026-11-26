@@ -179,3 +179,66 @@ async fn a_checkpoint_compacts_to_a_pack_the_viewer_fills_from() {
     let secret = viewer.fill_secret(&hits[0].item_id).unwrap();
     assert_eq!(secret.password.as_deref().map(String::as_str), Some("pw7"));
 }
+
+/// A pack replaces history only where the store shows it collected the
+/// covered frames: a device holding every frame (or seeing them all still
+/// listed) keeps folding from them, and a frontier past anything evidenced
+/// is refused.
+#[tokio::test]
+async fn a_full_replica_never_trades_its_history_for_a_pack() {
+    use deadbolt_core::v2::{FrameId, LogKind};
+    use deadbolt_core::{DeviceId, Vault};
+    use deadbolt_remote::{RemoteIndex, RemotePath, SyncAnchor};
+
+    let dir = tempfile::tempdir().unwrap();
+    let a = device(dir.path(), 74).await;
+    let vault = a.with(|s| s.create_vault("personal")).unwrap();
+    for i in 0..6 {
+        login(&a, vault, i);
+    }
+    a.with(|s| s.checkpoint(vault)).unwrap();
+    login(&a, vault, 6);
+    a.with(|s| {
+        let v = &s.vaults[&vault];
+        let me = s.id;
+        let frontier = v.base().unwrap().meta.frontier.clone();
+        let names = |frames: &mut dyn Iterator<Item = &deadbolt_core::v2::Frame>| -> Vec<String> {
+            frames
+                .map(|f| {
+                    let h = f.header();
+                    RemotePath::frame(vault, h.kind, h.author, h.seq).to_name()
+                })
+                .collect()
+        };
+        let every = RemoteIndex::from_names(&vault, &names(&mut v.frames()));
+        let none = SyncAnchor::default();
+        assert!(!super::sync::collected_behind(
+            v, &every, &none, me, &frontier
+        ));
+
+        // A replica missing the covered frames, the store listing only the tail.
+        let above = |f: &&deadbolt_core::v2::Frame| {
+            let h = f.header();
+            h.kind.log_kind() == LogKind::Member
+                || frontier.get(&h.author).is_none_or(|(seq, _)| h.seq > *seq)
+        };
+        let tail: Vec<_> = v.frames().filter(above).cloned().collect();
+        let thin = Vault::open(&s.keys(), tail.iter().cloned())?;
+        let listed = RemoteIndex::from_names(&vault, &names(&mut tail.iter()));
+        assert!(super::sync::collected_behind(
+            &thin, &listed, &none, me, &frontier
+        ));
+        // ...but every covered frame still listed: fetch them instead.
+        assert!(!super::sync::collected_behind(
+            &thin, &every, &none, me, &frontier
+        ));
+        // A frontier naming frames nothing evidences.
+        let mut phantom = frontier.clone();
+        phantom.insert(DeviceId::from_bytes([7; 32]), (40, FrameId::ZERO));
+        assert!(!super::sync::collected_behind(
+            &thin, &listed, &none, me, &phantom
+        ));
+        Ok(())
+    })
+    .unwrap();
+}

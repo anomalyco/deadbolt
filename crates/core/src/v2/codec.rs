@@ -3,11 +3,11 @@
 use crate::id::{DeviceId, Signature};
 
 use super::crypto::{
-    BACK_LINK_LEN, EpochId, FrameId, KemPublic, WRAP_LEN, derive_vault_id, verify_strict,
+    BACK_LINK_LEN, EpochId, FrameId, KemPublic, NetPublic, WRAP_LEN, derive_vault_id, verify_strict,
 };
 use super::frame::{
-    FrameError, FrameHeader, MAX_BACK_LINKS, MAX_BODY_LEN, MAX_DEPS, MAX_PARENTS, MAX_WRAPS,
-    join_consent_message, rotate_recovery_consent_message,
+    FrameError, FrameHeader, JoinConsent, MAX_BACK_LINKS, MAX_BODY_LEN, MAX_DEPS, MAX_PARENTS,
+    MAX_WRAPS, rotate_recovery_consent_message,
 };
 
 /// Encrypted epoch wrap distribution carried by `MemberOp::Rewrap` or `MemberOp::Add`.
@@ -35,10 +35,12 @@ pub enum MemberOp {
         nonce: [u8; 32],
         recovery_kem: KemPublic,
     },
+    /// `consent` carries the device's transport key, signed by the device
+    /// and by that key.
     Add {
         device: DeviceId,
         kem: KemPublic,
-        consent: Signature,
+        consent: JoinConsent,
         rewrap: Option<Rewrap>,
     },
     Remove {
@@ -99,6 +101,8 @@ pub fn member_op_wire_len(op: &MemberOp) -> usize {
         MemberOp::Add { rewrap, .. } => {
             1 + 32
                 + 32
+                + 32
+                + 64
                 + 64
                 + 1
                 + rewrap
@@ -198,7 +202,9 @@ fn encode_member_op(out: &mut Vec<u8>, op: &MemberOp) -> Result<(), FrameError> 
             out.push(1);
             out.extend_from_slice(device.as_bytes());
             out.extend_from_slice(kem.as_bytes());
-            out.extend_from_slice(consent.as_bytes());
+            out.extend_from_slice(consent.net.as_bytes());
+            out.extend_from_slice(consent.consent.as_bytes());
+            out.extend_from_slice(consent.net_proof.as_bytes());
             match rewrap {
                 None => out.push(0),
                 Some(r) => {
@@ -375,7 +381,11 @@ fn decode_member_op(r: &mut Reader<'_>) -> Result<MemberOp, FrameError> {
         1 => {
             let device = DeviceId::from_bytes(r.array::<32>()?);
             let kem = KemPublic::from_bytes(r.array::<32>()?);
-            let consent = Signature::from_bytes(r.array::<64>()?);
+            let consent = JoinConsent {
+                net: NetPublic::from_bytes(r.array::<32>()?),
+                consent: Signature::from_bytes(r.array::<64>()?),
+                net_proof: Signature::from_bytes(r.array::<64>()?),
+            };
             let rewrap = match r.u8()? {
                 0 => None,
                 1 => Some(decode_rewrap(r)?),
@@ -611,8 +621,7 @@ pub fn validate_member_body(header: &FrameHeader, body: &MemberBody) -> Result<(
             }),
             None,
         ) => {
-            let msg = join_consent_message(&header.vault, &header.author, device, kem);
-            if !verify_strict(device, &msg, consent) {
+            if !consent.verify(&header.vault, &header.author, device, kem) {
                 return Err(FrameError::InvalidConsent);
             }
             if let Some(r) = rewrap {

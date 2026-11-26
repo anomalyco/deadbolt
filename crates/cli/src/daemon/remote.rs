@@ -65,6 +65,15 @@ pub(super) fn save_anchor(s: &Session, vault: &VaultId, anchor: &SyncAnchor) -> 
     s.store().meta_set(&meta(vault, "anchor"), &anchor.encode())
 }
 
+/// Which store `saved` names (credentials aside).
+fn target(
+    vault: &VaultId,
+    saved: &Saved,
+) -> (String, String, Option<String>, Option<String>, String) {
+    let i = info(vault, saved, &SyncAnchor::default());
+    (i.kind, i.url, i.bucket, i.region, i.prefix)
+}
+
 /// What `remote show` says: where, never the secrets.
 pub(super) fn info(vault: &VaultId, saved: &Saved, anchor: &SyncAnchor) -> RemoteInfo {
     let mut info = RemoteInfo {
@@ -124,11 +133,17 @@ impl Daemon {
                 Remote::open(&remote)?;
                 self.with(|s| {
                     let id = s.resolve(vault.as_deref())?;
+                    let before = load(s, &id)?.map(|old| target(&id, &old));
                     let saved = Saved {
                         remote,
                         last_sync: None,
                     };
                     save(s, &id, Some(&saved))?;
+                    // Another store: what this device accepted from the old
+                    // one says nothing about it.
+                    if before != Some(target(&id, &saved)) {
+                        save_anchor(s, &id, &SyncAnchor::default())?;
+                    }
                     let info = info(&id, &saved, &load_anchor(s, &id)?);
                     Ok(Reply::Remote { remote: Some(info) })
                 })
@@ -142,6 +157,7 @@ impl Daemon {
             Command::RemoteRemove { vault } => self.with(|s| {
                 let id = s.resolve(vault.as_deref())?;
                 save(s, &id, None)?;
+                save_anchor(s, &id, &SyncAnchor::default())?;
                 Ok(Reply::Remote { remote: None })
             }),
             Command::RemoteSync { vault } => {

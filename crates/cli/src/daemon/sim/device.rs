@@ -147,7 +147,7 @@ fn report_problem(
     None
 }
 impl SyncHandler for Handler {
-    type ReceiveState = ();
+    type ReceiveState = deadbolt_net::application::ReceiveStream;
 
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         let guard = self.state.lock().unwrap();
@@ -177,7 +177,7 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         entries: Vec<Blob>,
-        _: &mut (),
+        stream: &mut Self::ReceiveState,
         _: bool,
     ) -> Result<(), HandlerError> {
         let mut guard = self.state.lock().unwrap();
@@ -186,7 +186,7 @@ impl SyncHandler for Handler {
         // Local writes and pairing record changes too; judge only this batch.
         s.changes = Changes::default();
         let before = accepted(s);
-        let result = sync::receive(s, &peer, entries, self.ready.load(Ordering::SeqCst));
+        let result = sync::receive(s, &peer, entries, self.ready.load(Ordering::SeqCst), stream);
         let reported = std::mem::take(&mut s.changes);
         if let Some(problem) = report_problem(s, &before, &reported) {
             self.unreported.lock().unwrap().push(problem);

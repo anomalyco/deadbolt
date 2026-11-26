@@ -79,9 +79,10 @@ impl VaultStore for NativeStore {
     fn open_pack(
         &self,
         sealed: &[u8],
+        vault: VaultId,
         key_for: &dyn Fn(&EpochId) -> Option<EpochKey>,
     ) -> Result<Pack> {
-        Ok(crate::disk::open_pack(sealed, key_for)?)
+        Ok(crate::disk::open_pack(sealed, vault, key_for)?)
     }
 }
 
@@ -312,14 +313,9 @@ pub(super) mod tests {
         seed: u8,
         vault: &VaultId,
         inviter: &DeviceId,
-    ) -> (DeviceKeys, deadbolt_core::Signature) {
+    ) -> (DeviceKeys, deadbolt_core::v2::JoinConsent) {
         let keys = DeviceKeys::from_seed(&[seed; 32]);
-        let consent = deadbolt_core::v2::sign_join_consent(
-            keys.sign_key(),
-            vault,
-            inviter,
-            &keys.kem_public(),
-        );
+        let consent = deadbolt_core::v2::sign_join_consent(&keys, vault, inviter);
         (keys, consent)
     }
 
@@ -362,7 +358,10 @@ pub(super) mod tests {
         assert_eq!(application::State::vaults(&loaded).count(), 0);
         assert!(super::super::sync::hello(&loaded, &pid, None).is_err());
         assert!(super::super::sync::missing_for(&mut loaded, &pid, b"{}", true).is_err());
-        assert!(super::super::sync::receive(&mut loaded, &pid, vec![], true).is_err());
+        assert!(
+            super::super::sync::receive(&mut loaded, &pid, vec![], true, &mut Default::default())
+                .is_err()
+        );
         assert!(super::super::pairing::offer(&loaded, id, pid.as_bytes(), None).is_err());
         assert!(loaded.create_vault("another").is_err());
         drop(loaded);

@@ -6,7 +6,9 @@ use crate::v2::{Frame, LogKind, RecoverySecret};
 use crate::vault::testing::{NOW_MS, author, recovery, vault};
 use crate::{Author, DataOp, Error, Field, FieldType, Heads, ItemId, Vault};
 
+mod admission;
 mod audit;
+mod root;
 mod rotate;
 
 fn login(user: &str, pw: &str) -> Vec<(String, Field)> {

@@ -48,7 +48,8 @@ pub const FILL_COPIES: [&str; 2] = ["credential-id", "user-handle"];
 /// One item's two records.
 pub struct ItemRecords {
     pub id: ItemId,
-    pub head: Vec<u8>,
+    /// Titles, URLs and usernames are private too: wiped when dropped.
+    pub head: Zeroizing<Vec<u8>>,
     pub secret: Zeroizing<Vec<u8>>,
 }
 
@@ -81,14 +82,15 @@ pub struct ItemSecret {
 }
 
 /// Whether a field register belongs in the Secret: any standing write
-/// with a secret type (`FieldType::is_secret`). Reserved `@` registers
-/// never are.
+/// with a secret type (`FieldType::is_secret`), a note or a file (both
+/// hold whatever the person put there). Reserved `@` registers never are.
 pub fn is_secret_register(name: &str, reg: &Register<Option<FieldValue>>) -> bool {
     !name.starts_with('@')
         && reg.writes().iter().any(|w| {
-            w.value
-                .as_ref()
-                .is_some_and(|v| FieldType::parse(&v.kind).is_secret())
+            w.value.as_ref().is_some_and(|v| {
+                let kind = FieldType::parse(&v.kind);
+                kind.is_secret() || matches!(kind, FieldType::File | FieldType::Note)
+            })
         })
 }
 
@@ -198,7 +200,7 @@ fn split_item(id: &ItemId, item: &ItemState) -> Result<ItemRecords, PayloadError
         let kind = winner_value(reg).map_or("", |v| v.kind.as_str());
         w.str(kind, MAX_LABEL_LEN, "field type")?;
     }
-    let head = w.into_bytes();
+    let head = Zeroizing::new(w.into_bytes());
     let mut w = Writer::new();
     w.bytes(SECRET_DOMAIN);
     w.item(id);

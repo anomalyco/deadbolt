@@ -36,7 +36,7 @@ fn i1_i2_i3_concurrent_offline_removals_and_dual_merge() {
             deps,
             dev.device_id(),
             dev.kem_public(),
-            sign_join_consent(dev.sign_key(), &vault, &r0.recovery_id(), &dev.kem_public()),
+            sign_join_consent(dev, &vault, &r0.recovery_id()),
             Some((e0, &k0)),
         )
         .unwrap();
@@ -230,7 +230,7 @@ fn i2_sixty_day_offline_device_and_newly_added_device_decrypt_via_back_links() {
             deps,
             dev.device_id(),
             dev.kem_public(),
-            sign_join_consent(dev.sign_key(), &vault, &r0.recovery_id(), &dev.kem_public()),
+            sign_join_consent(dev, &vault, &r0.recovery_id()),
             Some((e0, &k0)),
         )
         .unwrap();
@@ -285,12 +285,7 @@ fn i2_sixty_day_offline_device_and_newly_added_device_decrypt_via_back_links() {
         all_deps_with_prev(member_heads(&frames), a_prev),
         new_phone.device_id(),
         new_phone.kem_public(),
-        sign_join_consent(
-            new_phone.sign_key(),
-            &vault,
-            &a.device_id(),
-            &new_phone.kem_public(),
-        ),
+        sign_join_consent(new_phone, &vault, &a.device_id()),
         Some((e1, &k1)),
     )
     .unwrap();
@@ -348,7 +343,7 @@ fn e6_reader_duty_rewraps_for_concurrent_add_and_rotate() {
             deps,
             dev.device_id(),
             dev.kem_public(),
-            sign_join_consent(dev.sign_key(), &vault, &r0.recovery_id(), &dev.kem_public()),
+            sign_join_consent(dev, &vault, &r0.recovery_id()),
             Some((e0, &k0)),
         )
         .unwrap();
@@ -366,12 +361,7 @@ fn e6_reader_duty_rewraps_for_concurrent_add_and_rotate() {
         heads_before.clone(),
         newcomer.device_id(),
         newcomer.kem_public(),
-        sign_join_consent(
-            newcomer.sign_key(),
-            &vault,
-            &a.device_id(),
-            &newcomer.kem_public(),
-        ),
+        sign_join_consent(newcomer, &vault, &a.device_id()),
         Some((e0, &k0)),
     )
     .unwrap();

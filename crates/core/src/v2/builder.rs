@@ -15,8 +15,8 @@ use super::crypto::{
 };
 use super::epoch::{EpochError, EpochGraph, EpochKeyring};
 use super::frame::{
-    Frame, FrameError, FrameHeader, FrameKind, HEADER_LEN, MAX_BODY_LEN, MemberBody, MemberOp,
-    Rewrap, Rotate, member_body_wire_len, member_op_wire_len, rewrap_wire_len,
+    Frame, FrameError, FrameHeader, FrameKind, HEADER_LEN, JoinConsent, MAX_BODY_LEN, MemberBody,
+    MemberOp, Rewrap, Rotate, member_body_wire_len, member_op_wire_len, rewrap_wire_len,
 };
 use super::membership::ResolvedMembership;
 
@@ -231,7 +231,7 @@ pub fn build_add_frame(
     deps: Vec<FrameId>,
     device: DeviceId,
     device_kem: KemPublic,
-    consent: Signature,
+    consent: JoinConsent,
     inline_rewrap: Option<(EpochId, &EpochKey)>,
 ) -> Result<Frame, EpochError> {
     let author = author_secret.device_id();
@@ -242,6 +242,8 @@ pub fn build_add_frame(
     let op_len = 1
         + 32
         + 32
+        + 32
+        + 64
         + 64
         + 1
         + if inline_rewrap.is_some() {

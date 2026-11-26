@@ -42,10 +42,11 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
 }
 
-/// One incoming stream: whether item or label changes still need
-/// forwarding once it completes.
+/// One incoming stream: removals it delivered, and whether item or label
+/// changes still need forwarding once it completes.
 #[derive(Default)]
 pub struct Receiving {
+    stream: application::ReceiveStream,
     pending_forward: bool,
 }
 
@@ -68,13 +69,7 @@ impl SyncHandler for Handler {
             .with(|s| {
                 let ready = *self.0.ready.borrow();
                 let peer = s.device_of(&peer)?;
-                let history = missing_for(s, &peer, &peer_heads, ready)?;
-                let mut removed_by = self.0.removed_by.lock().unwrap_or_else(|e| e.into_inner());
-                match history.removed_by() {
-                    [] => removed_by.remove(&peer),
-                    vaults => removed_by.insert(peer, vaults.to_vec()),
-                };
-                Ok(history)
+                missing_for(s, &peer, &peer_heads, ready)
             })
             .map_err(handler_error)?;
         Ok(history.outgoing(|h| {
@@ -93,11 +88,14 @@ impl SyncHandler for Handler {
     ) -> Result<(), HandlerError> {
         let daemon = &self.0;
         let peer = daemon.with(|s| s.device_of(&peer)).map_err(handler_error)?;
-        let Receiving { pending_forward } = state;
+        let Receiving {
+            stream,
+            pending_forward,
+        } = state;
         daemon
             .with(|s| {
                 let ready = *daemon.ready.borrow();
-                let received = receive(s, &peer, entries, ready);
+                let received = receive(s, &peer, entries, ready, stream);
                 // Even an errored batch may have committed an earlier vault's removal.
                 daemon.refresh(s);
                 // Defer only item and label forwarding, not watcher delivery, admission
@@ -135,9 +133,10 @@ pub(super) fn receive(
     peer: &DeviceId,
     entries: Vec<Blob>,
     ready: bool,
+    stream: &mut application::ReceiveStream,
 ) -> Result<usize> {
     s.ensure_usable()?;
-    application::receive(s, peer, entries, ready)
+    application::receive(s, peer, entries, ready, stream)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,26 +266,19 @@ async fn sync_round(
             .into_iter()
             .map(|(id, _, result)| {
                 let device = s.device_info(&DeviceId::from_bytes(id), &connected);
-                // A peer that removed this device takes its membership
-                // frames and sends nothing back: name that, unless another
-                // vault is still shared.
+                // A removed device is told its removal and sent nothing
+                // else: say so, unless another vault is still shared.
                 let peer = DeviceId::from_bytes(id);
-                let by = daemon
-                    .removed_by
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&peer);
-                let by = by.unwrap_or_default();
                 let removed: Vec<&str> = s
                     .vaults
                     .values()
-                    .filter(|v| by.contains(&v.id()))
+                    .filter(|v| !v.is_member(&s.id) && (v.is_member(&peer) || v.was_removed(&s.id)))
                     .map(|v| v.name())
                     .collect();
                 let shares = s
                     .vaults
                     .values()
-                    .any(|v| !by.contains(&v.id()) && v.is_member(&s.id) && v.is_member(&peer));
+                    .any(|v| v.is_member(&s.id) && v.is_member(&peer));
                 let result = match result {
                     Ok(_) if !shares && !removed.is_empty() => Err(format!(
                         "rejected: this device was removed from {}",
@@ -660,7 +652,7 @@ mod tests {
     struct Plain(std::sync::Mutex<Loaded>, std::sync::atomic::AtomicUsize);
 
     impl SyncHandler for Plain {
-        type ReceiveState = ();
+        type ReceiveState = application::ReceiveStream;
 
         async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
             let s = self.0.lock().unwrap();
@@ -682,12 +674,12 @@ mod tests {
             &self,
             peer: PeerId,
             entries: Vec<Blob>,
-            _: &mut (),
+            stream: &mut application::ReceiveStream,
             _: bool,
         ) -> Result<(), HandlerError> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut s = self.0.lock().unwrap();
-            receive(&mut s, &DeviceId::from_bytes(peer), entries, true)
+            receive(&mut s, &DeviceId::from_bytes(peer), entries, true, stream)
                 .map(drop)
                 .map_err(handler_error)
         }
@@ -826,6 +818,7 @@ mod tests {
                 blob(&source, removal),
             ],
             true,
+            &mut Default::default(),
         )
         .unwrap();
         assert!(added >= 1);
@@ -898,7 +891,7 @@ mod tests {
         let mut batch = vec![r.removal.clone()];
         batch.extend(r.before.iter().map(|(_, b)| b.clone()));
         batch.push(r.after.1.clone());
-        let added = receive(&mut r.target, &peer, batch, true).unwrap();
+        let added = receive(&mut r.target, &peer, batch, true, &mut Default::default()).unwrap();
         assert_eq!(added, 4);
         let vault = r.target.vault(&r.id);
         assert!(!vault.is_member(&peer));
@@ -910,11 +903,11 @@ mod tests {
         // The honest member's later write counts whoever relays it: the peer
         // couldn't read or forge it, only pass it on.
         assert!(has(r.after.0));
-        // Once the removal is known, a write the peer made before learning
-        // of it never counts: the fold cuts its data at the removal, though
-        // the frame is held (later member frames may depend on it).
+        // Once the removal is known, nothing more from the peer is accepted,
+        // not even a write it made before learning of it.
         let late = vec![r.late.1.clone()];
-        receive(&mut r.target, &peer, late, true).unwrap();
+        let added = receive(&mut r.target, &peer, late, true, &mut Default::default()).unwrap();
+        assert_eq!(added, 0);
         assert!(
             r.target
                 .vault(&r.id)
@@ -1140,9 +1133,23 @@ mod tests {
         let entry = blob(&source, frame);
         let peer = loaded.id;
         let heads = hello(&loaded, &peer, None).unwrap();
-        receive(&mut loaded, &peer, vec![entry.clone()], false).unwrap();
+        receive(
+            &mut loaded,
+            &peer,
+            vec![entry.clone()],
+            false,
+            &mut Default::default(),
+        )
+        .unwrap();
         assert!(loaded.vault(&id).items().is_empty());
-        receive(&mut loaded, &peer, vec![entry.clone()], true).unwrap();
+        receive(
+            &mut loaded,
+            &peer,
+            vec![entry.clone()],
+            true,
+            &mut Default::default(),
+        )
+        .unwrap();
         assert!(
             missing_for(&mut loaded, &peer, &heads, false)
                 .unwrap()

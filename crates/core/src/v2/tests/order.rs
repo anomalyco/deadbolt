@@ -49,12 +49,7 @@ fn build_random_history(steps: &[Step]) -> (VaultId, Vec<Frame>, Vec<FraudProof>
         vec![create.id()],
         p.devices[0].device_id(),
         p.devices[0].kem_public(),
-        sign_join_consent(
-            p.devices[0].sign_key(),
-            &vault,
-            &p.roots[0].recovery_id(),
-            &p.devices[0].kem_public(),
-        ),
+        sign_join_consent(&p.devices[0], &vault, &p.roots[0].recovery_id()),
         None,
     )
     .unwrap();
@@ -67,12 +62,7 @@ fn build_random_history(steps: &[Step]) -> (VaultId, Vec<Frame>, Vec<FraudProof>
         vec![add0.id()],
         p.devices[1].device_id(),
         p.devices[1].kem_public(),
-        sign_join_consent(
-            p.devices[1].sign_key(),
-            &vault,
-            &p.roots[0].recovery_id(),
-            &p.devices[1].kem_public(),
-        ),
+        sign_join_consent(&p.devices[1], &vault, &p.roots[0].recovery_id()),
         None,
     )
     .unwrap();
@@ -117,8 +107,7 @@ fn build_random_history(steps: &[Step]) -> (VaultId, Vec<Frame>, Vec<FraudProof>
             // Add device.
             0..=2 => {
                 let dev = &p.devices[(step.target as usize) % p.devices.len()];
-                let consent =
-                    sign_join_consent(dev.sign_key(), &vault, &author_id, &dev.kem_public());
+                let consent = sign_join_consent(dev, &vault, &author_id);
                 // Signed directly, not through `build_add_frame`: the generator is adversarial
                 // and must keep producing re-adds of removed devices for the resolver to judge.
                 if let Ok(f) = Frame::sign_member(

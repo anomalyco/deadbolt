@@ -100,7 +100,7 @@ fn scene(devices: &[&DeviceKeys]) -> (Scene, EpochKey) {
             vec![prev],
             dev.device_id(),
             dev.kem_public(),
-            sign_join_consent(dev.sign_key(), &vault, &r0.recovery_id(), &dev.kem_public()),
+            sign_join_consent(dev, &vault, &r0.recovery_id()),
             Some((e0, &k0)),
         )
         .unwrap();
@@ -280,7 +280,7 @@ fn a_fake_back_link_does_not_suppress_a_rewrap() {
         vec![rem_b.id()],
         c.device_id(),
         c.kem_public(),
-        sign_join_consent(c.sign_key(), &vault, &a.device_id(), &c.kem_public()),
+        sign_join_consent(c, &vault, &a.device_id()),
         None,
     )
     .unwrap();

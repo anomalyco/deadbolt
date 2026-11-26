@@ -32,7 +32,7 @@ pub fn pack_input(pack: &Pack, place: PackPlace) -> Result<PackInput> {
         let hit = ViewerHit::from_head(&head);
         items.push(PackItem {
             keys: keys_of(item.id.as_bytes(), hit.as_ref())?,
-            head: zeroize::Zeroizing::new(item.head),
+            head: item.head,
             secret: item.secret,
         });
     }

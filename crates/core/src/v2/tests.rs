@@ -401,12 +401,7 @@ fn e1_atomicity_and_non_canonical_deps_rejected() {
     assert!(matches!(bad_remove, Err(FrameError::InvalidStructure(_))));
 
     // Add WITH Rotate rejected (E1).
-    let consent = sign_join_consent(
-        dev.sign_key(),
-        &vault,
-        &root_sk.device_id(),
-        &dev.kem_public(),
-    );
+    let consent = sign_join_consent(&dev, &vault, &root_sk.device_id());
     let dummy_rot = Rotate {
         suite: SUITE_X25519_WRAP,
         parents: vec![EpochId::from_frame_id(create.id())],
@@ -433,11 +428,16 @@ fn e1_atomicity_and_non_canonical_deps_rejected() {
     assert!(matches!(bad_add, Err(FrameError::InvalidStructure(_))));
 
     // Add with wrong-kem consent rejected.
-    let wrong_kem_consent = sign_join_consent(
+    let mut wrong_kem_consent = sign_join_consent(&dev, &vault, &root_sk.device_id());
+    wrong_kem_consent.consent = sign(
         dev.sign_key(),
-        &vault,
-        &root_sk.device_id(),
-        &KemPublic::from_bytes([0x99; 32]),
+        &join_consent_message(
+            &vault,
+            &root_sk.device_id(),
+            &dev.device_id(),
+            &KemPublic::from_bytes([0x99; 32]),
+            &dev.net_public(),
+        ),
     );
     let bad_consent = build_add_frame(
         &root_sk,
@@ -453,6 +453,58 @@ fn e1_atomicity_and_non_canonical_deps_rejected() {
     );
     assert!(matches!(
         bad_consent,
+        Err(EpochError::Frame(FrameError::InvalidConsent))
+    ));
+
+    // A transport key the device didn't prove it holds is rejected: another
+    // device's key, with only the joiner's own signatures.
+    let other = DeviceKeys::from_seed(&[0x77; 32]);
+    let mut stolen_net = sign_join_consent(&dev, &vault, &root_sk.device_id());
+    stolen_net.net = other.net_public();
+    stolen_net.consent = sign(
+        dev.sign_key(),
+        &join_consent_message(
+            &vault,
+            &root_sk.device_id(),
+            &dev.device_id(),
+            &dev.kem_public(),
+            &other.net_public(),
+        ),
+    );
+    let claimed = build_add_frame(
+        &root_sk,
+        vault,
+        &view(&[&create]),
+        1,
+        create.id(),
+        vec![create.id()],
+        dev.device_id(),
+        dev.kem_public(),
+        stolen_net,
+        None,
+    );
+    assert!(matches!(
+        claimed,
+        Err(EpochError::Frame(FrameError::InvalidConsent))
+    ));
+    // Nor may an inviter swap the joiner's key after it signed.
+    let mut swapped = sign_join_consent(&dev, &vault, &root_sk.device_id());
+    swapped.net = other.net_public();
+    swapped.net_proof = other.net_key().sign(&net_binding_message(&dev.device_id()));
+    let swapped = build_add_frame(
+        &root_sk,
+        vault,
+        &view(&[&create]),
+        1,
+        create.id(),
+        vec![create.id()],
+        dev.device_id(),
+        dev.kem_public(),
+        swapped,
+        None,
+    );
+    assert!(matches!(
+        swapped,
         Err(EpochError::Frame(FrameError::InvalidConsent))
     ));
 
@@ -502,7 +554,7 @@ fn e2_bad_commit_and_graft1_recovery_repair_rewrap() {
         vec![create.id()],
         a.device_id(),
         a.kem_public(),
-        sign_join_consent(a.sign_key(), &vault, &root_id, &a.kem_public()),
+        sign_join_consent(&a, &vault, &root_id),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -515,7 +567,7 @@ fn e2_bad_commit_and_graft1_recovery_repair_rewrap() {
         vec![add_a.id()],
         b.device_id(),
         b.kem_public(),
-        sign_join_consent(b.sign_key(), &vault, &root_id, &b.kem_public()),
+        sign_join_consent(&b, &vault, &root_id),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -658,7 +710,7 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
         vec![create.id()],
         a.device_id(),
         a.kem_public(),
-        sign_join_consent(a.sign_key(), &vault, &root_id, &a.kem_public()),
+        sign_join_consent(&a, &vault, &root_id),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -671,7 +723,7 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
         vec![add_a.id()],
         b.device_id(),
         b.kem_public(),
-        sign_join_consent(b.sign_key(), &vault, &root_id, &b.kem_public()),
+        sign_join_consent(&b, &vault, &root_id),
         Some((e0, &k0)),
     )
     .unwrap();

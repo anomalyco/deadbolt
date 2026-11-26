@@ -391,43 +391,50 @@ impl Engine {
             .collect()
     }
 
-    /// The transport key (`D_net`) `device` named in a held vault's
-    /// `DeviceCard`: the iroh id it is dialed and admitted by.
+    /// The transport key (`D_net`) `device` signed into its `Add` in a held
+    /// vault: the iroh id it is dialed and admitted by.
     pub fn net_of(&self, device: &DeviceId) -> Option<PeerId> {
         self.vaults
             .values()
-            .find_map(|v| v.device_card(device).map(|(net, _)| *net.as_bytes()))
+            .find_map(|v| v.device_net(device).map(|net| *net.as_bytes()))
     }
 
-    /// The device, member or removed, whose card names the transport key
-    /// `net`, if exactly one held vault's cards agree on it.
+    /// The device, member or removed, whose transport key is `net`, if
+    /// every held vault that knows the key agrees. A key is bound only by
+    /// its holder's signature, so this holds unless one holder speaks for
+    /// two devices.
     pub fn device_for_net(&self, net: &PeerId) -> Option<DeviceId> {
         let mut found = self.vaults.values().filter_map(|v| v.device_with_net(net));
         let first = found.next()?;
         found.all(|d| d == first).then_some(first)
     }
 
-    /// The transport keys of every other member: who this device dials.
+    /// The transport keys of every other member, from every held vault:
+    /// who this device dials.
     pub fn peer_nets(&self) -> HashSet<PeerId> {
-        self.peer_set()
-            .into_iter()
-            .filter_map(|id| self.net_of(&DeviceId::from_bytes(id)))
+        self.vaults
+            .values()
+            .flat_map(|v| {
+                v.members()
+                    .filter(|d| *d != self.id)
+                    .filter_map(|d| v.device_net(&d))
+                    .map(|net| *net.as_bytes())
+            })
             .collect()
     }
 
     /// Who the membership gate admits: every other member, and every device
     /// a held vault removed, which may still push membership frames only
-    /// (`deadbolt_net::application::hello`), so a removal that lost to its
+    /// (`deadbolt_net::application::receive`), so a removal that lost to its
     /// target's concurrent one can be undone without a third device.
     pub fn admitted_nets(&self) -> HashSet<PeerId> {
         let mut nets = self.peer_nets();
-        nets.extend(
-            self.vaults
-                .values()
-                .flat_map(|v| v.removed_devices())
+        nets.extend(self.vaults.values().flat_map(|v| {
+            v.removed_devices()
                 .filter(|d| *d != self.id)
-                .filter_map(|d| self.net_of(&d)),
-        );
+                .filter_map(|d| v.device_net(&d))
+                .map(|net| *net.as_bytes())
+        }));
         nets
     }
 

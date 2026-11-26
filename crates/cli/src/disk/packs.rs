@@ -62,11 +62,19 @@ impl Unlocked {
     }
 }
 
-/// Opens sealed pack bytes with the key of the epoch their header names:
-/// the trailer must verify and every record open.
-pub fn open_pack(sealed: &[u8], key_for: &dyn Fn(&EpochId) -> Option<EpochKey>) -> Result<Pack> {
+/// Opens sealed pack bytes of `vault` with the key of the epoch their
+/// header names: the header must name `vault`, the trailer verify and
+/// every record open.
+pub fn open_pack(
+    sealed: &[u8],
+    vault: VaultId,
+    key_for: &dyn Fn(&EpochId) -> Option<EpochKey>,
+) -> Result<Pack> {
     let header =
         PackHeader::decode(sealed).ok_or_else(|| Error::corrupt("not a checkpoint pack"))?;
+    if header.vault != *vault.as_bytes() {
+        return Err(Error::corrupt("the pack belongs to another vault"));
+    }
     let epoch = EpochId::from_bytes(header.epoch);
     let key = key_for(&epoch).ok_or_else(|| Error::corrupt("no key for the pack's epoch"))?;
     let blocks = MemBlocks::new();

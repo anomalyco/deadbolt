@@ -365,8 +365,18 @@ impl FoldedState {
                         net_pk: *net_pk,
                         label: label.clone(),
                     };
-                    let write = Write { dot, index, value };
+                    let own = dot.author == *device;
                     let reg = self.device_cards.entry(*device).or_default();
+                    // A device's own card outranks its adder's, however they
+                    // are ordered: an adder's counts only while the device has
+                    // none of its own.
+                    if !own && reg.writes().iter().any(|w| w.dot.author == *device) {
+                        continue;
+                    }
+                    if own {
+                        reg.writes.retain(|w| w.dot.author == *device);
+                    }
+                    let write = Write { dot, index, value };
                     reg.insert(write, book);
                 }
                 DataOp::Dispute {

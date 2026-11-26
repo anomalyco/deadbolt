@@ -47,8 +47,8 @@ pub use crypto::{
     NONCE_LEN, NetPublic, NetSecret, PADME_FLOOR, RecoverySecret, SUITE_X25519_WRAP,
     SUITE_XWING_RESERVED, TAG_LEN, WRAP_LEN, aead_open, aead_seal, derive_frame_id,
     derive_vault_id, open_back_link, padme_pad, padme_padded_len, padme_unpad, seal_back_link,
-    sign, unwrap_epoch_key, verify_recovery_wrap, verify_strict, wrap_epoch_key, wrap_info,
-    wrap_recovery_epoch_key,
+    sign, unwrap_epoch_key, verify_net, verify_recovery_wrap, verify_strict, wrap_epoch_key,
+    wrap_info, wrap_recovery_epoch_key,
 };
 pub use data::{
     DataBody, DataFrame, DataOp, DataPayload, FieldValue, MAX_FIELD_VALUE_LEN, MAX_LABEL_LEN,
@@ -63,10 +63,11 @@ pub use fold::{
     fold_from_checkpoint, fold_from_scratch, resolved_frames, uncounted_own_frames,
 };
 pub use frame::{
-    Frame, FrameError, FrameHeader, FrameKind, FrameWitness, HEADER_LEN, LogKind, MAGIC,
-    MAX_BACK_LINKS, MAX_BODY_LEN, MAX_DEPS, MAX_PARENTS, MAX_WRAPS, MIN_FRAME_LEN,
+    Frame, FrameError, FrameHeader, FrameKind, FrameWitness, HEADER_LEN, JoinConsent, LogKind,
+    MAGIC, MAX_BACK_LINKS, MAX_BODY_LEN, MAX_DEPS, MAX_PARENTS, MAX_WRAPS, MIN_FRAME_LEN,
     MIN_SEALED_BODY_LEN, SIGNATURE_LEN, WITNESS_LEN, frame_signature_message, join_consent_message,
-    rotate_recovery_consent_message, sign_join_consent, sign_rotate_recovery_consent,
+    net_binding_message, rotate_recovery_consent_message, sign_join_consent,
+    sign_rotate_recovery_consent,
 };
 pub use fraud::{FRAUD_PROOF_LEN, FraudError, FraudProof, VerifiedFraud, detect_fraud_in_frames};
 pub use gc::{

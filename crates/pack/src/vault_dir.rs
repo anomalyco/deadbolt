@@ -185,7 +185,7 @@ impl<B: Blocks> VaultDir<B> {
         Ok(PackSummary {
             header,
             id: header.id(),
-            hash,
+            trailer: hash,
             len: bytes.len() as u64,
         })
     }

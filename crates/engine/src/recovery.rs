@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use deadbolt_core::v2::{
-    DeviceKeys, FRAUD_PROOF_LEN, Frame, FraudProof, Pack, ParkingReason, RecoverySecret,
+    DeviceKeys, FRAUD_PROOF_LEN, Frame, FrameId, FraudProof, Pack, ParkingReason, RecoverySecret,
 };
 use deadbolt_core::{DeviceId, PackSite, Vault, VaultId, parking_message, recovery};
 use deadbolt_proto::daemon::{ParkedReason, VaultState};
@@ -117,14 +117,21 @@ impl Engine {
 
     /// Installs a checkpoint pack fetched whole (its `sealed` bytes, which
     /// `site` names) as `vault`'s base, re-sealing it as this device's own
-    /// generation if the store can't take it byte for byte.
+    /// generation if the store can't take it byte for byte. Refuses a pack
+    /// that `checkpoint` (counted, undisputed, still valid) doesn't commit
+    /// to.
     pub fn adopt_pack(
         &mut self,
         vault: VaultId,
+        checkpoint: FrameId,
         pack: Pack,
         sealed: &[u8],
         site: &PackSite,
     ) -> Result<()> {
+        let held = self.vaults.get(&vault).context("vault not held")?;
+        if !held.verify_base(&checkpoint, &pack, sealed) {
+            bail!("the checkpoint is disputed, no longer counts, or does not commit to that pack");
+        }
         if self.store().keeps_packs() && self.store().install_pack(vault, sealed).is_err() {
             let fresh = self.store().seal_pack(&pack, site)?;
             self.store().install_pack(vault, &fresh)?;
@@ -132,37 +139,46 @@ impl Engine {
         self.vaults
             .get_mut(&vault)
             .context("vault not held")?
-            .set_base(pack);
+            .set_base(checkpoint, pack);
         self.changes.vaults = true;
         self.changes.items.insert(vault);
         Ok(())
     }
 
     /// Takes on a vault rebuilt from its recovery kit: `frames` hold this
-    /// device's admission by the root, `base` the checkpoint pack its
-    /// folded state starts from (when the store collected older frames).
-    /// Stores it, then signs this device's card.
+    /// device's admission by the root, `base` the checkpoint (and its pack)
+    /// its folded state starts from (when the store collected older frames),
+    /// `proofs` the store's fraud proofs. Stores it, then signs this
+    /// device's card.
     pub fn adopt_recovered(
         &mut self,
         frames: Vec<Frame>,
-        base: Option<(Pack, Vec<u8>, PackSite)>,
+        base: Option<(FrameId, Pack, Vec<u8>, PackSite)>,
+        proofs: Vec<FraudProof>,
     ) -> Result<VaultId> {
         let id = frames
             .first()
             .map(|f| f.header().vault)
             .context("no frames")?;
-        if self.vaults.contains_key(&id) {
+        self.available(id)?;
+        if self.contains_vault(&id) {
             bail!("this device already holds that vault");
         }
         let keys: DeviceKeys = self.keys();
-        let vault = Vault::open(&keys, frames.iter().cloned())?;
+        let mut vault = Vault::open(&keys, frames.iter().cloned())?;
+        // Proofs first: an equivocating author must be judged before this
+        // device signs anything on the fold.
+        vault.add_proofs(proofs);
         if !vault.is_member(&self.id) {
             bail!("the recovered vault does not admit this device");
         }
-        self.store.append(id, &mut frames.iter())?;
+        let result = self.store.append(id, &mut frames.iter());
+        self.check_append(result)?;
         self.vaults.insert(id, vault);
-        if let Some((pack, sealed, site)) = base {
-            self.adopt_pack(id, pack, &sealed, &site)?;
+        self.save_proofs(&id)?;
+        self.save_removed(&id)?;
+        if let Some((checkpoint, pack, sealed, site)) = base {
+            self.adopt_pack(id, checkpoint, pack, &sealed, &site)?;
         }
         let label = self.meta.device_name.clone();
         self.update(id, |w, a| {

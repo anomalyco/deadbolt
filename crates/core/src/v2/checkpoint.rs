@@ -275,8 +275,13 @@ pub fn pack_matches(
     pack: &Pack,
     seen: PackCommitment,
 ) -> bool {
-    seen == payload.pack_commitment()
-        && pack.meta.validate(&pack.state).is_ok()
+    seen == payload.pack_commitment() && content_matches(k_mac, payload, pack)
+}
+
+/// [`pack_matches`] without the file: `pack` holds what `payload` commits to, however it
+/// was sealed (this device re-seals a pack its store couldn't take byte for byte).
+pub fn content_matches(k_mac: &[u8; 32], payload: &CheckpointPayload, pack: &Pack) -> bool {
+    pack.meta.validate(&pack.state).is_ok()
         && pack.meta.frontier == payload.frontier_map()
         && state_mac(k_mac, &pack.state).is_ok_and(|mac| mac == payload.state_mac)
 }

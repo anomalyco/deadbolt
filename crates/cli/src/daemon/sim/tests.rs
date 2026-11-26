@@ -570,8 +570,9 @@ async fn outgoing_catchup_is_a_snapshot_and_rechecks_revocation() {
         .unwrap();
     assert!(full.len() > expected.len());
     assert!(full.starts_with(&expected));
+    // Revoked mid-stream: nothing more is sent, the stream just ends.
     world.step(&Action::Remove(1)).unwrap();
-    assert!(revoked.next().unwrap().is_err());
+    assert!(revoked.next().is_none());
     world.check().unwrap();
 }
 

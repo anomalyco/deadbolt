@@ -35,13 +35,13 @@ mod updates;
 mod watch_tests;
 mod watchers;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use deadbolt_core::{DeviceId, VaultId};
+use deadbolt_core::DeviceId;
 use deadbolt_engine::{autofill, generate, items};
 use deadbolt_net::{Membership, Node, NodeConfig, PeerId};
 use tokio::sync::{Notify, mpsc, watch};
@@ -124,8 +124,6 @@ pub struct Daemon {
     /// Short cooldown after a user-cancelled Touch ID prompt so rapid window
     /// focus or summon events do not immediately re-prompt.
     biometric_cooldown_until: Mutex<Option<Instant>>,
-    /// Per peer, the vaults its last hello said removed this device.
-    removed_by: Mutex<HashMap<DeviceId, Vec<VaultId>>>,
     /// The one Touch ID prompt verifying a passkey ceremony, cancelled with
     /// the unlock prompt.
     passkey_prompt: Mutex<Option<Arc<biometric::CancelHandle>>>,
@@ -177,7 +175,6 @@ impl Daemon {
             biometric_slot: Mutex::new(initial_slot),
             biometric_flight: Mutex::default(),
             biometric_cooldown_until: Mutex::default(),
-            removed_by: Mutex::default(),
             passkey_prompt: Mutex::default(),
             #[cfg(test)]
             touch_id_available_override: Mutex::default(),

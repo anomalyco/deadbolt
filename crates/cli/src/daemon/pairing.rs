@@ -128,16 +128,6 @@ pub(super) fn adopt(s: &mut Loaded, welcomed: Welcomed) -> Result<VaultInfo> {
     s.learn(&inviter, Some(&inviter_name), inviter_addr, peers);
     let id = vault.id();
     s.add_vault(vault)?;
-    // This device's own card: the inviter's says the same, but it is the
-    // inviter's data, which a removal of the inviter can cut. Members who
-    // never got that one still learn this device's transport key from its
-    // own log, relayed by whoever holds it (`application::receive`).
-    let label = deadbolt_net::application::State::device_name(s).to_owned();
-    if let Err(error) = s.update(id, |v, a| {
-        Ok(v.card(a, a.id(), a.keys().net_public(), &label)?)
-    }) {
-        tracing::warn!(vault = %id, "writing this device's card: {error:#}");
-    }
     Ok(s.vault_info(&id))
 }
 
@@ -865,12 +855,7 @@ mod tests {
         let (kem, net, consent, join) = b
             .with(|s| {
                 let keys = s.keys();
-                let consent = deadbolt_core::v2::sign_join_consent(
-                    keys.sign_key(),
-                    &vault,
-                    &a_dev,
-                    &keys.kem_public(),
-                );
+                let consent = deadbolt_core::v2::sign_join_consent(&keys, &vault, &a_dev);
                 let join = join_blob(&keys, "beta", a_dev, &vault, None)?;
                 Ok((keys.kem_public(), keys.net_public(), consent, join))
             })
@@ -923,8 +908,18 @@ mod tests {
         let (consent, join) = b
             .with(|s| {
                 let keys = s.keys();
-                let consent =
-                    deadbolt_core::v2::sign_join_consent(keys.sign_key(), &vault, &a_dev, &wrong);
+                // Consent to the wrong KEM key, signed as the joiner.
+                let mut consent = deadbolt_core::v2::sign_join_consent(&keys, &vault, &a_dev);
+                consent.consent = deadbolt_core::v2::sign(
+                    keys.sign_key(),
+                    &deadbolt_core::v2::join_consent_message(
+                        &vault,
+                        &a_dev,
+                        &keys.device_id(),
+                        &wrong,
+                        &keys.net_public(),
+                    ),
+                );
                 Ok((consent, join_blob(&keys, "beta", a_dev, &vault, None)?))
             })
             .unwrap();

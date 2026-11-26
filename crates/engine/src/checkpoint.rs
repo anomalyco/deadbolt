@@ -55,7 +55,7 @@ impl Engine {
         let made = self.check_append(result)?;
         self.store.install_pack(vault, &made.sealed)?;
         if let Some(v) = self.vaults.get_mut(&vault) {
-            v.set_base(made.pack);
+            v.set_base(made.frame, made.pack);
         }
         Ok(made.frame)
     }
@@ -74,7 +74,8 @@ impl Engine {
     }
 
     /// Installs the local pack the store holds for `vault`, if any, as its
-    /// fold's base.
+    /// fold's base: only while a counted, undisputed checkpoint commits to
+    /// it and the membership still counts what it covers.
     pub(crate) fn load_base(&mut self, vault: VaultId) -> Result<()> {
         let Some(sealed) = self.store().load_pack(vault)? else {
             return Ok(());
@@ -82,9 +83,11 @@ impl Engine {
         let held = &self.vaults[&vault];
         let pack = self
             .store()
-            .open_pack(&sealed, &|epoch| held.epoch_key(epoch).cloned())?;
-        if let Some(v) = self.vaults.get_mut(&vault) {
-            v.set_base(pack);
+            .open_pack(&sealed, vault, &|epoch| held.epoch_key(epoch).cloned())?;
+        if let Some(v) = self.vaults.get_mut(&vault)
+            && v.adopt_local_base(pack).is_none()
+        {
+            tracing::warn!(vault = %vault, "no counted, undisputed checkpoint holds the local pack; folding from genesis");
         }
         Ok(())
     }

@@ -6,12 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 
 use crate::error::Error;
-use crate::id::{DeviceId, DeviceSecret, ItemId, Signature};
+use crate::id::{DeviceId, DeviceSecret, ItemId};
 use crate::item::{Field, ItemError};
 use crate::ops::{DataOp, valid_name};
 use crate::v2::{
-    self, DataPayload, DeviceKeys, EpochId, EpochKey, Frame, FrameId, KemPublic, KemSecret,
-    LogKind, NetPublic, RecoverySecret, VectorClock, WriteEpochDecision, honest_clock, next_dclock,
+    self, DataPayload, DeviceKeys, EpochId, EpochKey, Frame, FrameId, FrameKind, KemPublic,
+    KemSecret, LogKind, NetPublic, RecoverySecret, VectorClock, WriteEpochDecision, honest_clock,
+    next_dclock,
 };
 
 use super::{Vault, view};
@@ -50,13 +51,8 @@ impl Author {
     }
 
     /// This device's consent to join `vault` through `inviter`.
-    pub fn join_consent(&self, vault: &crate::VaultId, inviter: &DeviceId) -> Signature {
-        v2::sign_join_consent(
-            self.keys.sign_key(),
-            vault,
-            inviter,
-            &self.keys.kem_public(),
-        )
+    pub fn join_consent(&self, vault: &crate::VaultId, inviter: &DeviceId) -> v2::JoinConsent {
+        v2::sign_join_consent(&self.keys, vault, inviter)
     }
 }
 
@@ -162,7 +158,103 @@ impl<'a> VaultWrite<'a> {
     /// Applies frames from a peer, opening what they wrap to `kem` (this
     /// device's KEM secret, lent for the call). Returns how many were new.
     pub fn apply(&mut self, kem: &KemSecret, frames: Vec<Frame>) -> Result<usize, Error> {
+        let frames = self.admissible(frames);
         Ok(self.stage(frames, Some(kem))?.len())
+    }
+
+    /// The frames from a peer this vault may hold. Not one signed by a key
+    /// no membership frame names (held, or in the batch from someone it
+    /// names), so a stranger can't fill the vault toward `MAX_FRAMES`. Of
+    /// a removed device's, at most [`MAX_REMOVED_UNAUTHORIZED`] membership
+    /// frames that don't count and as many data frames past its removal's
+    /// cutoff (none of which count). They aren't refused outright: a member
+    /// that took them before it heard of the removal holds them, and every
+    /// replica must still converge on the same frames.
+    fn admissible(&self, frames: Vec<Frame>) -> Vec<Frame> {
+        let named = |f: &Frame| -> Vec<DeviceId> {
+            match f.member_body().and_then(|b| b.op.as_ref()) {
+                Some(v2::MemberOp::Add { device, .. }) => vec![*device],
+                Some(v2::MemberOp::RotateRecovery { new, .. }) => vec![*new],
+                Some(v2::MemberOp::Create { .. }) if f.header().seq == 0 => {
+                    vec![f.header().author]
+                }
+                _ => Vec::new(),
+            }
+        };
+        let mut known: BTreeSet<DeviceId> = self
+            .resolved
+            .devices
+            .iter()
+            .chain(self.resolved.removed.keys())
+            .chain(&self.resolved.recovery_lineage)
+            .copied()
+            .collect();
+        // A removed device's frames never vouch for a new signer.
+        let vouches = |f: &&Frame| !self.resolved.removed.contains_key(&f.header().author);
+        known.extend(self.members.values().filter(vouches).flat_map(named));
+        if self.members.is_empty() {
+            known.extend(
+                frames
+                    .iter()
+                    .filter(|f| f.header().seq == 0)
+                    .flat_map(named),
+            );
+        }
+        // Someone the batch's own frames name, signed by someone known.
+        loop {
+            let before = known.len();
+            let more: Vec<DeviceId> = frames
+                .iter()
+                .filter(|f| f.header().kind == FrameKind::Member)
+                .filter(|f| known.contains(&f.header().author))
+                .filter(vouches)
+                .flat_map(named)
+                .collect();
+            known.extend(more);
+            if known.len() == before {
+                break;
+            }
+        }
+        let past_cutoff = |f: &Frame| {
+            let h = f.header();
+            self.resolved
+                .removed
+                .get(&h.author)
+                .is_some_and(|cutoff| cutoff.is_none_or(|c| h.seq > c))
+        };
+        let mut unauthorized: BTreeMap<(DeviceId, LogKind), usize> = BTreeMap::new();
+        for f in self.members.values() {
+            let author = f.header().author;
+            if self.resolved.removed.contains_key(&author)
+                && !self.resolved.authorized_frames.contains(&f.id())
+            {
+                *unauthorized.entry((author, LogKind::Member)).or_default() += 1;
+            }
+        }
+        for f in self.data.values().filter(|f| past_cutoff(f)) {
+            *unauthorized
+                .entry((f.header().author, LogKind::Data))
+                .or_default() += 1;
+        }
+        frames
+            .into_iter()
+            .filter(|f| {
+                let h = f.header();
+                if !known.contains(&h.author) {
+                    return false;
+                }
+                let log = h.kind.log_kind();
+                if !self.resolved.removed.contains_key(&h.author)
+                    || (log == LogKind::Data && !past_cutoff(f))
+                    || self.frame(&f.id()).is_some()
+                {
+                    return true;
+                }
+                let count = unauthorized.entry((h.author, log)).or_default();
+                *count += 1;
+                *count <= MAX_REMOVED_UNAUTHORIZED
+            })
+            .collect()
     }
 
     /// Where `author`'s next frame in `log` goes: its seq and `prev`.
@@ -236,13 +328,21 @@ impl<'a> VaultWrite<'a> {
             .filter(|f| f.header().author == me)
             .max_by_key(|f| f.header().seq)
             .map(|f| f.header().epoch);
-        let decision = self.graph().select_write_epoch_with_parking(
-            &self.resolved,
-            &self.keyring,
-            &self.bad_epochs,
-            &self.previously_removed,
-            current,
-        );
+        // The recovery root settles what parks devices (a mutual removal, a
+        // reinstated device), so only a frozen lineage stops it.
+        let decision =
+            if self.resolved.active_recovery == Some(me) && !self.resolved.recovery_frozen {
+                self.graph()
+                    .select_write_epoch(&self.resolved, &self.keyring, &self.bad_epochs)
+            } else {
+                self.graph().select_write_epoch_with_parking(
+                    &self.resolved,
+                    &self.keyring,
+                    &self.bad_epochs,
+                    &self.previously_removed,
+                    current,
+                )
+            };
         let epoch = match decision {
             WriteEpochDecision::Use(e) => e,
             // Never seal under the epoch it had: a reinstated or contested
@@ -456,7 +556,7 @@ impl<'a> VaultWrite<'a> {
         author: &Author,
         device: DeviceId,
         kem: KemPublic,
-        consent: Signature,
+        consent: v2::JoinConsent,
     ) -> Result<FrameId, Error> {
         if !self.is_member(&author.id()) {
             return Err(Error::NotMember);
@@ -470,7 +570,7 @@ impl<'a> VaultWrite<'a> {
         signer: &DeviceSecret,
         device: DeviceId,
         kem: KemPublic,
-        consent: Signature,
+        consent: v2::JoinConsent,
     ) -> Result<FrameId, Error> {
         if self.was_removed(&device) {
             return Err(Error::AddRemovedDevice);
@@ -494,6 +594,11 @@ impl<'a> VaultWrite<'a> {
         Ok(self.stage(vec![frame], None)?[0])
     }
 }
+
+/// The most membership frames, and the most data frames past its removal,
+/// a removed device may have held that don't count: room for any honest
+/// removal race, a bound on a stolen device.
+pub const MAX_REMOVED_UNAUTHORIZED: usize = 256;
 
 /// The placed membership frames, minus `skip` and any voided fork frame,
 /// that none of the others names: what a new member frame depends on.

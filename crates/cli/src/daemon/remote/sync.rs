@@ -202,10 +202,11 @@ impl Daemon {
                 let Some((f, payload)) = v.checkpoints().find(|(f, _)| f.id == id) else {
                     return Ok(None);
                 };
-                if v.is_disputed(&id) {
+                let frontier = payload.frontier_map();
+                if v.is_disputed(&id) || v.contradicts(&frontier) {
                     return Ok(None);
                 }
-                let frontier = payload.frontier_map();
+                let needs_pack = !v.holds_frontier(&frontier);
                 let site = PackSite {
                     vault,
                     author: f.author,
@@ -216,14 +217,17 @@ impl Daemon {
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("no key"))?,
                 };
+                let collected =
+                    !needs_pack || collected_behind(v, &plan.index, anchor, f.author, &frontier);
                 Ok(Some((
                     frontier.clone(),
                     payload.pack_hash,
-                    !v.holds_frontier(&frontier),
+                    needs_pack,
+                    collected,
                     site,
                 )))
             })?;
-            let Some((frontier, pack_hash, needs_pack, site)) = found else {
+            let Some((frontier, pack_hash, needs_pack, collected, site)) = found else {
                 continue;
             };
             if needs_pack {
@@ -232,6 +236,13 @@ impl Daemon {
                     hash: pack_hash,
                 }
                 .to_name();
+                if !collected {
+                    anomalies.push(RemoteAnomaly::Mismatched {
+                        name,
+                        reason: "a checkpoint covers frames the store still lists or never showed",
+                    });
+                    continue;
+                }
                 let Some(sealed) = store.get(&name, None).await? else {
                     anomalies.push(RemoteAnomaly::Mismatched {
                         name,
@@ -240,13 +251,13 @@ impl Daemon {
                     continue;
                 };
                 let adopted = self.with(|s| {
-                    let pack = crate::disk::open_pack(&sealed, &|e| {
+                    let pack = crate::disk::open_pack(&sealed, vault, &|e| {
                         s.vaults[&vault].epoch_key(e).cloned()
                     })?;
-                    if !s.vaults[&vault].pack_matches(&id, &pack, &sealed) {
+                    if !s.vaults[&vault].verify_base(&id, &pack, &sealed) {
                         return Ok(false);
                     }
-                    s.adopt_pack(vault, pack, &sealed, &site)?;
+                    s.adopt_pack(vault, id, pack, &sealed, &site)?;
                     Ok(true)
                 })?;
                 if !adopted {
@@ -275,7 +286,11 @@ impl Daemon {
         if !rolled_back {
             self.publish(store, vault, anchor, &mut report, &mut anomalies)
                 .await?;
-            report.collected = self.collect(store, vault, anchor).await?;
+            // What the store holds now, the push included.
+            let names = store.list(&area_prefix(&vault, Area::Data), None).await?;
+            let index = deadbolt_remote::RemoteIndex::from_names(&vault, &names);
+            anomalies.extend(self.with(|s| Ok(withheld(&s.vaults[&vault], &index, anchor)))?);
+            report.collected = self.collect(store, vault, anchor, &index).await?;
         }
         report.anomalies = anomalies.iter().map(describe).collect();
         Ok(report)
@@ -294,8 +309,51 @@ impl Daemon {
         report: &mut deadbolt_proto::daemon::RemoteReport,
         anomalies: &mut Vec<RemoteAnomaly>,
     ) -> Result<()> {
+        let listed: BTreeSet<String> = store
+            .list(&area_prefix(&vault, Area::Pack), None)
+            .await?
+            .into_iter()
+            .collect();
+        let pack_listed =
+            |hash: [u8; 32]| listed.contains(&RemotePath::Pack { vault, hash }.to_name());
+        // A base the store lacks the pack of (a fresh store, a recovered
+        // vault whose pack this device re-sealed): the frames it covers are
+        // gone from here, so cover them with a checkpoint of this device's
+        // own, whose pack it holds byte for byte.
+        self.with(|s| {
+            let v = &s.vaults[&vault];
+            let Some(base) = base_pack_hash(v) else {
+                return Ok(());
+            };
+            let local = s
+                .store
+                .load_pack(vault)?
+                .map(|b| PackCommitment::of(&b).hash);
+            if !pack_listed(base) && local != Some(base) && v.is_member(&s.id) {
+                s.checkpoint(vault)?;
+            }
+            Ok(())
+        })?;
         let outbox = self.with(|s| {
             let v = &s.vaults[&vault];
+            let local = s.store.load_pack(vault)?;
+            let local_hash = local.as_ref().map(|b| PackCommitment::of(b).hash);
+            // This device's own older checkpoints its base covers, whose packs
+            // are gone: the base stands in for them, so they aren't pushed.
+            let base_me = v
+                .base_checkpoint()
+                .and_then(|id| v.checkpoints().find(|(f, _)| f.id == id))
+                .and_then(|(_, p)| p.frontier_map().get(&s.id).map(|(seq, _)| *seq));
+            let superseded: BTreeSet<FrameId> = v
+                .checkpoints()
+                .filter(|(f, p)| {
+                    f.author == s.id
+                        && Some(p.pack_hash) != local_hash
+                        && !pack_listed(p.pack_hash)
+                        && base_me.is_some_and(|seq| f.seq <= seq)
+                })
+                .map(|(f, _)| f.id)
+                .collect();
             let frames: Vec<_> = v
                 .frames()
                 .filter(|f| {
@@ -304,25 +362,26 @@ impl Daemon {
                     let collected = log == LogKind::Data
                         && anchor.compacted.get(&h.author).is_some_and(|c| h.seq <= *c);
                     !collected
+                        && !superseded.contains(&f.id())
                         && anchor
                             .tip(log, &h.author)
                             .is_none_or(|(seq, _)| h.seq > seq)
                 })
                 .cloned()
                 .collect();
-            let wanted: BTreeSet<[u8; 32]> = v
+            // The pack of every checkpoint pushed, and the base's if the
+            // store lacks it.
+            let mut wanted: BTreeSet<[u8; 32]> = v
                 .checkpoints()
                 .filter(|(f, _)| frames.iter().any(|x| x.id() == f.id))
                 .map(|(_, p)| p.pack_hash)
                 .collect();
+            wanted.extend(base_pack_hash(v).filter(|h| !pack_listed(*h)));
             let mut packs = Vec::new();
-            if !wanted.is_empty()
-                && let Some(sealed) = s.store.load_pack(vault)?
+            if let (Some(sealed), Some(hash)) = (local, local_hash)
+                && wanted.contains(&hash)
             {
-                let hash = PackCommitment::of(&sealed).hash;
-                if wanted.contains(&hash) {
-                    packs.push((hash, sealed));
-                }
+                packs.push((hash, sealed));
             }
             let frauds = v
                 .proofs()
@@ -363,25 +422,28 @@ impl Daemon {
     }
 
     /// Deletes the store's data frames behind the base checkpoint once
-    /// every current member's clock covers it (`plan_gc`). Only a
-    /// checkpoint whose pack this device holds can be the base.
+    /// every current member's clock covers it (`plan_gc`). Only the base's
+    /// own checkpoint can be the GC base: counted, undisputed, and with its
+    /// pack on the store, so whoever recovers later can fold from it.
     async fn collect<S: ObjStore + Sync>(
         &self,
         store: &S,
         vault: VaultId,
         anchor: &mut SyncAnchor,
+        index: &deadbolt_remote::RemoteIndex,
     ) -> Result<usize> {
         let now_ms = now().saturating_mul(1000);
-        // What the store holds now, the push included.
-        let names = store.list(&area_prefix(&vault, Area::Data), None).await?;
-        let index = &deadbolt_remote::RemoteIndex::from_names(&vault, &names);
+        let packs = store.list(&area_prefix(&vault, Area::Pack), None).await?;
         let gc = self.with(|s| {
             let v = &s.vaults[&vault];
-            let Some(base) = v.base() else {
+            let (Some(base), Some(base_id)) = (v.base(), v.base_checkpoint()) else {
                 return Ok(None);
             };
+            let stored =
+                |hash: [u8; 32]| packs.contains(&RemotePath::Pack { vault, hash }.to_name());
             let checkpoints: Vec<GcCheckpoint> = v
                 .checkpoints()
+                .filter(|(f, p)| f.id == base_id && !v.is_disputed(&f.id) && stored(p.pack_hash))
                 .filter(|(_, p)| p.frontier_map() == base.meta.frontier)
                 .map(|(f, _)| GcCheckpoint {
                     id: f.id,
@@ -447,6 +509,83 @@ impl Daemon {
         }
         Ok(names.len())
     }
+}
+
+/// Whether a pack may stand in for the data frames `frontier` covers
+/// (checkpoint `author`'s claim): the store shows some covered frame this
+/// device lacks is gone, so it was collected, and every frontier seq is
+/// evidenced by something other than the checkpoint itself (the store's
+/// listing, the anchor, this device's frames, or another member's clock).
+/// A full replica whose covered frames are all still listed never trades
+/// its history for a pack.
+pub(super) fn collected_behind(
+    v: &deadbolt_core::Vault,
+    index: &deadbolt_remote::RemoteIndex,
+    anchor: &SyncAnchor,
+    author: DeviceId,
+    frontier: &BTreeMap<DeviceId, (u64, FrameId)>,
+) -> bool {
+    let held: BTreeSet<(DeviceId, u64)> = v
+        .frames()
+        .filter(|f| f.header().kind.log_kind() == LogKind::Data)
+        .map(|f| (f.header().author, f.header().seq))
+        .collect();
+    let listed = |a: &DeviceId, seq: u64| {
+        index
+            .streams
+            .get(&(LogKind::Data, *a))
+            .is_some_and(|s| s.contains_key(&seq))
+    };
+    let clocks = v.member_clocks();
+    let cited = |a: &DeviceId| {
+        clocks
+            .iter()
+            .filter(|(m, _)| **m != author)
+            .filter_map(|(_, c)| c.get(a).checked_sub(1))
+            .max()
+    };
+    let evidenced = frontier.iter().all(|(a, (seq, _))| {
+        [
+            index.tip(LogKind::Data, a),
+            anchor.tip(LogKind::Data, a).map(|(s, _)| s),
+            anchor.compacted.get(a).copied(),
+            held.iter().filter(|(x, _)| x == a).map(|(_, s)| *s).max(),
+            cited(a),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|bound| bound >= *seq)
+    });
+    let gone = frontier
+        .iter()
+        .any(|(a, (seq, _))| (0..=*seq).any(|s| !held.contains(&(*a, s)) && !listed(a, s)));
+    evidenced && gone
+}
+
+/// The pack hash of the checkpoint `v`'s base belongs to.
+fn base_pack_hash(v: &deadbolt_core::Vault) -> Option<[u8; 32]> {
+    let id = v.base_checkpoint()?;
+    v.checkpoints()
+        .find(|(f, _)| f.id == id)
+        .map(|(_, p)| p.pack_hash)
+}
+
+/// Data frames a current member's clock cites that the store, listed after
+/// this device's push, neither holds nor may have collected.
+fn withheld(
+    v: &deadbolt_core::Vault,
+    index: &deadbolt_remote::RemoteIndex,
+    anchor: &SyncAnchor,
+) -> Vec<RemoteAnomaly> {
+    let tips = index.tips(LogKind::Data);
+    let mut out: Vec<RemoteAnomaly> = v
+        .member_clocks()
+        .values()
+        .flat_map(|clock| deadbolt_remote::check_withholding(clock, &tips, &anchor.compacted))
+        .collect();
+    out.sort_by_key(|a| format!("{a:?}"));
+    out.dedup();
+    out
 }
 
 /// Whether every own frame the store holds above the anchor is this

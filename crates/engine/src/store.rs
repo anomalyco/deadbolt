@@ -62,14 +62,15 @@ pub trait VaultStore: Send + Sync {
         Ok(None)
     }
 
-    /// Opens sealed pack bytes, local or fetched, with the key of the epoch
-    /// its header names.
+    /// Opens sealed pack bytes of `vault`, local or fetched, with the key
+    /// of the epoch its header names.
     fn open_pack(
         &self,
         sealed: &[u8],
+        vault: VaultId,
         key_for: &dyn Fn(&EpochId) -> Option<EpochKey>,
     ) -> Result<Pack> {
-        let _ = (sealed, key_for);
+        let _ = (sealed, vault, key_for);
         bail!("this store keeps no packs")
     }
 }
@@ -84,7 +85,9 @@ pub fn get_json<T: DeserializeOwned>(store: &dyn VaultStore, name: &str) -> Resu
 
 /// Writes `value` as the JSON metadata value `name`.
 pub fn set_json<T: Serialize>(store: &dyn VaultStore, name: &str, value: &T) -> Result<()> {
-    store.meta_set(name, &serde_json::to_vec(value)?)
+    // The value may be secret (a remote's credentials): wipe the bytes.
+    let bytes = Zeroizing::new(serde_json::to_vec(value)?);
+    store.meta_set(name, &bytes)
 }
 
 /// A store in memory, gone when dropped.

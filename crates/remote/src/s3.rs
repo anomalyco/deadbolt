@@ -44,11 +44,38 @@ pub struct S3Config {
 
 /// A request ready to send: method, full URL and every header but `host`
 /// (which the HTTP client derives from the URL exactly as signed).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignedRequest {
     pub method: &'static str,
     pub url: String,
     pub headers: Vec<(String, String)>,
+}
+
+/// Never prints the signature, the session token or the URL's query.
+impl std::fmt::Debug for SignedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = self
+            .url
+            .split_once('?')
+            .map_or(self.url.as_str(), |(path, _)| path);
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let secret = name.eq_ignore_ascii_case("authorization")
+                    || name.eq_ignore_ascii_case("x-amz-security-token");
+                (
+                    name.as_str(),
+                    if secret { "<redacted>" } else { value.as_str() },
+                )
+            })
+            .collect();
+        f.debug_struct("SignedRequest")
+            .field("method", &self.method)
+            .field("url", &url)
+            .field("headers", &headers)
+            .finish()
+    }
 }
 
 impl S3Config {
