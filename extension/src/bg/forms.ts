@@ -101,9 +101,14 @@ export class Forms {
   private filled = new Map<number, { card?: string; identity?: string; at: number }>()
 
   constructor(private host: VaultBackend) {
-    host.onChange(() => {
+    host.onChange((status) => {
       this.lists.clear()
       this.lockedShown.clear()
+      // Locked or gone: no menu may still pick, and no fill is remembered for a save.
+      if (status.state !== "ready") {
+        this.tokens.clear()
+        this.filled.clear()
+      }
     })
   }
 
