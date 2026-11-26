@@ -469,13 +469,23 @@ impl<'a> VaultWrite<'a> {
         author: &Author,
         ops: Vec<DataOp>,
     ) -> Result<(Vec<ItemId>, Vec<FrameId>), Error> {
+        self.write_ops_as(author, ops, |_| ItemId::random())
+    }
+
+    /// [`Self::write_ops`], creating the `i`th op's item under `new_id(i)`.
+    fn write_ops_as(
+        &mut self,
+        author: &Author,
+        ops: Vec<DataOp>,
+        mut new_id: impl FnMut(usize) -> ItemId,
+    ) -> Result<(Vec<ItemId>, Vec<FrameId>), Error> {
         view::check(|id| self.state.items.get(id), &ops)?;
         let mut ids = Vec::with_capacity(ops.len());
         let mut batches: Vec<Vec<v2::DataOp>> = vec![Vec::new()];
         let mut bytes = 0;
-        for op in &ops {
+        for (i, op) in ops.iter().enumerate() {
             let mut out = Vec::new();
-            ids.push(view::translate(op, ItemId::random(), &mut out));
+            ids.push(view::translate(op, new_id(i), &mut out));
             let len = op.encoded_len();
             if len > MAX_OP_LEN {
                 return Err(Error::TooLarge {
@@ -547,6 +557,33 @@ impl<'a> VaultWrite<'a> {
             return Ok((Vec::new(), Vec::new()));
         }
         self.write_ops(author, ops)
+    }
+
+    /// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+    ///
+    /// Creates items under the ids they had in a v1 vault, all or none, so
+    /// references by item id keep working once the vault moves to v2. Every
+    /// op must be a [`DataOp::Create`], every id new to this vault.
+    pub fn create_items_as(
+        &mut self,
+        author: &Author,
+        items: Vec<(ItemId, DataOp)>,
+    ) -> Result<Vec<FrameId>, Error> {
+        let mut seen = BTreeSet::new();
+        for (id, op) in &items {
+            if !matches!(op, DataOp::Create { .. })
+                || !seen.insert(*id)
+                || self.state.items.contains_key(id)
+            {
+                return Err(ItemError::NoSuchItem.into());
+            }
+        }
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (ids, ops): (Vec<ItemId>, Vec<DataOp>) = items.into_iter().unzip();
+        let (_, frames) = self.write_ops_as(author, ops, |i| ids[i])?;
+        Ok(frames)
     }
 
     /// Renames the vault.

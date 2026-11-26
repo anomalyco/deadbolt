@@ -1146,7 +1146,7 @@ pub fn check_new_value(name: &str, field: &Field) -> Result<(), ItemError> {
 }
 
 /// Checks a change to an existing item of type `kind`.
-pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError> {
+pub fn check_change(kind: &str, change: &Change) -> Result<(), ItemError> {
     let schema = schema(kind).ok_or_else(|| ItemError::UnknownType(kind.into()))?;
     match change {
         Change::Set { field, value } => check_field(schema, field, value),
