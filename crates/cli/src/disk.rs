@@ -7,7 +7,8 @@
 //! <data>/                       mode 0700
 //!   device/                     the device's own directory (a pseudo-vault, id 0)
 //!     local-<m>.sealed          seed + metadata, sealed under the device root,
-//!                               with the passphrase slot in its header
+//!                               with the passphrase slot in its header; the
+//!                               metadata holds each vault's rollback anchor
 //!     biometric.slot            the root wrapped under a platform key, beside
 //!                               its opaque token; created and deleted whole
 //!     activity-<k>.log          sealed Activity rows
@@ -32,6 +33,7 @@
 mod activity;
 mod kdf;
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,7 +42,9 @@ use std::sync::Mutex;
 use deadbolt_core::VaultId;
 use deadbolt_core::v2::{Frame, LogKind};
 use deadbolt_pack::local::{self, LocalState};
-use deadbolt_pack::{Blocks, DeviceRoot, FsBlocks, NoopAnchor, VaultDir};
+use deadbolt_pack::{
+    Blocks, DeviceRoot, FsBlocks, NoopAnchor, RollbackAnchor, RollbackToken, VaultDir,
+};
 pub use zeroize::Zeroizing;
 
 pub use activity::{Budget, Dropped};
@@ -88,6 +92,7 @@ impl From<deadbolt_pack::Error> for Error {
             e @ (deadbolt_pack::Error::CorruptLocal { .. }
             | deadbolt_pack::Error::CorruptLog { .. }
             | deadbolt_pack::Error::CorruptPack { .. }
+            | deadbolt_pack::Error::RollbackDetected { .. }
             | deadbolt_pack::Error::Decrypt) => Error::Corrupt(e.to_string()),
             e => Error::Pack(e),
         }
@@ -345,6 +350,49 @@ pub fn generate_biometric_key() -> Result<SecretKey> {
     kdf::random_key()
 }
 
+/// The device metadata name holding a vault's rollback anchor.
+fn anchor_name(vault: &VaultId) -> String {
+    format!("anchor/{vault}")
+}
+
+/// A vault's rollback anchor: the token of its newest local state, kept in
+/// the device's own sealed state, so deleting or restoring a vault's
+/// `local-<m>.sealed` is caught. `store` only records the token; the caller
+/// commits it to the device after the vault's commit (`record_anchor`), and a
+/// crash between the two is a commit one past the anchor, which pack's open
+/// accepts and heals.
+struct VaultAnchor {
+    anchored: Option<RollbackToken>,
+    stored: Cell<Option<RollbackToken>>,
+}
+
+impl VaultAnchor {
+    fn of(meta: &Meta, vault: &VaultId) -> Result<Self> {
+        let anchored = match meta.get(&anchor_name(vault)) {
+            Some(bytes) => Some(
+                RollbackToken::from_bytes(bytes)
+                    .ok_or_else(|| Error::corrupt("a vault's rollback anchor is malformed"))?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            anchored,
+            stored: Cell::new(None),
+        })
+    }
+}
+
+impl RollbackAnchor for VaultAnchor {
+    fn load(&self) -> deadbolt_pack::Result<Option<RollbackToken>> {
+        Ok(self.stored.get().or(self.anchored))
+    }
+
+    fn store(&self, token: &RollbackToken) -> deadbolt_pack::Result<()> {
+        self.stored.set(Some(*token));
+        Ok(())
+    }
+}
+
 /// One vault's directory and this device's state for it.
 struct Held {
     dir: VaultDir<FsBlocks>,
@@ -431,28 +479,45 @@ impl Unlocked {
         self.dir.join(VAULTS).join(vault.to_string())
     }
 
-    /// The vault's directory, opened (and created) on first use.
+    /// The vault's directory, opened (and created) on first use, its local
+    /// state checked against the anchor the device holds for it.
     fn held<'a>(&self, inner: &'a mut Inner, vault: VaultId) -> Result<&'a mut Held> {
-        use std::collections::btree_map::Entry;
-        Ok(match inner.vaults.entry(vault) {
-            Entry::Occupied(held) => held.into_mut(),
-            Entry::Vacant(slot) => {
-                let path = self.vault_dir(&vault);
-                create_private_dir(&path)?;
-                let (dir, _) = VaultDir::open(FsBlocks::open(path)?)?;
-                let local = local::open(
-                    dir.blocks(),
-                    &NoopAnchor,
-                    vault.as_bytes(),
-                    &self.device_root(),
-                )?;
-                let meta = match &local {
-                    Some(state) => decode_meta(&state.body)?,
-                    None => Meta::new(),
-                };
-                slot.insert(Held { dir, local, meta })
-            }
-        })
+        if !inner.vaults.contains_key(&vault) {
+            create_private_dir(&self.dir.join(VAULTS))?;
+            let path = self.vault_dir(&vault);
+            create_private_dir(&path)?;
+            let (dir, _) = VaultDir::open(FsBlocks::open(path)?)?;
+            let anchor = VaultAnchor::of(&inner.meta, &vault)?;
+            let local = local::open(dir.blocks(), &anchor, vault.as_bytes(), &self.device_root())?;
+            let meta = match &local {
+                Some(state) => decode_meta(&state.body)?,
+                None => Meta::new(),
+            };
+            self.record_anchor(inner, &vault, &anchor)?;
+            inner.vaults.insert(vault, Held { dir, local, meta });
+        }
+        inner
+            .vaults
+            .get_mut(&vault)
+            .ok_or_else(|| Error::corrupt("an opened vault is missing"))
+    }
+
+    /// Commits the token a vault's anchor was given, if any, to the device.
+    fn record_anchor(
+        &self,
+        inner: &mut Inner,
+        vault: &VaultId,
+        anchor: &VaultAnchor,
+    ) -> Result<()> {
+        let Some(token) = anchor.stored.get() else {
+            return Ok(());
+        };
+        inner.meta.insert(
+            anchor_name(vault),
+            Zeroizing::new(token.to_bytes().to_vec()),
+        );
+        let slots = inner.local.slots.clone();
+        self.commit_device(inner, &slots)
     }
 
     /// Calls `each` with every stored frame, vault by vault, membership
@@ -548,14 +613,18 @@ impl Unlocked {
         let root = self.device_root();
         match vault_meta(name) {
             Some((vault, rest)) => {
+                // Open the vault first: that may record its anchor.
+                self.held(&mut inner, vault)?;
+                let anchor = VaultAnchor::of(&inner.meta, &vault)?;
                 let held = self.held(&mut inner, vault)?;
                 held.meta
                     .insert(rest.into(), Zeroizing::new(value.to_vec()));
                 let mut body = Zeroizing::new(Vec::new());
                 encode_meta(&mut body, &held.meta);
+                // The vault's commit first, then its token in the device's.
                 let state = local::commit(
                     held.dir.blocks(),
-                    &NoopAnchor,
+                    &anchor,
                     vault.as_bytes(),
                     &root,
                     held.local.as_ref(),
@@ -563,6 +632,7 @@ impl Unlocked {
                     &body,
                 )?;
                 held.local = Some(state);
+                self.record_anchor(&mut inner, &vault, &anchor)?;
             }
             None => {
                 inner

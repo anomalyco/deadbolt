@@ -249,6 +249,66 @@ fn a_damaged_device_state_is_still_a_device() {
     ));
 }
 
+/// A device holding one vault whose per-vault state was committed twice,
+/// with the bytes of that state's first commit.
+fn vault_with_state() -> (tempfile::TempDir, VaultId, Vec<u8>) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = init_with_params(dir.path(), b"pass", &[7; 32], FAST).unwrap();
+    let author = Author::new(deadbolt_core::v2::DeviceKeys::from_seed(&[7; 32]), 1);
+    let root = RecoverySecret::from_bytes([3; 32]);
+    let (vault, frames) = Vault::create(&root, &author, "personal", "laptop").unwrap();
+    let id = vault.id();
+    store.append_frames(id, &mut frames.iter()).unwrap();
+    let name = format!("vault/{id}/removed");
+    store.meta_set(&name, b"[1]").unwrap();
+    let first = fs::read(local_file(dir.path(), &id, 1)).unwrap();
+    store.meta_set(&name, b"[1,2]").unwrap();
+    drop(store);
+    (dir, id, first)
+}
+
+fn local_file(dir: &Path, vault: &VaultId, seq: u64) -> PathBuf {
+    dir.join(VAULTS)
+        .join(vault.to_string())
+        .join(format!("local-{seq}.sealed"))
+}
+
+fn assert_rollback(dir: &Path, vault: &VaultId) {
+    let store = unlock(dir, b"pass").unwrap();
+    let read = store.meta_get(&format!("vault/{vault}/removed"));
+    assert!(
+        matches!(&read, Err(Error::Corrupt(msg)) if msg.contains("rollback")),
+        "{read:?}"
+    );
+}
+
+#[test]
+fn a_vaults_state_survives_reopening_under_its_anchor() {
+    let (dir, id, _) = vault_with_state();
+    let store = unlock(dir.path(), b"pass").unwrap();
+    let name = format!("vault/{id}/removed");
+    assert_eq!(&**store.meta_get(&name).unwrap().unwrap(), b"[1,2]");
+    store.meta_set(&name, b"[1,2,3]").unwrap();
+    drop(store);
+    let store = unlock(dir.path(), b"pass").unwrap();
+    assert_eq!(&**store.meta_get(&name).unwrap().unwrap(), b"[1,2,3]");
+}
+
+#[test]
+fn deleting_a_vaults_state_is_a_rollback_not_a_fresh_start() {
+    let (dir, id, _) = vault_with_state();
+    fs::remove_file(local_file(dir.path(), &id, 2)).unwrap();
+    assert_rollback(dir.path(), &id);
+}
+
+#[test]
+fn restoring_an_older_vault_state_is_a_rollback() {
+    let (dir, id, first) = vault_with_state();
+    fs::remove_file(local_file(dir.path(), &id, 2)).unwrap();
+    fs::write(local_file(dir.path(), &id, 1), first).unwrap();
+    assert_rollback(dir.path(), &id);
+}
+
 /// Every file under the data directory is the user's alone.
 #[cfg(unix)]
 #[test]
