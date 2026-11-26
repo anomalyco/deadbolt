@@ -122,7 +122,7 @@ A short text value prints alone on stdout, an item's fields as `field<TAB>value`
 
 ## Docs
 
-- [`docs/design.md`](docs/design.md) — **the current v1 design** (two keys, signed membership, per-device encrypted logs, QR pairing).
+- [`docs/design.md`](docs/design.md) — **the current v2 design** (signed `DBF2` frames, epoch keys, the 24-word recovery kit, never-rename pack files, blind HTTP remotes, QR and code pairing).
 - [`docs/app.md`](docs/app.md) — the desktop app (Rune, in `crates/app`): plan, keyboard, motion, and the first slice.
 - [`docs/proposals/send.md`](docs/proposals/send.md) — Deadbolt Send: one-time links to files, secrets and vault items, served live peer to peer and opened in any browser or with `deadbolt receive`.
 - [`docs/autofill.md`](docs/autofill.md) — browser autofill: the native messaging host, its message set, domain rules and threat model.

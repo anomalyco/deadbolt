@@ -5,9 +5,10 @@ import { clamp01, flashes, shade, span, rolling, wipe, working, type Box } from 
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Unlocking the desktop: the passphrase stretches through Argon2id (64 MiB, 3 passes) into the local unlock key,
-// which unwraps the device root and opens the sealed local state. From it come the vault's epoch key (sealing the
-// DBF2 data frames in its deadbolt-pack files) and the device keys derived from the seed (signing frames, receiving
-// epoch keys, dialing over iroh). A wrong passphrase fails AEAD on the local state.
+// which unwraps the device root and opens the sealed local state (local-<m>.sealed) holding the device seed. The seed
+// derives the device keys (signing frames, receiving epoch keys, dialing over iroh); its kem key unwraps the vault's
+// epoch key from members.log, and the epoch key seals the DBF2 data frames in the vault's deadbolt-pack files. A
+// wrong passphrase fails AEAD on the local state.
 //
 // Composition: the derivation runs left to right along the top, the keyset sits under the unlock key, and the two
 // keys it holds come out beneath it. The keyset and the store print their ciphertext; the unseal wicks the
@@ -55,7 +56,7 @@ const SHOTS: readonly Shot[] = [sPass, sKey, sOpen, sSeal, sWrong, sWrongKey, sW
 const DESKTOP_IMPULSES = [REVEAL, SIGN_AT]
 
 export const keysScene: StoryScene = {
-  label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the desktop's sealed local state: from it come the vault's epoch key and the desktop's device keys.",
+  label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the desktop's sealed local state and its device seed: the seed derives the device keys, whose kem key unwraps the vault's epoch key.",
   width: W, height: H, duration: REFUSED + 2.3,
   sounds: [
     ...soundOfSend(sPass, W, .8).cues,
@@ -82,12 +83,12 @@ export const keysScene: StoryScene = {
     {
       at: 5.0,
       focus: { unlock: .8, keyset: 1, data: 1, device: 1, toKeyset: 1, toData: 1, toDevice: 1 },
-      caption: { text: "it opens the sealed local state: the epoch and device keys", anchor: edge.left(KEYSET), place: [344, 163], align: "end", delay: .25 },
+      caption: { text: "it opens the sealed local state, whose seed derives the device keys", anchor: edge.left(KEYSET), place: [344, 163], align: "end", delay: .25 },
     },
     {
       at: 8.0,
       focus: { data: 1, store: 1, dataToStore: 1, keyset: .5 },
-      caption: { text: "the epoch key seals every data frame in the vault's pack files", width: 32, anchor: edge.top(STORE), place: [174, 220], align: "above", delay: .25 },
+      caption: { text: "the kem key unwraps the epoch key from members.log; it seals every data frame", width: 32, anchor: edge.top(STORE), place: [174, 220], align: "above", delay: .25 },
     },
     {
       at: 11.0,

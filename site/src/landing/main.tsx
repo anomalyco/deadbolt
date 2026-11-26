@@ -48,8 +48,8 @@ function Landing() {
       <section>
         <h2>how it works</h2>
         <ol className="steps">
-          <li><Justified text="each device has its own key. it's the device's identity on the network and signs everything the device writes. it never leaves the device, and on disk it's sealed under your passphrase." /></li>
-          <li><Justified text="every change is a signed entry in that device's own log. entries point at what their author had seen, never at a clock, so devices that were apart merge the same way in any order." /></li>
+          <li><Justified text="each device has its own keys, derived from a seed that never leaves it and is sealed under your passphrase on disk: one signs everything the device writes, one receives the vault's epoch keys, and a separate one is its identity on the network." /></li>
+          <li><Justified text="every change is a signed frame, sealed under the vault's current epoch key and appended to files that are never rewritten. frames point at what their author had seen, never at a clock, so devices that were apart merge the same way in any order." /></li>
           <li><Justified text="devices sync directly over iroh: compare what each has, send what the other is missing. the connection is end-to-end encrypted and authenticated to device keys." /></li>
           <li><Justified text="a device that isn't a member is refused before it can send or receive a single byte. remove a device and its open connections close at once." /></li>
           <li><Justified text="a new device joins by pairing with one that's already in. both screens show the same six digits; you confirm they match." /></li>
@@ -60,9 +60,9 @@ function Landing() {
       <section>
         <h2>trade-offs</h2>
         <dl className="facts">
-          <div><dt>no recovery</dt><Justified as="dd" text="lose every device and the vault is gone. there is no server holding a copy and no reset email. pair a second device early." /></div>
+          <div><dt>the recovery kit is the only way back</dt><Justified as="dd" text="each vault has a 24-word recovery kit. lose every device and the kit brings the vault back; lose the kit too and it's gone. there is no server holding a copy and no reset email." /></div>
           <div><dt>removal is a promise about the future</dt><Justified as="dd" text="a removed device can't sync anything new, but it keeps what it already had. rotate the passwords it could see." /></div>
-          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background daemon, pairing, sync and a bitwarden import. no apps or browser extension yet." /></div>
+          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is alpha: a cli, a background daemon, a desktop app, a chromium extension, pairing, sync and imports all work, and they still change from build to build." /></div>
         </dl>
       </section>
 
