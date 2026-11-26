@@ -1,4 +1,4 @@
-//! Reading an export for [`Command::Import`](crate::protocol::Command::Import).
+//! Reading an export for [`Command::Import`](deadbolt_proto::daemon::Command::Import).
 //!
 //! Clients only turn the file into text; the daemon detects the format and
 //! maps it. A 1Password `.1pux` is a zip: its `export.data`, and of the
@@ -17,8 +17,9 @@ use zeroize::Zeroizing;
 use zip::ZipArchive;
 use zip::result::ZipError;
 
+use deadbolt_proto::daemon::{ExportFile, MAX_LINE};
+
 pub use crate::file::MAX_FILE;
-use crate::protocol::{ExportFile, MAX_LINE};
 
 /// An export's text, and a `.1pux`'s attachments.
 #[derive(Debug, Default)]
@@ -172,22 +173,8 @@ fn bounded(
         if buffer.len() + n > max {
             return Ok(None);
         }
-        append(&mut buffer, &chunk[..n], max);
+        crate::append(&mut buffer, &chunk[..n], max);
     }
-}
-
-/// Appends `bytes` to a buffer of secrets. It grows by copying into a new
-/// buffer (to at most `max`, unless `bytes` need more) and wiping the old
-/// one, so no reallocation leaves a copy behind.
-pub fn append(buffer: &mut Zeroizing<Vec<u8>>, bytes: &[u8], max: usize) {
-    if buffer.capacity() - buffer.len() < bytes.len() {
-        let needed = buffer.len() + bytes.len();
-        let capacity = (buffer.capacity() * 2).min(max).max(needed);
-        let mut grown = Zeroizing::new(Vec::with_capacity(capacity));
-        grown.extend_from_slice(buffer);
-        *buffer = grown;
-    }
-    buffer.extend_from_slice(bytes);
 }
 
 /// The `export.data` of a 1Password `.1pux`, and the attachments it names.

@@ -5,7 +5,7 @@ An alpha, local-first password manager in Rust. No compatibility shims: change
 internal APIs directly and update their callers.
 
 - `crates/core`: v2 signed `DBF2` frame log, `X25519Wrap` clean-tip epochs and back-links, recovery-lineage membership resolver (`class = 0` 24-word recovery root), fraud proofs, delta clocks, item rules, password health, and autofill/form/tag rules (pure, `wasm32`-clean).
-- `crates/proto`: wire schemas, pure data: the daemon control protocol (`daemon`, re-exported as `deadbolt_client::protocol`) and the extension's native messaging (`browser`). `bun run gen:proto` writes the browser types to `extension/src/gen/proto.ts`; CI fails when it's stale.
+- `crates/proto`: wire schemas, pure data: the daemon control protocol (`daemon`) and the extension's native messaging (`browser`). `bun run gen:proto` writes the browser types to `extension/src/gen/proto.ts`; CI fails when it's stale.
 - `crates/os`: safe wrappers for the few OS calls no dependency wraps (BSD process facts and arguments, code signing info, process hardening, and locked key memory); the one crate where `unsafe` is allowed.
 - `crates/pack`: v2 on-disk storage — append-only framed logs (`members.log`, `wal-<n>.log`), immutable checkpoint packs (`gen-<n>.pack`), alternating sealed local state (`local-<m>.sealed`) with a two-phase rollback anchor, and W1–W6 crash rules over a create/append/delete-only `Blocks` trait (`wasm32`-clean).
 - `crates/remote`: blind HTTP remote sync — four-verb `ObjStore` (S3/R2 SigV4 and WebDAV), canonical object names, push/pull planner, rollback/withholding/self-rollback detection, and store-backed Send (pure core is `wasm32`-clean; `reqwest` transport behind the default `http` feature).

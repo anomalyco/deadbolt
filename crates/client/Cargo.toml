@@ -10,24 +10,42 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["host"]
+# Full daemon client: async socket transport, paths, export, file fields,
+# and OTLP telemetry. Disabled by sandboxed extensions (deadbolt-ffi) that
+# only verify the daemon's peer signature and frame JSON lines.
+host = [
+    "dep:blake3",
+    "dep:tempfile",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:zip",
+    "rustix/fs",
+    "serde/derive",
+]
+
 [dependencies]
-deadbolt-proto = { path = "../proto" }
-blake3 = "1.8"
 data-encoding = "2.11.1"
-nix = { version = "0.31", default-features = false, features = ["socket"] }
-rustix = { version = "1.1.5", default-features = false, features = ["fs", "process", "std"] }
-serde = { version = "1.0.229", features = ["derive"] }
+deadbolt-proto = { path = "../proto" }
+rustix = { version = "1.1.5", default-features = false, features = ["process", "std"] }
+serde = "1.0.229"
 serde_json = "1.0.151"
-tempfile = "3.27.0"
-thiserror = "2.0.21"
-tokio = { version = "1.53.3", features = ["net", "io-util", "macros", "rt", "time"] }
-zeroize = { version = "1.9", features = ["derive", "serde"] }
-zip = { version = "9.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zeroize = "1.9"
+
+blake3 = { version = "1.8", optional = true }
+tempfile = { version = "3.27.0", optional = true }
+thiserror = { version = "2.0.21", optional = true }
+tokio = { version = "1.53.3", features = ["net", "io-util", "macros", "rt", "time"], optional = true }
+zip = { version = "9.1", default-features = false, features = ["deflate-flate2-zlib-rs"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+deadbolt-os = { path = "../os" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
-deadbolt-os = { path = "../os" }
 security-framework = "3.7"
 
 [dev-dependencies]
+tempfile = "3.27.0"
 tokio = { version = "1.53.3", features = ["rt"] }

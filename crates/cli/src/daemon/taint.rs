@@ -21,11 +21,14 @@
 //! the run ends, or once it's reparented. The socket's other checks still
 //! apply to it.
 
-use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
 use deadbolt_client::peer::Peer;
+use deadbolt_client::peer::ancestry::{
+    self, AncestorStep, OsProcesses, ProcessFacts, Start, WalkEnd,
+};
 use deadbolt_engine::cap::{CapCheck, CapId, UseScope};
 use subtle::ConstantTimeEq;
 
@@ -35,96 +38,10 @@ use crate::protocol::{Command, ErrorCode, Reply, Secret};
 /// What a process inside a run hears.
 pub const DENIED: &str = "process is running inside deadbolt run and cannot access daemon secrets";
 
-/// A process's start time: seconds and microseconds since the epoch on
-/// macOS, clock ticks after boot (and 0) on Linux.
-pub type Start = (u64, u64);
-
 /// The most ancestors walked before giving up.
 const MAX_HOPS: usize = 64;
 /// The most runs registered at once.
 const MAX_RUNS: usize = 4096;
-
-/// What the walk reads of a process: its parent and when it started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Facts {
-    pub ppid: u32,
-    pub start: Start,
-}
-
-/// A parent whose facts can't be read, as `hidepid` explains it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(any(target_os = "linux", test)),
-    expect(dead_code, reason = "only Linux's hidepid proves a hidden parent")
-)]
-pub enum Hidden {
-    /// Hidden, and no visible process started it: the walk has reached the
-    /// system's processes.
-    System,
-    /// Hidden, started by this visible process, where the walk goes on.
-    Parent(u32),
-}
-
-/// Reads [`Facts`] by pid; the OS in the daemon, a table in tests.
-pub trait ProcessFacts {
-    fn facts(&self, pid: u32) -> Option<Facts>;
-
-    /// Why `parent`, whose facts didn't read, is out of sight while its
-    /// child `(child, child_start)` still names it: `None` unless that's
-    /// proven (Linux's `hidepid`).
-    fn hidden(&self, _parent: u32, _child: u32, _child_start: Start) -> Option<Hidden> {
-        None
-    }
-}
-
-/// The running system's processes.
-pub struct OsProcesses;
-
-impl ProcessFacts for OsProcesses {
-    #[cfg(target_os = "macos")]
-    fn facts(&self, pid: u32) -> Option<Facts> {
-        use deadbolt_os::process::{ZOMBIE, bsd_info, kinfo_proc};
-        if let Some(info) = bsd_info(pid) {
-            return (info.status != ZOMBIE).then_some(Facts {
-                ppid: info.ppid,
-                start: info.start,
-            });
-        }
-        // Other users' processes (launchd, login, sshd) answer only here.
-        let info = kinfo_proc(pid)?;
-        (info.stat != ZOMBIE && u32::try_from(info.pid).ok() == Some(pid)).then_some(Facts {
-            ppid: u32::try_from(info.ppid).ok()?,
-            start: info.start,
-        })
-    }
-
-    #[cfg(target_os = "linux")]
-    fn facts(&self, pid: u32) -> Option<Facts> {
-        // `stat` finds the name's end with `rfind(')')`, so a name holding
-        // spaces or parentheses can't shift the fields after it.
-        // A thread-group leader that exited while its other threads run is
-        // a zombie, still alive: `stat` reads it through them.
-        let stat = deadbolt_client::peer::linux::stat(pid)?;
-        Some(Facts {
-            ppid: stat.ppid,
-            start: (stat.start_ticks, 0),
-        })
-    }
-
-    #[cfg(target_os = "linux")]
-    fn hidden(&self, parent: u32, child: u32, child_start: Start) -> Option<Hidden> {
-        use deadbolt_client::peer::linux;
-        Some(match linux::hidden_parent(parent, child, child_start.0)? {
-            linux::Hidden::SystemBoundary => Hidden::System,
-            linux::Hidden::VisibleParent(pid) => Hidden::Parent(pid),
-        })
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    fn facts(&self, _pid: u32) -> Option<Facts> {
-        None
-    }
-}
 
 /// One `deadbolt run`, by the process that registered.
 #[derive(Debug)]
@@ -235,55 +152,37 @@ impl TaintTable {
         if self.entries.is_empty() {
             return Taint::Clean;
         }
-        let Some(mut me) = facts.facts(caller_pid).filter(|f| f.start == caller_start) else {
-            return Taint::Unknown;
-        };
-        let mut pid = caller_pid;
-        let mut seen = HashSet::from([pid]);
-        for _ in 0..MAX_HOPS {
-            if let Some(entry) = self.entry(pid, me.start) {
-                return Taint::Run(entry);
-            }
-            if pid <= 1 || me.ppid == 0 {
-                return Taint::Clean;
-            }
-            if !seen.insert(me.ppid) {
-                return Taint::Unknown;
-            }
-            let Some(parent) = facts.facts(me.ppid) else {
-                // init, or a process `hidepid` hides, ends the walk. A parent
-                // that is merely unreadable (exited between reads, a zombie
-                // leader) proves nothing: unknown, not clean.
-                if me.ppid == 1 {
-                    return Taint::Clean;
-                }
-                match facts.hidden(me.ppid, pid, me.start) {
-                    Some(Hidden::System) => return Taint::Clean,
-                    Some(Hidden::Parent(visible)) => {
-                        if !seen.insert(visible) {
-                            return Taint::Unknown;
-                        }
-                        let Some(grand) = facts.facts(visible) else {
-                            return Taint::Unknown;
-                        };
-                        if grand.start > me.start {
-                            return Taint::Clean;
-                        }
-                        pid = visible;
-                        me = grand;
-                        continue;
-                    }
-                    None => return Taint::Unknown,
-                }
-            };
-            if parent.start > me.start {
-                // The pid is someone new's; the real parent is gone.
-                return Taint::Clean;
-            }
-            pid = me.ppid;
-            me = parent;
+        match ancestry::walk_from(
+            facts,
+            caller_pid,
+            caller_start,
+            MAX_HOPS,
+            |step| match step {
+                AncestorStep::Visible { pid, start } => match self.entry(pid, start) {
+                    Some(entry) => ControlFlow::Break(entry),
+                    None => ControlFlow::Continue(()),
+                },
+                AncestorStep::Hidden { .. } => ControlFlow::Continue(()),
+            },
+        ) {
+            ControlFlow::Break(entry) => Taint::Run(entry),
+            // init, a proven `hidepid` system boundary, or a reused parent pid
+            // ends the walk clean. An unreadable parent other than init proves
+            // nothing: unknown, not clean.
+            ControlFlow::Continue(
+                WalkEnd::Root
+                | WalkEnd::SystemBoundary
+                | WalkEnd::NoParent
+                | WalkEnd::PidReused
+                | WalkEnd::Unreadable { pid: 1 },
+            ) => Taint::Clean,
+            ControlFlow::Continue(
+                WalkEnd::StartMismatch
+                | WalkEnd::Unreadable { .. }
+                | WalkEnd::Cycle
+                | WalkEnd::HopLimit,
+            ) => Taint::Unknown,
         }
-        Taint::Unknown
     }
 }
 
@@ -425,6 +324,8 @@ mod screen_tests;
 mod tests {
     use std::collections::HashMap;
 
+    use deadbolt_client::peer::ancestry::{Facts, Hidden};
+
     use super::*;
 
     /// Processes by pid: `(ppid, start)`.
@@ -565,12 +466,12 @@ mod tests {
         let mut table = TaintTable::default();
         table.register(20, (20, 0), None).unwrap();
         let rows = || Table::new(&[(1, 0, 1), (20, 1, 20), (30, 25, 30)]);
-        let through = Hiding(rows(), Some(Hidden::Parent(20)));
+        let through = Hiding(rows(), Some(Hidden::VisibleParent(20)));
         assert!(matches!(
             table.check_ancestry(&through, 30, (30, 0)),
             Taint::Run(_)
         ));
-        let system = Hiding(rows(), Some(Hidden::System));
+        let system = Hiding(rows(), Some(Hidden::SystemBoundary));
         assert!(matches!(
             table.check_ancestry(&system, 30, (30, 0)),
             Taint::Clean

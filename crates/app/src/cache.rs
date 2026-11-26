@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 
-use deadbolt_client::protocol::{Code, FieldInfo, ItemInfo};
+use deadbolt_proto::daemon::{Code, FieldInfo, ItemInfo};
 
 use crate::model::{forget, is_secret};
 

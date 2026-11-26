@@ -4,7 +4,7 @@
 //! can't see.
 
 use deadbolt_client::Paths;
-use deadbolt_client::protocol::{ActivityEntry, AppAction, Command, Outcome, Reply};
+use deadbolt_proto::daemon::{ActivityEntry, AppAction, Command, Outcome, Reply};
 use rune::{El, Tx, col, text};
 use rune_kit::Kit;
 
@@ -224,7 +224,7 @@ pub fn setting(s: &App, k: &Kit) -> (El, Option<El>) {
 
 #[cfg(test)]
 mod tests {
-    use deadbolt_client::protocol::{ActivityItem, CallerInfo, Tier};
+    use deadbolt_proto::daemon::{ActivityItem, CallerInfo, Tier};
 
     use super::*;
 

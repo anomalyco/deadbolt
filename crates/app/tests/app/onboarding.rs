@@ -233,7 +233,7 @@ fn a_created_vault_holds_its_recovery_words_until_they_are_saved() {
         s.onboarding.worker = Worker::scripted(vec![(
             0.1,
             Progress::Created(Ok(Created {
-                vault: deadbolt_client::protocol::VaultInfo {
+                vault: deadbolt_proto::daemon::VaultInfo {
                     id: "b3f9c21a1d4e".into(),
                     name: "personal".into(),
                     default: true,
@@ -523,7 +523,7 @@ fn joining_lands_in_the_vault() {
 /// leaves the flow where it is: it finishes or fails on its own.
 #[test]
 fn a_lock_from_the_daemon_does_not_interrupt_a_create_or_join() {
-    use deadbolt_client::protocol::Change;
+    use deadbolt_proto::daemon::Change;
     let locked = {
         let mut st = runtime("locked", false).state.status.unwrap();
         st.device = None;

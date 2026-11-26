@@ -22,8 +22,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use zeroize::Zeroizing;
 
 use super::config::{BrokerAuth, BrokerConfig, BrokerRoute, DEFAULT_MAX_BODY, upstream_url};
-use crate::daemon::taint::{OsProcesses, ProcessFacts};
 use crate::protocol::{Reference, ResolvedSecret, SCHEME};
+use deadbolt_client::peer::ancestry::{OsProcesses, ProcessFacts};
 
 /// The variable every brokered command gets: `http://127.0.0.1:<port>`.
 pub const BROKER_URL: &str = "DEADBOLT_BROKER_URL";

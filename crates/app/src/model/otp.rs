@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::Code;
+use deadbolt_proto::daemon::Code;
 use rune::Tx;
 use zeroize::Zeroizing;
 

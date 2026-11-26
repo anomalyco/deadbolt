@@ -10,7 +10,7 @@
 mod notice;
 pub(crate) mod theme;
 
-use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field};
+use deadbolt_proto::daemon::{FieldInfo, ItemInfo, code_field};
 use rune::{Cx, Edge, El, Icon, ScrollSpec, Transition, col, el, icon, row, text};
 use rune_kit::shell::Page;
 use rune_kit::{

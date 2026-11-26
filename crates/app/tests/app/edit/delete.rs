@@ -3,7 +3,7 @@
 use deadbolt_app::daemon::{Done, Job};
 use deadbolt_app::edit::Conflict;
 use deadbolt_app::model::{App, Screen};
-use deadbolt_client::protocol::ItemInfo;
+use deadbolt_proto::daemon::ItemInfo;
 use rune::{Key, KeyEvent};
 
 use super::{FRAME, Rig, cmd, failure, info, rig};

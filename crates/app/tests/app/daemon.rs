@@ -239,7 +239,7 @@ fn quick_panel_unlock_filter_copy() {
 /// focus itself isn't seen here.
 #[test]
 fn a_second_launch_reaches_the_main_window_not_the_panel() {
-    use deadbolt_client::protocol::{Command, Reply};
+    use deadbolt_proto::daemon::{Command, Reply};
 
     let device = Device::new();
     device.run(&["init"]);
@@ -324,13 +324,13 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
     rt.state.clear_after = 1.0;
     // The "copied" scene's state, by hand: a vault with one item's fields.
     rt.state.screen = Screen::Vault;
-    rt.state.detail = Some(deadbolt_client::protocol::ItemInfo {
+    rt.state.detail = Some(deadbolt_proto::daemon::ItemInfo {
         id: "a".into(),
         short: "a".into(),
         kind: "login".into(),
         label: "x".into(),
         detail: None,
-        fields: vec![deadbolt_client::protocol::FieldInfo {
+        fields: vec![deadbolt_proto::daemon::FieldInfo {
             name: "password".into(),
             kind: "secret".into(),
             value: "pw".into(),

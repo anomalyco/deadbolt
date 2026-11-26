@@ -32,7 +32,7 @@ fn manifest(version: &str, sequence: u64) -> Vec<u8> {
 
 /// The update the daemon's status reply carries, as the app and the
 /// terminal notice read it.
-fn update(device: &Device) -> Option<deadbolt_client::protocol::UpdateInfo> {
+fn update(device: &Device) -> Option<deadbolt_proto::daemon::UpdateInfo> {
     let paths = deadbolt_client::Paths::from_vars(|name| match name {
         "DEADBOLT_HOME" => Some(device.path("home").into()),
         "XDG_RUNTIME_DIR" => Some(device.path("run").into()),
@@ -49,7 +49,7 @@ fn update(device: &Device) -> Option<deadbolt_client::protocol::UpdateInfo> {
 
 /// The update the daemon reports, if it answered at all: the bounded wait
 /// an opted-out daemon is watched through, without a fixed sleep.
-fn reported_update(device: &Device) -> Option<Option<deadbolt_client::protocol::UpdateInfo>> {
+fn reported_update(device: &Device) -> Option<Option<deadbolt_proto::daemon::UpdateInfo>> {
     let paths = deadbolt_client::Paths::from_vars(|name| match name {
         "DEADBOLT_HOME" => Some(device.path("home").into()),
         "XDG_RUNTIME_DIR" => Some(device.path("run").into()),

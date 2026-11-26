@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use deadbolt_app::daemon::{Daemon, Done, Failure, Job, Values};
 use deadbolt_app::edit::{Conflict, Input};
 use deadbolt_app::model::App;
-use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo};
+use deadbolt_proto::daemon::{Change, FieldInfo, ItemInfo};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use zeroize::Zeroizing;
 

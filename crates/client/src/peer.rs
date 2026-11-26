@@ -8,8 +8,9 @@ use std::io;
 use std::os::fd::AsFd;
 use std::path::Path;
 
-use crate::protocol::{Ancestor, Signature};
+use deadbolt_proto::daemon::{Ancestor, Signature};
 
+pub mod ancestry;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
@@ -35,8 +36,7 @@ pub struct Peer {
 impl Peer {
     #[cfg(target_os = "macos")]
     pub fn of(socket: &impl AsFd) -> io::Result<Peer> {
-        use nix::sys::socket::{getsockopt, sockopt::LocalPeerToken};
-        let token = getsockopt(socket, LocalPeerToken)?.val;
+        let token = deadbolt_os::net::local_peer_token(socket.as_fd())?;
         Ok(Self::from_token(token))
     }
 
@@ -52,12 +52,11 @@ impl Peer {
 
     #[cfg(target_os = "linux")]
     pub fn of(socket: &impl AsFd) -> io::Result<Peer> {
-        use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-        let creds = getsockopt(socket, PeerCredentials)?;
-        let pid = u32::try_from(creds.pid()).map_err(|_| io::Error::other("no peer pid"))?;
+        let creds = deadbolt_os::net::peer_credentials(socket.as_fd())?;
+        let pid = u32::try_from(creds.pid).map_err(|_| io::Error::other("no peer pid"))?;
         Ok(Peer {
             pid,
-            uid: creds.uid(),
+            uid: creds.uid,
             token: None,
             pid_version: linux::stat(pid).map(|s| s.start_ticks),
         })
@@ -74,14 +73,12 @@ impl Peer {
 /// as long as the socket is.
 #[cfg(target_os = "macos")]
 pub fn uid(socket: &impl AsFd) -> io::Result<u32> {
-    use nix::sys::socket::{getsockopt, sockopt::LocalPeerCred};
-    Ok(getsockopt(socket, LocalPeerCred)?.uid())
+    deadbolt_os::net::local_peer_uid(socket.as_fd())
 }
 
 #[cfg(target_os = "linux")]
 pub fn uid(socket: &impl AsFd) -> io::Result<u32> {
-    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-    Ok(getsockopt(socket, PeerCredentials)?.uid())
+    Ok(deadbolt_os::net::peer_credentials(socket.as_fd())?.uid)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -277,11 +274,12 @@ pub mod linux {
     //! `/proc`, for what macOS reads with `proc_pidinfo`.
 
     use std::{
-        collections::HashSet,
         fs, io,
         path::{Path, PathBuf},
     };
 
+    pub use super::ancestry::Hidden;
+    use super::ancestry::{Facts, collect_ancestry};
     use super::{Ancestor, Process};
 
     /// `/proc/<pid>/stat`, the fields we use.
@@ -385,51 +383,30 @@ pub mod linux {
             .collect()
     }
 
-    pub enum Hidden {
-        SystemBoundary,
-        VisibleParent(u32),
-    }
-
     pub(super) fn walk(
         pid: u32,
-        mut next: u32,
-        mut child_start: u64,
+        next: u32,
+        child_start: u64,
         mut parent: impl FnMut(u32) -> Option<(Ancestor, u32, u64)>,
         mut hidden: impl FnMut(u32, u32, u64) -> Option<Hidden>,
     ) -> (Vec<Ancestor>, bool) {
-        let mut ancestry = Vec::new();
-        let mut seen = HashSet::from([pid]);
-        let mut child = pid;
-        while next != 0 && ancestry.len() < 1024 && seen.insert(next) {
-            let Some((entry, ppid, start)) = parent(next) else {
-                match hidden(next, child, child_start) {
-                    None => break,
-                    Some(Hidden::SystemBoundary) => return (ancestry, true),
-                    Some(Hidden::VisibleParent(ppid)) => {
-                        ancestry.push(Ancestor {
-                            pid: next,
-                            name: "(hidden)".into(),
-                            path: None,
-                        });
-                        // The visible grandparent must not be younger than
-                        // the last visible child. Keep that birth-time check.
-                        next = ppid;
-                        continue;
-                    }
-                }
-            };
-            if start > child_start {
-                break;
-            }
-            ancestry.push(entry);
-            if next == 1 {
-                return (ancestry, true);
-            }
-            child = next;
-            child_start = start;
-            next = ppid;
-        }
-        (ancestry, pid == 1)
+        collect_ancestry(
+            pid,
+            next,
+            (child_start, 0),
+            1024,
+            |p| {
+                let (entry, ppid, start) = parent(p)?;
+                Some((
+                    entry,
+                    Facts {
+                        ppid,
+                        start: (start, 0),
+                    },
+                ))
+            },
+            |p, c, s| hidden(p, c, s.0),
+        )
     }
 
     /// A missing stat is not enough: the pid must still exist, be invisible

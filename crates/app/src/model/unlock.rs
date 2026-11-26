@@ -1,6 +1,6 @@
 //! Unlocking (passphrase and Touch ID), locking, and reconnecting.
 
-use deadbolt_client::protocol::Status;
+use deadbolt_proto::daemon::Status;
 use rune::Tx;
 
 use crate::daemon::{Failure, Job};
@@ -202,7 +202,7 @@ impl App {
 
 pub(super) fn unlock_message(failure: &Failure) -> String {
     // "Too many wrong passphrases. Try again in 30 s.", as the daemon says.
-    if failure.code == Some(deadbolt_client::protocol::ErrorCode::RateLimited) {
+    if failure.code == Some(deadbolt_proto::daemon::ErrorCode::RateLimited) {
         return failure.message.clone();
     }
     if failure.message.contains("passphrase") || failure.message.contains("decrypt") {

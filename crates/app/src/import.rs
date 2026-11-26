@@ -9,7 +9,7 @@ pub mod view;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use deadbolt_client::protocol::{ErrorCode, ImportReport, Tally, noun};
+use deadbolt_proto::daemon::{ErrorCode, ImportReport, Tally, noun};
 use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
 use crate::daemon::{ImportFailure, Imported, Job};
@@ -514,7 +514,7 @@ pub fn import_label(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use deadbolt_client::protocol::ImportSource;
+    use deadbolt_proto::daemon::ImportSource;
 
     use super::*;
 

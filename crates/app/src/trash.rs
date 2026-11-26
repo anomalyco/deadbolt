@@ -6,7 +6,7 @@
 //! a deleted item stays until it's restored.
 
 use deadbolt_client::Paths;
-use deadbolt_client::protocol::{Command, ItemInfo, Reply};
+use deadbolt_proto::daemon::{Command, ItemInfo, Reply};
 use rune::{Color, El, Key, KeyEvent, Transition, Tx, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 

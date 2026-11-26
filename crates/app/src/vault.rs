@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use deadbolt_client::protocol::{ItemInfo, noun};
+use deadbolt_proto::daemon::{ItemInfo, noun};
 use rune::{El, GrowthSpec, Transition, col, el, icon, row, text};
 use rune_kit::shell::{SplitView, Toolbar};
 use rune_kit::{
@@ -287,7 +287,7 @@ fn list_row(
     item: &ItemInfo,
     i: usize,
     on: bool,
-    risk: Option<deadbolt_client::protocol::RiskLevel>,
+    risk: Option<deadbolt_proto::daemon::RiskLevel>,
 ) -> El {
     let id = item.id.clone();
     let label = text(item.label.clone())

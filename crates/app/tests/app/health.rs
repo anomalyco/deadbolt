@@ -7,7 +7,7 @@
 use deadbolt_app::daemon::{Done, Job};
 use deadbolt_app::health::Tab;
 use deadbolt_app::model::App;
-use deadbolt_client::protocol::{FindingKind, HealthReport};
+use deadbolt_proto::daemon::{FindingKind, HealthReport};
 use rune::{Key, Mods, Runtime};
 use zeroize::Zeroizing;
 

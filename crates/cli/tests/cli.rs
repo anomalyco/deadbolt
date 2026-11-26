@@ -535,7 +535,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
             .unwrap();
         let mut socket = bridge.stdin.take().unwrap();
         let request = serde_json::json!({
-            "v": deadbolt_client::protocol::PROTOCOL_VERSION,
+            "v": deadbolt_proto::daemon::PROTOCOL_VERSION,
             "cmd": "join",
             "device_name": "beta",
             "passphrase": null,
@@ -639,7 +639,7 @@ fn a_new_device_join_needs_a_passphrase_source() {
 #[cfg(target_os = "linux")]
 #[test]
 fn app_comes_forward_through_the_daemon_instead_of_starting_again() {
-    use deadbolt_client::protocol::Change;
+    use deadbolt_proto::daemon::Change;
     use std::os::unix::fs::PermissionsExt;
 
     let a = Device::new();
@@ -1083,7 +1083,7 @@ fn leaves_a_daemon_of_a_newer_protocol_running() {
     let a = Device::new();
     let newer = a.output(a.cmd(&["debug", "whoami"]).env(
         "DEADBOLT_TEST_PROTOCOL",
-        (deadbolt_client::protocol::PROTOCOL_VERSION + 1).to_string(),
+        (deadbolt_proto::daemon::PROTOCOL_VERSION + 1).to_string(),
     ));
     assert!(newer.status.success());
     let pid = a.daemon_pid().unwrap();

@@ -3,7 +3,7 @@
 //! for the item, ? lists every shortcut, ⌘, has Settings, ⇧⌘⌫ Recently
 //! Deleted, and Esc backs out of each. `SHORTCUTS` is the map the ? sheet and Settings show.
 
-use deadbolt_client::protocol::FieldInfo;
+use deadbolt_proto::daemon::FieldInfo;
 use rune::{Key, KeyEvent, Tx};
 
 use crate::model::{App, Screen, is_secret};

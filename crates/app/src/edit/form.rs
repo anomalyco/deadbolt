@@ -1,7 +1,7 @@
 //! Pure form state, item field schema, change diffing and daemon refusal parsing.
 
-use deadbolt_client::protocol::{FieldInfo, FieldInput, ItemInfo};
 use deadbolt_core::tag::fold_tag;
+use deadbolt_proto::daemon::{FieldInfo, FieldInput, ItemInfo};
 use rune::TextEdit;
 use zeroize::Zeroize;
 

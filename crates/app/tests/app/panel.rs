@@ -8,7 +8,7 @@ use deadbolt_app::daemon::{Daemon, Done, Job, Values};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::panel::window::Windows;
 use deadbolt_app::panel::{self, Phase};
-use deadbolt_client::protocol::{Change, ItemInfo};
+use deadbolt_proto::daemon::{Change, ItemInfo};
 use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime, Shell};
 
@@ -1505,7 +1505,7 @@ fn panel_keys_work_when_the_search_loses_focus_and_palette_opens_at_once() {
 
 #[test]
 fn panel_item_masks_empty_secrets_shows_code_errors_and_uses_cached_pages() {
-    use deadbolt_client::protocol::FieldInfo;
+    use deadbolt_proto::daemon::FieldInfo;
 
     let mut rt = runtime("empty", true);
     frames(&mut rt, 2);

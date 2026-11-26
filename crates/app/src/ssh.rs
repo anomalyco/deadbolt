@@ -1,6 +1,6 @@
 //! SSH key generation and file import in the item form.
 
-use deadbolt_client::protocol::SshKeyKind;
+use deadbolt_proto::daemon::SshKeyKind;
 use rune::{El, Tx, row, spacer};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, SegmentedControl};
 use zeroize::Zeroizing;

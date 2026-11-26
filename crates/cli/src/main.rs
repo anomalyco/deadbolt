@@ -29,8 +29,9 @@ use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
-use deadbolt_client::{export, paths, protocol};
+use deadbolt_client::{export, paths};
 use deadbolt_net::PairingCode;
+use deadbolt_proto::daemon as protocol;
 
 use crate::paths::Paths;
 use crate::protocol::{

@@ -1448,6 +1448,7 @@ dependencies = [
  "deadbolt-client",
  "deadbolt-core",
  "deadbolt-enclave",
+ "deadbolt-proto",
  "procwatch",
  "rune",
  "rune-kit",
@@ -1519,7 +1520,6 @@ dependencies = [
  "data-encoding",
  "deadbolt-os",
  "deadbolt-proto",
- "nix",
  "rustix 1.1.6",
  "security-framework",
  "serde",
@@ -3819,7 +3819,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
- "memoffset",
 ]
 
 [[package]]

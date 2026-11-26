@@ -5,7 +5,7 @@
 pub mod view;
 
 use deadbolt_client::Paths;
-use deadbolt_client::protocol::{
+use deadbolt_proto::daemon::{
     Command, Finding, FindingKind, HealthReport, ItemHealth, Reply, RiskLevel,
 };
 use rune::{Key, KeyEvent, Tx};

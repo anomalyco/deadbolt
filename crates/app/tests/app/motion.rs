@@ -110,7 +110,7 @@ fn an_item_synced_in_fades_into_the_list_and_the_selection_stays() {
 #[test]
 fn the_daemon_locking_swaps_to_the_lock_screen_softly() {
     use deadbolt_app::daemon::Done;
-    use deadbolt_client::protocol::Change;
+    use deadbolt_proto::daemon::Change;
     let mut rt = runtime("vault");
     rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
     rt.frame(FRAME);
@@ -187,7 +187,7 @@ fn a_search_replaces_the_list_at_once() {
 /// The selected item's values, as the daemon's reply brings them.
 fn deliver(rt: &mut Runtime<App>) {
     use deadbolt_app::daemon::{Done, Values};
-    use deadbolt_client::protocol::FieldInfo;
+    use deadbolt_proto::daemon::FieldInfo;
     let mut item = rt.state.selected_item().unwrap().clone();
     item.fields = vec![FieldInfo {
         name: "password".into(),
