@@ -69,8 +69,11 @@ pub fn print(migrated: &[MigratedVault], stderr: bool) {
     text.push_str(&format!(
         "Upgraded to Deadbolt v2: moved {vaults} from store.redb, under the same passphrase.\n\
          The old store is kept beside it as store.redb.v1.bak.\n\
-         Every vault has a new recovery kit below. Your other devices need to\n\
-         upgrade too, then pair again with `deadbolt join`.\n"
+         Every vault has a new recovery kit below.\n\
+         \n\
+         On your other devices, don't unlock after updating: that would make\n\
+         a separate copy of each vault there. Move their store.redb aside\n\
+         (keep it as a backup), then pair with this device: `deadbolt join`.\n"
     ));
     for moved in migrated {
         let default = if moved.vault.default {

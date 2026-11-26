@@ -420,7 +420,10 @@ impl App {
     /// The daemon stopped, which locked the store. The watch thread finds the
     /// next daemon; unlocking starts one.
     fn on_daemon_gone(&mut self, tx: &mut Tx) {
-        if self.screen == Screen::Vault {
+        // Recovery words showing go with it too.
+        if self.screen == Screen::Vault
+            || matches!(self.onboarding.step, crate::onboarding::Step::Recovery(_))
+        {
             self.on_locked(tx);
         }
     }

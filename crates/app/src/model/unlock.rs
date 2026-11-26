@@ -168,7 +168,8 @@ impl App {
     }
 
     pub fn submit_unlock(&mut self) {
-        if self.unlocking {
+        // DELETABLE(v1-migrate): the panel can't show an upgrade's kits.
+        if self.unlocking || (self.panel.is_some() && self.upgrade_waits()) {
             return;
         }
         if self.passphrase.text.is_empty() {

@@ -525,3 +525,48 @@ fn unlock_moves_a_v1_store_and_shows_its_kits() {
     assert!(home.join("store.redb.v1.bak").exists());
     check_moved(&a, &fx);
 }
+/// The kits `deadbolt migrate --json` printed, in order.
+fn migrate_kits(a: &Device) -> Vec<String> {
+    let out = a.try_run_stdin(
+        &["--passphrase-stdin", "migrate", "--json"],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    json["migrated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["recovery_kit"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_cutover_cut_short_before_its_commit_moves_again() {
+    let a = Device::new();
+    let home = a.path("home");
+    let fx = write_v1(&home);
+    let first = migrate_kits(&a);
+    a.run(&["debug", "daemon", "stop"]);
+
+    // As a crash just before `store.redb` was renamed leaves it: the moved
+    // v2 store, the old one, and the marker. Its kits may never have shown.
+    std::fs::rename(home.join("store.redb.v1.bak"), home.join("store.redb")).unwrap();
+    std::fs::create_dir(home.join(".v1-migrate")).unwrap();
+    std::fs::write(home.join(".v1-migrate/verified"), b"").unwrap();
+    let err = a.fail(&["init"]);
+    assert!(err.contains("deadbolt migrate"), "{err}");
+    assert_eq!(a.state(), "locked");
+
+    let again = migrate_kits(&a);
+    assert_eq!(again.len(), 2);
+    assert!(again.iter().all(|kit| !first.contains(kit)), "fresh kits");
+    assert!(!home.join("store.redb").exists());
+    assert!(home.join("store.redb.v1.bak").exists());
+    assert!(!home.join(".v1-migrate").exists());
+    check_moved(&a, &fx);
+}

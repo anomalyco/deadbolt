@@ -56,10 +56,11 @@ pub(super) fn build(
             recovery_kit,
         });
     }
-    if default.is_some() {
-        loaded.meta.default_vault = default;
-        loaded.save_meta()?;
-    }
+    // A v1 store with no default, or one naming a vault it doesn't hold,
+    // keeps v2's own pick: the first vault made.
+    let default = default.or(loaded.meta.default_vault);
+    loaded.meta.default_vault = default;
+    loaded.save_meta()?;
     drop(loaded);
     verify(dir, passphrase, plan, &moved, default)?;
     Ok(moved)
@@ -200,4 +201,50 @@ fn verify(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FAST: KdfParams = KdfParams {
+        m_cost_kib: 64,
+        t_cost: 1,
+        p_cost: 1,
+    };
+
+    fn vault(id: u8, name: &str) -> V1Vault {
+        V1Vault {
+            id: [id; 32],
+            name: name.into(),
+            items: Default::default(),
+        }
+    }
+
+    /// The default the built store holds, by the moved vault's position.
+    fn default_after(default: Option<[u8; 32]>) -> usize {
+        let dir = tempfile::tempdir().unwrap();
+        let vaults = [vault(1, "personal"), vault(2, "work")];
+        let plan = Plan {
+            device_name: "laptop",
+            default,
+            vaults: &vaults,
+        };
+        let store = dir.path().join("store");
+        let moved = build(&store, b"pass", FAST, &plan).unwrap();
+        let loaded = Loaded::open(&store, b"pass").unwrap();
+        let held = loaded.meta.default_vault.expect("a default vault");
+        moved.iter().position(|m| m.vault == held).unwrap()
+    }
+
+    #[test]
+    fn the_v1_default_carries_over() {
+        assert_eq!(default_after(Some([2; 32])), 1);
+    }
+
+    #[test]
+    fn no_default_or_a_stale_one_falls_back_to_the_first_vault() {
+        assert_eq!(default_after(None), 0);
+        assert_eq!(default_after(Some([9; 32])), 0);
+    }
 }

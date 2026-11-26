@@ -13,14 +13,18 @@
 //! v1, so each other device migrates too, then pairs again.
 //!
 //! Nothing touches `store.redb` until the end. The v2 store is built in
-//! `<data>/.v1-migrate/`, reopened and checked item by item, and only then
-//! moved into place (`v/`, then `device/`, which is what makes the device
-//! set up); after that `store.redb` is renamed to `store.redb.v1.bak`,
-//! never deleted. A failure before the move leaves only the staging folder,
-//! removed again; a crash during it is undone on the next try.
+//! `<data>/.v1-migrate/`, reopened and checked item by item, marked
+//! verified, and only then moved into place (`v/`, then `device/`).
+//! Renaming `store.redb` to `store.redb.v1.bak` (never deleting it) is
+//! the one commit point: until it lands, `store.redb` and the marker mean
+//! the device is still on v1 and the `v/` and `device/` beside it are
+//! this migration's, cleared and rebuilt on the next try, whose kits are
+//! the ones shown. A failure before the marker leaves only the staging
+//! folder, removed again.
 
 mod build;
 mod entry;
+mod fit;
 mod membership;
 mod replay;
 mod store;
@@ -43,15 +47,18 @@ pub(crate) const FOUND_V1: &str =
     "Found an existing v1 vault (store.redb). Unlock or run `deadbolt migrate` to upgrade to v2.";
 
 const STAGING: &str = ".v1-migrate";
-/// In the staging folder once the new store checked out: from then on a
-/// `v/` in the data directory without a `device/` is this migration's.
+/// In the staging folder once the new store checked out: from then until
+/// `store.redb` is renamed, the `v/` and `device/` in the data directory
+/// are this migration's.
 const VERIFIED: &str = "verified";
 const DEVICE: &str = "device";
 const VAULTS: &str = "v";
 
-/// Whether `data` holds a v1 store and no v2 device yet.
+/// Whether `data` holds a v1 store still to move: no v2 device yet, or
+/// only the one an interrupted cutover left.
 pub(crate) fn has_unmigrated_v1_store(data: &Path) -> bool {
-    data.join(V1_FILE).is_file() && !crate::disk::is_initialized(data)
+    data.join(V1_FILE).is_file()
+        && (!crate::disk::is_initialized(data) || data.join(STAGING).join(VERIFIED).is_file())
 }
 
 /// Moves the v1 store in `data` to v2, as above. Blocking (Argon2, several
@@ -64,7 +71,7 @@ pub(crate) fn migrate(data: &Path, passphrase: &[u8], params: KdfParams) -> Resu
     let staging = Staging::fresh(data)?;
     let v1 = store::read(
         &data.join(V1_FILE),
-        &staging.0.join("store.redb.copy"),
+        &staging.dir.join("store.redb.copy"),
         passphrase,
     )?;
     let entries = v1
@@ -72,7 +79,10 @@ pub(crate) fn migrate(data: &Path, passphrase: &[u8], params: KdfParams) -> Resu
         .iter()
         .map(|bytes| entry::Entry::decode(bytes))
         .collect::<Result<Vec<_>>>()?;
-    let vaults = replay::vaults(entries)?;
+    let vaults: Vec<_> = replay::vaults(entries)?
+        .into_iter()
+        .map(fit::vault)
+        .collect();
     let default = v1
         .default_vault
         .as_deref()
@@ -86,23 +96,34 @@ pub(crate) fn migrate(data: &Path, passphrase: &[u8], params: KdfParams) -> Resu
         default,
         vaults: &vaults,
     };
-    let moved = build::build(&staging.0.join("store"), passphrase, params, &plan)?;
+    let moved = build::build(&staging.dir.join("store"), passphrase, params, &plan)?;
     staging.cut_over(data)?;
     Ok(moved)
 }
 
-/// The staging folder, removed when dropped.
-struct Staging(PathBuf);
+/// The staging folder, removed when dropped unless a cutover began and
+/// didn't finish.
+struct Staging {
+    dir: PathBuf,
+    /// Keep the folder, and its marker, for the next try to clear up after.
+    keep: bool,
+}
 
 impl Staging {
-    /// An empty staging folder, after undoing what a crashed migration left.
+    /// An empty staging folder, after undoing what an interrupted cutover
+    /// left. Only called while `store.redb` is still there.
     fn fresh(data: &Path) -> Result<Self> {
         let dir = data.join(STAGING);
-        let vaults = data.join(VAULTS);
-        if dir.join(VERIFIED).exists() && vaults.exists() && !data.join(DEVICE).exists() {
-            // Cut short between moving `v/` and `device/`: the vaults are
-            // this migration's, and its kits were never shown. Start over.
-            fs::remove_dir_all(&vaults).context("removing a half-moved v2 store")?;
+        if dir.join(VERIFIED).is_file() {
+            // Cut short before the commit point: this `v/` and `device/`
+            // are the migration's, and its kits may never have been shown.
+            // Start over.
+            for name in [VAULTS, DEVICE] {
+                let moved = data.join(name);
+                if moved.exists() {
+                    fs::remove_dir_all(&moved).context("removing a half-moved v2 store")?;
+                }
+            }
         }
         if dir.exists() {
             fs::remove_dir_all(&dir).context("removing an earlier migration's files")?;
@@ -117,30 +138,30 @@ impl Staging {
             }
         }
         private_dir(&dir)?;
-        Ok(Self(dir))
+        Ok(Self { dir, keep: false })
     }
 
-    /// Moves the checked store into `data`, then backs up `store.redb`.
-    fn cut_over(self, data: &Path) -> Result<()> {
-        let built = self.0.join("store");
-        fs::File::create(self.0.join(VERIFIED))?.sync_all()?;
-        sync_dir(&self.0)?;
+    /// Moves the checked store into `data`, then backs up `store.redb`,
+    /// which commits.
+    fn cut_over(mut self, data: &Path) -> Result<()> {
+        let built = self.dir.join("store");
+        fs::File::create(self.dir.join(VERIFIED))?.sync_all()?;
+        sync_dir(&self.dir)?;
+        // Until the rename below, a failure or crash leaves the marker, and
+        // the next try clears what moved.
+        self.keep = true;
         let vaults = built.join(VAULTS);
-        let moved_vaults = vaults.exists();
-        if moved_vaults {
+        if vaults.exists() {
             fs::rename(&vaults, data.join(VAULTS)).context("moving the new vaults into place")?;
         }
-        if let Err(error) = fs::rename(built.join(DEVICE), data.join(DEVICE)) {
-            if moved_vaults && let Err(back) = fs::rename(data.join(VAULTS), &vaults) {
-                tracing::warn!("moving the new vaults back: {back}");
-            }
-            return Err(error).context("moving the new device into place");
-        }
+        fs::rename(built.join(DEVICE), data.join(DEVICE))
+            .context("moving the new device into place")?;
         sync_dir(data)?;
-        // On v2 now. The old store stays, renamed, as the backup.
+        // The commit point. The old store stays, renamed, as the backup.
         let backup = backup_path(data);
         fs::rename(data.join(V1_FILE), &backup)
             .with_context(|| format!("renaming store.redb to {}", backup.display()))?;
+        self.keep = false;
         sync_dir(data)?;
         Ok(())
     }
@@ -148,10 +169,13 @@ impl Staging {
 
 impl Drop for Staging {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.0)
+        if self.keep {
+            return;
+        }
+        if let Err(error) = fs::remove_dir_all(&self.dir)
             && error.kind() != std::io::ErrorKind::NotFound
         {
-            tracing::warn!("removing {}: {error}", self.0.display());
+            tracing::warn!("removing {}: {error}", self.dir.display());
         }
     }
 }
@@ -179,4 +203,69 @@ fn private_dir(dir: &Path) -> Result<()> {
 fn sync_dir(dir: &Path) -> Result<()> {
     fs::File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A data dir as a cutover cut short before its commit point leaves it:
+    /// `store.redb`, the moved v2 `v/` and `device/`, and the marker.
+    fn interrupted() -> tempfile::TempDir {
+        let data = tempfile::tempdir().unwrap();
+        let fast = KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let seed = [4u8; 32];
+        let mut loaded =
+            crate::daemon::session::Loaded::setup_with(data.path(), b"pass", "laptop", fast, &seed)
+                .unwrap();
+        loaded.create_vault_with_kit("personal").unwrap();
+        drop(loaded);
+        fs::write(data.path().join(V1_FILE), b"v1").unwrap();
+        assert!(crate::disk::is_initialized(data.path()));
+        assert!(data.path().join(VAULTS).is_dir());
+        data
+    }
+
+    #[test]
+    fn a_v2_device_beside_a_stray_store_redb_is_on_v2() {
+        let data = interrupted();
+        assert!(!has_unmigrated_v1_store(data.path()));
+    }
+
+    #[test]
+    fn an_interrupted_cutover_is_still_on_v1_and_starts_over() {
+        let data = interrupted();
+        let staging = data.path().join(STAGING);
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join(VERIFIED), b"").unwrap();
+        assert!(has_unmigrated_v1_store(data.path()));
+
+        let fresh = Staging::fresh(data.path()).unwrap();
+        assert!(!data.path().join(DEVICE).exists());
+        assert!(!data.path().join(VAULTS).exists());
+        assert!(!fresh.dir.join(VERIFIED).exists());
+        assert_eq!(fs::read(data.path().join(V1_FILE)).unwrap(), b"v1");
+        assert!(has_unmigrated_v1_store(data.path()));
+        drop(fresh);
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn a_cutover_that_fails_before_committing_keeps_its_marker() {
+        let data = tempfile::tempdir().unwrap();
+        fs::write(data.path().join(V1_FILE), b"v1").unwrap();
+        let staging = Staging::fresh(data.path()).unwrap();
+        let marker = staging.dir.join(VERIFIED);
+        // Nothing was built, so moving `device/` fails after the marker.
+        assert!(staging.cut_over(data.path()).is_err());
+        assert!(marker.is_file());
+        assert!(data.path().join(V1_FILE).is_file());
+        assert!(has_unmigrated_v1_store(data.path()));
+        Staging::fresh(data.path()).unwrap();
+        assert!(!marker.exists());
+    }
 }

@@ -337,6 +337,10 @@ impl App {
         }
         match ev.key {
             Key::Escape => self.dismiss(tx),
+            // DELETABLE(v1-migrate)
+            Key::Enter if self.screen == Screen::Locked && self.upgrade_waits() => {
+                self.open_main(tx);
+            }
             Key::Enter if self.screen == Screen::Locked => self.submit_unlock(),
             Key::Enter if self.screen == Screen::Onboarding => self.open_main(tx),
             Key::Enter if matches!(self.screen, Screen::Failed(_)) => self.retry(),

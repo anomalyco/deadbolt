@@ -1,0 +1,185 @@
+//! DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+//!
+//! Fits v1 items to v2's caps. Every v1 write was held to the same caps,
+//! but two devices' concurrent edits could together leave one item holding
+//! more than [`item::MAX_FILE`] of files or more than [`tag::MAX_TAGS`]
+//! tags, which v2 refuses in any write, now or when another device syncs.
+//! Such an item keeps the files that fit, and each file over goes to a
+//! document item of its own beside it, so nothing is lost; tags past the
+//! cap are dropped (the alphabetically last ones).
+
+use std::collections::BTreeMap;
+
+use deadbolt_core::item::{self, valid_item_name};
+use deadbolt_core::{FieldType, ItemId, tag};
+
+use super::replay::{V1Item, V1Vault};
+
+const SPLIT_CONTEXT: &str = "deadbolt 2026-11-26 v1 migrate split file";
+
+/// `vault` with every item within v2's caps.
+pub(super) fn vault(mut vault: V1Vault) -> V1Vault {
+    let mut split = BTreeMap::new();
+    for (id, item) in &mut vault.items {
+        if item.tags.len() > tag::MAX_TAGS {
+            tracing::warn!(item = %id, tags = item.tags.len(), "dropping tags past v2's cap");
+            let keep: Vec<String> = item.tags.iter().take(tag::MAX_TAGS).cloned().collect();
+            item.tags = keep.into_iter().collect();
+        }
+        for (field, part) in files_over(item) {
+            split.insert(part_id(id, &field), part);
+        }
+    }
+    vault.items.extend(split);
+    vault
+}
+
+/// Takes the file fields past `MAX_FILE` out of `item`, each as a document.
+fn files_over(item: &mut V1Item) -> Vec<(String, V1Item)> {
+    if item::files_size(item.fields.values()) <= item::MAX_FILE {
+        return Vec::new();
+    }
+    let mut total = 0;
+    let mut over = Vec::new();
+    for (name, field) in &item.fields {
+        if field.kind != FieldType::File {
+            continue;
+        }
+        let size = item::files_size([field]);
+        if total + size <= item::MAX_FILE {
+            total += size;
+        } else {
+            over.push(name.clone());
+        }
+    }
+    let base = item.name.clone().unwrap_or_else(|| item.kind.clone());
+    over.into_iter()
+        .filter_map(|name| {
+            let file = item.fields.remove(&name)?;
+            let mut title = format!("{base} ({name})");
+            if !valid_item_name(&title) {
+                title = name.clone();
+            }
+            let part = V1Item {
+                kind: "document".into(),
+                name: Some(title),
+                fields: BTreeMap::from([("file".to_owned(), file)]),
+                source: None,
+                favorite: false,
+                tags: item.tags.clone(),
+                password_changed: None,
+                ignored: BTreeMap::new(),
+                password_entry: None,
+                deleted: item.deleted,
+            };
+            Some((name, part))
+        })
+        .collect()
+}
+
+/// The id of the document holding `field` of item `id`, the same every try.
+fn part_id(id: &ItemId, field: &str) -> ItemId {
+    let material = [id.as_bytes().as_slice(), field.as_bytes()].concat();
+    let key = blake3::derive_key(SPLIT_CONTEXT, &material);
+    let mut part = [0; 16];
+    part.copy_from_slice(&key[..16]);
+    ItemId::from_bytes(part)
+}
+
+#[cfg(test)]
+mod tests {
+    use deadbolt_core::Field;
+
+    use super::*;
+
+    fn file(name: &str, len: usize) -> Field {
+        Field {
+            kind: FieldType::File,
+            value: item::file_value(name, &vec![7; len]).as_str().into(),
+        }
+    }
+
+    fn document(fields: BTreeMap<String, Field>, tags: usize) -> V1Item {
+        V1Item {
+            kind: "document".into(),
+            name: Some("Scans".into()),
+            fields,
+            source: None,
+            favorite: true,
+            tags: (0..tags).map(|i| format!("t{i:03}")).collect(),
+            password_changed: None,
+            ignored: BTreeMap::new(),
+            password_entry: None,
+            deleted: None,
+        }
+    }
+
+    fn one(item: V1Item) -> V1Vault {
+        V1Vault {
+            id: [1; 32],
+            name: "personal".into(),
+            items: BTreeMap::from([(ItemId::from_bytes([3; 16]), item)]),
+        }
+    }
+
+    #[test]
+    fn items_within_the_caps_stay_as_they_are() {
+        let six = item::MAX_FILE / 2 - 1024;
+        let fields = BTreeMap::from([
+            ("file".to_owned(), file("a.bin", six)),
+            ("more".to_owned(), file("b.bin", six)),
+        ]);
+        let item = document(fields, tag::MAX_TAGS);
+        let fitted = vault(one(item.clone()));
+        assert_eq!(fitted.items.len(), 1);
+        assert_eq!(fitted.items.values().next(), Some(&item));
+    }
+
+    #[test]
+    fn files_over_the_cap_move_to_documents_beside_it() {
+        let six = item::MAX_FILE * 6 / 10;
+        let fields = BTreeMap::from([
+            ("file".to_owned(), file("a.bin", six)),
+            ("more".to_owned(), file("b.bin", six)),
+            (
+                "notes".to_owned(),
+                Field {
+                    kind: FieldType::Note,
+                    value: "two scans".into(),
+                },
+            ),
+        ]);
+        let fitted = vault(one(document(fields.clone(), 2)));
+        assert_eq!(fitted.items.len(), 2);
+        let main = &fitted.items[&ItemId::from_bytes([3; 16])];
+        assert_eq!(main.fields.keys().collect::<Vec<_>>(), ["file", "notes"]);
+        let part = fitted
+            .items
+            .iter()
+            .find(|(id, _)| **id != ItemId::from_bytes([3; 16]))
+            .map(|(_, part)| part)
+            .unwrap();
+        assert_eq!(part.name.as_deref(), Some("Scans (more)"));
+        assert_eq!(part.fields["file"], fields["more"]);
+        assert_eq!(part.tags, main.tags);
+        // Both fit v2's rules as they are now.
+        for item in fitted.items.values() {
+            let check = item::check_create_with(
+                &item.kind,
+                item.name.as_deref(),
+                &item.fields,
+                None,
+                &item.tags,
+            );
+            assert!(check.is_ok(), "{check:?}");
+        }
+    }
+
+    #[test]
+    fn tags_past_the_cap_are_dropped() {
+        let fitted = vault(one(document(BTreeMap::new(), tag::MAX_TAGS + 6)));
+        let item = fitted.items.values().next().unwrap();
+        assert_eq!(item.tags.len(), tag::MAX_TAGS);
+        assert!(item.tags.contains("t000") && !item.tags.contains("t069"));
+    }
+}

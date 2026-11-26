@@ -4,11 +4,11 @@
 //! kit on the save step, one after another, then opens the vault. A lock on
 //! the way drops them all.
 
-use deadbolt_app::daemon::Done;
+use deadbolt_app::daemon::{Daemon, Done, Job};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::Step;
-use deadbolt_proto::daemon::{MigratedVault, Secret, Status, VaultInfo};
-use rune::{Env, Runtime};
+use deadbolt_proto::daemon::{Change, MigratedVault, Secret, Status, VaultInfo};
+use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const FRAME: f64 = 1.0 / 60.0;
 const PERSONAL: &str = "abandon ability able about above absent absorb abstract absurd abuse \
@@ -146,4 +146,58 @@ fn a_lock_during_an_upgrade_drops_every_kit() {
     assert_eq!(rt.state.screen, Screen::Locked);
     assert_eq!(rt.state.onboarding.step, Step::Welcome);
     assert!(!shows(&rt, "abandon"));
+}
+#[test]
+fn the_daemon_stopping_during_an_upgrade_drops_every_kit() {
+    let mut rt = locked();
+    let done = upgraded(&rt);
+    rt.update(|s, tx| s.apply(done, tx));
+    settle(&mut rt);
+    assert_eq!(showing(&rt).0, "personal");
+
+    rt.update(|s, tx| s.apply(Done::Changed(Change::Stopping), tx));
+    settle(&mut rt);
+    assert_eq!(rt.state.screen, Screen::Locked);
+    assert_eq!(rt.state.onboarding.step, Step::Welcome);
+    assert!(!shows(&rt, "abandon"));
+}
+
+/// The quick panel can't show an upgrade's kits: it sends people to the
+/// window, and never unlocks a v1 store itself.
+#[test]
+fn the_panel_sends_a_v1_upgrade_to_the_window() {
+    let app = rune::tooling::initial_state(&deadbolt_app::panel::spec(), Some("locked"));
+    let mut rt = Runtime::new(
+        app,
+        deadbolt_app::panel::view::panel,
+        deadbolt_app::panel::SIZE,
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.on_key = Some(|s, ev, tx| s.panel_key(ev, tx));
+    let (daemon, jobs, _replies) = Daemon::scripted();
+    rt.state.daemon = daemon;
+    rt.state.status.as_mut().expect("a status").v1_store = true;
+    settle(&mut rt);
+    assert_eq!(rt.state.screen, Screen::Locked);
+    assert!(shows(&rt, "Open Deadbolt to upgrade to v2"));
+    assert!(!shows(&rt, "Enter your passphrase"));
+
+    // Neither Return nor a passphrase somehow typed sends an unlock.
+    rt.state.passphrase.paste("hunter22");
+    rt.update(|s, _| s.submit_unlock());
+    rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    settle(&mut rt);
+    let sent: Vec<Job> = jobs.try_iter().collect();
+    assert!(
+        !sent.iter().any(|job| matches!(job, Job::Unlock(_))),
+        "no unlock from the panel"
+    );
+    assert!(!rt.state.unlocking);
 }

@@ -44,6 +44,23 @@ pub fn panel(s: &App, cx: &mut Cx<App>) -> El {
 fn card(s: &App, k: &Kit) -> El {
     let (header, body) = match &s.screen {
         Screen::Vault => (search(s, k), vault(s, k)),
+        // DELETABLE(v1-migrate): the kits an upgrade makes show only in
+        // Deadbolt's window, so the first unlock happens there.
+        Screen::Locked if s.upgrade_waits() => (
+            title(k, "upgrade", k.glyph.lock, "Open Deadbolt to upgrade to v2"),
+            message(
+                k,
+                "upgrade",
+                "Unlock in Deadbolt's window once to move your vaults to v2. It shows each one's new recovery kit.",
+                Some(
+                    Button::new("Open Deadbolt")
+                        .variant(ButtonVariant::Contrast)
+                        .control_size(ControlSize::Large)
+                        .on_press_tx(|s: &mut App, tx| s.open_main(tx))
+                        .build(k),
+                ),
+            ),
+        ),
         Screen::Locked => (
             title(k, "locked", k.glyph.lock, "Unlock Deadbolt"),
             locked(s, k),

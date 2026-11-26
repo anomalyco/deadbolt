@@ -53,6 +53,13 @@ impl Recovery {
 }
 
 impl App {
+    /// The device is locked on a v1 store, which its next unlock moves.
+    pub fn upgrade_waits(&self) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|s| s.v1_store && !s.unlocked)
+    }
+
     /// The unlock moved these vaults: show each one's words before the vault
     /// opens. A lock or close drops them all, like a created vault's.
     pub(crate) fn on_upgraded(
