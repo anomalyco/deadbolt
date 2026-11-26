@@ -28,8 +28,8 @@ pub const MAX_SEALED_LEN: usize = 32 * 1024 * 1024;
 /// Bytes sealing adds besides one tag per chunk: the header and the prefix.
 pub const SEAL_OVERHEAD: usize = HEADER_LEN + PREFIX_LEN;
 
-const PREFIX_LEN: usize = 15;
-const TAG_LEN: usize = 16;
+pub(crate) const PREFIX_LEN: usize = 15;
+pub(crate) const TAG_LEN: usize = 16;
 const KEY_CONTEXT: &str = "deadbolt send 2026-11 bundle";
 
 fn cipher(key: &[u8; 32]) -> XChaCha20Poly1305 {
@@ -108,6 +108,15 @@ pub fn open(key: &[u8; 32], sealed: &[u8]) -> Result<(PolicyHeader, Zeroizing<Ve
 
 /// Opens `prefix || chunk*` with chunk 0 bound to `head`.
 fn open_body(key: &[u8; 32], head: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    open_chunks(&cipher(key), head, sealed)
+}
+
+/// Opens `prefix || chunk*` under `cipher`, with chunk 0 bound to `aad0`.
+pub(crate) fn open_chunks(
+    cipher: &XChaCha20Poly1305,
+    aad0: &[u8],
+    sealed: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
     let corrupt = |what: &str| Error::Corrupt(what.into());
     if sealed.len() < PREFIX_LEN + TAG_LEN {
         return Err(corrupt("too short"));
@@ -119,7 +128,6 @@ fn open_body(key: &[u8; 32], head: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec
         return Err(corrupt("truncated chunk"));
     }
     let chunks = body.len().div_ceil(full);
-    let cipher = cipher(key);
     let mut out = Zeroizing::new(Vec::with_capacity(body.len() - chunks * TAG_LEN));
     for (index, chunk) in body.chunks(full).enumerate() {
         let (ciphertext, tag) = chunk.split_at(chunk.len() - TAG_LEN);
@@ -127,7 +135,7 @@ fn open_body(key: &[u8; 32], head: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec
         let at = out.len();
         out.extend_from_slice(ciphertext);
         let nonce = nonce(prefix, index + 1 == chunks, index as u64);
-        let aad: &[u8] = if index == 0 { head } else { &[] };
+        let aad: &[u8] = if index == 0 { aad0 } else { &[] };
         cipher
             .decrypt_inout_detached(&nonce.into(), aad, out[at..].as_mut().into(), &tag.into())
             .map_err(|_| corrupt("authentication failed"))?;

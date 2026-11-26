@@ -47,6 +47,9 @@ mod seal;
 mod server;
 #[cfg(feature = "live")]
 mod ticket;
+// DELETABLE(v1-send): remove once existing v1 users have upgraded to v2.
+#[cfg(feature = "live")]
+mod v1;
 
 pub use error::{Error, Result};
 pub use header::{HEADER_LEN, PolicyHeader};
