@@ -24,7 +24,7 @@ use rune::{Key, KeyEvent, TextEdit, Tx};
 use zeroize::Zeroizing;
 
 use crate::daemon::{Failure, Job};
-use crate::model::{App, Screen};
+use crate::model::{App, Screen, VaultPane};
 use crate::onboarding::sentence;
 use crate::view::theme::kind_noun;
 use form::problem;
@@ -124,11 +124,8 @@ impl App {
     pub fn edits(&self) -> bool {
         self.screen == Screen::Vault
             && self.panel.is_none()
-            && !self.settings_open
-            && !self.trash.open
-            && !self.security_open()
-            && !self.installing()
-            && !self.import.showing()
+            && self.pane == VaultPane::Item
+            && !self.import_showing()
             && !self.drop_hovering()
             && !self.deleting()
     }

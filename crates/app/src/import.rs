@@ -13,7 +13,7 @@ use deadbolt_proto::daemon::{ErrorCode, ImportReport, Tally, noun};
 use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
 use crate::daemon::{ImportFailure, Imported, Job};
-use crate::model::{App, Screen};
+use crate::model::{App, Screen, VaultPane};
 use crate::onboarding::sentence;
 use crate::view::{Notice, Severity};
 
@@ -26,9 +26,6 @@ const IMPORTED_FOR: f64 = 2.4;
 
 #[derive(Default)]
 pub struct Import {
-    /// The import view is showing in the detail pane. An empty vault always
-    /// shows the drop zone.
-    pub open: bool,
     /// A file the window takes is being dragged over it. Read it through
     /// `App::drop_hovering`, which ignores it while the window takes no drops.
     pub(crate) hover: bool,
@@ -86,12 +83,6 @@ impl Preview {
 }
 
 impl Import {
-    /// The detail pane shows the import view rather than an item. A drag
-    /// over the window shows it too, while it lasts (`App::drop_hovering`).
-    pub fn showing(&self) -> bool {
-        self.open || self.phase != Phase::Idle
-    }
-
     /// The preview or the import it confirmed.
     pub fn preview(&self) -> Option<(&Preview, bool)> {
         match &self.phase {
@@ -118,23 +109,19 @@ impl App {
         self.enter_import();
     }
 
-    /// Clears overlays that share the detail pane so the import view shows cleanly.
+    /// The import view takes the vault's pane, closing whichever had it
+    /// (Settings, Recently Deleted, Security or the install page).
     fn enter_import(&mut self) {
         self.edit.delete = None;
-        if let Some(installer) = self.installer.as_mut().filter(|i| i.open) {
-            installer.close();
-        }
-        self.close_settings();
-        self.trash.forget();
+        self.set_pane(VaultPane::Import);
         self.nav = crate::keys::Nav::default();
-        self.import.open = true;
     }
 
     /// The window takes dropped files: the main window's vault, not the install page.
     pub fn accepts_drops(&self) -> bool {
         self.screen == Screen::Vault
             && self.panel.is_none()
-            && !self.installing()
+            && self.pane != VaultPane::Install
             && !self.editing()
             && !self.deleting()
     }
@@ -244,7 +231,7 @@ impl App {
         self.import.seq += 1;
         self.import.phase = Phase::Idle;
         self.import.error = None;
-        self.import.open = false;
+        self.close_pane(VaultPane::Import);
         // A search typed while it showed now picks the item that shows.
         self.keep_selection_visible();
     }
@@ -281,7 +268,7 @@ impl App {
                     Some((format!("Imported {n} from {}", report.source), self.clock));
                 tx.wake_after(Duration::from_secs_f64(IMPORTED_FOR));
                 self.import.phase = Phase::Idle;
-                self.import.open = false;
+                self.close_pane(VaultPane::Import);
                 self.search.focused = true;
             }
             // An import that found nothing new by then (imported meanwhile
@@ -316,7 +303,7 @@ impl App {
             }
         }
         // A search typed while the import ran now picks the item that shows.
-        if !self.import.showing() {
+        if !self.import_showing() {
             self.keep_selection_visible();
         }
     }
@@ -370,7 +357,7 @@ impl App {
             self.show_import();
             return Some(true);
         }
-        let showing = self.import.showing() || self.drop_hovering();
+        let showing = self.import_showing() || self.drop_hovering();
         match ev.key {
             Key::Enter if showing => {
                 if ev.mods == rune::Mods::default() {

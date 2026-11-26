@@ -10,7 +10,7 @@ use rune::{El, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, RollingText};
 
 use super::{Phase, Preview, changed, details, import_label, new_items, nothing_new};
-use crate::model::App;
+use crate::model::{App, VaultPane};
 use crate::view::theme::{IMPORT, SUBHEADING};
 use crate::view::{replace, status_pill, tnum, vault_name};
 
@@ -90,7 +90,7 @@ pub fn drop_zone(s: &App, k: &Kit) -> El {
             .build(k)
             .key("choose"),
     );
-    if s.import.open && !s.items.is_empty() {
+    if s.pane == VaultPane::Import && !s.items.is_empty() {
         actions = actions.child(
             Button::new("Cancel")
                 .variant(ButtonVariant::GhostMuted)

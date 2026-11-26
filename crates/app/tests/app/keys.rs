@@ -372,7 +372,7 @@ fn escape_clears_a_search_wherever_focus_is() {
 #[test]
 fn the_import_view_keeps_keys_from_the_item_with_nothing_focused() {
     let mut rt = scene("import");
-    assert!(rt.state.import.showing());
+    assert!(rt.state.import_showing());
     blur(&mut rt);
     for shift in [false, true] {
         press(
@@ -384,7 +384,7 @@ fn the_import_view_keeps_keys_from_the_item_with_nothing_focused() {
             },
         );
         assert_eq!(copied(&rt), None, "copied with shift {shift}");
-        assert!(rt.state.import.showing());
+        assert!(rt.state.import_showing());
     }
     command(&mut rt, 'f');
     assert!(rt.state.search.focused);
@@ -451,9 +451,9 @@ fn a_hidden_list_opens_when_the_selection_moves() {
 #[test]
 fn a_search_edit_closes_the_import_view() {
     let mut rt = scene("import");
-    assert!(rt.state.import.showing());
+    assert!(rt.state.import_showing());
     tap(&mut rt, Key::Text("f".into()));
-    assert!(!rt.state.import.showing(), "the import view closed");
+    assert!(!rt.state.import_showing(), "the import view closed");
     let selected = rt.state.selected.clone().unwrap();
     assert!(
         rt.state.visible().iter().any(|i| i.id == selected),
@@ -541,7 +541,7 @@ fn the_import_view_opens_a_hidden_list() {
     assert!(!rt.state.sidebar.is_open());
     tap(&mut rt, Key::Down);
     assert!(
-        !rt.state.import.showing() && rt.state.sidebar.is_open(),
+        !rt.state.import_showing() && rt.state.sidebar.is_open(),
         "↓"
     );
 
@@ -552,7 +552,7 @@ fn the_import_view_opens_a_hidden_list() {
     });
     press(&mut rt, Key::Command('b'), toggle);
     tap(&mut rt, Key::Text("f".into()));
-    assert!(rt.state.import.showing(), "the import runs on");
+    assert!(rt.state.import_showing(), "the import runs on");
     assert!(rt.state.sidebar.is_open(), "a search edit");
 }
 
@@ -573,7 +573,7 @@ fn a_search_during_an_import_is_honoured_once_it_goes() {
 
     rt.update(|s, _| s.import.phase = Phase::Preview(preview));
     tap(&mut rt, Key::Escape);
-    assert!(!rt.state.import.showing());
+    assert!(!rt.state.import_showing());
     assert_eq!(rt.state.selected_item().unwrap().label, "fly.io");
 }
 
@@ -595,7 +595,7 @@ fn rows_never_take_focus() {
     for name in ["vault", "import"] {
         let mut rt = scene(name);
         let selected = rt.state.selected.clone();
-        let importing = rt.state.import.showing();
+        let importing = rt.state.import_showing();
         for _ in 0..12 {
             tap(&mut rt, Key::Tab);
             assert_eq!(focused_row(&rt), None, "Tab ({name})");
@@ -623,7 +623,7 @@ fn rows_never_take_focus() {
         assert!(rt.state.search.focused, "the search kept focus ({name})");
         assert_eq!(rt.state.selected, selected, "the press selected ({name})");
         assert_eq!(
-            rt.state.import.showing(),
+            rt.state.import_showing(),
             importing,
             "the press closed the import view"
         );
@@ -633,7 +633,7 @@ fn rows_never_take_focus() {
         settle(&mut rt, 0.1);
         assert_eq!(rt.state.selected, selected, "Space selected a row ({name})");
         assert_eq!(
-            rt.state.import.showing(),
+            rt.state.import_showing(),
             importing,
             "Space closed the import view"
         );

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use deadbolt_app::model::App;
+use deadbolt_app::model::{App, VaultPane};
 use deadbolt_app::panel::window::{FLAG, OPEN};
 use deadbolt_app::shortcut::{self, Hotkey};
 use rune::{Env, Mods, PhysicalInput, PhysicalKeyCode, Runtime, Shortcut, ShortcutError};
@@ -87,10 +87,10 @@ fn a_conflict_at_launch_shows_a_notice_that_leads_to_settings() {
     assert!(rt.state.shortcut_fallback, "it still works inside Deadbolt");
 
     press(&mut rt, "choose");
-    assert!(rt.state.settings_open, "Choose another… opens Settings");
+    assert!(rt.state.settings_open(), "Choose another… opens Settings");
     assert!(rt.find("recorder").is_some(), "with the recorder");
     press(&mut rt, "settings-trigger");
-    assert!(!rt.state.settings_open);
+    assert!(!rt.state.settings_open());
 
     press(&mut rt, "dismiss");
     assert!(rt.find("shortcut-notice").is_none(), "Not now puts it away");
@@ -101,7 +101,7 @@ fn a_conflict_at_launch_shows_a_notice_that_leads_to_settings() {
     rt.update(|s, _| s.edit_selected());
     settle(&mut rt, 0.3);
     press(&mut rt, "choose");
-    assert!(!rt.state.editing() && rt.state.settings_open);
+    assert!(!rt.state.editing() && rt.state.settings_open());
 
     let mut rt = main_window(Hotkey::new(Some(default.clone()), vec![default.clone()]));
     rt.update(|s, _| {
@@ -110,7 +110,7 @@ fn a_conflict_at_launch_shows_a_notice_that_leads_to_settings() {
     });
     settle(&mut rt, 0.3);
     press(&mut rt, "choose");
-    assert!(rt.state.editing() && !rt.state.settings_open);
+    assert!(rt.state.editing() && !rt.state.settings_open());
     assert!(rt.state.edit.form.as_ref().unwrap().nudge);
 }
 
@@ -142,7 +142,7 @@ fn a_known_holder_is_named() {
         &rt,
         "Spotlight is using it, so the quick panel can't open from anywhere."
     ));
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     let in_use = |chord| format!("{} is in use by Spotlight.", shortcut::name(chord));
     assert!(shows(&rt, &in_use(&default)), "Settings says who");
@@ -167,7 +167,7 @@ fn the_recorder_changes_saves_and_resets_the_shortcut() {
     let taken = parse("ctrl+alt+j");
     let hotkey = Hotkey::new(shortcut::load(&file), vec![taken.clone()]).saving_to(file.clone());
     let mut rt = main_window(hotkey);
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     assert!(
         rt.find("reset").is_none(),
@@ -240,7 +240,7 @@ fn the_recorder_refuses_a_chord_without_a_modifier() {
     let file = dir.path().join("app-shortcut");
     let hotkey = Hotkey::new(Some(shortcut::default()), Vec::new()).saving_to(file.clone());
     let mut rt = main_window(hotkey);
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     press(&mut rt, "recorder");
     let shift = Mods {
@@ -279,7 +279,7 @@ fn the_recorder_takes_a_function_key_alone() {
     let file = dir.path().join("app-shortcut");
     let hotkey = Hotkey::new(Some(shortcut::default()), Vec::new()).saving_to(file.clone());
     let mut rt = main_window(hotkey);
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     for key in [
         PhysicalKeyCode::F1,
@@ -302,7 +302,7 @@ fn the_recorder_takes_a_function_key_alone() {
 fn a_shortcut_taken_at_launch_can_be_tried_again() {
     let default = shortcut::default();
     let mut rt = main_window(Hotkey::new(Some(default.clone()), vec![default.clone()]));
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     let in_use = format!("{} is in use by another app.", shortcut::name(&default));
     assert!(shows(&rt, &in_use), "Settings says why");
@@ -331,7 +331,7 @@ fn a_shortcut_taken_at_launch_can_be_tried_again() {
 
     // Try again does the same.
     let mut rt = main_window(Hotkey::new(Some(default.clone()), vec![default.clone()]));
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     rt.state.hotkey.set_taken(Vec::new());
     press(&mut rt, "retry");
@@ -351,7 +351,7 @@ fn a_refused_reset_says_why_until_recording_starts() {
     let default = shortcut::default();
     let other = parse("ctrl+alt+k");
     let mut rt = main_window(Hotkey::new(Some(other), vec![default.clone()]));
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     press(&mut rt, "reset");
     let in_use = format!("{} is in use by another app.", shortcut::name(&default));
@@ -367,13 +367,13 @@ fn a_refused_reset_says_why_until_recording_starts() {
 #[test]
 fn escape_cancels_a_recording_before_it_closes_settings() {
     let mut rt = main_window(Hotkey::new(Some(shortcut::default()), Vec::new()));
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     press(&mut rt, "recorder");
     assert!(rt.state.hotkey.recorder.is_recording());
     physical(&mut rt, PhysicalKeyCode::Escape, Mods::default());
     assert!(!rt.state.hotkey.recorder.is_recording());
-    assert!(rt.state.settings_open, "Settings stays");
+    assert!(rt.state.settings_open(), "Settings stays");
     assert_eq!(rt.state.hotkey.shortcut, Some(shortcut::default()));
 }
 

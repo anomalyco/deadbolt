@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use deadbolt_app::daemon::{Daemon, Job, Window};
 use deadbolt_app::import::Phase;
 use deadbolt_app::install::Installer;
-use deadbolt_app::model::{App, Screen};
+use deadbolt_app::model::{App, Screen, VaultPane};
 use deadbolt_app::view::Severity;
 use rune::{Env, FileDialogKind, Key, KeyEvent, Mods, Runtime};
 
@@ -183,7 +183,7 @@ fn a_dropped_export_is_previewed_then_imported() {
         s.items.len() == 3 && s.import.phase == Phase::Idle
     });
     assert!(shows(&rt, "Imported 3 from Bitwarden"));
-    assert!(!rt.state.import.showing());
+    assert!(!rt.state.import_showing());
     // The note lists by its name, never its body.
     assert!(shows(&rt, "Wifi") && shows(&rt, "Secure note"));
     no_secrets(&rt);
@@ -200,7 +200,7 @@ fn an_export_already_imported_has_nothing_new() {
 
     // ⇧⌘I opens the import view in a vault with items.
     import_passwords(&mut rt);
-    assert!(rt.state.import.open && shows(&rt, "Drop an export here"));
+    assert!((rt.state.pane == VaultPane::Import) && shows(&rt, "Drop an export here"));
 
     drop_file(&mut rt, file);
     until(&mut rt, "the preview", previewing);
@@ -214,7 +214,7 @@ fn an_export_already_imported_has_nothing_new() {
     assert!(!shows(&rt, "Import 0 items"));
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
-    assert!(!rt.state.import.showing(), "Done closes it");
+    assert!(!rt.state.import_showing(), "Done closes it");
     assert_eq!(rt.state.items.len(), 3);
 }
 
@@ -288,17 +288,20 @@ fn choose_file_previews_the_chosen_export() {
 
     // Cancelling the dialog leaves the vault as it was: the view isn't
     // opened by Choose File…, so a vault that gains items isn't left on it.
-    assert!(!rt.state.import.open);
+    assert!(!(rt.state.pane == VaultPane::Import));
     press(&mut rt, "choose");
     let (kind, options) = rt.file_dialog().expect("an Open dialog");
     assert_eq!(kind, FileDialogKind::Open);
     assert_eq!(options.title, "Import Passwords");
-    assert!(!rt.state.import.open, "not open while the dialog is up");
+    assert!(
+        !(rt.state.pane == VaultPane::Import),
+        "not open while the dialog is up"
+    );
     rt.resolve_file_dialog(None).unwrap();
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.import.phase, Phase::Idle);
     assert_eq!(rt.state.import.error, None);
-    assert!(!rt.state.import.open);
+    assert!(!(rt.state.pane == VaultPane::Import));
 
     press(&mut rt, "choose");
     rt.resolve_file_dialog(Some(file)).unwrap();
@@ -316,7 +319,7 @@ fn cancelling_a_preview_imports_nothing() {
     rt.key(key(Key::Escape));
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.import.phase, Phase::Idle);
-    assert!(!rt.state.import.showing());
+    assert!(!rt.state.import_showing());
     assert!(shows(&rt, "Drop an export here"));
     assert!(device.output(&["ls"]).is_empty());
 }
@@ -331,7 +334,7 @@ fn locking_forgets_the_import() {
     device.run(&["lock"]);
     until(&mut rt, "the lock", |s| s.screen == Screen::Locked);
     assert_eq!(rt.state.import.phase, Phase::Idle);
-    assert!(!rt.state.import.showing() && rt.state.import.error.is_none());
+    assert!(!rt.state.import_showing() && rt.state.import.error.is_none());
 
     for c in PASSPHRASE.chars() {
         rt.key(key(Key::Text(c.into())));
@@ -407,7 +410,7 @@ fn an_export_with_nothing_deadbolt_takes_says_so() {
     assert!(shows(&rt, "Skipped 1 bank account"));
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
-    assert!(!rt.state.import.showing(), "Done closes it");
+    assert!(!rt.state.import_showing(), "Done closes it");
     assert!(device.output(&["ls"]).is_empty());
 }
 
@@ -472,7 +475,7 @@ fn the_rolling_label_is_centred_in_its_button() {
 fn keys_dont_reach_the_item_under_the_import_view() {
     let mut rt = scene("import");
     let selected = rt.state.selected.clone();
-    assert!(selected.is_some() && rt.state.search.focused && rt.state.import.showing());
+    assert!(selected.is_some() && rt.state.search.focused && rt.state.import_showing());
     for shift in [false, true] {
         rt.key(KeyEvent {
             key: Key::Enter,
@@ -483,11 +486,11 @@ fn keys_dont_reach_the_item_under_the_import_view() {
         });
         rt.frame(1.0 / 60.0);
         assert!(rt.state.copy.is_none(), "copied with shift {shift}");
-        assert!(rt.state.import.showing());
+        assert!(rt.state.import_showing());
     }
     rt.key(key(Key::Down));
     rt.frame(1.0 / 60.0);
-    assert!(!rt.state.import.showing());
+    assert!(!rt.state.import_showing());
     assert_eq!(rt.state.selected, selected, "back to the item, unmoved");
 
     rt.key(key(Key::Enter));
@@ -522,7 +525,7 @@ fn a_drag_cut_short_doesnt_stick() {
     // The drag ends over the install page, which takes no drops.
     rt.drag_files_leave();
     rt.frame(1.0 / 60.0);
-    rt.state.installer.as_mut().unwrap().close();
+    rt.state.close_installer();
     rt.frame(1.0 / 60.0);
     assert!(!rt.state.drop_hovering() && rt.find("drop-zone").is_none());
 }
@@ -535,34 +538,58 @@ fn import_passwords_leaves_the_install_page_and_settings() {
     let mut rt = scene("install-command");
     import_passwords(&mut rt);
     let installer = rt.state.installer.as_ref().unwrap();
-    assert!(!installer.open && !installer.offering());
-    assert!(rt.state.import.open && rt.find("drop-zone").is_some());
+    assert!(!rt.state.installing() && !installer.offering());
+    assert!((rt.state.pane == VaultPane::Import) && rt.find("drop-zone").is_some());
 
     let mut rt = scene("command-offer");
     import_passwords(&mut rt);
-    assert!(rt.state.import.open);
+    assert!((rt.state.pane == VaultPane::Import));
     assert!(rt.state.installer.as_ref().unwrap().offering());
 
     let mut rt = scene("settings");
     rt.state.hotkey.recorder().begin();
     import_passwords(&mut rt);
     assert!(
-        rt.state.settings_open && !rt.state.import.open,
+        rt.state.settings_open() && !(rt.state.pane == VaultPane::Import),
         "recording it"
     );
     rt.state.hotkey.recorder().cancel();
     import_passwords(&mut rt);
-    assert!(!rt.state.settings_open && rt.state.import.open);
+    assert!(!rt.state.settings_open() && (rt.state.pane == VaultPane::Import));
 
     // Dropping an export while Settings is open leaves Settings for the import view.
     let mut rt = scene("settings");
-    assert!(rt.state.settings_open);
+    assert!(rt.state.settings_open());
     rt.drop_files(
         vec![PathBuf::from("/fixture/export.1pux")],
         Some((600.0, 300.0)),
     );
     rt.frame(1.0 / 60.0);
-    assert!(!rt.state.settings_open && rt.state.import.showing());
+    assert!(!rt.state.settings_open() && rt.state.import_showing());
+}
+
+/// ⇧⌘I or an export dropped on Security switches to the import view rather
+/// than opening it hidden behind Security.
+#[test]
+fn import_passwords_leaves_security() {
+    let mut rt = scene("vault-risk");
+    rt.update(|s, _| s.open_security());
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.security_open());
+    import_passwords(&mut rt);
+    assert_eq!(rt.state.pane, VaultPane::Import);
+    assert!(!rt.state.security_open() && rt.find("drop-zone").is_some());
+
+    let mut rt = scene("vault-risk");
+    rt.update(|s, _| s.open_security());
+    rt.frame(1.0 / 60.0);
+    rt.drop_files(
+        vec![PathBuf::from("/fixture/export.1pux")],
+        Some((600.0, 300.0)),
+    );
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.pane, VaultPane::Import);
+    assert!(rt.state.import_showing() && rt.find("drop-zone").is_some());
 }
 
 /// A dialog answering after its import was cancelled is ignored; a Choose
@@ -579,7 +606,7 @@ fn a_dialog_answers_the_latest_choose_file() {
     rt.resolve_file_dialog(Some(export.clone())).unwrap();
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.import.phase, Phase::Idle, "a stale answer");
-    assert!(!rt.state.import.open);
+    assert!(!(rt.state.pane == VaultPane::Import));
 
     press(&mut rt, "choose");
     rt.key(key(Key::Escape));

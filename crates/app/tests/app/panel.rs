@@ -5,7 +5,7 @@
 //! it up from anywhere.
 
 use deadbolt_app::daemon::{Daemon, Done, Job, Values};
-use deadbolt_app::model::{App, Screen};
+use deadbolt_app::model::{App, Screen, VaultPane};
 use deadbolt_app::panel::window::Windows;
 use deadbolt_app::panel::{self, Phase};
 use deadbolt_proto::daemon::{Change, ItemInfo};
@@ -279,11 +279,9 @@ fn it_opens_fresh_and_at_rest() {
 #[test]
 fn it_has_no_settings_or_install_offer_and_keeps_its_keys() {
     let mut rt = runtime("empty", true);
-    let mut installer = deadbolt_app::install::Installer::fixture();
-    installer.show();
     rt.update(|s, _| {
-        s.installer = Some(installer);
-        s.settings_open = true;
+        s.installer = Some(deadbolt_app::install::Installer::fixture());
+        s.pane = VaultPane::Settings;
     });
     frames(&mut rt, 10);
     for text in ["Settings", "Install the deadbolt command", "Install…"] {
@@ -297,8 +295,7 @@ fn it_has_no_settings_or_install_offer_and_keeps_its_keys() {
     rt.key(key(Key::Escape));
     rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Closing { .. }), "Escape closes");
-    let i = rt.state.installer.as_ref().unwrap();
-    assert!(i.open && rt.state.settings_open, "no popover took the keys");
+    assert!(rt.state.settings_open(), "no popover took the keys");
 }
 
 #[test]

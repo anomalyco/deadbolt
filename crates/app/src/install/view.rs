@@ -228,11 +228,7 @@ pub fn page(s: &App, k: &Kit) -> Paged {
                 .transition(Transition::opacity()),
         );
     }
-    let back = bar(k, "Back", &CHEVRON_LEFT, |s| {
-        if let Some(i) = installer(s) {
-            i.close();
-        }
-    });
+    let back = bar(k, "Back", &CHEVRON_LEFT, App::close_installer);
     centred("install-command", Some(back), panel)
 }
 

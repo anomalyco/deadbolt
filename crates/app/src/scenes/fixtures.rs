@@ -7,7 +7,7 @@ use deadbolt_proto::daemon::{
 use rune::Tx;
 
 use crate::daemon::{self, Daemon, Job};
-use crate::model::{App, Screen};
+use crate::model::{App, Screen, VaultPane};
 use crate::onboarding::worker::{Created, RecoveryKit, Stage};
 use crate::onboarding::{Flow, Recovery, Step};
 use crate::view::{Notice, Severity};
@@ -83,7 +83,7 @@ pub(super) fn settings_touch_id(s: &mut App) {
 }
 
 pub(super) fn show_preview(s: &mut App, preview: import::Preview) {
-    s.import.open = true;
+    s.pane = VaultPane::Import;
     s.import.phase = import::Phase::Preview(preview);
 }
 

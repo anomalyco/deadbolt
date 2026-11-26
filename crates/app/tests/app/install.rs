@@ -3,7 +3,7 @@
 //! and copying a command confirms in place.
 
 use deadbolt_app::install::{Copied, Installer};
-use deadbolt_app::model::{App, Screen};
+use deadbolt_app::model::{App, Screen, VaultPane};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const FRAME: f64 = 1.0 / 60.0;
@@ -74,25 +74,22 @@ fn the_offer_and_settings_live_in_the_vault_only() {
         "locked",
         "failed",
     ] {
-        let mut rt = runtime(scene);
-        rt.update(|s, _| {
-            let mut i = Installer::fixture();
-            // Even an install page or Settings left open never covers these.
-            i.open = true;
-            s.installer = Some(i);
-            s.settings_open = true;
-        });
-        settle(&mut rt, 0.6);
-        assert!(!shows(&rt, OFFER), "{scene} shows the offer");
-        assert!(!shows(&rt, "Install the deadbolt command"), "{scene}");
-        assert!(
-            rt.find("settings-trigger").is_none(),
-            "{scene} has Settings"
-        );
-        assert!(
-            !installer(&rt).open && !rt.state.settings_open,
-            "{scene} closed them"
-        );
+        // Even an install page or Settings left open never covers these.
+        for pane in [VaultPane::Install, VaultPane::Settings] {
+            let mut rt = runtime(scene);
+            rt.update(|s, _| {
+                s.installer = Some(Installer::fixture());
+                s.pane = pane;
+            });
+            settle(&mut rt, 0.6);
+            assert!(!shows(&rt, OFFER), "{scene} shows the offer");
+            assert!(!shows(&rt, "Install the deadbolt command"), "{scene}");
+            assert!(
+                rt.find("settings-trigger").is_none(),
+                "{scene} has Settings"
+            );
+            assert_eq!(rt.state.pane, VaultPane::Item, "{scene} closed {pane:?}");
+        }
     }
     let mut rt = runtime("command-offer");
     settle(&mut rt, 0.6);
@@ -146,7 +143,7 @@ fn settings_takes_keys_before_the_focused_search() {
     settle(&mut rt, 0.6);
     let selected = rt.state.selected.clone();
     // Open it without moving focus: the search field would get keys first.
-    rt.update(|s, _| s.settings_open = true);
+    rt.update(|s, _| s.pane = VaultPane::Settings);
     settle(&mut rt, 0.5);
     assert!(shows(&rt, "deadbolt command") && shows(&rt, "Install…"));
     assert!(
@@ -161,7 +158,7 @@ fn settings_takes_keys_before_the_focused_search() {
 
     rt.key(key(Key::Escape));
     settle(&mut rt, 0.3);
-    assert!(!rt.state.settings_open, "Escape closed Settings");
+    assert!(!rt.state.settings_open(), "Escape closed Settings");
     assert_eq!(rt.state.screen, Screen::Vault);
 
     // Closing hands focus back to the trigger. Back in the search field, the

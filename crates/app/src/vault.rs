@@ -22,7 +22,7 @@ use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Keybind, Kit, TextInput,
 };
 
-use crate::model::App;
+use crate::model::{App, VaultPane};
 use crate::view::theme::{SLIDERS, STAR_FILL, TRASH, kind_icon};
 use crate::view::{LIST_EDGE, device_name, instant, scroll_col, tnum, vault_name};
 
@@ -43,18 +43,15 @@ pub(crate) fn fact(item: &ItemInfo) -> String {
 /// The vault: the sidebar and the page, with ⌘K's actions and the ? sheet
 /// over it in `layer`.
 pub fn view(s: &App, k: &Kit, inset: f32, reduced_motion: bool, layer: &mut Vec<El>) -> El {
-    let main = if s.settings_open {
-        crate::settings::page(s, k)
-    } else if s.trash.open {
-        crate::trash::page(s, k)
-    } else if s.security_open() {
-        crate::health::view::page(s, k)
-    } else {
-        page::pane(s, k, layer)
+    let main = match s.pane {
+        VaultPane::Settings => crate::settings::page(s, k),
+        VaultPane::Trash => crate::trash::page(s, k),
+        VaultPane::Security => crate::health::view::page(s, k),
+        VaultPane::Item | VaultPane::Import | VaultPane::Install => page::pane(s, k, layer),
     }
     .transition(instant());
     let mut toolbar = Toolbar::new();
-    if !s.settings_open && !s.trash.open && !s.security_open() {
+    if !s.pane.replaces_item() {
         toolbar = toolbar.trailing(page::toolbar(s, k).transition(instant()));
     }
     layer.extend(crate::palette::view(s, k).map(|card| over("palette-over", card, 72.0)));
@@ -225,10 +222,7 @@ fn rows_of(s: &App, k: &Kit, visible: &[usize]) -> El {
             let Some(item) = items.get(i).and_then(|&at| s.items.get(at)) else {
                 return el();
             };
-            let on = !s.settings_open
-                && !s.trash.open
-                && !s.security_open()
-                && s.selected.as_deref() == Some(item.id.as_str());
+            let on = !s.pane.replaces_item() && s.selected.as_deref() == Some(item.id.as_str());
             let jump = if i < 9 && on { i + 1 } else { 0 };
             let risk = s.health.risk_for(&item.id);
             rune::memo(
@@ -391,16 +385,13 @@ impl App {
         if !self.leave_edit() {
             return;
         }
-        if self.settings_open {
-            self.close_settings();
-        }
-        self.trash.forget();
-        if self.security_open() {
-            self.close_security();
+        let importing = self.import_showing();
+        if self.pane.replaces_item() {
+            self.set_pane(VaultPane::Item);
         }
         // Focus somewhere else (nothing, Lock) comes back to the search.
         self.search.focused = true;
-        if !self.import.showing() && !was_editing {
+        if !importing && !was_editing {
             tx.instant();
         }
         self.cancel_import();
@@ -423,7 +414,7 @@ fn foot(s: &App, k: &Kit) -> El {
         .shortcut("⌘,")
         .on_press_tx(|s: &mut App, tx| {
             tx.instant();
-            if s.settings_open {
+            if s.settings_open() {
                 s.close_settings();
                 s.search.focused = true;
             } else {
@@ -432,7 +423,7 @@ fn foot(s: &App, k: &Kit) -> El {
         })
         .build(k)
         .key("settings-trigger");
-    let settings = if s.settings_open {
+    let settings = if s.settings_open() {
         row()
             .key("settings-on")
             .radius(6.0)
@@ -452,7 +443,7 @@ fn foot(s: &App, k: &Kit) -> El {
         })
         .build(k)
         .key("trash-trigger");
-    let trash = if s.trash.open {
+    let trash = if s.trash_open() {
         row()
             .key("trash-on")
             .radius(6.0)

@@ -324,7 +324,7 @@ fn command_comma_opens_settings_and_its_rows_take_the_keys() {
     let mut rt = scene("vault");
     let selected = rt.state.selected.clone();
     command(&mut rt, ',');
-    assert!(rt.state.settings_open);
+    assert!(rt.state.settings_open());
     assert!(rt.find("settings").is_some());
     let rows = deadbolt_app::settings::rows(&rt.state);
     assert_eq!(rt.state.nav.row, 0);
@@ -366,7 +366,7 @@ fn command_comma_opens_settings_and_its_rows_take_the_keys() {
     tap(&mut rt, Key::Escape);
     settle(&mut rt, 0.1);
     assert!(!rt.state.hotkey.recorder.is_recording());
-    assert!(rt.state.settings_open, "Esc stopped the recording first");
+    assert!(rt.state.settings_open(), "Esc stopped the recording first");
 
     // ↵ on the last row, Activity, shows the daemon's entries, and again hides them.
     rt.update(move |s, _| s.nav.row = 99);
@@ -379,11 +379,11 @@ fn command_comma_opens_settings_and_its_rows_take_the_keys() {
 
     // Esc leaves, back to the search; ⌘, toggles too.
     tap(&mut rt, Key::Escape);
-    assert!(!rt.state.settings_open);
+    assert!(!rt.state.settings_open());
     assert!(rt.state.search.focused);
     command(&mut rt, ',');
     command(&mut rt, ',');
-    assert!(!rt.state.settings_open);
+    assert!(!rt.state.settings_open());
 }
 
 #[test]

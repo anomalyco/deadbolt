@@ -36,7 +36,7 @@ pub fn pane(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 pub fn toolbar(s: &App, k: &Kit) -> El {
     let item = s.selected_item().is_some()
         && s.edit.form.is_none()
-        && !s.import.showing()
+        && !s.import_showing()
         && !s.drop_hovering()
         && !s.items.is_empty();
     row()
@@ -60,7 +60,7 @@ fn detail(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     .into_iter()
     .flatten();
     let importing =
-        s.loaded && !s.editing() && (s.import.showing() || s.drop_hovering() || s.items.is_empty());
+        s.loaded && !s.editing() && (s.import_showing() || s.drop_hovering() || s.items.is_empty());
     let body = if importing {
         // An empty vault keeps its guide, with the drop zone, until there's a preview.
         if s.items.is_empty() && s.import.preview().is_none() {
@@ -526,7 +526,7 @@ fn daemon_notice(s: &App, k: &Kit) -> Option<El> {
 fn foot(s: &App, k: &Kit) -> El {
     let rest = s.edit.form.is_none()
         && s.edit.delete.is_none()
-        && !s.import.showing()
+        && !s.import_showing()
         && !s.drop_hovering();
     row()
         .key("hints")
@@ -577,7 +577,7 @@ fn key_hints(s: &App, k: &Kit) -> Vec<El> {
             h("h-cancel", &["esc"], "Cancel"),
         ];
     }
-    if !(s.import.showing() || s.drop_hovering()) {
+    if !(s.import_showing() || s.drop_hovering()) {
         if let Some(f) = s.focused_field() {
             let copy = if f.kind == "file" { "Save…" } else { "Copy" };
             let mut hints = vec![h("h-field-copy", &["⏎"], copy)];

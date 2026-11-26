@@ -44,16 +44,16 @@ pub(crate) const SCENES: &[Scene] = &[
     }),
     ("install-command", |s| {
         vault(s);
-        let mut i = install::Installer::fixture();
-        i.show();
-        s.installer = Some(i);
+        s.installer = Some(install::Installer::fixture());
+        s.show_installer();
     }),
     ("command-installed", |s| {
         vault(s);
-        let mut i = install::Installer::fixture();
-        i.show();
-        i.apply();
-        s.installer = Some(i);
+        s.installer = Some(install::Installer::fixture());
+        s.show_installer();
+        if let Some(i) = &mut s.installer {
+            i.apply();
+        }
     }),
     ("connecting", |_| {}),
     ("vault-243", vault_243),
