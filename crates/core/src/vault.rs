@@ -12,13 +12,13 @@
 //! makes them durable before anyone sees them. If the change or the commit
 //! fails, the frames are taken back out.
 
+mod duty;
+mod remove;
 mod sync;
 mod view;
 mod write;
 
 use std::collections::{BTreeMap, BTreeSet};
-
-use zeroize::Zeroizing;
 
 use crate::error::Error;
 use crate::id::{DeviceId, ItemId, VaultId};
@@ -49,10 +49,13 @@ pub struct Touch {
 pub struct Vault {
     id: VaultId,
     me: DeviceId,
-    kem: Zeroizing<[u8; 32]>,
     members: BTreeMap<FrameId, Frame>,
     data: BTreeMap<FrameId, Frame>,
     opened: BTreeMap<FrameId, DataFrame>,
+    /// Header-only stand-ins for frames sealed under an epoch the membership
+    /// placed but doesn't authorize, which this device can't open: they count
+    /// for no one, and folding them keeps their author's later frames chained.
+    unreadable: BTreeMap<FrameId, DataFrame>,
     proofs: Vec<FraudProof>,
     keyring: EpochKeyring,
     bad_epochs: BTreeSet<EpochId>,
@@ -68,14 +71,14 @@ pub struct Vault {
 }
 
 impl Vault {
-    fn empty(id: VaultId, me: DeviceId, kem: &KemSecret) -> Self {
+    fn empty(id: VaultId, me: DeviceId) -> Self {
         Self {
             id,
             me,
-            kem: kem.to_bytes(),
             members: BTreeMap::new(),
             data: BTreeMap::new(),
             opened: BTreeMap::new(),
+            unreadable: BTreeMap::new(),
             proofs: Vec::new(),
             keyring: EpochKeyring::new(),
             bad_epochs: BTreeSet::new(),
@@ -113,9 +116,9 @@ impl Vault {
                     )
             })
             .ok_or(Error::InvalidGenesis)?;
-        let mut vault = Self::empty(genesis.header().vault, me, kem);
+        let mut vault = Self::empty(genesis.header().vault, me);
         vault.insert(frames)?;
-        vault.refresh();
+        vault.refresh(Some(kem));
         if vault.resolved.recovery_lineage.is_empty() {
             return Err(Error::InvalidGenesis);
         }
@@ -164,26 +167,36 @@ impl Vault {
         Ok(new)
     }
 
-    /// Takes frames back out (a failed transaction) and refreshes.
-    fn remove_frames(&mut self, ids: &[FrameId]) {
+    /// Takes frames back out (a failed transaction), restores the keys held
+    /// before it, and refreshes.
+    fn remove_frames(&mut self, ids: &[FrameId], keyring: EpochKeyring) {
         for id in ids {
             self.members.remove(id);
             self.data.remove(id);
             self.opened.remove(id);
         }
-        self.keyring = EpochKeyring::new();
-        self.refresh();
+        self.keyring = keyring;
+        self.refresh(None);
     }
 
     /// Re-resolves membership, unlocks every epoch this device can reach,
-    /// opens what it can and refolds.
-    fn refresh(&mut self) {
+    /// opens what it can and refolds. Without `kem` (this device's own
+    /// writes, which wrap nothing new to it) only back-links are walked; the
+    /// KEM secret is never kept between calls.
+    fn refresh(&mut self, kem: Option<&KemSecret>) {
         let frames = self.members.values().chain(self.data.values());
         self.resolved = v2::resolve(&self.id, frames, &self.proofs);
         let graph = EpochGraph::build(self.id, self.members.values(), &self.resolved);
-        let kem = KemSecret::from_bytes(&self.kem);
-        let report = graph.unlock(&self.me, &kem, &mut self.keyring);
-        self.bad_epochs = report.bad_epochs();
+        match kem {
+            Some(kem) => {
+                let report = graph.unlock(&self.me, kem, &mut self.keyring);
+                self.bad_epochs = report.bad_epochs();
+            }
+            None => {
+                let report = graph.unlock_back_links(&mut self.keyring);
+                self.bad_epochs.extend(report.bad_epochs());
+            }
+        }
         let unopened: Vec<_> = self
             .data
             .iter()
@@ -194,14 +207,35 @@ impl Vault {
             DataFrame::open(f, key).ok().map(|opened| (*id, opened))
         });
         self.opened.extend(opened.into_iter().flatten());
+        self.unreadable = self
+            .data
+            .iter()
+            .filter(|(id, _)| !self.opened.contains_key(id))
+            .filter(|(_, f)| self.void_epoch(&f.header().epoch))
+            .filter_map(|(id, f)| Some((*id, DataFrame::unreadable(f).ok()?)))
+            .collect();
         self.graph = Some(graph);
         self.adders = v2::adders_from_frames(&self.resolved, self.members.values());
         let ctx = FoldContext {
             membership: &self.resolved,
             adders: &self.adders,
         };
-        self.state = v2::fold_from_scratch(&ctx, self.opened.values());
+        self.state = v2::fold_from_scratch(&ctx, self.fold_inputs());
         self.note_removed();
+    }
+
+    /// True iff `epoch`'s `Rotate` is placed in the membership DAG but not
+    /// authorized: a losing or voided epoch, which never will count. One
+    /// merely not placed yet may still, so its frames wait instead.
+    fn void_epoch(&self, epoch: &EpochId) -> bool {
+        self.resolved.dag_frames.contains(&epoch.as_frame_id())
+            && !self.resolved.is_authorized_epoch(epoch)
+    }
+
+    /// What the fold sees: every opened frame, and a stand-in for each
+    /// unreadable one under a void epoch.
+    fn fold_inputs(&self) -> impl Iterator<Item = &DataFrame> {
+        self.opened.values().chain(self.unreadable.values())
     }
 
     /// Parking-rule bookkeeping after a refresh. This device's own removal
@@ -433,13 +467,14 @@ impl Vault {
         commit: impl FnOnce(&Vault, &[&Frame]) -> Result<(), E>,
     ) -> Result<T, E> {
         self.staged.clear();
+        let keyring = self.keyring.clone();
         let result = change(&mut VaultWrite::new(self));
         let staged = std::mem::take(&mut self.staged);
         let value = match result {
             Ok(value) => value,
             Err(error) => {
                 if !staged.is_empty() {
-                    self.remove_frames(&staged);
+                    self.remove_frames(&staged, keyring);
                 }
                 return Err(error);
             }
@@ -451,7 +486,7 @@ impl Vault {
         match commit(self, &frames) {
             Ok(()) => Ok(value),
             Err(error) => {
-                self.remove_frames(&staged);
+                self.remove_frames(&staged, keyring);
                 Err(error)
             }
         }
@@ -480,6 +515,11 @@ pub(crate) mod testing {
 
     /// Writes outside a host transaction, for tests.
     impl Vault {
+        /// The epoch graph, membership and keys, for checking epoch rules.
+        pub(crate) fn epoch_parts(&self) -> (&EpochGraph, &ResolvedMembership, &EpochKeyring) {
+            (self.graph(), &self.resolved, &self.keyring)
+        }
+
         pub(crate) fn create_item(
             &mut self,
             a: &Author,

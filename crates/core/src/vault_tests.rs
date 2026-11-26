@@ -6,6 +6,8 @@ use crate::v2::{Frame, LogKind, RecoverySecret};
 use crate::vault::testing::{NOW_MS, author, recovery, vault};
 use crate::{Author, DataOp, Error, Field, FieldType, Heads, ItemId, Vault};
 
+mod audit;
+
 fn login(user: &str, pw: &str) -> Vec<(String, Field)> {
     vec![
         ("username".into(), Field::new(FieldType::Text, user)),
@@ -26,7 +28,8 @@ fn sync(from: &Peer, to: &mut Peer) {
         .flat_map(|log| from.v.missing(&heads, log))
         .cloned()
         .collect();
-    to.v.transact(|w| w.apply(frames), |_, _| Ok::<_, Error>(()))
+    let kem = to.a.keys().kem_key();
+    to.v.transact(|w| w.apply(kem, frames), |_, _| Ok::<_, Error>(()))
         .unwrap();
 }
 
@@ -408,7 +411,8 @@ fn a_write_names_only_frames_the_fold_resolved() {
     let (_, from_b) = stage(&mut b, "from b");
     // a gets b's write, which names c's, but not c's.
     let only = b.v.frame(&from_b).unwrap().clone();
-    a.v.transact(|w| w.apply(vec![only]), |_, _| Ok::<_, Error>(()))
+    let kem = a.a.keys().kem_key();
+    a.v.transact(|w| w.apply(kem, vec![only]), |_, _| Ok::<_, Error>(()))
         .unwrap();
     assert!(a.v.frame(&from_c).is_none());
     assert!(

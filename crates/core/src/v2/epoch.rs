@@ -268,6 +268,27 @@ impl EpochGraph {
         keyring: &mut EpochKeyring,
     ) -> UnlockReport {
         let mut report = UnlockReport::default();
+        self.unlock_direct(my_id, my_kem, keyring, &mut report);
+        self.walk_back_links(keyring, &mut report);
+        report
+    }
+
+    /// Rule E5 alone: the back-links of the keys `keyring` already holds, for
+    /// a holder that has no KEM secret at hand (none of its own frames wraps
+    /// a key to it that it didn't make).
+    pub fn unlock_back_links(&self, keyring: &mut EpochKeyring) -> UnlockReport {
+        let mut report = UnlockReport::default();
+        self.walk_back_links(keyring, &mut report);
+        report
+    }
+
+    fn unlock_direct(
+        &self,
+        my_id: &DeviceId,
+        my_kem: &KemSecret,
+        keyring: &mut EpochKeyring,
+        report: &mut UnlockReport,
+    ) {
         for (&epoch_id, info) in &self.epochs {
             if keyring.contains(&epoch_id) {
                 continue;
@@ -306,6 +327,9 @@ impl EpochGraph {
                 }
             }
         }
+    }
+
+    fn walk_back_links(&self, keyring: &mut EpochKeyring, report: &mut UnlockReport) {
         let mut queue: VecDeque<EpochId> = keyring.epoch_ids().into_iter().collect();
         let mut visited: BTreeSet<EpochId> = BTreeSet::new();
         while let Some(epoch_id) = queue.pop_front() {
@@ -338,7 +362,6 @@ impl EpochGraph {
                 }
             }
         }
-        report
     }
 
     /// Opens one back-link of the epoch `info` (whose key is `k_child`) and checks the parent's
@@ -484,13 +507,13 @@ impl EpochGraph {
             if !bad_commit_epochs.contains(&target) {
                 return WriteEpochDecision::AwaitingRewrap(target);
             }
-            let mut parent_pool = keyring.epoch_ids();
+            let mut parent_pool = self.authorized_held(keyring);
             parent_pool.insert(target);
             return WriteEpochDecision::MintRotate {
                 parents: self.maximal_epochs_in(&parent_pool),
             };
         }
-        let mut parent_pool = keyring.epoch_ids();
+        let mut parent_pool = self.authorized_held(keyring);
         for &b in bad_commit_epochs {
             if self.epochs.get(&b).is_some_and(|e| e.authorized) {
                 parent_pool.insert(b);
@@ -499,6 +522,17 @@ impl EpochGraph {
         WriteEpochDecision::MintRotate {
             parents: self.maximal_epochs_in(&parent_pool),
         }
+    }
+
+    /// The authorized epochs `keyring` holds: what a new `Rotate` may name as
+    /// parents and seal back-links to. A voided or losing epoch's key never
+    /// travels forward.
+    fn authorized_held(&self, keyring: &EpochKeyring) -> BTreeSet<EpochId> {
+        keyring
+            .epoch_ids()
+            .into_iter()
+            .filter(|e| self.epochs.get(e).is_some_and(|i| i.authorized))
+            .collect()
     }
 
     /// Rule E4 write-epoch selection guarded by the parking rule.

@@ -391,12 +391,13 @@ pub fn receive<S: State>(
     let mut added = 0;
     for (id, frames) in grouped {
         let removed_here = stream.removed.contains(&id);
-        let (count, removed) = s.update(id, |vault, _| {
+        let (count, removed) = s.update(id, |vault, author| {
+            let kem = author.keys().kem_key();
             let before = vault.is_member(peer);
             let (members, data): (Vec<Frame>, Vec<Frame>) = frames
                 .into_iter()
                 .partition(|f| f.header().kind.log_kind() == LogKind::Member);
-            let mut added = match vault.apply(members) {
+            let mut added = match vault.apply(kem, members) {
                 Ok(n) => n,
                 Err(error) => {
                     debug!(peer = %peer, "rejected frames: {error}");
@@ -405,10 +406,17 @@ pub fn receive<S: State>(
             };
             let removed = before && !vault.is_member(peer);
             if vault.is_member(peer) || removed || removed_here {
-                match vault.apply(data) {
+                match vault.apply(kem, data) {
                     Ok(n) => added += n,
                     Err(error) => debug!(peer = %peer, "rejected frames: {error}"),
                 }
+            }
+            // What arrived may leave a member without a key it needs (rule
+            // E6): rewrap it in the same commit.
+            if added > 0
+                && let Err(error) = vault.fulfill_reader_duty(author)
+            {
+                debug!(peer = %peer, "reader duty: {error}");
             }
             Ok((added, removed))
         })?;

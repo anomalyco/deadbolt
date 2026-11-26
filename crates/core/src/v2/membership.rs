@@ -98,6 +98,12 @@ impl ResolvedMembership {
         self.authorized_frames.contains(&epoch.as_frame_id())
     }
 
+    /// True iff `frame` is a voided fork frame of a forked author, or descends
+    /// from one: no honest frame may build on it.
+    pub fn is_fork_void(&self, frame: &FrameId) -> bool {
+        self.fork_descendants.values().any(|d| d.contains(frame))
+    }
+
     /// True iff a data frame by `author` at `seq` with membership view `mheads` counts.
     ///
     /// For an author that forked in `Member`, every head must be a placed frame outside the

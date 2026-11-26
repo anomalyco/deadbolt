@@ -194,7 +194,23 @@ impl Engine {
                 }
             }
         }
+        engine.fulfill_reader_duty();
         Ok(engine)
+    }
+
+    /// Rule E6 for every vault: rewraps the keys other members can't reach
+    /// and this device holds. A failure leaves that vault as it was; a peer
+    /// holding the key can still do it, and the next unlock tries again.
+    pub fn fulfill_reader_duty(&mut self) -> usize {
+        let ids: Vec<VaultId> = self.vaults.keys().copied().collect();
+        let mut made = 0;
+        for id in ids {
+            match self.update(id, |v, a| Ok(v.fulfill_reader_duty(a)?)) {
+                Ok(frames) => made += frames.len(),
+                Err(error) => tracing::warn!(vault = %id, %error, "reader duty failed"),
+            }
+        }
+        made
     }
 
     fn empty(store: Box<dyn VaultStore>, clock: Box<dyn Clock>) -> Self {

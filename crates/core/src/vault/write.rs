@@ -10,8 +10,8 @@ use crate::id::{DeviceId, DeviceSecret, ItemId, Signature};
 use crate::item::{Field, ItemError};
 use crate::ops::{DataOp, valid_name};
 use crate::v2::{
-    self, DataPayload, DeviceKeys, EpochId, EpochKey, Frame, FrameId, KemPublic, LogKind,
-    NetPublic, RecoverySecret, VectorClock, WriteEpochDecision, honest_clock, next_dclock,
+    self, DataPayload, DeviceKeys, EpochId, EpochKey, Frame, FrameId, KemPublic, KemSecret,
+    LogKind, NetPublic, RecoverySecret, VectorClock, WriteEpochDecision, honest_clock, next_dclock,
 };
 
 use super::{Vault, view};
@@ -78,7 +78,7 @@ impl DerefMut for VaultWrite<'_> {
     }
 }
 
-fn frame_err(e: impl std::fmt::Display) -> Error {
+pub(super) fn frame_err(e: impl std::fmt::Display) -> Error {
     Error::Frame(e.to_string())
 }
 
@@ -101,9 +101,9 @@ impl Vault {
             v2::build_create_frame(recovery, crate::id::random(), &k0).map_err(frame_err)?;
         let id = create.header().vault;
         let e0 = EpochId::from_frame_id(create.id());
-        let mut vault = Vault::empty(id, author.id(), author.keys.kem_key());
+        let mut vault = Vault::empty(id, author.id());
         vault.insert([create.clone()])?;
-        vault.refresh();
+        vault.refresh(Some(author.keys.kem_key()));
         let root = recovery.signing_key();
         let consent = author.join_consent(&id, &root.device_id());
         let add = v2::build_add_frame(
@@ -120,7 +120,7 @@ impl Vault {
         )
         .map_err(frame_err)?;
         vault.insert([add.clone()])?;
-        vault.refresh();
+        vault.refresh(Some(author.keys.kem_key()));
         let mut frames = vec![create, add];
         vault.transact(
             |v| {
@@ -146,20 +146,27 @@ impl<'a> VaultWrite<'a> {
         Self { vault }
     }
 
-    fn stage(&mut self, frames: Vec<Frame>) -> Result<Vec<FrameId>, Error> {
+    /// Adds frames to the transaction. Pass `kem` when they may wrap a key
+    /// to this device (a peer's); this device's own frames don't.
+    pub(super) fn stage(
+        &mut self,
+        frames: Vec<Frame>,
+        kem: Option<&KemSecret>,
+    ) -> Result<Vec<FrameId>, Error> {
         let new = self.vault.insert(frames)?;
         self.vault.staged.extend(&new);
-        self.vault.refresh();
+        self.vault.refresh(kem);
         Ok(new)
     }
 
-    /// Applies frames from a peer. Returns how many were new.
-    pub fn apply(&mut self, frames: Vec<Frame>) -> Result<usize, Error> {
-        Ok(self.stage(frames)?.len())
+    /// Applies frames from a peer, opening what they wrap to `kem` (this
+    /// device's KEM secret, lent for the call). Returns how many were new.
+    pub fn apply(&mut self, kem: &KemSecret, frames: Vec<Frame>) -> Result<usize, Error> {
+        Ok(self.stage(frames, Some(kem))?.len())
     }
 
     /// Where `author`'s next frame in `log` goes: its seq and `prev`.
-    fn position(&self, author: &DeviceId, log: LogKind) -> (u64, FrameId) {
+    pub(super) fn position(&self, author: &DeviceId, log: LogKind) -> (u64, FrameId) {
         let frames = match log {
             LogKind::Member => &self.members,
             LogKind::Data => &self.data,
@@ -172,32 +179,13 @@ impl<'a> VaultWrite<'a> {
     }
 
     /// The membership frames no placed frame names: what a new frame depends on.
-    pub(super) fn mheads_excluding(&self, skip: &BTreeSet<FrameId>) -> Vec<FrameId> {
-        let dag: Vec<&Frame> = self
-            .resolved
-            .dag_frames
-            .iter()
-            .filter(|id| !skip.contains(id))
-            .filter_map(|id| self.members.get(id))
-            .collect();
-        let mut cited = BTreeSet::new();
-        for f in &dag {
-            cited.extend(f.member_body().map(|b| b.deps.clone()).unwrap_or_default());
-            cited.insert(f.header().prev);
-        }
-        dag.iter()
-            .map(|f| f.id())
-            .filter(|id| !cited.contains(id))
-            .collect()
-    }
-
-    fn mheads(&self) -> Vec<FrameId> {
-        self.mheads_excluding(&BTreeSet::new())
+    pub(super) fn mheads(&self) -> Vec<FrameId> {
+        member_heads(&self.members, &self.resolved, &BTreeSet::new())
     }
 
     /// A member frame's deps: `heads`, plus its author's `prev` (which a
     /// later frame may already cite, hiding it from the heads).
-    fn member_deps(prev: FrameId, mut heads: Vec<FrameId>) -> Vec<FrameId> {
+    pub(super) fn member_deps(prev: FrameId, mut heads: Vec<FrameId>) -> Vec<FrameId> {
         if !prev.is_zero() && !heads.contains(&prev) {
             heads.push(prev);
             heads.sort();
@@ -206,7 +194,7 @@ impl<'a> VaultWrite<'a> {
     }
 
     /// Eligible wrap recipients and their keys, minus `leaving` and plus `joining`.
-    fn recipients(
+    pub(super) fn recipients(
         &self,
         leaving: Option<DeviceId>,
         joining: Option<(DeviceId, KemPublic)>,
@@ -225,7 +213,7 @@ impl<'a> VaultWrite<'a> {
     }
 
     /// The newest authorized epochs this device holds keys for.
-    fn parents(&self) -> Vec<EpochId> {
+    pub(super) fn parents(&self) -> Vec<EpochId> {
         let held: BTreeSet<EpochId> = self
             .keyring
             .epoch_ids()
@@ -254,10 +242,8 @@ impl<'a> VaultWrite<'a> {
         );
         let epoch = match decision {
             WriteEpochDecision::Use(e) => e,
-            WriteEpochDecision::Parked {
-                current_epoch: Some(e),
-                ..
-            } if self.keyring.contains(&e) => e,
+            // Never seal under the epoch it had: a reinstated or contested
+            // device may hold that key, so nothing new goes there.
             WriteEpochDecision::Parked { reasons, .. } => {
                 return Err(Error::Parked(describe_parking(&reasons)));
             }
@@ -281,12 +267,11 @@ impl<'a> VaultWrite<'a> {
                 .map_err(frame_err)?;
                 let epoch = EpochId::from_frame_id(frame.id());
                 self.keyring.insert(epoch, key);
-                self.stage(vec![frame])?;
+                self.stage(vec![frame], None)?;
                 epoch
             }
         };
-        // Parked writes stay in the current epoch, which a lost membership
-        // conflict can leave unauthorized: data sealed there counts for no one.
+        // Data sealed under an epoch that doesn't count is lost to everyone.
         if !self.graph().get(&epoch).is_some_and(|i| i.authorized) {
             return Err(Error::AwaitingKeys);
         }
@@ -314,7 +299,7 @@ impl<'a> VaultWrite<'a> {
             .fold(VectorClock::new(), |clock, f| f.clock_after(&clock));
         // Claim only frames the fold resolved: naming one still waiting on
         // a frame this device lacks would leave this write waiting too.
-        let resolved = v2::resolved_frames(&self.resolved, self.opened.values());
+        let resolved = v2::resolved_frames(&self.resolved, self.fold_inputs());
         let honest = honest_clock(self.data.values().map(|f| {
             let h = f.header();
             (h.author, h.seq, resolved.contains(&f.id()))
@@ -336,7 +321,7 @@ impl<'a> VaultWrite<'a> {
             });
         }
         let id = frame.id();
-        self.stage(vec![frame])?;
+        self.stage(vec![frame], None)?;
         Ok(id)
     }
 
@@ -503,187 +488,32 @@ impl<'a> VaultWrite<'a> {
             Some((epoch, &key)),
         )
         .map_err(frame_err)?;
-        Ok(self.stage(vec![frame])?[0])
+        Ok(self.stage(vec![frame], None)?[0])
     }
+}
 
-    /// Removes `device` with an atomic `Rotate`. Its data frames this
-    /// vault holds keep counting.
-    pub fn remove(&mut self, author: &Author, device: DeviceId) -> Result<FrameId, Error> {
-        if !self.is_member(&author.id()) {
-            return Err(Error::NotMember);
-        }
-        self.remove_signed(author.keys.sign_key(), device, None)
+/// The placed membership frames, minus `skip` and any voided fork frame,
+/// that none of the others names: what a new member frame depends on.
+pub(super) fn member_heads(
+    members: &BTreeMap<FrameId, Frame>,
+    resolved: &v2::ResolvedMembership,
+    skip: &BTreeSet<FrameId>,
+) -> Vec<FrameId> {
+    let dag: Vec<&Frame> = resolved
+        .dag_frames
+        .iter()
+        .filter(|id| !skip.contains(id) && !resolved.is_fork_void(id))
+        .filter_map(|id| members.get(id))
+        .collect();
+    let mut cited = BTreeSet::new();
+    for f in &dag {
+        cited.extend(f.member_body().map(|b| b.deps.clone()).unwrap_or_default());
+        cited.insert(f.header().prev);
     }
-
-    /// Removes a stolen `device`: only its data frames written before
-    /// `since_ms` keep counting, and the removal depends on none of the
-    /// membership frames it wrote that no other principal has built on.
-    pub fn remove_stolen(
-        &mut self,
-        signer: &DeviceSecret,
-        device: DeviceId,
-        since_ms: Option<u64>,
-    ) -> Result<FrameId, Error> {
-        self.remove_signed(signer, device, Some(since_ms))
-    }
-
-    /// Removes `device` as the recovery root.
-    pub fn remove_by_root(
-        &mut self,
-        root: &RecoverySecret,
-        device: DeviceId,
-    ) -> Result<FrameId, Error> {
-        if self.recovery_root() != Some(root.recovery_id()) {
-            return Err(Error::NotRecoveryRoot);
-        }
-        self.remove_signed(&root.signing_key(), device, None)
-    }
-
-    fn remove_signed(
-        &mut self,
-        signer: &DeviceSecret,
-        device: DeviceId,
-        stolen: Option<Option<u64>>,
-    ) -> Result<FrameId, Error> {
-        if !self.is_member(&device) {
-            return Err(Error::RemoveNonMember);
-        }
-        let mut counted = 0u64;
-        while let Some(f) = self
-            .data
-            .values()
-            .find(|f| f.header().author == device && f.header().seq == counted)
-        {
-            let before = match stolen {
-                Some(Some(since)) => self
-                    .opened
-                    .get(&f.id())
-                    .is_some_and(|o| o.body.timestamp_ms() < since),
-                _ => true,
-            };
-            if !before {
-                break;
-            }
-            counted += 1;
-        }
-        let last_seen_seq = counted.checked_sub(1);
-        let deps = match stolen {
-            Some(_) => self.mheads_excluding(&self.pre_theft_exclusions(&device)),
-            None => self.mheads(),
-        };
-        let key = EpochKey::generate().map_err(frame_err)?;
-        let me = signer.device_id();
-        let (seq, prev) = self.position(&me, LogKind::Member);
-        let recipients = self.recipients(Some(device), None);
-        let parents = self.parents();
-        let frame = v2::build_remove_frame(
-            signer,
-            self.id,
-            &self.resolved,
-            seq,
-            prev,
-            Self::member_deps(prev, deps),
-            device,
-            last_seen_seq,
-            &key,
-            parents,
-            &self.keyring,
-            &recipients,
-        )
-        .map_err(frame_err)?;
-        self.keyring.insert(EpochId::from_frame_id(frame.id()), key);
-        Ok(self.stage(vec![frame])?[0])
-    }
-
-    /// What a removal of a stolen `device` must not depend on: the removals
-    /// it signed that nobody else has built on, and everything after them.
-    fn pre_theft_exclusions(&self, device: &DeviceId) -> BTreeSet<FrameId> {
-        let mut built: BTreeSet<FrameId> = BTreeSet::new();
-        let mut stack: Vec<FrameId> = self
-            .members
-            .values()
-            .filter(|f| f.header().author != *device)
-            .map(|f| f.id())
-            .collect();
-        while let Some(id) = stack.pop() {
-            if !built.insert(id) {
-                continue;
-            }
-            if let Some(f) = self.members.get(&id) {
-                stack.extend(f.member_body().map(|b| b.deps.clone()).unwrap_or_default());
-                if !f.header().prev.is_zero() {
-                    stack.push(f.header().prev);
-                }
-            }
-        }
-        let mut out: BTreeSet<FrameId> = self
-            .members
-            .values()
-            .filter(|f| f.header().author == *device && !built.contains(&f.id()))
-            .filter(|f| {
-                matches!(
-                    f.member_body().and_then(|b| b.op.as_ref()),
-                    Some(v2::MemberOp::Remove { .. })
-                )
-            })
-            .map(|f| f.id())
-            .collect();
-        loop {
-            let more: Vec<FrameId> = self
-                .members
-                .values()
-                .filter(|f| !out.contains(&f.id()))
-                .filter(|f| {
-                    out.contains(&f.header().prev)
-                        || f.member_body()
-                            .is_some_and(|b| b.deps.iter().any(|d| out.contains(d)))
-                })
-                .map(|f| f.id())
-                .collect();
-            if more.is_empty() {
-                return out;
-            }
-            out.extend(more);
-        }
-    }
-
-    /// Hands the recovery root from `old` to `new` (`RotateRecovery`+`Rotate`).
-    pub fn rotate_recovery(
-        &mut self,
-        old: &RecoverySecret,
-        new: &RecoverySecret,
-    ) -> Result<FrameId, Error> {
-        let signer = old.signing_key();
-        let me = signer.device_id();
-        if self.recovery_root() != Some(me) {
-            return Err(Error::NotRecoveryRoot);
-        }
-        let new_id = new.recovery_id();
-        let consent =
-            v2::sign_rotate_recovery_consent(&new.signing_key(), &self.id, &me, &new.kem_public());
-        let key = EpochKey::generate().map_err(frame_err)?;
-        let (seq, prev) = self.position(&me, LogKind::Member);
-        let recipients = self.recipients(Some(me), Some((new_id, new.kem_public())));
-        let parents = self.parents();
-        let frame = v2::build_rotate_recovery_frame(
-            &signer,
-            self.id,
-            &self.resolved,
-            seq,
-            prev,
-            Self::member_deps(prev, self.mheads()),
-            new_id,
-            new.kem_public(),
-            consent,
-            &key,
-            parents,
-            &self.keyring,
-            &recipients,
-        )
-        .map_err(frame_err)?;
-        self.keyring.insert(EpochId::from_frame_id(frame.id()), key);
-        Ok(self.stage(vec![frame])?[0])
-    }
+    dag.iter()
+        .map(|f| f.id())
+        .filter(|id| !cited.contains(id))
+        .collect()
 }
 
 /// One line about why writes are parked.

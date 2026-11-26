@@ -169,7 +169,11 @@ async fn pairing_offer_rejects_a_removed_inviter() {
         })
         .unwrap();
     world.devices[1]
-        .with(|s| s.update(world.vault, |v, _| Ok(v.apply(vec![removal])?)))
+        .with(|s| {
+            s.update(world.vault, |v, a| {
+                Ok(v.apply(a.keys().kem_key(), vec![removal])?)
+            })
+        })
         .unwrap();
     let invite = Invitation {
         device: &world.devices[1],
