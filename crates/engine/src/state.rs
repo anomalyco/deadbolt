@@ -7,11 +7,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use deadbolt_core::v2::{DeviceKeys, Frame, RecoverySecret};
 use deadbolt_core::{Author, DeviceId, Vault, VaultId, VaultWrite, recovery, valid_name};
-use zeroize::Zeroizing;
 use deadbolt_proto::daemon::{DeviceInfo, ErrorCode, VaultInfo};
 use deadbolt_proto::peer::{Addr, Hint, clean_name};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::cap::{CapAudit, CapCheck, CapError, CapId, CapTable};
 use crate::clock::{Clock, utc_date};
@@ -519,9 +519,7 @@ impl Engine {
         if self.contains_vault(&id) {
             bail!("this device already holds vault {}", vault.name());
         }
-        let result = self
-            .store
-            .append(id, &mut vault.frames());
+        let result = self.store.append(id, &mut vault.frames());
         self.check_append(result)?;
         self.vaults.insert(id, vault);
         self.save_removed(&id)?;
@@ -582,7 +580,7 @@ impl Engine {
                 default: self.meta.default_vault == Some(*id),
                 members: 0,
                 member: false,
-                error: Some(format!("{}; stored entries retained", vault.error)),
+                error: Some(format!("{}; stored frames retained", vault.error)),
             }))
             .collect()
     }

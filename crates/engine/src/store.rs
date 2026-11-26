@@ -74,7 +74,9 @@ impl VaultStore for MemoryStore {
 
     fn for_each_frame(&self, each: &mut dyn FnMut(VaultId, &[u8]) -> Result<()>) -> Result<()> {
         let frames = self.frames.lock().unwrap_or_else(|e| e.into_inner());
-        frames.iter().try_for_each(|(vault, frame)| each(*vault, frame))
+        frames
+            .iter()
+            .try_for_each(|(vault, frame)| each(*vault, frame))
     }
 
     fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = &Frame>) -> Result<()> {

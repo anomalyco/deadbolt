@@ -18,18 +18,18 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::disk::KdfParams;
 use anyhow::{Context, Result, anyhow, bail};
 use deadbolt_core::v2::DeviceKeys;
 use deadbolt_core::{DeviceId, VaultId};
-use zeroize::Zeroizing;
 use deadbolt_net::application;
 pub(super) use deadbolt_net::application::{Offer, Welcomed};
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, Node, NodeConfig, PairingCode, PairingContext,
     PairingOptions, PeerId, SyncHandler,
 };
-use crate::disk::KdfParams;
 use tracing::info;
+use zeroize::Zeroizing;
 
 use super::session::{Addr, Loaded, clean_name};
 use super::{Conversation, Daemon};
@@ -97,9 +97,7 @@ pub(super) fn verify_welcome(
     offer: Offer,
     welcome: application::WelcomeReplay,
 ) -> Result<Welcomed> {
-    Ok(application::verify_welcome(
-        keys, inviter, offer, welcome,
-    )?)
+    Ok(application::verify_welcome(keys, inviter, offer, welcome)?)
 }
 
 /// Stores a checked welcome.
@@ -571,7 +569,7 @@ mod tests {
         let daemon = Daemon::new(super::super::tests::test_paths(dir), true, KDF);
         daemon.ready.send_replace(true);
         let node = Node::spawn(
-            NodeConfig::local_only(*loaded.secret().to_bytes()),
+            NodeConfig::local_only(loaded.node_key()),
             Arc::new(|_: &PeerId| false),
             super::super::sync::Handler(daemon.clone()),
         )
@@ -684,8 +682,11 @@ mod tests {
         let a = test_daemon(a_dir.path(), "alpha").await;
         let vault = a.with(|s| s.create_vault("personal")).unwrap();
         for keep in [false, true] {
-            let secret = DeviceSecret::generate();
-            let b_id = *secret.device_id().as_bytes();
+            let mut seed = Zeroizing::new([0u8; 32]);
+            getrandom::fill(seed.as_mut_slice()).unwrap();
+            let b_id = *deadbolt_core::v2::DeviceKeys::from_seed(&seed)
+                .device_id()
+                .as_bytes();
             let inviter = ExistingDevice {
                 daemon: &a,
                 vault,
@@ -693,7 +694,7 @@ mod tests {
             };
             let joiner = NewDevice {
                 home: Home::Memory(Box::new(Memory {
-                    secret,
+                    seed,
                     name: "beta".into(),
                     addr: Addr::default(),
                 })),
@@ -710,9 +711,9 @@ mod tests {
             let Home::Memory(memory) = home else {
                 unreachable!()
             };
-            let Memory { secret, name, .. } = *memory;
+            let Memory { seed, name, .. } = *memory;
             let fresh = Fresh {
-                secret,
+                seed,
                 name,
                 welcomed: welcomed.into_inner().unwrap().unwrap(),
             };
@@ -760,18 +761,10 @@ mod tests {
 
         // The inviter commits b's Add, but b never stores the welcome.
         let join = b
-            .with(|s| {
-                join_blob(
-                    &s.secret(),
-                    "beta",
-                    DeviceId::from_bytes(a_id),
-                    &vault,
-                    None,
-                )
-            })
+            .with(|s| join_blob(&s.keys(), "beta", DeviceId::from_bytes(a_id), &vault, None))
             .unwrap();
         a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
-        let entries = a.with(|s| Ok(s.vault(&vault).entries().len())).unwrap();
+        let entries = a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap();
 
         let inviter = ExistingDevice {
             daemon: &a,
@@ -790,7 +783,7 @@ mod tests {
         assert!(b.with(|s| Ok(s.vaults.contains_key(&vault))).unwrap());
         // No second Add.
         assert_eq!(
-            a.with(|s| Ok(s.vault(&vault).entries().len())).unwrap(),
+            a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap(),
             entries
         );
 

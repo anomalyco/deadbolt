@@ -209,14 +209,18 @@ impl DataOp {
                 32 + kind.len()
                     + name.as_ref().map_or(0, |n| 32 + n.len())
                     + fields.iter().map(|(n, f)| 16 + field(n, f)).sum::<usize>()
-                    + source.as_ref().map_or(0, |s| 48 + s.id.len() + s.version.len())
+                    + source
+                        .as_ref()
+                        .map_or(0, |s| 48 + s.id.len() + s.version.len())
                     + tags.iter().map(|t| 48 + 2 * t.len()).sum::<usize>()
             }
             Self::Edit { change, .. } => {
                 32 + match change {
                     Change::Set { field: name, value } => field(name, value),
                     Change::Source(Some(s)) => 32 + s.id.len() + s.version.len(),
-                    Change::Name(Some(s)) | Change::TagAdd(s) | Change::TagRemove(s) => 32 + 2 * s.len(),
+                    Change::Name(Some(s)) | Change::TagAdd(s) | Change::TagRemove(s) => {
+                        32 + 2 * s.len()
+                    }
                     _ => 64,
                 }
             }

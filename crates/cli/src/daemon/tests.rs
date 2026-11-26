@@ -5,7 +5,6 @@ use crate::client::DaemonError;
 use crate::protocol::FieldInput;
 use crate::protocol::PROTOCOL_VERSION;
 use crate::protocol::Request;
-use deadbolt_core::DeviceSecret;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::task::JoinSet;
@@ -179,14 +178,15 @@ async fn ambiguous_append_closes_the_gate_and_cannot_be_reopened_by_readiness() 
     let daemon = locked_daemon(dir.path());
     let (mut loaded, fault) = session::tests::fault_store(dir.path(), [7; 32]);
     let id = loaded.create_vault("personal").unwrap();
-    let peer = DeviceSecret::from_bytes(&[8; 32]);
-    let consent = peer.join_consent(&id, &loaded.id);
+    let (peer, consent) = session::tests::peer(8, &id, &loaded.id);
     loaded
-        .update(id, |v, key| Ok(v.add(key, peer.device_id(), consent)?))
+        .update(id, |v, a| {
+            Ok(v.add(a, peer.device_id(), peer.kem_public(), consent)?)
+        })
         .unwrap();
     let members = daemon.members.clone();
     let node = Node::spawn(
-        NodeConfig::local_only(*loaded.secret().to_bytes()),
+        NodeConfig::local_only(loaded.node_key()),
         Arc::new(move |id: &PeerId| members.read().unwrap().contains(id)),
         sync::Handler(daemon.clone()),
     )
@@ -200,7 +200,7 @@ async fn ambiguous_append_closes_the_gate_and_cannot_be_reopened_by_readiness() 
     *daemon.session.lock().unwrap() = Some(session);
     daemon.ready.send_replace(true);
     let peer_node = Node::spawn(
-        NodeConfig::local_only(*peer.to_bytes()),
+        NodeConfig::local_only(session::node_key(&[8; 32])),
         Arc::new(|_: &PeerId| true),
         sync::Handler(daemon.clone()),
     )
@@ -209,8 +209,9 @@ async fn ambiguous_append_closes_the_gate_and_cannot_be_reopened_by_readiness() 
     // Dial out so the tracked connection is installed on the exact node
     // whose membership is revoked below, without waiting for the accept task.
     let conn = node.connect(peer_node.addr()).await.unwrap();
+    let frames = daemon.with(|s| Ok(s.vault(&id).frames().count())).unwrap();
     assert!(node.connected_peers().contains(peer.device_id().as_bytes()));
-    fault.store(2, Ordering::SeqCst);
+    fault.store(1, Ordering::SeqCst);
     let error = daemon
         .with(|s| s.update(id, |v, key| Ok(v.remove(key, peer.device_id())?)))
         .unwrap_err();
@@ -252,7 +253,7 @@ async fn ambiguous_append_closes_the_gate_and_cannot_be_reopened_by_readiness() 
     daemon
         .with(|s| {
             assert!(!s.vault(&id).is_member(&peer.device_id()));
-            assert_eq!(s.vault(&id).entries().len(), 3);
+            assert_eq!(s.vault(&id).frames().count(), frames + 1);
             Ok(())
         })
         .unwrap();
@@ -278,14 +279,15 @@ async fn quarantine_unlock_authenticates_and_replays_without_a_separate_lock() {
             .set_biometric(&key, &make_valid_biometric_token(session::now()))
             .unwrap();
         let node = Node::spawn(
-            NodeConfig::local_only(*loaded.secret().to_bytes()),
+            NodeConfig::local_only(loaded.node_key()),
             Arc::new(|_: &PeerId| false),
             sync::Handler(daemon.clone()),
         )
         .await
         .unwrap();
+        let frames = loaded.vault(&id).frames().count();
         *daemon.session.lock().unwrap() = Some(Session::new(loaded, node));
-        fault.store(2, Ordering::SeqCst);
+        fault.store(1, Ordering::SeqCst);
         assert!(
             daemon
                 .with(|s| s.update(id, |v, key| Ok(v.rename(key, "committed")?)))
@@ -329,7 +331,7 @@ async fn quarantine_unlock_authenticates_and_replays_without_a_separate_lock() {
         daemon
             .with(|s| {
                 assert_eq!(s.vault(&id).name(), "committed");
-                assert_eq!(s.vault(&id).entries().len(), 2);
+                assert_eq!(s.vault(&id).frames().count(), frames + 1);
                 Ok(())
             })
             .unwrap();
@@ -345,14 +347,14 @@ async fn quarantine_explicit_lock_still_closes_the_failed_handle() {
     let (mut loaded, fault) = session::tests::fault_store(dir.path(), [7; 32]);
     let id = loaded.create_vault("personal").unwrap();
     let node = Node::spawn(
-        NodeConfig::local_only(*loaded.secret().to_bytes()),
+        NodeConfig::local_only(loaded.node_key()),
         Arc::new(|_: &PeerId| false),
         sync::Handler(daemon.clone()),
     )
     .await
     .unwrap();
     *daemon.session.lock().unwrap() = Some(Session::new(loaded, node));
-    fault.store(2, Ordering::SeqCst);
+    fault.store(1, Ordering::SeqCst);
     assert!(
         daemon
             .with(|s| s.update(id, |v, key| Ok(v.rename(key, "committed")?)))
@@ -382,7 +384,7 @@ async fn locking_wakes_membership_waiters_with_the_locked_error() {
     )
     .unwrap();
     let node = Node::spawn(
-        NodeConfig::local_only(*loaded.secret().to_bytes()),
+        NodeConfig::local_only(loaded.node_key()),
         Arc::new(|_: &PeerId| false),
         sync::Handler(daemon.clone()),
     )
@@ -474,14 +476,10 @@ async fn local_item_commands_work_immediately_after_unlock_with_offline_peers() 
     drop(store);
     let mut loaded = Loaded::open(dir.path(), b"test").unwrap();
     let id = loaded.create_vault("personal").unwrap();
-    let offline = DeviceSecret::from_bytes(&[52; 32]);
+    let (offline, consent) = session::tests::peer(52, &id, &loaded.id);
     loaded
-        .update(id, |v, key| {
-            Ok(v.add(
-                key,
-                offline.device_id(),
-                offline.join_consent(&id, &key.device_id()),
-            )?)
+        .update(id, |v, a| {
+            Ok(v.add(a, offline.device_id(), offline.kem_public(), consent)?)
         })
         .unwrap();
     drop(loaded);
@@ -651,11 +649,7 @@ async fn touch_id_set_off_clears_slot_and_updates_status() {
 
     daemon.set_touch_id(false).await.unwrap();
     assert!(!Config::load(&daemon.paths.config).unwrap().touch_id());
-    assert!(
-        crate::disk::biometric_token(dir.path())
-            .unwrap()
-            .is_none()
-    );
+    assert!(crate::disk::biometric_token(dir.path()).unwrap().is_none());
     let st = daemon.status();
     assert!(st.touch_id_available);
     assert!(!st.touch_id_enabled);
@@ -740,9 +734,7 @@ async fn touch_id_coalesces_overlapping_requests_and_cancels_on_passphrase_unloc
     }));
     assert!(daemon.unlock_biometric(None).await.is_err());
     assert!(
-        crate::disk::biometric_token(dir.path())
-            .unwrap()
-            .is_some(),
+        crate::disk::biometric_token(dir.path()).unwrap().is_some(),
         "cancelled flight must not clear biometric slot"
     );
     assert!(daemon.status().touch_id_ready);

@@ -604,8 +604,7 @@ impl Daemon {
             } else {
                 let dir = self.paths.data.clone();
                 let raw =
-                    tokio::task::spawn_blocking(move || crate::disk::biometric_token(&dir))
-                        .await?;
+                    tokio::task::spawn_blocking(move || crate::disk::biometric_token(&dir)).await?;
                 let token = match raw {
                     Ok(Some(token)) => token,
                     Ok(None) => {
@@ -619,10 +618,8 @@ impl Daemon {
                         let msg = err.to_string();
                         let dir = self.paths.data.clone();
                         drop(
-                            tokio::task::spawn_blocking(move || {
-                                crate::disk::clear_biometric(&dir)
-                            })
-                            .await,
+                            tokio::task::spawn_blocking(move || crate::disk::clear_biometric(&dir))
+                                .await,
                         );
                         self.biometric_was_enrolled.store(true, Ordering::SeqCst);
                         *self
@@ -761,8 +758,8 @@ impl Daemon {
 
         let dir = self.paths.data.clone();
         let expected_token = token;
-        let opened = tokio::task::spawn_blocking(move || {
-            match crate::disk::unlock_biometric(&dir, &key) {
+        let opened =
+            tokio::task::spawn_blocking(move || match crate::disk::unlock_biometric(&dir, &key) {
                 Ok(store) => {
                     let meta =
                         biometric::token_meta(store.biometric_token().ok().flatten().as_deref());
@@ -780,9 +777,8 @@ impl Daemon {
                     ))
                 }
                 Err(err) => Err((biometric::UnlockError::Store(err), false)),
-            }
-        })
-        .await?;
+            })
+            .await?;
 
         let (loaded, meta) = match opened {
             Ok(pair) => pair,
@@ -881,7 +877,7 @@ impl Daemon {
 
     async fn start(self: &Arc<Self>, loaded: Loaded, timeout_secs: Option<u64>) -> Result<()> {
         loaded.ensure_usable()?;
-        let secret = session::node_key(loaded.store.device_seed());
+        let secret = loaded.node_key();
         let config = if self.local_net {
             NodeConfig::local_only(secret)
         } else {

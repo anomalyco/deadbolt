@@ -99,7 +99,10 @@ impl KdfHeader {
             .try_into()
             .map_err(|_| Error::corrupt("KDF header has the wrong length"))?;
         if bytes[0] != ALG_ARGON2ID_V13 {
-            return Err(Error::corrupt(format!("unknown KDF algorithm {}", bytes[0])));
+            return Err(Error::corrupt(format!(
+                "unknown KDF algorithm {}",
+                bytes[0]
+            )));
         }
         let u32_at =
             |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
@@ -126,11 +129,18 @@ impl KdfHeader {
         let mut memory = Zeroizing::new(Vec::new());
         memory
             .try_reserve_exact(params.block_count())
-            .map_err(|_| Error::InvalidKdfParams(format!("not enough memory for {:?}", self.params)))?;
+            .map_err(|_| {
+                Error::InvalidKdfParams(format!("not enough memory for {:?}", self.params))
+            })?;
         memory.resize(params.block_count(), Block::new());
         let mut key = Zeroizing::new([0u8; KEY_LEN]);
         argon2
-            .hash_password_into_with_memory(passphrase, &self.salt, key.as_mut_slice(), memory.as_mut_slice())
+            .hash_password_into_with_memory(
+                passphrase,
+                &self.salt,
+                key.as_mut_slice(),
+                memory.as_mut_slice(),
+            )
             .map_err(|e| Error::InvalidKdfParams(e.to_string()))?;
         Ok(key)
     }

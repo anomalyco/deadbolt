@@ -19,9 +19,8 @@ pub fn kit_text(vault: &str, words: &str) -> Zeroizing<String> {
     }
     out.push_str(&format!(
         "\nVault id: {vault}\n\
-         With the words and a copy of the vault's frames (another device, or a\n\
-         remote set with `deadbolt remote set`), `deadbolt recover` brings the\n\
-         vault back if every device is lost.\n"
+         The words and a copy of the vault's frames bring it back if every\n\
+         device is lost.\n"
     ));
     out
 }

@@ -285,11 +285,17 @@ fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) 
 #[test]
 fn init_vaults_and_locking() {
     let a = Device::new();
-    assert_eq!(
+    // Each new vault prints its recovery kit once: 24 words and the vault id.
+    let kit = |out: String, first: &str| {
+        assert!(out.starts_with(first), "{out}");
+        assert!(out.contains("Recovery kit"), "{out}");
+        assert!(out.contains("24. "), "{out}");
+    };
+    kit(
         a.run(&["init", "--device-name", "alpha"]),
-        "created vault personal (default)\n"
+        "created vault personal (default)\n",
     );
-    assert_eq!(a.run(&["init", "work"]), "created vault work\n");
+    kit(a.run(&["init", "work"]), "created vault work\n");
     assert!(!a.try_run(&["init", "work"]).status.success());
     assert!(!a.try_run(&["init", "Bad Name"]).status.success());
 

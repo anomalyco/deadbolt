@@ -13,7 +13,7 @@ fn hex(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
 )]
 pub(crate) fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0; N];
-    getrandom::fill(&mut bytes).expect("OS random number generator failed");
+    crate::rng::fill(&mut bytes).expect("OS random number generator failed");
     bytes
 }
 

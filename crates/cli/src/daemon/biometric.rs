@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
 use crate::disk::Zeroizing;
+use anyhow::{Result, bail};
 
 /// Re-confirm the vault passphrase at least once every 14 days so the user
 /// does not forget their passphrase while relying on Touch ID.
@@ -550,8 +550,8 @@ mod macos {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use anyhow::{Context, Result, anyhow, bail};
     use crate::disk::Zeroizing;
+    use anyhow::{Context, Result, anyhow, bail};
 
     use super::{BiometricStatus, CancelHandle, PROBE_TIMEOUT, UnlockError};
 

@@ -142,7 +142,6 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
     let now = 1_700_000_000;
 
     let store = crate::disk::init_with_params(dir, PASS, &SECRET, FAST).unwrap();
-    store.append_batch([&b"vault-entry-1"[..]]).unwrap();
     store.meta_set("vault_id", b"v-touchid").unwrap();
     assert!(store.biometric_token().unwrap().is_none());
 
@@ -173,7 +172,7 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
         PROMPT_TIMEOUT,
     )
     .unwrap();
-    assert_eq!(unlocked.device_secret(), &SECRET);
+    assert_eq!(unlocked.device_seed(), &SECRET);
     assert_eq!(
         unlocked
             .meta_get("vault_id")
@@ -182,12 +181,6 @@ fn secure_enclave_headless_roundtrip_and_invalidation() {
             .map(Vec::as_slice),
         Some(&b"v-touchid"[..])
     );
-    let entries: Vec<Vec<u8>> = unlocked
-        .iter_all()
-        .unwrap()
-        .map(|r| r.unwrap().to_vec())
-        .collect();
-    assert_eq!(entries, vec![b"vault-entry-1".to_vec()]);
     drop(unlocked);
 
     // Requiring `.biometryCurrentSet` against a non-biometric token is rejected

@@ -307,7 +307,10 @@ fn is_torn(seq: u64, file: &[u8]) -> bool {
 /// what a passphrase or platform key unwraps the root from before [`open`].
 /// `None` when no file holds a complete slot section.
 pub fn peek_slots<B: Blocks>(blocks: &B) -> Result<Option<Vec<u8>>> {
-    for seq in numbered(blocks, LOCAL_PREFIX, LOCAL_SUFFIX)?.into_iter().rev() {
+    for seq in numbered(blocks, LOCAL_PREFIX, LOCAL_SUFFIX)?
+        .into_iter()
+        .rev()
+    {
         let bytes = match blocks.read_all(&local_sealed(seq)) {
             Ok(bytes) => bytes,
             Err(err) if err.is_not_found() => continue,

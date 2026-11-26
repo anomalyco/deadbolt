@@ -63,6 +63,7 @@ zip = { version = "9.1", default-features = false, features = ["deflate-flate2-z
 
 [dev-dependencies]
 p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+deadbolt-core = { path = "../core", features = ["sim"] }
 deadbolt-net = { path = "../net", features = ["sim"] }
 tokio = { version = "1.53.3", features = ["test-util"] }
 memchr = "2.8"

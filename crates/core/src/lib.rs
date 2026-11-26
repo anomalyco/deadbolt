@@ -34,6 +34,7 @@ pub mod passkeys;
 pub mod password;
 pub mod password_rules;
 pub mod recovery;
+pub mod rng;
 pub mod site;
 pub mod site_password;
 pub mod tag;

@@ -74,13 +74,24 @@ pub(super) struct Index {
 }
 
 enum Record {
-    Row { id: u64, time: u64, bytes: Zeroizing<Vec<u8>> },
-    Floor { floor: u64, dropped: Dropped },
+    Row {
+        id: u64,
+        time: u64,
+        bytes: Zeroizing<Vec<u8>>,
+    },
+    Floor {
+        floor: u64,
+        dropped: Dropped,
+    },
 }
 
 fn words(plain: &[u8], n: usize) -> Option<Vec<u64>> {
     (0..n)
-        .map(|i| Some(u64::from_be_bytes(plain.get(i * 8..i * 8 + 8)?.try_into().ok()?)))
+        .map(|i| {
+            Some(u64::from_be_bytes(
+                plain.get(i * 8..i * 8 + 8)?.try_into().ok()?,
+            ))
+        })
         .collect()
 }
 
@@ -114,7 +125,8 @@ impl Unlocked {
 
     fn open_record(&self, chunk: u64, sealed: &[u8]) -> Result<Record> {
         let corrupt = || Error::corrupt(format!("activity chunk {chunk} failed authentication"));
-        let plain = kdf::open(&self.activity_key(), &Self::aad(chunk), sealed).ok_or_else(corrupt)?;
+        let plain =
+            kdf::open(&self.activity_key(), &Self::aad(chunk), sealed).ok_or_else(corrupt)?;
         let (tag, rest) = plain.split_first().ok_or_else(corrupt)?;
         match *tag {
             TAG_ROW => {
@@ -165,7 +177,10 @@ impl Unlocked {
                         chunk: k,
                     }),
                     Record::Row { .. } => {}
-                    Record::Floor { floor: f, dropped: d } if f >= floor => (floor, dropped) = (f, d),
+                    Record::Floor {
+                        floor: f,
+                        dropped: d,
+                    } if f >= floor => (floor, dropped) = (f, d),
                     Record::Floor { .. } => {}
                 }
             }
@@ -186,7 +201,10 @@ impl Unlocked {
     }
 
     fn append_record(&self, inner: &mut Inner, record: &Record) -> Result<(u64, u64)> {
-        let index = inner.activity.as_mut().ok_or_else(|| Error::corrupt("no activity index"))?;
+        let index = inner
+            .activity
+            .as_mut()
+            .ok_or_else(|| Error::corrupt("no activity index"))?;
         if index.in_chunk >= CHUNK_RECORDS {
             index.chunk += 1;
             index.in_chunk = 0;
@@ -200,7 +218,10 @@ impl Unlocked {
                 index.in_chunk += 1;
             }
         }
-        let index = inner.activity.as_mut().ok_or_else(|| Error::corrupt("no activity index"))?;
+        let index = inner
+            .activity
+            .as_mut()
+            .ok_or_else(|| Error::corrupt("no activity index"))?;
         let k = index.chunk;
         let sealed = self.seal_record(k, record)?;
         inner.device.append_activity(k, &sealed)?;
@@ -214,7 +235,10 @@ impl Unlocked {
         if inner.activity.is_none() {
             inner.activity = Some(self.load_index(inner)?);
         }
-        inner.activity.as_mut().ok_or_else(|| Error::corrupt("no activity index"))
+        inner
+            .activity
+            .as_mut()
+            .ok_or_else(|| Error::corrupt("no activity index"))
     }
 
     /// Appends `rows` (time, bytes), then removes the oldest rows timed
@@ -291,12 +315,22 @@ impl Unlocked {
 
     /// Rows timed at or after `since` and with ids before `before`, newest
     /// first, at most `limit`.
-    pub fn activity_list(&self, since: u64, before: Option<u64>, limit: usize) -> Result<ActivityPage> {
+    pub fn activity_list(
+        &self,
+        since: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<ActivityPage> {
         let mut inner = self.inner();
         let index = self.index(&mut inner)?;
         let mut chosen = Vec::new();
         let mut reached_start = true;
-        for row in index.rows.iter().rev().filter(|r| before.is_none_or(|b| r.id < b)) {
+        for row in index
+            .rows
+            .iter()
+            .rev()
+            .filter(|r| before.is_none_or(|b| r.id < b))
+        {
             if row.time < since || chosen.len() >= limit {
                 reached_start = false;
                 break;
@@ -305,7 +339,9 @@ impl Unlocked {
         }
         let dropped = (reached_start && chosen.len() < limit)
             .then_some(index.dropped)
-            .filter(|d| d.count > 0 && d.last_time >= since && before.is_none_or(|b| d.last_id < b));
+            .filter(|d| {
+                d.count > 0 && d.last_time >= since && before.is_none_or(|b| d.last_id < b)
+            });
         let chunks: BTreeSet<u64> = chosen.iter().map(|(_, k)| *k).collect();
         let mut found: BTreeMap<u64, ActivityRow> = BTreeMap::new();
         for k in chunks {
@@ -318,7 +354,10 @@ impl Unlocked {
             }
         }
         Ok(ActivityPage {
-            rows: chosen.iter().filter_map(|(id, _)| found.remove(id)).collect(),
+            rows: chosen
+                .iter()
+                .filter_map(|(id, _)| found.remove(id))
+                .collect(),
             dropped,
         })
     }

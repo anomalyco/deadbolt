@@ -1,18 +1,16 @@
 //! Simulated device, sync handler, and pairing roles for the deterministic simulator.
 
-use super::super::{
-    pairing,
-    session::{Changes, Loaded},
-    sync,
-};
+pub(super) use super::super::session::Loaded;
+use super::super::{pairing, session::Changes, sync};
+use crate::disk::KdfParams;
 use anyhow::Result;
-use deadbolt_core::{DeviceId, DeviceSecret, Log, MembershipOp, Payload, Vault, VaultId};
+use deadbolt_core::v2::{DeviceKeys, FrameId};
+use deadbolt_core::{DeviceId, VaultId};
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PeerId, SyncHandler,
 };
-use crate::disk::KdfParams;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -37,8 +35,7 @@ impl Device {
     pub(super) fn new(index: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let key = [index as u8 + 1; 32];
-        let secret = DeviceSecret::from_bytes(&key);
-        let id = *secret.device_id().as_bytes();
+        let id = *DeviceKeys::from_seed(&key).device_id().as_bytes();
         let store = crate::disk::init_with_params(
             dir.path(),
             PASS,
@@ -101,42 +98,40 @@ pub(super) struct Handler {
     pub(super) unreported: Arc<Mutex<Vec<String>>>,
 }
 
-pub(super) fn membership_writes(vault: &Vault, author: DeviceId) -> u64 {
-    vault.entries().into_iter().filter(|entry| entry.author() == author
-        && matches!(entry.payload(), Payload::Membership(op) if !matches!(op, MembershipOp::Remove { .. })))
-        .count() as u64
-}
-
-/// Accepted (data, membership) entries per vault.
-fn accepted(s: &Loaded) -> BTreeMap<VaultId, (usize, usize)> {
+/// Accepted frames per vault.
+fn accepted(s: &Loaded) -> BTreeMap<VaultId, BTreeSet<FrameId>> {
     s.vaults
         .iter()
-        .map(|(id, v)| {
-            let entries = v.entries();
-            let data = entries.iter().filter(|e| e.log() == Log::Data).count();
-            (*id, (data, entries.len() - data))
-        })
+        .map(|(id, v)| (*id, v.frames().map(|f| f.id()).collect()))
         .collect()
 }
 
-/// What watchers must hear about a batch: every vault whose items or
-/// membership grew, and nothing else.
+/// What watchers must hear about a batch: every vault whose new frames
+/// touch its items, name or devices, and nothing else.
 fn report_problem(
-    before: &BTreeMap<VaultId, (usize, usize)>,
-    after: &BTreeMap<VaultId, (usize, usize)>,
+    s: &Loaded,
+    before: &BTreeMap<VaultId, BTreeSet<FrameId>>,
     reported: &Changes,
 ) -> Option<String> {
-    for (id, (data, membership)) in after {
-        let (data_before, membership_before) = before.get(id).copied().unwrap_or_default();
-        let items = *data > data_before;
-        let members = *membership > membership_before;
-        let problem = if items && !reported.items.contains(id) {
+    for (id, vault) in &s.vaults {
+        let old = before.get(id);
+        let mut touch = deadbolt_core::Touch::default();
+        for frame in vault
+            .frames()
+            .filter(|f| old.is_none_or(|o| !o.contains(&f.id())))
+        {
+            let t = vault.touched(frame);
+            touch.items |= t.items;
+            touch.name |= t.name;
+            touch.devices |= t.devices;
+        }
+        let problem = if touch.items && !reported.items.contains(id) {
             "items grew unreported"
-        } else if members && !reported.vaults {
+        } else if (touch.devices || touch.name) && !reported.vaults {
             "membership grew unreported"
-        } else if !items && !members && reported.items.contains(id) {
+        } else if !touch.items && reported.items.contains(id) {
             "unchanged items reported"
-        } else if !members && reported.devices.contains(id) {
+        } else if !touch.devices && reported.devices.contains(id) {
             "unchanged devices reported"
         } else {
             continue;
@@ -198,7 +193,7 @@ impl SyncHandler for Handler {
             stream,
         );
         let reported = std::mem::take(&mut s.changes);
-        if let Some(problem) = report_problem(&before, &accepted(s), &reported) {
+        if let Some(problem) = report_problem(s, &before, &reported) {
             self.unreported.lock().unwrap().push(problem);
         }
         result.map(|_| ()).map_err(|e| e.to_string().into())
@@ -244,7 +239,7 @@ impl Joiner for Device {
         let join = self
             .with(|s| {
                 anyhow::ensure!(!s.vaults.contains_key(&vault), "already held");
-                pairing::join_blob(&s.secret(), &s.meta.device_name, inviter, &vault, None)
+                pairing::join_blob(&s.keys(), &s.meta.device_name, inviter, &vault, None)
             })
             .map_err(|e| -> HandlerError { e.to_string().into() })?;
         *self.offer.lock().unwrap() = Some(offer);

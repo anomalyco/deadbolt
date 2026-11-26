@@ -78,7 +78,7 @@ fn hex(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
 pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], CryptoError> {
     let mut out = [0u8; N];
-    getrandom::fill(&mut out).map_err(|_| CryptoError::Rng)?;
+    crate::rng::fill(&mut out).map_err(|_| CryptoError::Rng)?;
     Ok(out)
 }
 

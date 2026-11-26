@@ -202,7 +202,13 @@ pub struct Missing(VecDeque<FrameId>);
 
 impl Missing {
     fn of(vault: &Vault, heads: &Heads, log: LogKind) -> Self {
-        Self(vault.missing(heads, log).into_iter().map(Frame::id).collect())
+        Self(
+            vault
+                .missing(heads, log)
+                .into_iter()
+                .map(Frame::id)
+                .collect(),
+        )
     }
 
     fn next(&mut self, vault: &Vault) -> Result<Option<Blob>, Error> {
@@ -457,12 +463,8 @@ pub fn join_blob(
     vault: &VaultId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>, Error> {
-    let consent = deadbolt_core::v2::sign_join_consent(
-        keys.sign_key(),
-        vault,
-        &inviter,
-        &keys.kem_public(),
-    );
+    let consent =
+        deadbolt_core::v2::sign_join_consent(keys.sign_key(), vault, &inviter, &keys.kem_public());
     Ok(serde_json::to_vec(&JoinBlob {
         v: 3,
         consent: HEXLOWER.encode(consent.as_bytes()),

@@ -104,8 +104,19 @@ pub struct SystemClock;
 
 impl deadbolt_engine::Clock for SystemClock {
     fn now(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(now) = TEST_NOW.get() {
+            return now;
+        }
         wall_clock()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A fixed now for the engines this thread opens: the simulator's, so
+    /// the frames it signs replay byte for byte.
+    pub static TEST_NOW: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

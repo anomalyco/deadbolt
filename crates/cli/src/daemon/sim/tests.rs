@@ -1,4 +1,5 @@
 use super::*;
+use deadbolt_core::v2::{LogKind, MemberOp};
 use deadbolt_net::{Inviter, PairingContext, SyncHandler};
 
 fn actions(seed: u64) -> Vec<Action> {
@@ -8,8 +9,8 @@ fn actions(seed: u64) -> Vec<Action> {
         let i = (rng.next() % DEVICES as u64) as usize;
         let j = (rng.next() % DEVICES as u64) as usize;
         let value = rng.next();
-        if rng.next().is_multiple_of(64) {
-            actions.push(Action::MembershipFlood(i, j));
+        if rng.next().is_multiple_of(24) {
+            actions.push(Action::RemoveBy(i, j));
             continue;
         }
         actions.push(match rng.next() % 19 {
@@ -83,33 +84,47 @@ fn shrink(mut actions: Vec<Action>, mut fails: impl FnMut(&[Action]) -> bool) ->
     actions
 }
 
+/// Two members cut off from each other each remove the other, offline and
+/// concurrently, while a third writes. Once healed every device agrees on
+/// who is left, and replay is byte for byte.
 #[test]
-fn membership_flood_is_bounded_durable_and_replayable() {
-    for (author, receiver) in [(0, 1), (1, 0)] {
-        let actions = [
-            Action::Pair(1),
-            Action::MembershipFlood(author, receiver),
-            Action::Crash(receiver),
-            Action::MembershipFlood(author, receiver),
-            Action::Startup(receiver),
-            Action::Add(receiver, 42),
-            Action::Remove(1),
-            Action::Add(0, 43),
-        ];
-        assert_eq!(replay(&actions).unwrap(), replay(&actions).unwrap());
-    }
+fn concurrent_offline_removals_converge_and_replay() {
+    let actions = [
+        Action::Pair(1),
+        Action::Pair(2),
+        Action::Pair(3),
+        Action::Add(0, 1),
+        Action::Sync(0, 1, 3, None),
+        Action::Sync(0, 2, 4, None),
+        Action::Partition(1, 2),
+        Action::Partition(0, 2),
+        Action::RemoveBy(1, 2),
+        Action::RemoveBy(2, 1),
+        Action::Add(2, 5),
+        Action::Crash(1),
+        Action::Add(3, 6),
+        Action::Heal,
+        Action::Startup(1),
+    ];
+    assert_eq!(replay(&actions).unwrap(), replay(&actions).unwrap());
 }
 
-/// Seed 54: startup catches a third member up on a 1000-entry membership log
-/// over network seed 7's 2-byte relay chunks (~275 KiB, ~550k scheduler ticks).
+/// A removal made while its target is unreachable, then a crash on both
+/// sides before they meet again.
 #[test]
-fn membership_flood_catches_up_third_member_over_small_chunks() {
+fn a_removal_across_a_partition_survives_crashes() {
     replay(&[
         Action::Pair(1),
-        Action::Pair(3),
+        Action::Pair(2),
+        Action::Partition(0, 1),
+        Action::Remove(1),
+        Action::Add(1, 9),
+        Action::Crash(0),
         Action::Crash(1),
-        Action::MembershipFlood(0, 1),
+        Action::Heal,
+        Action::Startup(0),
         Action::Startup(1),
+        Action::Add(0, 10),
     ])
     .unwrap();
 }
@@ -148,10 +163,13 @@ async fn pairing_offer_rejects_a_removed_inviter() {
     world.pair(1).unwrap();
     let peer = DeviceId::from_bytes(world.devices[1].id);
     let removal = world.devices[0]
-        .with(|s| s.update(world.vault, |v, key| Ok(v.remove(key, peer)?)))
+        .with(|s| {
+            let id = s.update(world.vault, |v, a| Ok(v.remove(a, peer)?))?;
+            Ok(s.vault(&world.vault).frame(&id).unwrap().clone())
+        })
         .unwrap();
     world.devices[1]
-        .with(|s| s.update(world.vault, |v, _| Ok(v.apply(removal)?)))
+        .with(|s| s.update(world.vault, |v, _| Ok(v.apply(vec![removal])?)))
         .unwrap();
     let invite = Invitation {
         device: &world.devices[1],
@@ -225,15 +243,16 @@ fn pairing_again_after_a_cut_finishes_the_join() {
         let adds = world.devices[0]
             .with(|s| {
                 Ok(s.vault(&world.vault)
-                    .entries()
-                    .into_iter()
-                    .filter(|e| {
-                        matches!(e.payload(), Payload::Membership(MembershipOp::Add { .. }))
+                    .frames()
+                    .filter(|f| {
+                        f.member_body()
+                            .is_some_and(|b| matches!(b.op, Some(MemberOp::Add { .. })))
                     })
                     .count())
             })
             .unwrap();
-        assert_eq!(adds, 1, "cut {cut}");
+        // Genesis adds the creator; pairing adds one more.
+        assert_eq!(adds, 2, "cut {cut}");
         world.step(&Action::Add(1, 7)).unwrap();
         world.converge().unwrap();
     }
@@ -521,10 +540,11 @@ async fn outgoing_catchup_is_a_snapshot_and_rechecks_revocation() {
         .unwrap();
     let expected = world.devices[0]
         .with(|s| {
-            Ok(s.vault(&world.vault)
-                .missing_for(&peer_heads)
+            let vault = s.vault(&world.vault);
+            Ok([LogKind::Member, LogKind::Data]
                 .into_iter()
-                .map(Entry::encode)
+                .flat_map(|log| vault.missing(&peer_heads, log))
+                .map(|f| deadbolt_net::Blob::new(f.encode()))
                 .collect::<Vec<_>>())
         })
         .unwrap();
@@ -557,7 +577,7 @@ fn outgoing_welcome_stops_after_removal() {
     let device = DeviceId::from_bytes(world.devices[1].id);
     let inviter = DeviceId::from_bytes(world.devices[0].id);
     let join = world.devices[1]
-        .with(|s| pairing::join_blob(&s.secret(), "beta", inviter, &world.vault, None))
+        .with(|s| pairing::join_blob(&s.keys(), "beta", inviter, &world.vault, None))
         .unwrap();
     let mut history = world.devices[0]
         .with(|s| Ok(pairing::welcome(s, world.vault, device, &join, None)?.0))
@@ -577,11 +597,11 @@ fn outgoing_welcome_stops_after_removal() {
     world.check().unwrap();
 }
 
-/// Application batches can overlap across sessions. A child arriving before
-/// its parent is dropped, not persisted; the next heads exchange must recover
-/// it, including after reopening the accepted prefix.
+/// Application batches can overlap across sessions and arrive in any order.
+/// Data frames name no data parents, so a batch delivered backwards lands
+/// whole, survives a crash, and replaying it (or any part) adds nothing.
 #[tokio::test]
-async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
+async fn reordered_batches_land_whole_and_replay_as_no_ops_after_a_crash() {
     // The manual stream scheduler owns polling; an enclosing Tokio task's
     // cooperative budget must not make its duplex streams spuriously stall.
     tokio::task::unconstrained(async {
@@ -613,17 +633,12 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
             .await
             .unwrap();
         world.check().unwrap();
-        world.devices[1]
-            .with(|s| {
-                assert_eq!(s.vault(&world.vault).items().len(), 1);
-                assert!(
-                    !s.vault(&world.vault).items()[0]
-                        .fields
-                        .contains_key("receipt")
-                );
-                Ok(())
-            })
-            .unwrap();
+        let items = |world: &World, i: usize| {
+            world.devices[i]
+                .with(|s| Ok(s.vault(&world.vault).items()))
+                .unwrap()
+        };
+        assert_eq!(items(&world, 1), items(&world, 0));
         world.step(&Action::Crash(1)).unwrap();
         world.step(&Action::Startup(1)).unwrap();
         let missing = source
@@ -632,9 +647,8 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(missing, entries[1..]);
-        // Resume one batch at a time, then replay the entire overlapping session.
-        for entry in missing {
+        assert!(missing.is_empty());
+        for entry in entries.iter().cloned() {
             target
                 .receive(a, vec![entry], &mut Default::default(), true)
                 .await
@@ -646,47 +660,43 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
             .await
             .unwrap();
         world.check().unwrap();
+        assert_eq!(items(&world, 1), items(&world, 0));
         world.step(&Action::Crash(1)).unwrap();
         world.converge().unwrap();
     })
     .await;
 }
 
-/// A cap rejection must not discard a following removal at the same sequence.
-/// Another author remains writable independently, and its changes converge.
+/// A frame that fails verification must not discard a removal beside it.
+/// Another member's concurrent write still lands, and everything converges.
 #[tokio::test]
-async fn exhausted_author_does_not_block_removal_or_other_authors() {
+async fn a_bad_frame_does_not_block_removal_or_other_members() {
     tokio::task::unconstrained(async {
         let mut world = World::new().unwrap();
         world.step(&Action::Pair(1)).unwrap();
         world.step(&Action::Pair(2)).unwrap();
-        world.step(&Action::MembershipFlood(0, 1)).unwrap();
         let removed = DeviceId::from_bytes(world.devices[2].id);
-        let (rejected, removal) = world.devices[0]
+        let (forged, removal) = world.devices[0]
             .with(|s| {
-                let mut probe = s.vault(&world.vault).clone();
-                let removal = probe.remove(&s.secret(), removed)?;
-                let rejected = Entry::sign(
-                    &s.secret(),
-                    world.vault,
-                    removal.seq(),
-                    removal.deps().to_vec(),
-                    Payload::Membership(MembershipOp::Rename {
-                        name: "over-budget".into(),
-                    }),
-                );
-                let removal = s.update(world.vault, |v, key| Ok(v.remove(key, removed)?))?;
-                Ok((rejected, removal))
+                let id = s.update(world.vault, |v, a| Ok(v.remove(a, removed)?))?;
+                let removal = s.vault(&world.vault).frame(&id).unwrap().encode();
+                // The same frame with one signature byte flipped.
+                let mut forged = removal.clone();
+                *forged.last_mut().unwrap() ^= 1;
+                Ok((
+                    deadbolt_net::Blob::new(forged),
+                    deadbolt_net::Blob::new(removal),
+                ))
             })
             .unwrap();
         let renamed = world.devices[1]
-            .with(|s| s.update(world.vault, |v, key| Ok(v.rename(key, "still-writable")?)))
+            .with(|s| s.update(world.vault, |v, a| Ok(v.rename(a, "still-writable")?)))
             .unwrap();
         let handler = world.devices[1].handler();
         handler
             .receive(
                 world.devices[0].id,
-                vec![rejected.encode(), removal.encode()],
+                vec![forged, removal],
                 &mut Default::default(),
                 true,
             )
@@ -694,18 +704,7 @@ async fn exhausted_author_does_not_block_removal_or_other_authors() {
             .unwrap();
         world.devices[1]
             .with(|s| {
-                let vault = s.vault(&world.vault);
-                assert!(!vault.is_member(&removed));
-                assert!(
-                    !vault
-                        .entries()
-                        .iter()
-                        .any(|entry| entry.hash() == rejected.hash())
-                );
-                assert_eq!(
-                    membership_writes(vault, DeviceId::from_bytes(world.devices[0].id)),
-                    MAX_MEMBERSHIP_ENTRIES
-                );
+                assert!(!s.vault(&world.vault).is_member(&removed));
                 Ok(())
             })
             .unwrap();
@@ -714,19 +713,7 @@ async fn exhausted_author_does_not_block_removal_or_other_authors() {
         world.converge().unwrap();
         world.devices[0]
             .with(|s| {
-                assert!(
-                    s.vault(&world.vault)
-                        .entries()
-                        .iter()
-                        .any(|entry| entry.hash() == renamed.hash())
-                );
-                assert_eq!(
-                    membership_writes(
-                        s.vault(&world.vault),
-                        DeviceId::from_bytes(world.devices[1].id)
-                    ),
-                    1
-                );
+                assert!(s.vault(&world.vault).frame(&renamed).is_some());
                 Ok(())
             })
             .unwrap();

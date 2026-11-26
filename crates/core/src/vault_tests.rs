@@ -26,7 +26,8 @@ fn sync(from: &Peer, to: &mut Peer) {
         .flat_map(|log| from.v.missing(&heads, log))
         .cloned()
         .collect();
-    to.v.transact(|w| w.apply(frames), |_, _| Ok::<_, Error>(())).unwrap();
+    to.v.transact(|w| w.apply(frames), |_, _| Ok::<_, Error>(()))
+        .unwrap();
 }
 
 /// `a` invites a new device seeded `seed`; the new device opens the vault
@@ -61,7 +62,10 @@ fn a_new_vault_has_its_name_one_member_and_a_recovery_root() {
     assert_eq!(p.v.name(), "personal");
     assert_eq!(p.v.members().collect::<Vec<_>>(), vec![p.a.id()]);
     assert_eq!(p.v.recovery_root(), Some(recovery().recovery_id()));
-    assert!(!p.v.is_member(&recovery().recovery_id()), "the root is not a device");
+    assert!(
+        !p.v.is_member(&recovery().recovery_id()),
+        "the root is not a device"
+    );
     assert_eq!(p.v.device_card(&p.a.id()).unwrap().1, "test");
     let reopened = Vault::open(p.a.keys(), p.v.frames().cloned()).unwrap();
     assert_eq!(reopened.name(), "personal");
@@ -71,9 +75,15 @@ fn a_new_vault_has_its_name_one_member_and_a_recovery_root() {
 #[test]
 fn items_round_trip_with_every_kind_of_metadata() {
     let mut p = first();
-    let (id, _) = p
-        .v
-        .create_item_with(&p.a, "login", Some("Mail".into()), login("me", "pw"), true, ["work/aws".into()])
+    let (id, _) =
+        p.v.create_item_with(
+            &p.a,
+            "login",
+            Some("Mail".into()),
+            login("me", "pw"),
+            true,
+            ["work/aws".into()],
+        )
         .unwrap();
     let item = p.v.item(&id).unwrap();
     assert_eq!(item.name.as_deref(), Some("Mail"));
@@ -99,7 +109,8 @@ fn items_round_trip_with_every_kind_of_metadata() {
     assert_eq!(item.password_changed.as_deref(), Some("2026-01-02"));
     assert_eq!(item.ignored["weak"], crate::Hash::from_bytes([7; 32]));
     assert!(!item.fields.contains_key("username"));
-    p.v.write(a, vec![DataOp::delete(id, NOW_MS / 1000)]).unwrap();
+    p.v.write(a, vec![DataOp::delete(id, NOW_MS / 1000)])
+        .unwrap();
     assert!(p.v.items().is_empty());
     assert_eq!(p.v.deleted()[0].at, Some(NOW_MS / 1000));
     p.v.write(a, vec![DataOp::restore(id)]).unwrap();
@@ -114,10 +125,17 @@ fn writes_are_checked_against_the_item_rules() {
         p.v.create_item(a, "nope", None, []),
         Err(Error::Item(_))
     ));
-    assert!(p
-        .v
-        .write(a, vec![DataOp::set(ItemId::random(), "password", Field::new(FieldType::Secret, "x"))])
-        .is_err());
+    assert!(
+        p.v.write(
+            a,
+            vec![DataOp::set(
+                ItemId::random(),
+                "password",
+                Field::new(FieldType::Secret, "x")
+            )]
+        )
+        .is_err()
+    );
     let (id, _) = p.v.create_item(a, "login", None, login("u", "p")).unwrap();
     let too_many: Vec<DataOp> = (0..=crate::tag::MAX_TAGS)
         .map(|i| DataOp::tag_add(id, format!("t{i}")))
@@ -125,20 +143,36 @@ fn writes_are_checked_against_the_item_rules() {
     assert!(p.v.write(a, too_many).is_err());
     // A failed write leaves no frame behind.
     let before = p.v.frames().count();
-    assert!(p.v.write(a, vec![DataOp::name(id, Some("\u{0}".into()))]).is_err());
+    assert!(
+        p.v.write(a, vec![DataOp::name(id, Some("\u{0}".into()))])
+            .is_err()
+    );
     assert_eq!(p.v.frames().count(), before);
 }
 
 #[test]
 fn paired_devices_converge_and_concurrent_edits_resolve() {
     let mut a = first();
-    let (id, _) = a.v.create_item(&a.a, "login", None, login("me", "one")).unwrap();
+    let (id, _) =
+        a.v.create_item(&a.a, "login", None, login("me", "one"))
+            .unwrap();
     let mut b = pair(&mut a, 2);
     assert!(b.v.is_member(&b.a.id()));
     assert_eq!(b.v.item(&id).unwrap().fields["password"].value, "one");
     // Concurrent: A edits, B deletes; then A tags, B untags the same tag.
-    a.v.write(&a.a, vec![DataOp::set(id, "password", Field::new(FieldType::Secret, "two")), DataOp::tag_add(id, "x")]).unwrap();
-    b.v.write(&b.a, vec![DataOp::delete(id, 1), DataOp::tag_remove(id, "x")]).unwrap();
+    a.v.write(
+        &a.a,
+        vec![
+            DataOp::set(id, "password", Field::new(FieldType::Secret, "two")),
+            DataOp::tag_add(id, "x"),
+        ],
+    )
+    .unwrap();
+    b.v.write(
+        &b.a,
+        vec![DataOp::delete(id, 1), DataOp::tag_remove(id, "x")],
+    )
+    .unwrap();
     sync(&a, &mut b);
     sync(&b, &mut a);
     let (ia, ib) = (a.v.item(&id).unwrap(), b.v.item(&id).unwrap());
@@ -157,16 +191,25 @@ fn a_removed_device_cannot_read_what_is_written_after() {
     sync(&a, &mut b);
     sync(&a, &mut c);
     let (aa, cid) = (&a.a, c.a.id());
-    a.v.transact(|w| w.remove(aa, cid), |_, _| Ok::<_, Error>(())).unwrap();
-    let (secret, _) = a.v.create_item(&a.a, "login", None, login("after", "removal")).unwrap();
+    a.v.transact(|w| w.remove(aa, cid), |_, _| Ok::<_, Error>(()))
+        .unwrap();
+    let (secret, _) =
+        a.v.create_item(&a.a, "login", None, login("after", "removal"))
+            .unwrap();
     sync(&a, &mut c);
     sync(&a, &mut b);
     assert!(!c.v.is_member(&c.a.id()));
-    assert!(c.v.item(&secret).is_none(), "the new epoch never wrapped to C");
+    assert!(
+        c.v.item(&secret).is_none(),
+        "the new epoch never wrapped to C"
+    );
     assert!(c.v.sealed_count() > 0);
     assert_eq!(b.v.item(&secret).unwrap().fields["username"].value, "after");
     // C can't write any more.
-    assert!(matches!(c.v.create_item(&c.a, "login", None, login("x", "y")), Err(Error::NotMember)));
+    assert!(matches!(
+        c.v.create_item(&c.a, "login", None, login("x", "y")),
+        Err(Error::NotMember)
+    ));
 }
 
 #[test]
@@ -179,13 +222,19 @@ fn concurrent_offline_removals_converge_on_one_write_epoch() {
         sync(&a, p);
     }
     let (xa, xid, yid) = (&a.a, x.a.id(), y.a.id());
-    a.v.transact(|w| w.remove(xa, xid), |_, _| Ok::<_, Error>(())).unwrap();
+    a.v.transact(|w| w.remove(xa, xid), |_, _| Ok::<_, Error>(()))
+        .unwrap();
     let ba = &b.a;
-    b.v.transact(|w| w.remove(ba, yid), |_, _| Ok::<_, Error>(())).unwrap();
+    b.v.transact(|w| w.remove(ba, yid), |_, _| Ok::<_, Error>(()))
+        .unwrap();
     sync(&a, &mut b);
     sync(&b, &mut a);
-    let (ia, _) = a.v.create_item(&a.a, "login", None, login("a", "1")).unwrap();
-    let (ib, _) = b.v.create_item(&b.a, "login", None, login("b", "2")).unwrap();
+    let (ia, _) =
+        a.v.create_item(&a.a, "login", None, login("a", "1"))
+            .unwrap();
+    let (ib, _) =
+        b.v.create_item(&b.a, "login", None, login("b", "2"))
+            .unwrap();
     sync(&a, &mut b);
     sync(&b, &mut a);
     for p in [&a, &b] {
@@ -202,7 +251,9 @@ fn concurrent_offline_removals_converge_on_one_write_epoch() {
 #[test]
 fn the_recovery_kit_alone_recovers_everything_and_removes_lost_devices() {
     let mut a = first();
-    let (id, _) = a.v.create_item(&a.a, "login", Some("Bank".into()), login("me", "hunter2")).unwrap();
+    let (id, _) =
+        a.v.create_item(&a.a, "login", Some("Bank".into()), login("me", "hunter2"))
+            .unwrap();
     let b = pair(&mut a, 2);
     let _ = b;
     // Every device is gone: only the frames (a remote) and the 24 words remain.
@@ -210,14 +261,22 @@ fn the_recovery_kit_alone_recovers_everything_and_removes_lost_devices() {
     let rs = crate::recovery::decode(&words).unwrap();
     let frames: Vec<Frame> = a.v.frames().cloned().collect();
     let mut as_root = Vault::open_as(rs.recovery_id(), &rs.kem_secret(), frames).unwrap();
-    assert_eq!(as_root.item(&id).unwrap().fields["password"].value, "hunter2");
+    assert_eq!(
+        as_root.item(&id).unwrap().fields["password"].value,
+        "hunter2"
+    );
     let new = author(9);
     let consent = new.join_consent(&as_root.id(), &rs.recovery_id());
     let old: Vec<_> = as_root.members().collect();
     as_root
         .transact(
             |w| {
-                w.add_signed(&rs.signing_key(), new.id(), new.keys().kem_public(), consent)?;
+                w.add_signed(
+                    &rs.signing_key(),
+                    new.id(),
+                    new.keys().kem_public(),
+                    consent,
+                )?;
                 for d in &old {
                     w.remove_by_root(&rs, *d)?;
                 }
@@ -230,9 +289,17 @@ fn the_recovery_kit_alone_recovers_everything_and_removes_lost_devices() {
     assert_eq!(fresh.members().collect::<Vec<_>>(), vec![new.id()]);
     assert_eq!(fresh.item(&id).unwrap().fields["password"].value, "hunter2");
     assert_eq!(fresh.name(), "personal");
-    let (later, _) = fresh.create_item(&new, "login", None, login("new", "device")).unwrap();
+    let (later, _) = fresh
+        .create_item(&new, "login", None, login("new", "device"))
+        .unwrap();
     // The old device sees it was removed and can't read the new write.
-    sync(&Peer { a: author(9), v: fresh }, &mut a);
+    sync(
+        &Peer {
+            a: author(9),
+            v: fresh,
+        },
+        &mut a,
+    );
     assert!(!a.v.is_member(&a.a.id()));
     assert!(a.v.item(&later).is_none());
 }
@@ -242,15 +309,24 @@ fn rotating_the_kit_retires_the_old_one() {
     let mut a = first();
     let old = recovery();
     let new = RecoverySecret::from_bytes([0x11; 32]);
-    a.v.transact(|w| w.rotate_recovery(&old, &new), |_, _| Ok::<_, Error>(())).unwrap();
+    a.v.transact(|w| w.rotate_recovery(&old, &new), |_, _| Ok::<_, Error>(()))
+        .unwrap();
     assert_eq!(a.v.recovery_root(), Some(new.recovery_id()));
-    let (id, _) = a.v.create_item(&a.a, "login", None, login("u", "p")).unwrap();
+    let (id, _) =
+        a.v.create_item(&a.a, "login", None, login("u", "p"))
+            .unwrap();
     let frames: Vec<Frame> = a.v.frames().cloned().collect();
     let as_new = Vault::open_as(new.recovery_id(), &new.kem_secret(), frames.clone()).unwrap();
     assert!(as_new.item(&id).is_some());
     let as_old = Vault::open_as(old.recovery_id(), &old.kem_secret(), frames).unwrap();
-    assert!(as_old.item(&id).is_none(), "the old kit can't read past its rotation");
-    assert!(a.v.transact(|w| w.rotate_recovery(&old, &new), |_, _| Ok::<_, Error>(())).is_err());
+    assert!(
+        as_old.item(&id).is_none(),
+        "the old kit can't read past its rotation"
+    );
+    assert!(
+        a.v.transact(|w| w.rotate_recovery(&old, &new), |_, _| Ok::<_, Error>(()))
+            .is_err()
+    );
 }
 
 #[test]
@@ -260,19 +336,31 @@ fn the_kit_undoes_a_stolen_senior_devices_removals() {
     sync(&a, &mut b);
     // The thief holds the senior device A and removes B; B hears of it.
     let (aa, aid, bid) = (&a.a, a.a.id(), b.a.id());
-    a.v.transact(|w| w.remove(aa, bid), |_, _| Ok::<_, Error>(())).unwrap();
+    a.v.transact(|w| w.remove(aa, bid), |_, _| Ok::<_, Error>(()))
+        .unwrap();
     sync(&a, &mut b);
-    assert!(!b.v.is_member(&bid), "without the kit, seniority lets the thief win");
+    assert!(
+        !b.v.is_member(&bid),
+        "without the kit, seniority lets the thief win"
+    );
     // With the kit, the root removes A citing only what came before the theft.
     let rs = recovery();
-    b.v.transact(|w| w.remove_stolen(&rs.signing_key(), aid, None), |_, _| Ok::<_, Error>(()))
-        .unwrap();
+    b.v.transact(
+        |w| w.remove_stolen(&rs.signing_key(), aid, None),
+        |_, _| Ok::<_, Error>(()),
+    )
+    .unwrap();
     assert!(!b.v.is_member(&aid));
     assert!(b.v.is_member(&bid), "the thief's removal of B is void");
     assert!(b.v.parked().is_empty());
-    let (id, _) = b.v.create_item(&b.a, "login", None, login("safe", "again")).unwrap();
+    let (id, _) =
+        b.v.create_item(&b.a, "login", None, login("safe", "again"))
+            .unwrap();
     sync(&b, &mut a);
-    assert!(a.v.item(&id).is_none(), "the thief can't read B's new writes");
+    assert!(
+        a.v.item(&id).is_none(),
+        "the thief can't read B's new writes"
+    );
 }
 
 #[test]
@@ -284,9 +372,11 @@ fn a_device_parks_when_a_device_it_saw_removed_comes_back() {
     sync(&a, &mut c);
     // B removes C, and C (senior to B? no: both added by A) removes B, offline.
     let (ba, cid, bid) = (&b.a, c.a.id(), b.a.id());
-    b.v.transact(|w| w.remove(ba, cid), |_, _| Ok::<_, Error>(())).unwrap();
+    b.v.transact(|w| w.remove(ba, cid), |_, _| Ok::<_, Error>(()))
+        .unwrap();
     let ca = &c.a;
-    c.v.transact(|w| w.remove(ca, bid), |_, _| Ok::<_, Error>(())).unwrap();
+    c.v.transact(|w| w.remove(ca, bid), |_, _| Ok::<_, Error>(()))
+        .unwrap();
     sync(&b, &mut a);
     sync(&c, &mut a);
     assert!(!a.v.parked().is_empty(), "mutual removals always park");

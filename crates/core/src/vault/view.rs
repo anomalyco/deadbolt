@@ -75,7 +75,11 @@ fn kind(state: &ItemState) -> &str {
 }
 
 fn password_field(state: &ItemState) -> &'static str {
-    if kind(state) == "ssh" { "passphrase" } else { "password" }
+    if kind(state) == "ssh" {
+        "passphrase"
+    } else {
+        "password"
+    }
 }
 
 /// The item's own fields' winning values, without projecting anything else.
@@ -129,7 +133,8 @@ pub(crate) fn item(id: ItemId, state: &ItemState) -> Item {
             PASSWORD_CHANGED => out.password_changed = Some(v.value.clone()),
             _ if name.starts_with(IGNORE) => {
                 if let Some(hash) = unhex32(&v.value) {
-                    out.ignored.insert(name[IGNORE.len()..].to_owned(), Hash::from_bytes(hash));
+                    out.ignored
+                        .insert(name[IGNORE.len()..].to_owned(), Hash::from_bytes(hash));
                 }
             }
             _ if name.starts_with('@') => {}
@@ -258,8 +263,15 @@ pub(crate) fn check<'a>(
     items: impl Fn(&ItemId) -> Option<&'a ItemState>,
     ops: &[DataOp],
 ) -> Result<(), ItemError> {
-    let mut after: BTreeMap<ItemId, (BTreeMap<String, usize>, BTreeSet<String>, bool, Option<String>)> =
-        BTreeMap::new();
+    let mut after: BTreeMap<
+        ItemId,
+        (
+            BTreeMap<String, usize>,
+            BTreeSet<String>,
+            bool,
+            Option<String>,
+        ),
+    > = BTreeMap::new();
     for op in ops {
         match op {
             DataOp::Create {
@@ -271,7 +283,9 @@ pub(crate) fn check<'a>(
                 ..
             } => item::check_create_with(kind, name.as_deref(), fields, source.as_ref(), tags)?,
             DataOp::Edit { item: id, change } => {
-                let state = items(id).filter(|s| !kind(s).is_empty()).ok_or(ItemError::NoSuchItem)?;
+                let state = items(id)
+                    .filter(|s| !kind(s).is_empty())
+                    .ok_or(ItemError::NoSuchItem)?;
                 item::check_change(kind(state), change)?;
                 let (sizes, tags, tag_grew, file_grew) = after.entry(*id).or_insert_with(|| {
                     let it = item(*id, state);

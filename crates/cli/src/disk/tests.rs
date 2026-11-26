@@ -15,14 +15,20 @@ const ROOMY: Budget = Budget {
 /// The rows' bytes, as text, newest first.
 fn rows(store: &Unlocked) -> Vec<String> {
     let page = store.activity_list(0, None, 100).unwrap();
-    page.rows.iter().map(|r| String::from_utf8(r.bytes.to_vec()).unwrap()).collect()
+    page.rows
+        .iter()
+        .map(|r| String::from_utf8(r.bytes.to_vec()).unwrap())
+        .collect()
 }
 
 #[test]
 fn the_passphrase_opens_the_device_and_nothing_else_does() {
     let dir = tempfile::tempdir().unwrap();
     assert!(!is_initialized(dir.path()));
-    assert!(matches!(unlock(dir.path(), b"pass"), Err(Error::NotInitialized(_))));
+    assert!(matches!(
+        unlock(dir.path(), b"pass"),
+        Err(Error::NotInitialized(_))
+    ));
     let store = init_with_params(dir.path(), b"pass", &[7; 32], FAST).unwrap();
     assert!(is_initialized(dir.path()));
     assert!(matches!(unlock(dir.path(), b"pass"), Err(Error::InUse)));
@@ -34,11 +40,13 @@ fn the_passphrase_opens_the_device_and_nothing_else_does() {
         init_with_params(dir.path(), b"other", &[1; 32], FAST),
         Err(Error::AlreadyExists(_))
     ));
-    assert!(matches!(unlock(dir.path(), b"nope"), Err(Error::WrongPassphrase)));
+    assert!(matches!(
+        unlock(dir.path(), b"nope"),
+        Err(Error::WrongPassphrase)
+    ));
     let store = unlock(dir.path(), b"pass").unwrap();
     assert_eq!(store.device_seed(), &[7; 32]);
     assert_eq!(&**store.meta_get("cli/name").unwrap().unwrap(), b"laptop");
-
 }
 
 #[test]
@@ -67,7 +75,13 @@ fn frames_and_vault_state_persist_per_vault() {
     assert_eq!(reopened.name(), "personal");
     assert_eq!(&**store.meta_get(&name).unwrap().unwrap(), b"[]");
     assert!(store.meta_get("vault/x/removed").unwrap().is_none());
-    assert!(dir.path().join("v").join(id.to_string()).join("members.log").is_file());
+    assert!(
+        dir.path()
+            .join("v")
+            .join(id.to_string())
+            .join("members.log")
+            .is_file()
+    );
 }
 
 #[test]
@@ -79,10 +93,19 @@ fn the_biometric_slot_opens_the_device_and_clears_while_locked() {
     store.set_biometric(&key, b"token").unwrap();
     assert!(store.check_biometric(&key).unwrap());
     assert!(!store.check_biometric(&[0; 32]).unwrap());
-    assert_eq!(store.biometric_token().unwrap().as_deref(), Some(&b"token"[..]));
+    assert_eq!(
+        store.biometric_token().unwrap().as_deref(),
+        Some(&b"token"[..])
+    );
     drop(store);
-    assert_eq!(biometric_token(dir.path()).unwrap().as_deref(), Some(&b"token"[..]));
-    assert!(matches!(unlock_biometric(dir.path(), &[0; 32]), Err(Error::InvalidBiometric)));
+    assert_eq!(
+        biometric_token(dir.path()).unwrap().as_deref(),
+        Some(&b"token"[..])
+    );
+    assert!(matches!(
+        unlock_biometric(dir.path(), &[0; 32]),
+        Err(Error::InvalidBiometric)
+    ));
     let store = unlock_biometric(dir.path(), &key).unwrap();
     assert_eq!(store.device_seed(), &[7; 32]);
     drop(store);
@@ -94,7 +117,9 @@ fn the_biometric_slot_opens_the_device_and_clears_while_locked() {
 /// Appends one row timed `time` whose bytes are its time.
 fn row(store: &Unlocked, time: u64, keep_from: u64, budget: Budget) -> u64 {
     let text = time.to_string();
-    store.activity_append([(time, text.as_bytes())], keep_from, budget).unwrap()[0]
+    store
+        .activity_append([(time, text.as_bytes())], keep_from, budget)
+        .unwrap()[0]
 }
 
 #[test]
@@ -113,7 +138,11 @@ fn activity_lists_newest_first_and_old_rows_go() {
     assert_eq!(older.rows.iter().map(|r| r.id).collect::<Vec<_>>(), [1, 0]);
     assert_eq!(row(&store, 40, 25, ROOMY), 3);
     assert_eq!(rows(&store), ["40", "30"]);
-    assert_eq!(store.activity_list(0, None, 10).unwrap().dropped, None, "aged, not dropped");
+    assert_eq!(
+        store.activity_list(0, None, 10).unwrap().dropped,
+        None,
+        "aged, not dropped"
+    );
     drop(store);
     let store = unlock(dir.path(), b"pass").unwrap();
     assert_eq!(rows(&store), ["40", "30"]);
@@ -137,9 +166,15 @@ fn activity_keeps_to_its_budget_across_chunks_and_unlocks() {
         last_id: 1,
         last_time: 2,
     };
-    assert_eq!(store.activity_list(0, None, 10).unwrap().dropped, Some(dropped));
+    assert_eq!(
+        store.activity_list(0, None, 10).unwrap().dropped,
+        Some(dropped)
+    );
     assert_eq!(store.activity_list(0, None, 2).unwrap().dropped, None);
-    assert_eq!(store.activity_list(0, Some(3), 2).unwrap().dropped, Some(dropped));
+    assert_eq!(
+        store.activity_list(0, Some(3), 2).unwrap().dropped,
+        Some(dropped)
+    );
     assert_eq!(store.activity_list(3, None, 10).unwrap().dropped, None);
     // Enough rows to fill several chunks: old chunks go, the floor stays.
     let many = Budget {
@@ -158,11 +193,22 @@ fn activity_keeps_to_its_budget_across_chunks_and_unlocks() {
     assert_eq!(page.dropped.unwrap().count, 1500 - 1 - 10);
     let chunks = fs::read_dir(dir.path().join("device"))
         .unwrap()
-        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("activity-"))
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("activity-")
+        })
         .count();
     assert!(chunks <= 2, "{chunks} chunks left");
     // However big, the newest row stays.
-    let small = Budget { rows: 1_000, bytes: 400 };
-    store.activity_append([(2000, &[b'x'; 1_000][..])], 0, small).unwrap();
+    let small = Budget {
+        rows: 1_000,
+        bytes: 400,
+    };
+    store
+        .activity_append([(2000, &[b'x'; 1_000][..])], 0, small)
+        .unwrap();
     assert_eq!(rows(&store).len(), 1);
 }

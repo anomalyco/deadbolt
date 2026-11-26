@@ -97,7 +97,8 @@ impl Vault {
             return Err(Error::InvalidName);
         }
         let k0 = EpochKey::generate().map_err(frame_err)?;
-        let create = v2::build_create_frame(recovery, crate::id::random(), &k0).map_err(frame_err)?;
+        let create =
+            v2::build_create_frame(recovery, crate::id::random(), &k0).map_err(frame_err)?;
         let id = create.header().vault;
         let e0 = EpochId::from_frame_id(create.id());
         let mut vault = Vault::empty(id, author.id(), author.keys.kem_key());
@@ -284,7 +285,11 @@ impl<'a> VaultWrite<'a> {
                 epoch
             }
         };
-        let key = self.keyring.get(&epoch).cloned().ok_or(Error::AwaitingKeys)?;
+        let key = self
+            .keyring
+            .get(&epoch)
+            .cloned()
+            .ok_or(Error::AwaitingKeys)?;
         Ok((epoch, key))
     }
 
@@ -355,7 +360,8 @@ impl<'a> VaultWrite<'a> {
                 });
             }
             let full = batches.last().is_some_and(|b| {
-                !b.is_empty() && (b.len() + out.len() > OPS_PER_FRAME || bytes + len > BYTES_PER_FRAME)
+                !b.is_empty()
+                    && (b.len() + out.len() > OPS_PER_FRAME || bytes + len > BYTES_PER_FRAME)
             });
             if full {
                 batches.push(Vec::new());
@@ -621,8 +627,7 @@ impl<'a> VaultWrite<'a> {
                 .filter(|f| !out.contains(&f.id()))
                 .filter(|f| {
                     out.contains(&f.header().prev)
-                        || f
-                            .member_body()
+                        || f.member_body()
                             .is_some_and(|b| b.deps.iter().any(|d| out.contains(d)))
                 })
                 .map(|f| f.id())

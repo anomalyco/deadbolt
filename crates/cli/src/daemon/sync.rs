@@ -329,7 +329,8 @@ pub async fn run(daemon: Arc<Daemon>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deadbolt_core::{DeviceSecret, Field, FieldType, Vault};
+    use deadbolt_core::v2::{Frame, LogKind};
+    use deadbolt_core::{Field, FieldType, Vault, VaultId};
 
     #[test]
     fn startup_requires_attempts_for_current_and_newly_discovered_peers() {
@@ -445,6 +446,21 @@ mod tests {
         p_cost: 1,
     };
 
+    use super::super::session::tests::{author, blob, local, peer};
+
+    /// Adds devices seeded `seeds` to `vault`, as `s`.
+    fn add_all(s: &mut Loaded, vault: VaultId, seeds: &[u8]) {
+        let me = s.id;
+        s.update(vault, |v, a| {
+            for seed in seeds {
+                let (keys, consent) = peer(*seed, &vault, &me);
+                v.add(a, keys.device_id(), keys.kem_public(), consent)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
     // Drive the real wire reader up to a specific prefix without yielding to a timer.
     // A background round waiting on sync_now would consume the same permit we inspect.
     #[tokio::test]
@@ -467,31 +483,18 @@ mod tests {
             .setup("test".to_owned().into(), "local".into())
             .await
             .unwrap();
-        let sender = DeviceSecret::from_bytes(&[2; 32]);
-        let third = DeviceSecret::from_bytes(&[3; 32]);
-        let peer = *sender.device_id().as_bytes();
+        let sender = author(2);
+        let third = author(3);
+        let peer = *sender.id().as_bytes();
         let (mut shared, mut sole_sender) = daemon
             .with(|s| {
                 s.sync_task.take();
                 s.health_task.take();
-                let mut vault = |name: &str, others: &[&DeviceSecret]| -> Result<Vault> {
-                    let id = s.create_vault(name)?;
-                    s.update(id, |v, key| {
-                        for device in others {
-                            v.add(
-                                key,
-                                device.device_id(),
-                                device.join_consent(&id, &key.device_id()),
-                            )?;
-                        }
-                        Ok(())
-                    })?;
-                    Ok(s.vault(&id).clone())
-                };
-                let vaults = (
-                    vault("shared", &[&sender, &third])?,
-                    vault("two", &[&sender])?,
-                );
+                let shared = s.create_vault("shared")?;
+                add_all(s, shared, &[2, 3]);
+                let two = s.create_vault("two")?;
+                add_all(s, two, &[2]);
+                let vaults = (s.vault(&shared).clone(), s.vault(&two).clone());
                 daemon.refresh(s);
                 Ok(vaults)
             })
@@ -526,10 +529,10 @@ mod tests {
         let heads = handler.heads(peer).await.unwrap();
         assert!(!woke());
         let edit = |v: &mut Vault| {
-            v.create_item(&sender, "login", Some("edit".into()), [])
-                .unwrap()
-                .1
-                .encode()
+            let (_, frame) = local(v, |w| {
+                w.create_item(&sender, "login", Some("edit".into()), [])
+            });
+            blob(v, frame)
         };
         for final_duplicate in [false, true] {
             use crate::protocol::Change;
@@ -537,7 +540,8 @@ mod tests {
             let (mut wire, mut exchange) = session();
             frame(&mut wire, HEADS, &heads).await;
             let first = if final_duplicate {
-                shared.rename(&sender, "new-label").unwrap().encode()
+                let frame = local(&mut shared, |w| w.rename(&sender, "new-label"));
+                blob(&shared, frame)
             } else {
                 edit(&mut shared)
             };
@@ -602,8 +606,8 @@ mod tests {
         // Removing the third peer must wake and close its gate *before* DONE.
         let (mut wire, mut exchange) = session();
         frame(&mut wire, HEADS, &heads).await;
-        let removal = shared.remove(&sender, third.device_id()).unwrap();
-        frame(&mut wire, ENTRY, &removal.encode()).await;
+        let removal = local(&mut shared, |w| w.remove(&sender, third.id()));
+        frame(&mut wire, ENTRY, &blob(&shared, removal)).await;
         assert!(exchange.as_mut().poll(cx).is_pending());
         assert!(woke());
         assert!(
@@ -611,7 +615,7 @@ mod tests {
                 .members
                 .read()
                 .unwrap()
-                .contains(third.device_id().as_bytes())
+                .contains(third.id().as_bytes())
         );
         drop(exchange);
         daemon.lock().await;
@@ -655,11 +659,11 @@ mod tests {
     }
 
     /// A vault the size of a real one (thousands of imported items, large notes,
-    /// one near the entry limit, edits one at a time) pairs to a new device and
+    /// one near the frame limit, edits one at a time) pairs to a new device and
     /// then syncs to it through the production handlers and sync protocol.
     #[tokio::test]
     async fn a_large_imported_vault_pairs_and_syncs() {
-        use deadbolt_core::{DataOp, MAX_ENTRY_LEN};
+        use deadbolt_core::DataOp;
         let (a_dir, b_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let mut a = Loaded::setup(a_dir.path(), b"a", "alpha", FAST).unwrap();
         let mut b = Loaded::setup(b_dir.path(), b"b", "beta", FAST).unwrap();
@@ -693,7 +697,7 @@ mod tests {
             DataOp::create("note", Some(name.into()), [("notes".into(), field)])
         };
         let import = |s: &mut Loaded, items: Vec<DataOp>| {
-            s.update(vault, |v, secret| Ok(v.create_items(secret, items)?.0))
+            s.update(vault, |v, a| Ok(v.create_items(a, items)?.0))
                 .unwrap()
         };
 
@@ -703,7 +707,7 @@ mod tests {
         import(&mut a, items);
         let offer_blob = super::super::pairing::offer(&a, vault, &b.id, None).unwrap();
         let (offer, _) = super::super::pairing::read_offer(&offer_blob).unwrap();
-        let join = super::super::pairing::join_blob(&b.secret(), "b", a.id, &vault, None).unwrap();
+        let join = super::super::pairing::join_blob(&b.keys(), "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
             super::super::pairing::welcome(&mut a, vault, b.id, &join, None).unwrap();
         super::super::pairing::apply_welcome(
@@ -715,14 +719,14 @@ mod tests {
         .unwrap();
         assert_eq!(b.vault(&vault).items().len(), 3004);
 
-        // Then sync a second import, one item near the limit and single edits.
+        // Then sync a second import, one item near the frame limit and single edits.
         let mut items: Vec<_> = (3000..6000).map(login).collect();
-        items.push(note("huge", MAX_ENTRY_LEN - 4096));
+        items.push(note("huge", 13 << 20));
         let ids = import(&mut a, items);
-        a.update(vault, |v, secret| {
+        a.update(vault, |v, a| {
             for id in ids.iter().take(200) {
                 let field = Field::new(FieldType::Secret, format!("edited-{id}"));
-                v.write(secret, vec![DataOp::set(*id, "password", field)])?;
+                v.write(a, vec![DataOp::set(*id, "password", field)])?;
             }
             Ok(())
         })
@@ -746,126 +750,134 @@ mod tests {
     }
 
     #[test]
-    fn rejected_entries_do_not_discard_removals_or_admit_removed_peer_data() {
+    fn bad_frames_do_not_discard_removals_beside_them() {
         let dir = tempfile::tempdir().unwrap();
         let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
         let id = target.create_vault("personal").unwrap();
-        let peer = DeviceSecret::from_bytes(&[2; 32]);
-        let consent = peer.join_consent(&id, &target.id);
-        target
-            .update(id, |v, key| Ok(v.add(key, peer.device_id(), consent)?))
-            .unwrap();
+        add_all(&mut target, id, &[2]);
+        let peer = author(2);
         let mut fork = target.vault(&id).clone();
         target
             .update(id, |v, _| {
                 Ok(v.create_item(&peer, "login", Some("original".into()), [])?)
             })
             .unwrap();
-        let (_, rejected) = fork
-            .create_item(&peer, "login", Some("fork".into()), [])
-            .unwrap();
+        // The peer signs a second frame at the same position: an equivocation.
+        let (_, twin) = local(&mut fork, |w| {
+            w.create_item(&peer, "login", Some("fork".into()), [])
+        });
         let mut source = target.vault(&id).clone();
-        let removal = source.remove(&target.secret(), peer.device_id()).unwrap();
-        let (private, data) = source
-            .create_item(&target.secret(), "login", Some("private".into()), [])
-            .unwrap();
+        let me = target.author();
+        let removal = local(&mut source, |w| w.remove(&me, peer.id()));
         let added = receive(
             &mut target,
-            &peer.device_id(),
+            &peer.id(),
             vec![
                 Blob::new(vec![255]),
-                rejected.encode(),
-                removal.encode(),
-                data.encode(),
+                blob(&fork, twin),
+                blob(&source, removal),
             ],
             true,
             &mut Default::default(),
         )
         .unwrap();
-        assert_eq!(added, 1);
-        assert!(!target.vault(&id).is_member(&peer.device_id()));
-        assert!(
-            target
-                .vault(&id)
-                .items()
-                .iter()
-                .all(|item| item.id != private)
-        );
+        assert!(added >= 1);
+        assert!(!target.vault(&id).is_member(&peer.id()));
         let heads = target.vault(&id).heads();
         drop(target);
-        assert_eq!(
-            Loaded::open(dir.path(), b"test")
-                .unwrap()
-                .vault(&id)
-                .heads(),
-            heads
-        );
+        let reopened = Loaded::open(dir.path(), b"test").unwrap();
+        assert_eq!(reopened.vault(&id).heads(), heads);
+        assert!(!reopened.vault(&id).is_member(&peer.id()));
+    }
+
+    /// The vault the peer seeded 2 is removed from by an honest member
+    /// seeded 3, and the frames around it: the peer's and the member's
+    /// writes from before the removal, the member's after it, and the peer's
+    /// write made concurrently, which the removal's `last_seen_seq` excludes.
+    struct Removal {
+        target: Loaded,
+        id: VaultId,
+        before: Vec<(deadbolt_core::ItemId, Blob)>,
+        removal: Blob,
+        after: (deadbolt_core::ItemId, Blob),
+        late: (deadbolt_core::ItemId, Blob),
+        _dir: tempfile::TempDir,
+    }
+
+    fn removal(own: usize) -> Removal {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
+        let id = target.create_vault("personal").unwrap();
+        add_all(&mut target, id, &[2, 3]);
+        let (peer, honest) = (author(2), author(3));
+        let mut source = target.vault(&id).clone();
+        let mut before = Vec::new();
+        for i in 0..own {
+            let (item, f) = local(&mut source, |w| {
+                w.create_item(&peer, "login", Some(format!("own {i}")), [])
+            });
+            before.push((item, blob(&source, f)));
+        }
+        let (item, f) = local(&mut source, |w| {
+            w.create_item(&honest, "login", Some("relayed".into()), [])
+        });
+        before.push((item, blob(&source, f)));
+        let mut concurrent = source.clone();
+        let r = local(&mut source, |w| w.remove(&honest, peer.id()));
+        let removal = blob(&source, r);
+        let (item, f) = local(&mut source, |w| {
+            w.create_item(&honest, "login", Some("after".into()), [])
+        });
+        let after = (item, blob(&source, f));
+        let (item, f) = local(&mut concurrent, |w| {
+            w.create_item(&peer, "login", Some("late".into()), [])
+        });
+        let late = (item, blob(&concurrent, f));
+        Removal {
+            target,
+            id,
+            before,
+            removal,
+            after,
+            late,
+            _dir: dir,
+        }
     }
 
     #[test]
     fn a_batch_with_the_peers_removal_keeps_data_written_before_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
-        let id = target.create_vault("personal").unwrap();
-        let peer = DeviceSecret::from_bytes(&[2; 32]);
-        let honest = DeviceSecret::from_bytes(&[3; 32]);
-        target
-            .update(id, |v, key| {
-                for device in [&peer, &honest] {
-                    let consent = device.join_consent(&id, &key.device_id());
-                    v.add(key, device.device_id(), consent)?;
-                }
-                Ok(())
-            })
-            .unwrap();
-        // The peer relays its own write and an honest member's, both from
-        // before that member removed it, plus the member's write after it.
-        let mut source = target.vault(&id).clone();
-        let (own, own_entry) = source
-            .create_item(&peer, "login", Some("own".into()), [])
-            .unwrap();
-        let (relayed, relayed_entry) = source
-            .create_item(&honest, "login", Some("relayed".into()), [])
-            .unwrap();
-        let mut concurrent = source.clone();
-        let removal = source.remove(&honest, peer.device_id()).unwrap();
-        let (after, after_entry) = source
-            .create_item(&honest, "login", Some("after".into()), [])
-            .unwrap();
-        let (late, late_entry) = concurrent
-            .create_item(&peer, "login", Some("late".into()), [])
-            .unwrap();
-        let peer = peer.device_id();
-        let batch = [removal, own_entry, relayed_entry, after_entry];
-        let added = receive(
-            &mut target,
-            &peer,
-            batch.iter().map(deadbolt_core::Entry::encode).collect(),
-            true,
-            &mut Default::default(),
-        )
-        .unwrap();
-        assert_eq!(added, 3);
-        let vault = target.vault(&id);
+        let mut r = removal(1);
+        let peer = author(2).id();
+        let mut batch = vec![r.removal.clone()];
+        batch.extend(r.before.iter().map(|(_, b)| b.clone()));
+        batch.push(r.after.1.clone());
+        let added = receive(&mut r.target, &peer, batch, true, &mut Default::default()).unwrap();
+        assert_eq!(added, 4);
+        let vault = r.target.vault(&r.id);
         assert!(!vault.is_member(&peer));
         let has = |item| vault.items().iter().any(|i| i.id == item);
-        assert!(has(own) && has(relayed), "data from before the removal");
-        assert!(!has(after), "the removed peer never held data after it");
+        assert!(
+            r.before.iter().all(|(item, _)| has(*item)),
+            "data from before the removal"
+        );
+        // The honest member's later write counts whoever relays it: the peer
+        // couldn't read or forge it, only pass it on.
+        assert!(has(r.after.0));
         // Once the removal is known, nothing more from the peer is accepted,
         // not even a write it made before learning of it.
-        let added = receive(
-            &mut target,
-            &peer,
-            vec![late_entry.encode()],
-            true,
-            &mut Default::default(),
-        )
-        .unwrap();
+        let late = vec![r.late.1.clone()];
+        let added = receive(&mut r.target, &peer, late, true, &mut Default::default()).unwrap();
         assert_eq!(added, 0);
-        assert!(target.vault(&id).items().iter().all(|i| i.id != late));
+        assert!(
+            r.target
+                .vault(&r.id)
+                .items()
+                .iter()
+                .all(|i| i.id != r.late.0)
+        );
     }
 
-    /// A peer that sends a fixed list of entries and wants nothing back.
+    /// A peer that sends a fixed list of frames and wants nothing back.
     struct Replay(Vec<Blob>);
 
     impl SyncHandler for Replay {
@@ -901,54 +913,18 @@ mod tests {
         }
     }
 
-    /// The wire commits a stream in prefixes of 1, 2, 4, ... entries, so the
-    /// peer's removal lands alone in the first batch and the data it wrote
-    /// before the removal in later ones. That data still lands; data after the
-    /// removal, and anything in a later stream, does not.
+    /// The wire commits a stream in prefixes of 1, 2, 4, ... frames, so the
+    /// peer's removal lands alone in the first batch and the data written
+    /// before it in later ones. That data still lands; anything in a later
+    /// stream from the peer does not.
     #[tokio::test]
     async fn a_streamed_removal_keeps_data_written_before_it_in_later_batches() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
-        let id = target.create_vault("personal").unwrap();
-        let peer = DeviceSecret::from_bytes(&[2; 32]);
-        let honest = DeviceSecret::from_bytes(&[3; 32]);
-        target
-            .update(id, |v, key| {
-                for device in [&peer, &honest] {
-                    let consent = device.join_consent(&id, &key.device_id());
-                    v.add(key, device.device_id(), consent)?;
-                }
-                Ok(())
-            })
-            .unwrap();
-        let mut source = target.vault(&id).clone();
-        let mut sent = Vec::new();
-        let mut before = Vec::new();
-        for i in 0..5 {
-            let (item, entry) = source
-                .create_item(&peer, "login", Some(format!("own {i}")), [])
-                .unwrap();
-            before.push(item);
-            sent.push(entry.encode());
-        }
-        let (relayed, entry) = source
-            .create_item(&honest, "login", Some("relayed".into()), [])
-            .unwrap();
-        before.push(relayed);
-        sent.push(entry.encode());
-        let mut concurrent = source.clone();
-        let removal = source.remove(&honest, peer.device_id()).unwrap();
-        sent.insert(0, removal.encode());
-        let (after, entry) = source
-            .create_item(&honest, "login", Some("after".into()), [])
-            .unwrap();
-        sent.push(entry.encode());
-        let (late, late_entry) = concurrent
-            .create_item(&peer, "login", Some("late".into()), [])
-            .unwrap();
-
-        let (peer_id, target_id) = (*peer.device_id().as_bytes(), *target.id.as_bytes());
-        let target = Plain(std::sync::Mutex::new(target), Default::default());
+        let r = removal(5);
+        let peer_id = *author(2).id().as_bytes();
+        let target_id = *r.target.id.as_bytes();
+        let mut sent = vec![r.removal.clone()];
+        sent.extend(r.before.iter().map(|(_, b)| b.clone()));
+        let target = Plain(std::sync::Mutex::new(r.target), Default::default());
         let stream = |entries: Vec<Blob>| {
             let target = &target;
             async move {
@@ -967,39 +943,36 @@ mod tests {
         stream(sent).await;
         let batches = target.1.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
-            batches >= 4,
+            batches >= 3,
             "the stream was committed in {batches} batches"
         );
         {
             let s = target.0.lock().unwrap();
-            let vault = s.vault(&id);
-            assert!(!vault.is_member(&peer.device_id()));
+            let vault = s.vault(&r.id);
+            assert!(!vault.is_member(&DeviceId::from_bytes(peer_id)));
             let has = |item| vault.items().iter().any(|i| i.id == item);
             assert!(
-                before.iter().all(|item| has(*item)),
+                r.before.iter().all(|(item, _)| has(*item)),
                 "data from before the removal"
             );
-            assert!(!has(after), "the removed peer never held data after it");
         }
         // A later stream from the peer is refused, even a write it made before
         // learning of its removal.
-        stream(vec![late_entry.encode()]).await;
+        stream(vec![r.late.1.clone()]).await;
         let s = target.0.lock().unwrap();
-        assert!(s.vault(&id).items().iter().all(|i| i.id != late));
+        assert!(s.vault(&r.id).items().iter().all(|i| i.id != r.late.0));
     }
 
     fn two_shared_vaults() -> (tempfile::TempDir, Loaded, DeviceId, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
-        let peer = DeviceSecret::from_bytes(&[2; 32]);
         let mut vaults = BTreeMap::new();
         for name in ["first", "second"] {
             let id = source.create_vault(name).unwrap();
-            let consent = peer.join_consent(&id, &source.id);
+            add_all(&mut source, id, &[2]);
             source
-                .update(id, |v, key| {
-                    v.add(key, peer.device_id(), consent)?;
-                    Ok(v.create_item(key, "login", Some("secret".into()), [])?)
+                .update(id, |v, a| {
+                    Ok(v.create_item(a, "login", Some("secret".into()), [])?)
                 })
                 .unwrap();
             vaults.insert(
@@ -1015,7 +988,11 @@ mod tests {
             vaults,
         })
         .unwrap();
-        (dir, source, peer.device_id(), hello)
+        (dir, source, author(2).id(), hello)
+    }
+
+    fn log_of(bytes: &[u8]) -> LogKind {
+        Frame::decode(bytes).unwrap().header().kind.log_kind()
     }
 
     #[test]
@@ -1023,23 +1000,15 @@ mod tests {
         let (_dir, mut source, peer, hello) = two_shared_vaults();
         let logs = |mut h: application::OutgoingHistory, s: &Loaded| {
             std::iter::from_fn(|| h.next(s, true).unwrap())
-                .map(|bytes| deadbolt_core::Entry::decode(&bytes).unwrap().log())
+                .map(|bytes| log_of(&bytes))
                 .collect::<Vec<_>>()
         };
         let all = logs(
             missing_for(&mut source, &peer, &hello, true).unwrap(),
             &source,
         );
-        assert!(all.contains(&deadbolt_core::Log::Data));
-        let first_data = all
-            .iter()
-            .position(|log| *log == deadbolt_core::Log::Data)
-            .unwrap();
-        assert!(
-            all[first_data..]
-                .iter()
-                .all(|log| *log == deadbolt_core::Log::Data)
-        );
+        let first_data = all.iter().position(|log| *log == LogKind::Data).unwrap();
+        assert!(all[first_data..].iter().all(|log| *log == LogKind::Data));
         let startup = logs(
             missing_for(&mut source, &peer, &hello, false).unwrap(),
             &source,
@@ -1047,22 +1016,28 @@ mod tests {
         assert_eq!(startup, all[..first_data]);
     }
 
+    /// Every frame of `vault`, as a new peer is sent them.
+    fn everything(vault: &Vault) -> Vec<Blob> {
+        let none = deadbolt_core::Heads::default();
+        [LogKind::Member, LogKind::Data]
+            .into_iter()
+            .flat_map(|log| vault.missing(&none, log))
+            .map(|f| Blob::new(f.encode()))
+            .collect()
+    }
+
     #[test]
     fn multi_vault_sync_omits_only_the_revoked_vault() {
         let (_dir, mut source, peer, hello) = two_shared_vaults();
         // Revoke the recipient after the first membership frame. Its vault
-        // still has both an Add and a data cursor in this snapshot.
+        // still has both member and data frames queued in this snapshot.
         let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
         let first = history.next(&source, true).unwrap().unwrap();
-        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
+        let revoked = Frame::decode(&first).unwrap().header().vault;
         let kept = *source.vaults.keys().find(|id| **id != revoked).unwrap();
-        let expected: Vec<_> = source
-            .vault(&kept)
-            .iter_entries()
-            .map(deadbolt_core::Entry::encode)
-            .collect();
+        let expected = everything(source.vault(&kept));
         source
-            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
+            .update(revoked, |v, a| Ok(v.remove(a, peer)?))
             .unwrap();
         let remaining: Vec<_> = std::iter::from_fn(|| history.next(&source, true).transpose())
             .collect::<Result<_, _>>()
@@ -1071,70 +1046,55 @@ mod tests {
     }
 
     #[test]
-    fn multi_vault_sync_does_not_skip_a_missing_signed_tip() {
+    fn multi_vault_sync_does_not_skip_a_vanished_frame() {
         let (_dir, mut source, peer, hello) = two_shared_vaults();
         let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
-        let first = history.next(&source, true).unwrap().unwrap();
-        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
-        source
-            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
-            .unwrap();
-        // Even a real signed removal can't disguise a partial replay: the
-        // restored view knows the removal but lacks the pinned data tip.
-        let mut membership = source
-            .vault(&revoked)
-            .iter_entries()
-            .filter(|e| e.log() == deadbolt_core::Log::Membership)
-            .cloned();
-        let mut partial = Vault::from_genesis(membership.next().unwrap()).unwrap();
-        for entry in membership {
-            partial.apply(entry).unwrap();
+        history.next(&source, true).unwrap().unwrap();
+        // Swap in views that lack the data frames the snapshot selected.
+        let keys = source.keys();
+        for id in source.vaults.keys().copied().collect::<Vec<_>>() {
+            let members: Vec<Frame> = source
+                .vault(&id)
+                .frames()
+                .filter(|f| f.header().kind.log_kind() == LogKind::Member)
+                .cloned()
+                .collect();
+            source
+                .vaults
+                .insert(id, Vault::open(&keys, members).unwrap());
         }
-        assert!(partial.was_removed(&peer));
-        source.vaults.insert(revoked, partial);
-        assert!(matches!(
-            history.next(&source, true),
-            Err(application::Error::Core(
-                deadbolt_core::Error::HistoryChanged
-            ))
-        ));
+        let result: Result<Vec<_>, _> =
+            std::iter::from_fn(|| history.next(&source, true).transpose()).collect();
+        assert!(matches!(result, Err(application::Error::Protocol(_))));
     }
 
     #[test]
     fn startup_does_not_accept_data() {
         let dir = tempfile::tempdir().unwrap();
-        let secret = DeviceSecret::from_bytes(&[1; 32]);
-        let store = crate::disk::init_with_params(
-            dir.path(),
-            b"test",
-            &secret.to_bytes(),
-            crate::disk::KdfParams {
-                m_cost_kib: 64,
-                t_cost: 1,
-                p_cost: 1,
-            },
-        )
-        .unwrap();
-        let (mut source, genesis) = Vault::create(&secret, "test").unwrap();
-        let id = source.id();
+        let store = crate::disk::init_with_params(dir.path(), b"test", &[1; 32], FAST).unwrap();
         let mut loaded = Loaded::from_unlocked(store).unwrap();
+        let me = loaded.author();
+        let root = deadbolt_core::v2::RecoverySecret::from_bytes([9; 32]);
+        let (mut source, genesis) = Vault::create(&root, &me, "test", "device").unwrap();
+        let id = source.id();
         loaded
             .vaults
-            .insert(id, Vault::from_genesis(genesis).unwrap());
-        let (_, entry) = source
-            .create_item(
-                &loaded.secret(),
+            .insert(id, Vault::open(me.keys(), genesis).unwrap());
+        let (_, frame) = local(&mut source, |w| {
+            w.create_item(
+                &me,
                 "login",
                 None,
                 [("password".into(), Field::new(FieldType::Secret, "private"))],
             )
-            .unwrap();
+        });
+        let entry = blob(&source, frame);
         let peer = loaded.id;
         let heads = hello(&loaded, &peer, None).unwrap();
         receive(
             &mut loaded,
             &peer,
-            vec![entry.encode()],
+            vec![entry.clone()],
             false,
             &mut Default::default(),
         )
@@ -1143,7 +1103,7 @@ mod tests {
         receive(
             &mut loaded,
             &peer,
-            vec![entry.encode()],
+            vec![entry.clone()],
             true,
             &mut Default::default(),
         )
@@ -1160,7 +1120,7 @@ mod tests {
                 .unwrap()
                 .next(&loaded, true)
                 .unwrap(),
-            Some(entry.encode())
+            Some(entry)
         );
     }
 }

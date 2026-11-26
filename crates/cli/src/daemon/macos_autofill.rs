@@ -571,7 +571,10 @@ impl Daemon {
                         let entry = s.update(vault, |v, author| {
                             Ok(v.create_items(author, vec![made.create.clone()])?.0)
                         })?;
-                        let id = entry.first().copied().context("the passkey was not created")?;
+                        let id = entry
+                            .first()
+                            .copied()
+                            .context("the passkey was not created")?;
                         let passkey = login_ref(&vault, &id);
                         Ok((made, passkey, identities_hash(s)))
                     })?;
@@ -621,7 +624,10 @@ impl Daemon {
                     let entry = s.update(vault, |v, author| {
                         Ok(v.create_items(author, vec![made.create.clone()])?.0)
                     })?;
-                    let id = entry.first().copied().context("the passkey was not created")?;
+                    let id = entry
+                        .first()
+                        .copied()
+                        .context("the passkey was not created")?;
                     let passkey = login_ref(&vault, &id);
                     Ok((made, passkey, identities_hash(s)))
                 })?;

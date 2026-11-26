@@ -673,7 +673,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             };
             let default = if vault.default { " (default)" } else { "" };
             println!("created vault {}{default}", vault.name);
-            print!("{}", recovery::kit_text(&vault.id, recovery_kit.expose()).as_str());
+            print!(
+                "{}",
+                recovery::kit_text(&vault.id, recovery_kit.expose()).as_str()
+            );
         }
         Commands::Join { device_name } => {
             let status = client::ensure_running(&paths).await?;

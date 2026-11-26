@@ -45,6 +45,7 @@ pub struct Touch {
 }
 
 /// A vault on this device. See the module docs.
+#[derive(Clone)]
 pub struct Vault {
     id: VaultId,
     me: DeviceId,
@@ -357,7 +358,12 @@ impl Vault {
         use std::ops::Bound::{Excluded, Unbounded};
         let live = |(_, s): &(&ItemId, &v2::ItemState)| view::known(s) && !s.deleted();
         [
-            self.state.items.range(..id).rev().find(live).map(|(id, _)| *id),
+            self.state
+                .items
+                .range(..id)
+                .rev()
+                .find(live)
+                .map(|(id, _)| *id),
             self.state
                 .items
                 .range((Excluded(id), Unbounded))
@@ -389,7 +395,10 @@ impl Vault {
                     && !s.deleted()
                     && s.kind.winner().is_some_and(|w| w.value == "login")
                     && site.matches(crate::autofill::field_urls(
-                        view::fields(s).map(|(_, v)| view::field(v)).collect::<Vec<_>>().iter(),
+                        view::fields(s)
+                            .map(|(_, v)| view::field(v))
+                            .collect::<Vec<_>>()
+                            .iter(),
                     ))
             })
             .map(|(id, s)| view::item(*id, s))
@@ -505,7 +514,11 @@ pub(crate) mod testing {
             self.transact(|v| v.create_items(a, ops), |_, _| Ok(()))
         }
 
-        pub(crate) fn write(&mut self, a: &Author, ops: Vec<crate::DataOp>) -> Result<FrameId, Error> {
+        pub(crate) fn write(
+            &mut self,
+            a: &Author,
+            ops: Vec<crate::DataOp>,
+        ) -> Result<FrameId, Error> {
             self.transact(|v| v.write(a, ops), |_, _| Ok(()))
         }
     }

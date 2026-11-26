@@ -353,6 +353,10 @@ pub struct Unlocked {
     root: LiveKey,
     seed: LiveKey,
     inner: Mutex<Inner>,
+    /// Test fault: the frame append that brings this to zero lands, then
+    /// reports failure, like a lost sync acknowledgement.
+    #[cfg(test)]
+    pub(crate) lost_ack: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for Unlocked {
@@ -391,6 +395,8 @@ impl Unlocked {
                 vaults: BTreeMap::new(),
                 activity: None,
             }),
+            #[cfg(test)]
+            lost_ack: Default::default(),
         }
     }
 
@@ -476,7 +482,11 @@ impl Unlocked {
 
     /// Appends `frames` to `vault`'s logs, each durable before the next.
     /// A crash part way keeps a prefix, every frame of which stands alone.
-    pub fn append_frames(&self, vault: VaultId, frames: &mut dyn Iterator<Item = &Frame>) -> Result<()> {
+    pub fn append_frames(
+        &self,
+        vault: VaultId,
+        frames: &mut dyn Iterator<Item = &Frame>,
+    ) -> Result<()> {
         let mut inner = self.inner();
         let held = self.held(&mut inner, vault)?;
         for frame in frames {
@@ -493,6 +503,17 @@ impl Unlocked {
                     _ => "append".into(),
                 })
             })?;
+            #[cfg(test)]
+            {
+                use std::sync::atomic::Ordering::SeqCst;
+                if self
+                    .lost_ack
+                    .try_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                    == Ok(1)
+                {
+                    return Err(Error::AppendUncertain("lost sync acknowledgement".into()));
+                }
+            }
         }
         Ok(())
     }
@@ -514,7 +535,8 @@ impl Unlocked {
         match vault_meta(name) {
             Some((vault, rest)) => {
                 let held = self.held(&mut inner, vault)?;
-                held.meta.insert(rest.into(), Zeroizing::new(value.to_vec()));
+                held.meta
+                    .insert(rest.into(), Zeroizing::new(value.to_vec()));
                 let mut body = Zeroizing::new(Vec::new());
                 encode_meta(&mut body, &held.meta);
                 let state = local::commit(
@@ -529,7 +551,9 @@ impl Unlocked {
                 held.local = Some(state);
             }
             None => {
-                inner.meta.insert(name.into(), Zeroizing::new(value.to_vec()));
+                inner
+                    .meta
+                    .insert(name.into(), Zeroizing::new(value.to_vec()));
                 let slots = inner.local.slots.clone();
                 self.commit_device(&mut inner, &slots)?;
             }

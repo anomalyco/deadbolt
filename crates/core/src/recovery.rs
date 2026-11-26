@@ -128,7 +128,10 @@ mod tests {
             let words = encode(&secret);
             assert_eq!(decode(&words).unwrap().as_bytes(), &seed);
             assert_eq!(decode(&words.to_uppercase()).unwrap().as_bytes(), &seed);
-            let short: Vec<String> = words.split(' ').map(|w| w[..w.len().min(4)].to_owned()).collect();
+            let short: Vec<String> = words
+                .split(' ')
+                .map(|w| w[..w.len().min(4)].to_owned())
+                .collect();
             assert_eq!(decode(&short.join("\n")).unwrap().as_bytes(), &seed);
             let mut swapped: Vec<&str> = words.split(' ').collect();
             swapped.swap(0, 1);

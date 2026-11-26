@@ -138,8 +138,13 @@ pub fn create_passkey(
     let made = shared::register(new, verified, &created).map_err(shared_error)?;
 
     let vault = s.resolve(None)?;
-    let (ids, _) = s.update(vault, |v, author| Ok(v.create_items(author, vec![made.create])?))?;
-    let id = ids.first().copied().context("the passkey was not created")?;
+    let (ids, _) = s.update(vault, |v, author| {
+        Ok(v.create_items(author, vec![made.create])?)
+    })?;
+    let id = ids
+        .first()
+        .copied()
+        .context("the passkey was not created")?;
     let passkey = passkey_ref(&vault, &id);
     Ok(Created {
         passkey,
