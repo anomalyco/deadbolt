@@ -149,17 +149,23 @@ impl Engine {
                 .transpose()?,
             peers: get_json(engine.store(), META_PEERS)?.unwrap_or_default(),
         };
-        let mut grouped: IndexMap<VaultId, Result<Vec<Frame>>> = IndexMap::new();
+        // Decoding checks every frame's signature: spread it across cores.
+        let mut stored: Vec<(VaultId, Zeroizing<Vec<u8>>)> = Vec::new();
         engine.store.for_each_frame(&mut |vault, bytes| {
-            let slot = grouped.entry(vault).or_insert_with(|| Ok(Vec::new()));
+            stored.push((vault, Zeroizing::new(bytes.to_vec())));
+            Ok(())
+        })?;
+        let decoded = deadbolt_core::par::map(&stored, |(_, bytes)| Frame::decode(bytes));
+        let mut grouped: IndexMap<VaultId, Result<Vec<Frame>>> = IndexMap::new();
+        for ((vault, _), frame) in stored.iter().zip(decoded) {
+            let slot = grouped.entry(*vault).or_insert_with(|| Ok(Vec::new()));
             if let Ok(frames) = slot {
-                match Frame::decode(bytes) {
+                match frame {
                     Ok(frame) => frames.push(frame),
                     Err(error) => *slot = Err(anyhow!("decoding a stored frame: {error}")),
                 }
             }
-            Ok(())
-        })?;
+        }
         let keys = engine.keys();
         for (id, frames) in grouped {
             // Never publish a partial vault for use or sync.

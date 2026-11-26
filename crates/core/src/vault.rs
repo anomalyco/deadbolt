@@ -184,16 +184,16 @@ impl Vault {
         let kem = KemSecret::from_bytes(&self.kem);
         let report = graph.unlock(&self.me, &kem, &mut self.keyring);
         self.bad_epochs = report.bad_epochs();
-        for (id, frame) in &self.data {
-            if self.opened.contains_key(id) {
-                continue;
-            }
-            if let Some(key) = self.keyring.get(&frame.header().epoch)
-                && let Ok(opened) = DataFrame::open(frame, key)
-            {
-                self.opened.insert(*id, opened);
-            }
-        }
+        let unopened: Vec<_> = self
+            .data
+            .iter()
+            .filter(|(id, _)| !self.opened.contains_key(id))
+            .filter_map(|(id, f)| Some((*id, f, self.keyring.get(&f.header().epoch)?)))
+            .collect();
+        let opened = crate::par::map(&unopened, |(id, f, key)| {
+            DataFrame::open(f, key).ok().map(|opened| (*id, opened))
+        });
+        self.opened.extend(opened.into_iter().flatten());
         self.graph = Some(graph);
         self.adders = v2::adders_from_frames(&self.resolved, self.members.values());
         let ctx = FoldContext {

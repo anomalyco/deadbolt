@@ -80,3 +80,77 @@ fn a_new_vault_gives_its_kit_once_and_reopens_from_its_frames() {
     let reopened = Vault::open(&engine.keys(), frames).unwrap();
     assert_eq!(reopened.name(), "work");
 }
+
+/// A memory store two engines share, so the second opens what the first wrote.
+struct Shared(std::sync::Arc<crate::MemoryStore>);
+
+impl VaultStore for Shared {
+    fn device_seed(&self) -> &[u8; 32] {
+        self.0.device_seed()
+    }
+    fn for_each_frame(&self, each: &mut dyn FnMut(VaultId, &[u8]) -> Result<()>) -> Result<()> {
+        self.0.for_each_frame(each)
+    }
+    fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = &Frame>) -> Result<()> {
+        self.0.append(vault, frames)
+    }
+    fn meta_get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.0.meta_get(name)
+    }
+    fn meta_set(&self, name: &str, value: &[u8]) -> Result<()> {
+        self.0.meta_set(name, value)
+    }
+    fn uncertain(&self, error: &anyhow::Error) -> Option<String> {
+        self.0.uncertain(error)
+    }
+}
+
+/// Unlocking (decoding every frame, resolving membership, opening each
+/// epoch and folding) takes at most 5 ms at 5,000 items. The passphrase KDF
+/// runs before this and isn't counted. Timing, so release builds only.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "timing: run with --release")]
+fn unlock_takes_at_most_5_ms_at_5000_items() {
+    use deadbolt_core::{DataOp, Field, FieldType};
+    let store = std::sync::Arc::new(crate::MemoryStore::new([7; 32]));
+    let clock = || Box::new(crate::clock::FixedClock(testing::NOW));
+    let mut engine = Engine::create(Box::new(Shared(store.clone())), clock(), "test").unwrap();
+    let id = engine.create_vault("personal").unwrap();
+    let items: Vec<_> = (0..5000)
+        .map(|i| {
+            DataOp::create(
+                "login",
+                Some(format!("Site {i}")),
+                [
+                    (
+                        "username".into(),
+                        Field::new(FieldType::Text, "me@example.com"),
+                    ),
+                    (
+                        "password".into(),
+                        Field::new(FieldType::Secret, format!("pw-{i}")),
+                    ),
+                    (
+                        "url".into(),
+                        Field::new(FieldType::Url, format!("https://{i}.example.com")),
+                    ),
+                ],
+            )
+        })
+        .collect();
+    engine
+        .update(id, |v, a| Ok(v.create_items(a, items)?))
+        .unwrap();
+    drop(engine);
+    let mut best = std::time::Duration::MAX;
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let engine = Engine::open(Box::new(Shared(store.clone())), clock()).unwrap();
+        best = best.min(start.elapsed());
+        assert_eq!(engine.vault(&id).items().len(), 5000);
+    }
+    assert!(
+        best <= std::time::Duration::from_millis(5),
+        "unlock took {best:?}"
+    );
+}

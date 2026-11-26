@@ -395,7 +395,7 @@ fn a_write_names_only_frames_the_fold_resolved() {
     let mut b = pair(&mut a, 2);
     let mut c = pair(&mut a, 3);
     sync(&a, &mut b);
-    let mut stage = |p: &mut Peer, name: &str| {
+    let stage = |p: &mut Peer, name: &str| {
         let (pa, v) = (&p.a, &mut p.v);
         v.transact(
             |w| w.create_item(pa, "login", Some(name.into()), []),
@@ -421,4 +421,58 @@ fn a_write_names_only_frames_the_fold_resolved() {
     // Once c's frame arrives, everything folds.
     sync(&c, &mut a);
     assert_eq!(a.v.items().len(), 3);
+}
+
+/// Unlocking a large vault folds item shards in parallel; the result is the
+/// one-pass fold's, edits, deletes, tags and all.
+#[test]
+fn a_parallel_fold_matches_a_sequential_one() {
+    let mut a = first();
+    let mut b = pair(&mut a, 2);
+    let items: Vec<DataOp> = (0..1500)
+        .map(|i| {
+            DataOp::create(
+                "login",
+                Some(format!("site {i}")),
+                login("me", &format!("pw{i}")),
+            )
+        })
+        .collect();
+    let (pa, v) = (&a.a, &mut a.v);
+    let (ids, _) = v
+        .transact(|w| w.create_items(pa, items), |_, _| Ok::<_, Error>(()))
+        .unwrap();
+    sync(&a, &mut b);
+    let edits: Vec<DataOp> = ids
+        .iter()
+        .step_by(3)
+        .map(|id| DataOp::set(*id, "password", Field::new(FieldType::Secret, "changed")))
+        .collect();
+    let (pb, v) = (&b.a, &mut b.v);
+    v.transact(|w| w.write(pb, edits), |_, _| Ok::<_, Error>(()))
+        .unwrap();
+    let deletes: Vec<DataOp> = ids
+        .iter()
+        .step_by(7)
+        .map(|id| DataOp::delete(*id, NOW_MS))
+        .collect();
+    let (pa, v) = (&a.a, &mut a.v);
+    v.transact(|w| w.write(pa, deletes), |_, _| Ok::<_, Error>(()))
+        .unwrap();
+    sync(&a, &mut b);
+    sync(&b, &mut a);
+    let parallel = Vault::open(a.a.keys(), a.v.frames().cloned()).unwrap();
+    crate::v2::fold::SEQUENTIAL.set(true);
+    let sequential = Vault::open(a.a.keys(), a.v.frames().cloned()).unwrap();
+    crate::v2::fold::SEQUENTIAL.set(false);
+    assert_eq!(parallel.items(), sequential.items());
+    assert_eq!(parallel.deleted(), sequential.deleted());
+    assert_eq!(parallel.name(), sequential.name());
+    assert_eq!(
+        parallel.device_card(&b.a.id()),
+        sequential.device_card(&b.a.id())
+    );
+    // A delete loses to the concurrent edit on every 21st item.
+    let deleted = (0..1500).filter(|i| i % 7 == 0 && i % 3 != 0).count();
+    assert_eq!(parallel.items().len(), 1500 - deleted);
 }

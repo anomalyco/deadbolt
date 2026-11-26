@@ -30,6 +30,7 @@ mod id;
 pub mod item;
 pub mod listing;
 pub mod ops;
+pub mod par;
 pub mod passkeys;
 pub mod password;
 pub mod password_rules;

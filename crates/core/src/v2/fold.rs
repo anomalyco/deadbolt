@@ -24,7 +24,7 @@ use super::data::{DataBody, DataFrame, DataOp};
 use super::frame::{Frame, FrameKind, MemberOp};
 use super::membership::ResolvedMembership;
 use super::pack::{Pack, PackMeta};
-use super::state::FoldedState;
+use super::state::{FoldedState, Shard};
 
 /// What a fold needs from the membership plane.
 #[derive(Debug, Clone, Copy)]
@@ -277,13 +277,60 @@ fn apply_chains(
     for (f, closure) in chains.values().flatten() {
         book.insert((f.author, f.seq), closure.clone());
     }
-    for (f, _) in chains.values().flatten() {
-        if let DataBody::Data(p) = &f.body
-            && ctx.counts(f)
-        {
-            state.apply(f.dot(), p, book, |a, d| ctx.card_ok(a, d));
+    let counted: Vec<_> = chains
+        .values()
+        .flatten()
+        .filter_map(|(f, _)| match &f.body {
+            DataBody::Data(p) if ctx.counts(f) => Some((f.dot(), p)),
+            _ => None,
+        })
+        .collect();
+    let book = &*book;
+    let ops: usize = counted.iter().map(|(_, p)| p.ops.len()).sum();
+    // Unlock folds everything from empty: past a few thousand ops, fold
+    // disjoint item shards on every core and take their union.
+    if ops >= PARALLEL_OPS && *state == FoldedState::default() && !sequential() {
+        let of = 16;
+        let shards: Vec<Shard> = (0..of).map(|k| Shard { k, of }).collect();
+        let parts = crate::par::map(&shards, |shard| {
+            let mut part = FoldedState::default();
+            for (dot, p) in &counted {
+                part.apply(*dot, p, book, |a, d| ctx.card_ok(a, d), *shard);
+            }
+            part
+        });
+        for part in parts {
+            state.items.extend(part.items);
+            if !part.vault_meta.is_empty()
+                || !part.device_cards.is_empty()
+                || !part.disputes.is_empty()
+            {
+                state.vault_meta = part.vault_meta;
+                state.device_cards = part.device_cards;
+                state.disputes = part.disputes;
+            }
         }
+        return;
     }
+    for (dot, p) in &counted {
+        state.apply(*dot, p, book, |a, d| ctx.card_ok(a, d), Shard::ALL);
+    }
+}
+
+/// Counted ops past which a fold from empty runs in parallel shards.
+const PARALLEL_OPS: usize = 4096;
+
+#[cfg(test)]
+thread_local! {
+    /// Forces this thread's folds to run in one pass, for comparing.
+    pub(crate) static SEQUENTIAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn sequential() -> bool {
+    #[cfg(test)]
+    return SEQUENTIAL.get();
+    #[cfg(not(test))]
+    false
 }
 
 /// The data frames [`fold_from_scratch`] resolves causally: each author's
