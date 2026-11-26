@@ -82,39 +82,42 @@ impl ViewerHandle {
         self.viewer.lookup_item(&item_id)
     }
 
-    /// One item's secrets: one range read, one decryption.
+    /// One item's secrets, after checking its Head is live and autofillable.
     pub fn fill_secret(&self, item_id: String) -> Result<Arc<ViewerSecret>> {
         self.viewer.fill_secret(&item_id).map(Arc::new)
     }
 
-    /// Queues a login for the app to save. Returns the outbox entry's name.
-    pub fn queue_login(&self, login: OutboxLogin) -> Result<String> {
+    /// Queues a login at Unix milliseconds `now_ms`. Returns the entry's name.
+    pub fn queue_login(&self, login: OutboxLogin, now_ms: u64) -> Result<String> {
         let OutboxLogin {
             url,
             username,
             password,
             title,
         } = login;
-        self.queue(&OutboxMutation::SaveLogin {
-            url,
-            username,
-            password: Zeroizing::new(password),
-            title,
-        })
+        self.queue(
+            &OutboxMutation::SaveLogin {
+                url,
+                username,
+                password: Zeroizing::new(password),
+                title,
+            },
+            now_ms,
+        )
     }
 
     /// Records that an item was filled, for the app's "last used".
-    pub fn touch_used(&self, item_id: String, used_unix: u64) -> Result<String> {
+    pub fn touch_used(&self, item_id: String, used_unix: u64, now_ms: u64) -> Result<String> {
         crate::item::parse_item_id(&item_id)?;
-        self.queue(&OutboxMutation::TouchUsed { item_id, used_unix })
+        self.queue(&OutboxMutation::TouchUsed { item_id, used_unix }, now_ms)
     }
 }
 
 impl ViewerHandle {
-    fn queue(&self, mutation: &OutboxMutation) -> Result<String> {
+    fn queue(&self, mutation: &OutboxMutation, now_ms: u64) -> Result<String> {
         let blocks = FsBlocks::open(&self.dir)?;
         let kem = deadbolt_core::v2::KemPublic::from_bytes(*self.viewer.device_kem());
-        queue_save(&blocks, self.viewer.vault(), &kem, mutation)
+        queue_save(&blocks, self.viewer.vault(), &kem, mutation, now_ms)
     }
 }
 

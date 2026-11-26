@@ -11,7 +11,7 @@ use crate::{PackViewer, ViewerError};
 const ITEMS: usize = 5_000;
 
 #[test]
-fn a_fill_reads_the_header_the_index_one_head_and_one_secret() {
+fn a_lookup_and_fill_read_only_the_target_head_and_secret() {
     let blocks = MemBlocks::new();
     let summary = write_pack(&blocks, ITEMS, 1);
     let bundle = bundle_for(&summary);
@@ -49,6 +49,7 @@ fn a_fill_reads_the_header_the_index_one_head_and_one_secret() {
             read(0, HEADER_LEN as u32),
             read(header.index_off, header.index_len),
             read(item.head.off, item.head.len),
+            read(item.head.off, item.head.len),
             read(item.secret.off, item.secret.len),
         ]
     );
@@ -63,7 +64,7 @@ fn a_fill_reads_the_header_the_index_one_head_and_one_secret() {
     let past_index = touched - u64::from(header.index_len) - HEADER_LEN as u64;
     assert_eq!(
         past_index,
-        u64::from(item.head.len) + u64::from(item.secret.len)
+        2 * u64::from(item.head.len) + u64::from(item.secret.len)
     );
     assert!(touched < summary.len / 4);
 }
@@ -88,7 +89,7 @@ fn a_lookup_and_fill_on_a_5k_item_pack_on_disk_is_fast() {
     }
     eprintln!("5k-item pack on disk: open + index {opened:?}, lookup + fill {best:?}");
     assert!(
-        best < Duration::from_millis(10),
+        best < Duration::from_millis(2),
         "lookup + fill took {best:?}"
     );
 }

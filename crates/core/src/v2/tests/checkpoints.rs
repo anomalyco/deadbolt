@@ -180,10 +180,10 @@ fn prove(sc: &Scenario) -> Result<(), TestCaseError> {
     prop_assert_eq!(&all.state, &full);
 
     // (b) Checkpoint pack (from its bytes) + post-frontier and late tail.
-    let decoded1 = Pack::decode(&bytes1).unwrap();
+    let decoded1 = super::sim::round_trip(&pack1);
     check_pack(&sim, &ctx, &decoded1, &full, full_mac, sc.stale, sc.seed)?;
-    if let Some((pack2, bytes2, _)) = &second {
-        prop_assert_eq!(&Pack::decode(bytes2).unwrap(), pack2);
+    if let Some((pack2, _, _)) = &second {
+        prop_assert_eq!(&super::sim::round_trip(pack2), pack2);
         check_pack(&sim, &ctx, pack2, &full, full_mac, sc.stale, sc.seed ^ 11)?;
     }
 

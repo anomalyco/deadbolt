@@ -695,7 +695,7 @@ impl Engine {
     pub fn card_label(&self, device: &DeviceId) -> Option<&str> {
         self.vaults
             .values()
-            .find_map(|v| v.device_card(device).map(|(_, label)| label))
+            .find_map(|v| v.device_label(device))
             .filter(|l| !l.is_empty())
     }
 

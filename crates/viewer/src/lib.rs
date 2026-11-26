@@ -37,4 +37,4 @@ pub use error::{Result, ViewerError};
 pub use item::{ViewerHit, ViewerPasskey, ViewerSecret, item_key, rp_key, site_key};
 pub use outbox::{Drained, OutboxMutation, drain_outbox, open_entry, queue_save};
 pub use reader::PackViewer;
-pub use repack::{PackPlace, pack_input, read_pack};
+pub use repack::{pack_input, read_pack};

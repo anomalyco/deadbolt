@@ -21,8 +21,6 @@ pub use records::{
     FILL_COPIES, ItemHead, ItemRecords, ItemSecret, PackRecords, is_secret_register,
 };
 
-const PACK_DOMAIN: &[u8] = b"deadbolt/v2 pack\0";
-
 /// What a checkpoint keeps besides the state so its pre-frontier frames can be deleted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PackMeta {
@@ -212,28 +210,4 @@ impl PackMeta {
 pub struct Pack {
     pub state: FoldedState,
     pub meta: PackMeta,
-}
-
-impl Pack {
-    /// Canonical pack bytes.
-    pub fn encode(&self) -> Result<Vec<u8>, PayloadError> {
-        let mut w = Writer::new();
-        w.bytes(PACK_DOMAIN);
-        self.state.encode_into(&mut w)?;
-        self.meta.encode_into(&mut w)?;
-        Ok(w.into_bytes())
-    }
-
-    /// Strict decode; also checks the meta against the state.
-    pub fn decode(bytes: &[u8]) -> Result<Self, PayloadError> {
-        let mut r = Reader::new(bytes);
-        if r.take(PACK_DOMAIN.len())? != PACK_DOMAIN {
-            return Err(PayloadError::Invalid("pack domain"));
-        }
-        let state = FoldedState::decode_from(&mut r)?;
-        let meta = PackMeta::decode_from(&mut r)?;
-        r.finish()?;
-        meta.validate(&state)?;
-        Ok(Self { state, meta })
-    }
 }

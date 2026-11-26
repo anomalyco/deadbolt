@@ -9,7 +9,7 @@
 use deadbolt_core::v2::{EpochId, EpochKey, Pack};
 use deadbolt_core::{PackSite, VaultId};
 use deadbolt_pack::{Blocks, MemBlocks, PackHeader, PackKeys, PackReader, VaultReader, names};
-use deadbolt_viewer::{PackPlace, pack_input, read_pack};
+use deadbolt_viewer::{pack_input, read_pack};
 
 use super::{Error, Result, Unlocked};
 
@@ -19,14 +19,8 @@ impl Unlocked {
     pub fn seal_pack(&self, pack: &Pack, site: &PackSite) -> Result<Vec<u8>> {
         let mut inner = self.inner();
         let generation = self.held(&mut inner, site.vault)?.dir.next_generation();
-        let place = PackPlace {
-            vault: *site.vault.as_bytes(),
-            author: *site.author.as_bytes(),
-            seq: site.seq,
-            epoch: *site.epoch.as_bytes(),
-            generation,
-        };
-        let input = pack_input(pack, place).map_err(|e| Error::corrupt(e.to_string()))?;
+        let input =
+            pack_input(pack, site, generation).map_err(|e| Error::corrupt(e.to_string()))?;
         Ok(deadbolt_pack::pack::encode(&input, site.key.as_bytes())?.bytes)
     }
 

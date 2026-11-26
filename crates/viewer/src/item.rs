@@ -163,19 +163,36 @@ pub(crate) fn hex_id(id: &[u8; 16]) -> String {
 
 impl ViewerHit {
     /// What a picker shows for the item a Head record holds; `None` for a
-    /// deleted item or one never created.
+    /// deleted item, one never created, or a non-autofill kind.
     pub fn from_head(head: &ItemHead) -> Option<Self> {
         let kind = head.kind()?;
-        if head.deleted() {
+        if head.deleted() || !matches!(kind, "login" | "passkey") {
             return None;
         }
         let text = |name: &str| head.value(name).map(|v| v.value.clone());
         let passkey = kind == "passkey";
+        let title = text("@name")
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                if passkey {
+                    text("rp-id")
+                } else {
+                    text("url").map(|url| deadbolt_core::listing::host(&url))
+                }
+                .filter(|value| !value.is_empty())
+            })
+            .or_else(|| text("username").filter(|name| !name.is_empty()))
+            .unwrap_or_else(|| kind.to_owned());
         Some(Self {
             item_id: hex_id(head.id.as_bytes()),
-            title: text("@name").unwrap_or_default(),
+            title,
             username: text("username"),
-            urls: urls_of(head),
+            // Only logins match saved URLs; passkeys match their relying party.
+            urls: if kind == "login" {
+                urls_of(head)
+            } else {
+                Vec::new()
+            },
             passkey_rp_id: passkey.then(|| text("rp-id")).flatten(),
             passkey_credential_id: passkey.then(|| text("credential-id")).flatten(),
             has_password: head

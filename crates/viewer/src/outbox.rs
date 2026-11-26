@@ -7,7 +7,7 @@
 //! aad   = "deadbolt/v2 outbox\0" || vault 32 || id 16 || entry[..6]
 //! ```
 //!
-//! Every entry gets a fresh random name and is written create-new and synced
+//! Every entry gets a timestamp-prefixed random name and is written create-new and synced
 //! (W1, W2), so the lock-free extension never races the app's writer. The
 //! name's id is in the AAD: a copy under another name doesn't open, so one
 //! save can't be replayed as two. Padmé padding hides the password's length.
@@ -110,12 +110,18 @@ fn aad(vault: &[u8; 32], id: &[u8; 16]) -> Vec<u8> {
 
 /// Seals `mutation` to `device_kem` and leaves it in the outbox of the
 /// vault directory `blocks`. Returns the entry's name.
+/// `now_ms` is Unix milliseconds (48 bits); distinct milliseconds drain in
+/// timestamp order, with random ordering within a millisecond.
 pub fn queue_save<B: Blocks>(
     blocks: &B,
     vault: &[u8; 32],
     device_kem: &KemPublic,
     mutation: &OutboxMutation,
+    now_ms: u64,
 ) -> Result<String> {
+    if now_ms >= 1 << 48 {
+        return Err(ViewerError::invalid("outbox timestamp exceeds 48 bits"));
+    }
     let json = Zeroizing::new(
         serde_json::to_vec(mutation).map_err(|err| ViewerError::invalid(err.to_string()))?,
     );
@@ -123,7 +129,8 @@ pub fn queue_save<B: Blocks>(
         return Err(ViewerError::invalid("mutation too large"));
     }
     let mut id = [0; 16];
-    getrandom::fill(&mut id).map_err(|err| ViewerError::Io {
+    id[..6].copy_from_slice(&now_ms.to_be_bytes()[2..]);
+    getrandom::fill(&mut id[6..]).map_err(|err| ViewerError::Io {
         message: format!("random number generator: {err}"),
     })?;
     let aad = aad(vault, &id);

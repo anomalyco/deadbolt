@@ -864,18 +864,18 @@ mod tests {
         a.with(|s| s.update(vault, |v, key| Ok(v.add(key, b_dev, kem, consent)?)))
             .unwrap();
         let card = |a: &Daemon| {
-            a.with(|s| {
-                Ok(s.vault(&vault)
-                    .device_card(&b_dev)
-                    .map(|(net, label)| (*net.as_bytes(), label.to_owned())))
-            })
-            .unwrap()
+            a.with(|s| Ok(s.vault(&vault).device_label(&b_dev).map(str::to_owned)))
+                .unwrap()
         };
         assert_eq!(card(&a), None);
         let frames = a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap();
 
         a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
-        assert_eq!(card(&a), Some((*net.as_bytes(), "beta".to_owned())));
+        assert_eq!(card(&a), Some("beta".to_owned()));
+        assert_eq!(
+            a.with(|s| Ok(s.vault(&vault).device_net(&b_dev))).unwrap(),
+            Some(net)
+        );
         // The card, and no second Add.
         assert_eq!(
             a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap(),

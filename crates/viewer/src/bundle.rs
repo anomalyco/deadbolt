@@ -15,7 +15,7 @@
 use std::fmt;
 
 use deadbolt_core::VaultId;
-use deadbolt_core::v2::{EpochId, EpochKey, KemPublic};
+use deadbolt_core::v2::{EpochKey, KemPublic};
 use deadbolt_pack::names::hex;
 use deadbolt_pack::{PackHeader, PackKeys};
 use zeroize::Zeroizing;
@@ -50,14 +50,18 @@ impl ViewerKeyBundle {
         device_kem: &KemPublic,
         expires_unix: u64,
     ) -> Self {
-        let vault = VaultId::from_bytes(header.vault);
-        let epoch = EpochId::from_bytes(header.epoch);
+        let keys = PackKeys::derive(
+            epoch_key.as_bytes(),
+            &header.vault,
+            &header.epoch,
+            &header.id(),
+        );
         let pack_id = header.id().0;
         Self {
             vault: header.vault,
             pack_id,
-            k_pack: epoch_key.pack_key(&vault, &epoch, &pack_id),
-            k_ix: epoch_key.index_key(&vault, &epoch, &pack_id),
+            k_pack: Zeroizing::new(*keys.pack_key()),
+            k_ix: Zeroizing::new(*keys.index_key()),
             device_kem: *device_kem.as_bytes(),
             expires_unix,
         }

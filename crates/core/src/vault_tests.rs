@@ -72,7 +72,7 @@ fn a_new_vault_has_its_name_one_member_and_a_recovery_root() {
         !p.v.is_member(&recovery().recovery_id()),
         "the root is not a device"
     );
-    assert_eq!(p.v.device_card(&p.a.id()).unwrap().1, "test");
+    assert_eq!(p.v.device_label(&p.a.id()).unwrap(), "test");
     let reopened = Vault::open(p.a.keys(), p.v.frames().cloned()).unwrap();
     assert_eq!(reopened.name(), "personal");
     assert!(Vault::create(&recovery(), &p.a, "Not Valid", "x").is_err());
@@ -476,8 +476,8 @@ fn a_parallel_fold_matches_a_sequential_one() {
     assert_eq!(parallel.deleted(), sequential.deleted());
     assert_eq!(parallel.name(), sequential.name());
     assert_eq!(
-        parallel.device_card(&b.a.id()),
-        sequential.device_card(&b.a.id())
+        parallel.device_label(&b.a.id()),
+        sequential.device_label(&b.a.id())
     );
     // A delete loses to the concurrent edit on every 21st item.
     let deleted = (0..1500).filter(|i| i % 7 == 0 && i % 3 != 0).count();

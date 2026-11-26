@@ -6,10 +6,11 @@ use deadbolt_pack::names::hex;
 use deadbolt_pack::{Blocks, PackInput, PackSummary, pack};
 use zeroize::Zeroizing;
 
-use crate::{PackPlace, ViewerHit, ViewerKeyBundle, ViewerPasskey, ViewerSecret, pack_input};
+use crate::{ViewerHit, ViewerKeyBundle, ViewerPasskey, ViewerSecret, pack_input};
 
 mod bundle;
 mod deps;
+mod eligibility;
 mod outbox;
 mod reader;
 
@@ -45,7 +46,14 @@ fn fixture() -> &'static (Vec<ItemId>, Pack) {
             .unwrap();
         let made = vault
             .transact(
-                |w| w.checkpoint(&author, |pack, _| pack.encode().map_err(|e| e.to_string())),
+                |w| {
+                    w.checkpoint(&author, |pack, site| {
+                        let input = crate::pack_input(pack, site, 1).map_err(|e| e.to_string())?;
+                        Ok(deadbolt_pack::pack::encode(&input, site.key.as_bytes())
+                            .map_err(|e| e.to_string())?
+                            .bytes)
+                    })
+                },
                 |_, _| Ok::<_, Error>(()),
             )
             .unwrap();
@@ -140,14 +148,14 @@ pub(crate) fn secret(i: usize) -> ViewerSecret {
 }
 
 pub(crate) fn input(items: usize, generation: u64) -> PackInput {
-    let place = PackPlace {
-        vault: VAULT,
-        author: AUTHOR,
+    let site = deadbolt_core::PackSite {
+        vault: deadbolt_core::VaultId::from_bytes(VAULT),
+        author: deadbolt_core::DeviceId::from_bytes(AUTHOR),
         seq: items as u64,
-        epoch: EPOCH,
-        generation,
+        epoch: deadbolt_core::v2::EpochId::from_bytes(EPOCH),
+        key: epoch_key(),
     };
-    pack_input(&core_pack(items), place).unwrap()
+    pack_input(&core_pack(items), &site, generation).unwrap()
 }
 
 /// Writes `gen-<generation>.pack` with `items` items.

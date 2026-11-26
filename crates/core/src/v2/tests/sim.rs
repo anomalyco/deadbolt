@@ -218,11 +218,16 @@ impl Sim {
             })
             .collect();
         let pack = compact(ctx, base, view).unwrap();
-        let bytes = pack.encode().unwrap();
+        let records = pack.split().unwrap();
+        let mut bytes = records.meta.to_vec();
+        for item in &records.items {
+            bytes.extend_from_slice(&item.head);
+            bytes.extend_from_slice(&item.secret);
+        }
         let commitment = PackCommitment::of(&sealed(&bytes));
         let payload = build_checkpoint(&K_MAC, &pack, commitment, Vec::new(), self.now_ms).unwrap();
         assert_ne!(payload.pack_hash, *blake3::hash(&bytes).as_bytes());
-        assert_eq!(Pack::decode(&bytes).unwrap(), pack, "pack must round-trip");
+        assert_eq!(round_trip(&pack), pack, "pack must round-trip");
         let encoded = payload.encode().unwrap();
         assert_eq!(CheckpointPayload::decode(&encoded).unwrap(), payload);
         let author = dev(d);
@@ -245,4 +250,17 @@ impl Sim {
         let refs: Vec<&DataFrame> = self.frames.iter().collect();
         super::model::shuffled(&refs, seed)
     }
+}
+
+/// Exercise the production record codec, including its metadata validation.
+pub(super) fn round_trip(pack: &Pack) -> Pack {
+    let records = pack.split().unwrap();
+    Pack::join(
+        &records.meta,
+        records
+            .items
+            .iter()
+            .map(|item| (&item.head[..], &item.secret[..])),
+    )
+    .unwrap()
 }

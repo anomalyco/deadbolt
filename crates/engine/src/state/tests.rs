@@ -63,7 +63,7 @@ fn the_keys_come_from_the_store_each_time() {
         })
         .unwrap();
     assert_eq!(engine.vault(&id).name(), "renamed");
-    assert_eq!(engine.vault(&id).device_card(&me).unwrap().1, "test");
+    assert_eq!(engine.vault(&id).device_label(&me).unwrap(), "test");
 
     let store = crate::store::MemoryStore::new([3; 32]);
     assert_eq!(store.device_seed(), &[3; 32]);
