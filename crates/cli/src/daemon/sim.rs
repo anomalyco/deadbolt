@@ -9,8 +9,8 @@ mod tests;
 
 use super::{pairing, sync};
 use anyhow::{Context, Result, ensure};
+use deadbolt_core::VaultId;
 use deadbolt_core::v2::{Frame, FrameId, MemberOp};
-use deadbolt_core::{DeviceId, VaultId};
 use deadbolt_net::{PairingCode, PairingStream, run_sync_session};
 use device::{Device, Invitation, MAX};
 use network::{Rng, drive, link};
@@ -233,7 +233,7 @@ impl World {
             cut,
             |tick| {
                 if revoke_at == Some(tick) {
-                    let target = DeviceId::from_bytes(self.devices[b].id);
+                    let target = self.devices[b].id;
                     // Only a current member can be removed.
                     match self.devices[a].with(|s| {
                         if !s.vault(&self.vault).is_member(&target) {
@@ -542,10 +542,7 @@ impl World {
         if !self.devices[0].open() {
             return Ok(None);
         }
-        let (inviter, device) = (
-            DeviceId::from_bytes(self.devices[0].id),
-            DeviceId::from_bytes(self.devices[i].id),
-        );
+        let (inviter, device) = (self.devices[0].id, self.devices[i].id);
         self.devices[0].with(|s| {
             Ok(s.vaults.get(&self.vault).and_then(|v| {
                 v.frames()
@@ -570,7 +567,7 @@ impl World {
     /// (`deadbolt_net::application::hello`), so the senior's winning frames
     /// reach it and the two reconverge without a third device.
     fn remove(&mut self, by: usize, target: usize) -> Result<()> {
-        let peer = DeviceId::from_bytes(self.devices[target].id);
+        let peer = self.devices[target].id;
         if self.seniority(by)?.is_none() || self.seniority(target)?.is_none() {
             return Ok(());
         }

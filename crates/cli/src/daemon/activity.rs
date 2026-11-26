@@ -620,7 +620,7 @@ mod tests {
         };
         let filled = |kind: &str| -> Result<Reply> {
             Ok(Reply::FormFill {
-                kind: kind.into(),
+                kind: deadbolt_proto::daemon::FormKind::of(kind).unwrap(),
                 title: "Visa •••• 4242".into(),
                 values: [("number".to_string(), Secret::new("4242424242424242"))].into(),
                 verified: true,

@@ -86,9 +86,9 @@ async fn check_for(stream: &UnixStream, command: &Command) -> Result<(), Error> 
     if matches!(command, Command::Stop) {
         return Ok(());
     }
-    let passphrase = command.carries_passphrase();
-    check_daemon(stream, passphrase).await.map_err(|why| {
-        if passphrase {
+    let secret = command.carries_client_secret();
+    check_daemon(stream, secret).await.map_err(|why| {
+        if secret {
             Error::UncheckedDaemon(why)
         } else {
             Error::UnverifiedDaemon(why)

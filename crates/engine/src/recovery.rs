@@ -150,6 +150,12 @@ impl Engine {
     /// its folded state starts from (when the store collected older frames),
     /// `proofs` the store's fraud proofs. Stores it, then signs this
     /// device's card.
+    ///
+    /// Everything that can refuse runs before the frames are stored, the
+    /// base's pack installed first (a pack with no frames is no vault).
+    /// Once they are, the vault is held: the steps after (its proofs, the
+    /// parking rule's memory, the card, the default vault) only warn when
+    /// they fail, and a remote sync or the next unlock redoes them.
     pub fn adopt_recovered(
         &mut self,
         frames: Vec<Frame>,
@@ -172,23 +178,41 @@ impl Engine {
         if !vault.is_member(&self.id) {
             bail!("the recovered vault does not admit this device");
         }
+        if let Some((checkpoint, pack, sealed, site)) = base {
+            if !vault.verify_base(&checkpoint, &pack, &sealed) {
+                bail!(
+                    "the checkpoint is disputed, no longer counts, or does not commit to that pack"
+                );
+            }
+            if self.store().keeps_packs() && self.store().install_pack(id, &sealed).is_err() {
+                let fresh = self.store().seal_pack(&pack, &site)?;
+                self.store().install_pack(id, &fresh)?;
+            }
+            vault.set_base(checkpoint, pack);
+        }
         let result = self.store.append(id, &mut frames.iter());
         self.check_append(result)?;
         self.vaults.insert(id, vault);
-        self.save_proofs(&id)?;
-        self.save_removed(&id)?;
-        if let Some((checkpoint, pack, sealed, site)) = base {
-            self.adopt_pack(id, checkpoint, pack, &sealed, &site)?;
-        }
+        self.changes.vaults = true;
+        self.changes.items.insert(id);
+        self.changes.devices.insert(id);
+        let warn = |what: &str, result: Result<()>| {
+            if let Err(error) = result {
+                tracing::warn!(vault = %id, %error, "{what} failed after recovery");
+            }
+        };
+        warn("saving the fraud proofs", self.save_proofs(&id));
+        warn("saving the removed devices", self.save_removed(&id));
         let label = self.meta.device_name.clone();
-        self.update(id, |w, a| {
+        let card = self.update(id, |w, a| {
             Ok(w.card(a, a.id(), a.keys().net_public(), &label)?)
-        })?;
+        });
+        warn("signing this device's card", card.map(drop));
         if self.meta.default_vault.is_none() {
             self.meta.default_vault = Some(id);
-            self.save_meta()?;
+            let saved = self.save_meta();
+            warn("saving the default vault", saved);
         }
-        self.changes.vaults = true;
         Ok(id)
     }
 

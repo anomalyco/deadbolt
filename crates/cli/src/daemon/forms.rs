@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use deadbolt_core::forms;
 use deadbolt_engine::forms::{find, list, values};
 use deadbolt_engine::items::label;
@@ -43,8 +43,9 @@ impl Daemon {
             false
         };
         let item = self.with(|s| find(s, origin, target, fields))?;
+        let kind = FormKind::of(&item.kind).context("not an identity or a card")?;
         Ok(Reply::FormFill {
-            kind: item.kind.clone(),
+            kind,
             title: label(&item),
             values: values(&item, fields),
             verified,

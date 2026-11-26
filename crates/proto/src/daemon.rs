@@ -57,7 +57,7 @@ pub use caller::{
     ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Outcome,
     Signature, Tier, UNVERIFIED_LINUX,
 };
-pub use command::{Command, Request};
+pub use command::{Command, Policy, Request};
 pub use health::{
     Finding, FindingKind, HealthCounts, HealthPeer, HealthReport, ItemHealth, PassphraseStrength,
     RiskLevel, WeakReason, audited_password_field, passphrase_strength,

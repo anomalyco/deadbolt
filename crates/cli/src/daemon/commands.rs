@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, bail};
 use deadbolt_client::telemetry::Span;
-use deadbolt_net::PeerId;
+use deadbolt_core::DeviceId;
 use tokio::io::AsyncWriteExt;
 
 use super::connection::Conversation;
@@ -41,46 +41,9 @@ impl Daemon {
         command: Command,
         conv: &Conversation,
     ) -> Result<Reply> {
-        if matches!(command, Command::Status | Command::Stop) {
-            return self.run(command, conv).await;
-        }
-        // A one-time code isn't use: a client showing one asks every period,
-        // which would otherwise hold the vault open for as long as it shows.
-        // Nor is a browser looking at a page: it asks for every page loaded.
-        // Nor are sends, which never touch the vault, nor SSH key generation.
-        // Nor is bringing the app forward.
-        let send = matches!(
-            command,
-            Command::SendCreate { .. }
-                | Command::SendList
-                | Command::SendShow { .. }
-                | Command::SendRevoke { .. }
-                | Command::SendWait { .. }
-                | Command::SshGenerate { .. }
-                | Command::SshInspect { .. }
-        );
-        let used = !send
-            && !matches!(
-                command,
-                Command::ItemCode { .. }
-                    | Command::SiteLogins { .. }
-                    | Command::SiteCheck { .. }
-                    | Command::FormItems { .. }
-                    | Command::PasskeyList { .. }
-                    | Command::SiteGenerateCheck { .. }
-                    | Command::SiteGenerateDrop { .. }
-                    | Command::AppActivate { .. }
-                    // macOS AutoFill lookups run in the background without use.
-                    | Command::AutofillStatus
-                    | Command::AutofillIdentities
-                    | Command::AutofillList { .. }
-            );
-        // Nor does waiting for a send to be picked up, or for an app to
-        // start.
-        let busy = !matches!(
-            command,
-            Command::SendWait { .. } | Command::AppActivate { .. }
-        );
+        // Whether it is use and holds the daemon busy: `Command::policy`.
+        let policy = command.policy();
+        let (used, busy) = (policy.keepalive, policy.busy);
         if busy {
             self.busy.fetch_add(1, Ordering::SeqCst);
         }
@@ -194,7 +157,8 @@ impl Daemon {
             Command::Devices { vault } => {
                 let devices = self.with(|s| {
                     let id = s.resolve(vault.as_deref())?;
-                    let connected: HashSet<PeerId> = s.connected_devices(s.node.connected_peers());
+                    let connected: HashSet<DeviceId> =
+                        s.connected_devices(s.node.connected_peers());
                     let mut devices: Vec<_> = s
                         .vault(&id)
                         .members()
@@ -390,7 +354,8 @@ impl Daemon {
                     url.as_deref(),
                     length,
                     symbols,
-                )?,
+                )?
+                .into(),
             }),
             Command::SiteLogins { origin } => {
                 let (site, logins) = self.with(|s| autofill::list(s, &origin))?;

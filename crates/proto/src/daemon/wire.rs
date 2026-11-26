@@ -9,10 +9,10 @@ use ts_rs::TS;
 use zeroize::Zeroizing;
 
 use super::{
-    ActivityEntry, Code, DeviceInfo, FormCard, FormIdentity, HealthReport, ImportReport, ItemInfo,
-    LoginRef, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync, RemoteInfo,
-    RemoteReport, ResolvedSecret, SendInfo, SenderInfo, SiteLogin, SitePasskey, SiteStatus,
-    SiteValues, Status, TagCount, VaultInfo, VaultState,
+    ActivityEntry, Code, DeviceInfo, FormCard, FormIdentity, FormKind, HealthReport, ImportReport,
+    ItemInfo, LoginRef, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync,
+    RemoteInfo, RemoteReport, ResolvedSecret, SendInfo, SenderInfo, SiteLogin, SitePasskey,
+    SiteStatus, SiteValues, Status, TagCount, VaultInfo, VaultState,
 };
 
 /// A secret on the wire: wiped on drop; Debug leaves it out. A newtype, so
@@ -27,6 +27,17 @@ impl Secret {
 
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    /// The value, still wiped when dropped.
+    pub fn into_inner(self) -> Zeroizing<String> {
+        self.0
+    }
+}
+
+impl From<Zeroizing<String>> for Secret {
+    fn from(value: Zeroizing<String>) -> Self {
+        Self(value)
     }
 }
 
@@ -250,7 +261,7 @@ pub enum Reply {
         code: Code,
     },
     Password {
-        password: Zeroizing<String>,
+        password: Secret,
     },
     SiteLogins {
         /// The page's site: its registrable domain.
@@ -282,8 +293,7 @@ pub enum Reply {
         can_verify: bool,
     },
     FormFill {
-        /// `identity` or `card`.
-        kind: String,
+        kind: FormKind,
         /// The item's label.
         title: String,
         /// The fields asked for that it has, by name.

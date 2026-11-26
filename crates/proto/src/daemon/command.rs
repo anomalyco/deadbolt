@@ -463,7 +463,7 @@ pub enum Command {
         refs: Vec<String>,
         purpose: Purpose,
     },
-    /// macOS AutoFill (`docs/macos-autofill.md`): lock and Touch ID status
+    /// macOS AutoFill (`docs/autofill.md`): lock and Touch ID status
     /// plus `identities_hash` (when unlocked) so the extension knows whether
     /// `ASCredentialIdentityStore` needs a sync. Doesn't count as use for the
     /// idle lock.
@@ -568,21 +568,139 @@ pub enum Command {
     },
 }
 
+/// What the daemon does around a command, decided for every command (see
+/// [`Command::policy`]) so a new one doesn't compile until it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// Counts as use for the idle lock.
+    pub keepalive: bool,
+    /// Holds the daemon busy while it runs.
+    pub busy: bool,
+    /// Carries a secret of the client's, so the client must check who it is
+    /// talking to before sending it.
+    pub client_secret: bool,
+}
+
+impl Policy {
+    /// Use, held while it runs.
+    const USE: Self = Self {
+        keepalive: true,
+        busy: true,
+        client_secret: false,
+    };
+    /// Use, carrying a client secret.
+    const SECRET: Self = Self {
+        client_secret: true,
+        ..Self::USE
+    };
+    /// Held while it runs, but not use.
+    const QUIET: Self = Self {
+        keepalive: false,
+        ..Self::USE
+    };
+    /// Neither use nor held.
+    const IDLE: Self = Self {
+        keepalive: false,
+        busy: false,
+        client_secret: false,
+    };
+}
+
 impl Command {
-    /// Whether the request carries the vault passphrase, so the client must
-    /// check who it is talking to before sending it.
-    pub fn carries_passphrase(&self) -> bool {
-        // A join asks for one if the device isn't set up.
-        // So do the recovery kit and a remote's credentials.
-        matches!(
-            self,
+    /// The command's [`Policy`].
+    pub fn policy(&self) -> Policy {
+        use Policy as P;
+        match self {
+            // Answered at once, or waiting on someone else: a send being
+            // picked up, an app starting.
+            Self::Status | Self::Stop | Self::SendWait { .. } | Self::AppActivate { .. } => P::IDLE,
+            // The passphrase (a join asks for one if the device isn't set
+            // up), the recovery kit, a remote's credentials, an export.
             Self::Setup { .. }
-                | Self::Unlock { .. }
-                | Self::Join { .. }
-                | Self::RecoveryRotate { .. }
-                | Self::RemoteSet { .. }
-                | Self::Recover { .. }
-        )
+            | Self::Unlock { .. }
+            | Self::Join { .. }
+            | Self::RecoveryRotate { .. }
+            | Self::RemoteSet { .. }
+            | Self::Recover { .. }
+            | Self::Import { .. } => P::SECRET,
+            // An SSH private key, which never touches the vault.
+            Self::SshInspect { .. } => Policy {
+                client_secret: true,
+                ..P::QUIET
+            },
+            // A one-time code isn't use: a client showing one asks every
+            // period, which would otherwise hold the vault open for as long
+            // as it shows. Nor is a browser or AutoFill looking at a page:
+            // it asks for every page loaded. Nor are sends, which never
+            // touch the vault, nor SSH key generation.
+            Self::ItemCode { .. }
+            | Self::SiteLogins { .. }
+            | Self::SiteCheck { .. }
+            | Self::FormItems { .. }
+            | Self::PasskeyList { .. }
+            | Self::SiteGenerateCheck { .. }
+            | Self::SiteGenerateDrop { .. }
+            | Self::AutofillStatus
+            | Self::AutofillIdentities
+            | Self::AutofillList { .. }
+            | Self::SendCreate { .. }
+            | Self::SendList
+            | Self::SendShow { .. }
+            | Self::SendRevoke { .. }
+            | Self::SshGenerate { .. } => P::QUIET,
+            Self::UnlockBiometric { .. }
+            | Self::TouchIdSet { .. }
+            | Self::Lock
+            | Self::Watch { .. }
+            | Self::VaultCreate { .. }
+            | Self::VaultList
+            | Self::VaultRename { .. }
+            | Self::VaultDefault { .. }
+            | Self::Devices { .. }
+            | Self::DeviceRemove { .. }
+            | Self::DeviceRemoveStolen { .. }
+            | Self::VaultConfirmReinstated { .. }
+            | Self::VaultStatus { .. }
+            | Self::RemoteShow { .. }
+            | Self::RemoteSync { .. }
+            | Self::RemoteRemove { .. }
+            | Self::Sync { .. }
+            | Self::Pair { .. }
+            | Self::ItemNew { .. }
+            | Self::ItemGet { .. }
+            | Self::ItemList { .. }
+            | Self::TagList { .. }
+            | Self::ItemSet { .. }
+            | Self::ItemUnset { .. }
+            | Self::ItemRemove { .. }
+            | Self::ItemRestore { .. }
+            | Self::Generate { .. }
+            | Self::SiteFill { .. }
+            | Self::SiteGenerate { .. }
+            | Self::SiteGenerateKeep { .. }
+            | Self::SiteSave { .. }
+            | Self::SiteLink { .. }
+            | Self::PasskeyCreate { .. }
+            | Self::PasskeyGet { .. }
+            | Self::FormFill { .. }
+            | Self::ActivityList { .. }
+            | Self::ActivityReport { .. }
+            | Self::Resolve { .. }
+            | Self::AutofillFill { .. }
+            | Self::AutofillPasskeyGet { .. }
+            | Self::AutofillPasskeyCreate { .. }
+            | Self::Health { .. }
+            | Self::HealthIgnore { .. }
+            | Self::BreachChecksSet { .. }
+            | Self::RunTaint
+            | Self::RunUntaint { .. } => P::USE,
+        }
+    }
+
+    /// Whether the request carries a secret of the client's
+    /// ([`Policy::client_secret`]).
+    pub fn carries_client_secret(&self) -> bool {
+        self.policy().client_secret
     }
 
     /// The command's wire name (its `cmd` tag), for logs and traces:

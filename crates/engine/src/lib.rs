@@ -36,7 +36,7 @@ use data_encoding::HEXLOWER;
 use deadbolt_proto::daemon::{DaemonError, ErrorCode};
 
 pub use clock::Clock;
-pub use state::{Changes, Engine, Meta, ONLINE_WINDOW_SECS, Peer, PeerId, UnavailableVault};
+pub use state::{Changes, Engine, Meta, ONLINE_WINDOW_SECS, Peer, UnavailableVault};
 pub use store::{MemoryStore, VaultStore};
 
 /// An error with the code clients act on (`DaemonError`).

@@ -201,9 +201,9 @@ fn send(
             peer::check(&stream, daemon)
                 .map_err(|reason| call.or_cancelled(DaemonCallError::PeerRejected { reason }))?;
         }
-        None if command.carries_passphrase() => {
+        None if command.carries_client_secret() => {
             return Err(DaemonCallError::PeerRejected {
-                reason: "refusing to send passphrase without verifying Deadbolt's daemon signature"
+                reason: "refusing to send a secret without verifying Deadbolt's daemon signature"
                     .into(),
             });
         }

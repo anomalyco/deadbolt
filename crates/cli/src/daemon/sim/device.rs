@@ -4,8 +4,8 @@ pub(super) use super::super::session::Loaded;
 use super::super::{pairing, session::Changes, sync};
 use crate::disk::KdfParams;
 use anyhow::Result;
-use deadbolt_core::VaultId;
-use deadbolt_core::v2::{DeviceKeys, FrameId};
+use deadbolt_core::v2::{DeviceKeys, FrameId, NetPublic};
+use deadbolt_core::{DeviceId, VaultId};
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PeerId, SyncHandler,
 };
@@ -25,7 +25,7 @@ pub(super) struct Device {
     pub(super) state: Arc<Mutex<Option<Loaded>>>,
     pub(super) gate: MembershipGate,
     /// The device id (`D_sign`).
-    pub(super) id: PeerId,
+    pub(super) id: DeviceId,
     /// The transport key (`D_net`) connections name it by.
     pub(super) net: PeerId,
     pub(super) ready: Arc<AtomicBool>,
@@ -39,7 +39,7 @@ impl Device {
         let dir = tempfile::tempdir().unwrap();
         let key = [index as u8 + 1; 32];
         let keys = DeviceKeys::from_seed(&key);
-        let id = *keys.device_id().as_bytes();
+        let id = keys.device_id();
         let net = *keys.net_public().as_bytes();
         let store = crate::disk::init_with_params(
             dir.path(),
@@ -59,7 +59,7 @@ impl Device {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|s| s.admitted_nets().contains(peer))
+                .is_some_and(|s| s.admitted_nets().contains(&NetPublic::from_bytes(*peer)))
         }));
         Self {
             dir,

@@ -597,11 +597,11 @@ mod tests {
         };
         assert_eq!(format!("{unlock:?}"), "unlock");
         let unlock = unlock.into_proto();
-        assert!(unlock.carries_passphrase());
+        assert!(unlock.carries_client_secret());
         assert!(
             !AutofillCommand::UnlockBiometric
                 .into_proto()
-                .carries_passphrase()
+                .carries_client_secret()
         );
     }
 

@@ -492,7 +492,7 @@ pub async fn run(
                 fields.push(FieldInput {
                     name: "password".into(),
                     kind: None,
-                    value: password.to_string(),
+                    value: password.expose().to_string(),
                 });
             }
             if kind == "ssh" && !fields.iter().any(|f| f.name == "private-key") {
