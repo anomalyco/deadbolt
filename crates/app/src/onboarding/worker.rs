@@ -4,6 +4,7 @@
 //! screen. Progress lands in an inbox the UI drains each frame; the thread
 //! wakes the window when it sends.
 
+use std::fmt;
 use std::thread::JoinHandle;
 
 use deadbolt_client::protocol::{Answer, Command, DeviceInfo, Event, Reply, Status, VaultInfo};
@@ -41,10 +42,46 @@ pub enum Progress {
         vault: String,
         inviter: DeviceInfo,
     },
-    Created(Result<VaultInfo, Failure>),
+    Created(Result<Created, Failure>),
     Joined(Result<VaultInfo, Failure>),
     /// What this computer calls itself, to suggest as the device's name.
     DeviceName(String),
+}
+
+/// A vault this app just made, with the recovery kit the daemon showed once.
+/// The kit is held only as long as the save step needs it.
+#[derive(Debug)]
+pub struct Created {
+    pub vault: VaultInfo,
+    /// Absent only for a daemon too old to send one.
+    pub kit: Option<RecoveryKit>,
+}
+
+/// The 24 words, in memory only while the save step shows. The buffer is
+/// wiped when dropped; Debug never prints it.
+#[derive(PartialEq, Eq)]
+pub struct RecoveryKit(Zeroizing<String>);
+
+impl RecoveryKit {
+    pub fn new(words: impl Into<String>) -> RecoveryKit {
+        RecoveryKit(Zeroizing::new(words.into()))
+    }
+
+    /// The words as the daemon sent them, one space between each.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The words, in order.
+    pub fn words(&self) -> Vec<&str> {
+        self.0.split_whitespace().collect()
+    }
+}
+
+impl fmt::Debug for RecoveryKit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecoveryKit(<redacted>)")
+    }
 }
 
 /// This device's name and passphrase, when it isn't set up yet.
@@ -159,7 +196,7 @@ impl Worker {
     }
 
     /// Runs `run` on its own thread; `done` reports a thread that couldn't start.
-    fn start<F, Fut>(&mut self, done: fn(Result<VaultInfo, Failure>) -> Progress, run: F)
+    fn start<R: 'static, F, Fut>(&mut self, done: fn(Result<R, Failure>) -> Progress, run: F)
     where
         F: FnOnce(Paths, Launch, Poster<Progress>) -> Fut + Send + 'static,
         Fut: Future<Output = ()>,
@@ -248,13 +285,19 @@ async fn create(
     device: Option<NewDevice>,
     vault: String,
     post: &Poster<Progress>,
-) -> Result<VaultInfo, Failure> {
+) -> Result<Created, Failure> {
     let status = start(paths, launch, post).await?;
     set_up(paths, &status, device, post).await?;
     post.send(Progress::Stage(Stage::CreatingVault));
-    // The app doesn't show the recovery kit yet; it drops it here.
     match deadbolt_client::simple(paths, Command::VaultCreate { name: vault }).await? {
-        Reply::VaultCreated { vault, .. } => Ok(vault),
+        // The daemon keeps no copy: these words are the only ones there are.
+        Reply::VaultCreated {
+            vault,
+            recovery_kit,
+        } => Ok(Created {
+            vault,
+            kit: Some(RecoveryKit::new(recovery_kit.expose())),
+        }),
         _ => Err(unexpected()),
     }
 }
@@ -323,5 +366,18 @@ fn unexpected() -> Failure {
     Failure {
         code: None,
         message: "unexpected reply from the daemon".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecoveryKit;
+
+    #[test]
+    fn the_recovery_kit_is_redacted_in_debug_and_keeps_its_words() {
+        let kit = RecoveryKit::new("abandon ability able");
+        assert_eq!(format!("{kit:?}"), "RecoveryKit(<redacted>)");
+        assert_eq!(kit.words(), ["abandon", "ability", "able"]);
+        assert_eq!(kit.as_str(), "abandon ability able");
     }
 }

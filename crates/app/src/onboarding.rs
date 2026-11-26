@@ -7,8 +7,11 @@
 //! passphrase and asks only for what's left.
 
 mod ceremony;
+mod recovery;
 pub mod view;
 pub mod worker;
+
+pub use recovery::{KitCopy, Recovery};
 
 use std::time::Duration;
 
@@ -19,7 +22,7 @@ use zeroize::Zeroizing;
 use crate::daemon::{Failure, Job};
 use crate::model::{App, Screen};
 use crate::view::{Notice, Severity};
-use worker::{NewDevice, Progress, Stage, Worker};
+use worker::{NewDevice, Progress, RecoveryKit, Stage, Worker};
 
 /// How long a copied command's button shows a check, in seconds.
 pub const COPIED_FOR: f64 = 1.6;
@@ -55,7 +58,7 @@ impl Flow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Step {
     Welcome,
     /// The create form.
@@ -66,11 +69,16 @@ pub enum Step {
     Working(Flow),
     /// The code is up, waiting for the other device.
     Code,
-    /// Created or joined: the moment, then the vault.
+    /// Created: the 24 words, shown once, before the vault opens.
+    Recovery(Box<Recovery>),
+    /// Created or joined: the moment, then the vault. A created vault's
+    /// words wait here, held until the save step takes them.
     Done {
         flow: Flow,
         vault: String,
+        id: String,
         from: Option<String>,
+        kit: Option<RecoveryKit>,
     },
 }
 
@@ -108,6 +116,8 @@ pub struct Onboarding {
     pub code: Option<Zeroizing<String>>,
     /// The copied `deadbolt approve` command, while it's still on the clipboard.
     pub copied: Option<SecretCopy>,
+    /// The recovery words copied on the save step, and its brief check.
+    pub copied_kit: Option<recovery::KitCopy>,
     /// A command copied from the empty vault's guide, and when.
     pub copied_command: Option<(&'static str, Option<f64>)>,
     /// The vault joined and the device that invited this one, once paired.
@@ -143,6 +153,7 @@ impl Onboarding {
             notice: None,
             code: None,
             copied: None,
+            copied_kit: None,
             copied_command: None,
             pairing: None,
             done_at: None,
@@ -191,7 +202,10 @@ impl Onboarding {
     /// A request is running or its result is showing: status changes from
     /// elsewhere must not move the screen.
     pub fn busy(&self) -> bool {
-        matches!(self.step, Step::Working(_) | Step::Code | Step::Done { .. })
+        matches!(
+            self.step,
+            Step::Working(_) | Step::Code | Step::Recovery(_) | Step::Done { .. }
+        )
     }
 
     pub fn strength(&self) -> Strength {
@@ -350,12 +364,15 @@ impl App {
         self.onboarding.reset(device_ready);
     }
 
-    /// Leaving onboarding (or the app): takes a copied code off the clipboard
-    /// if it's still there, wipes the code and passphrases, and hangs up a join.
+    /// Leaving onboarding (or the app): takes a copied code or recovery kit
+    /// off the clipboard if it's still there, wipes both, the passphrases and
+    /// any held 24 words, and hangs up a join.
     pub(crate) fn forget_onboarding(&mut self) {
         self.forget_code();
         self.onboarding.worker.cancel();
         self.onboarding.forget();
+        // The words live here only until the step closes.
+        self.onboarding.forget_recovery();
     }
 
     pub fn choose(&mut self, flow: Flow) {
@@ -502,13 +519,14 @@ impl App {
             *at = Some(now);
             tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
         }
-        let mut changed = self.check_code_copy()
-            || !progress.is_empty()
-            || self
-                .onboarding
-                .copied_command
-                .take_if(|(_, at)| at.is_some_and(|at| now - at >= COPIED_FOR - 1e-3))
-                .is_some();
+        let mut changed = self.check_code_copy();
+        changed |= self.poll_recovery(now, tx);
+        changed |= !progress.is_empty();
+        changed |= self
+            .onboarding
+            .copied_command
+            .take_if(|(_, at)| at.is_some_and(|at| now - at >= COPIED_FOR - 1e-3))
+            .is_some();
         for p in progress {
             self.on_progress(p, now);
         }
@@ -517,13 +535,19 @@ impl App {
         }
         if let Some(done) = self.onboarding.done_at {
             let age = now - done;
-            if age >= moment::OPEN {
-                tx.animated();
-                self.open_vault(tx);
-                return true;
-            }
             // The view draws each phase; wake for the next.
             let phase = moment::PHASES.iter().filter(|p| age >= **p).count();
+            if age >= moment::OPEN {
+                // A created vault with words to save hands off to the step
+                // that holds them; the vault opens when they say they're saved.
+                if matches!(self.onboarding.step, Step::Done { kit: Some(_), .. }) {
+                    self.begin_recovery();
+                } else {
+                    self.open_vault(tx);
+                }
+                tx.animated();
+                return true;
+            }
             if let Some(next) = moment::PHASES.get(phase) {
                 tx.wake_after(Duration::from_secs_f64(next - age));
             }
@@ -569,7 +593,9 @@ impl App {
                 self.onboarding.pairing = Some(Pairing { vault, inviter });
             }
             Progress::Created(result) => match result {
-                Ok(vault) => self.done(Flow::Create, vault, None, now),
+                Ok(created) => {
+                    self.done(Flow::Create, created.vault, None, created.kit, now);
+                }
                 Err(failure) => self.onboarding_failed(Flow::Create, failure),
             },
             Progress::Joined(result) => {
@@ -577,7 +603,7 @@ impl App {
                 match result {
                     Ok(vault) => {
                         let from = self.onboarding.pairing.take().map(|p| p.inviter);
-                        self.done(Flow::Join, vault, from, now);
+                        self.done(Flow::Join, vault, from, None, now);
                     }
                     Err(failure) => self.onboarding_failed(Flow::Join, failure),
                 }
@@ -585,7 +611,14 @@ impl App {
         }
     }
 
-    fn done(&mut self, flow: Flow, vault: VaultInfo, from: Option<String>, now: f64) {
+    fn done(
+        &mut self,
+        flow: Flow,
+        vault: VaultInfo,
+        from: Option<String>,
+        kit: Option<RecoveryKit>,
+        now: f64,
+    ) {
         let o = &mut self.onboarding;
         o.forget();
         o.notice = None;
@@ -594,7 +627,9 @@ impl App {
         o.step = Step::Done {
             flow,
             vault: vault.name,
+            id: vault.id,
             from,
+            kit,
         };
         o.done_at = Some(now);
         o.phase = 0;
@@ -715,6 +750,9 @@ pub fn key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Step::Create | Step::Join => s.onboarding_back(),
         Step::Code => s.cancel_join(),
         Step::Working(Flow::Join) if s.onboarding.pairing.is_none() => s.cancel_join(),
+        // The vault exists and its words show once: there is nothing to go
+        // back to, so Escape does nothing here.
+        Step::Recovery(_) => return true,
         _ => return false,
     }
     true

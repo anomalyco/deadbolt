@@ -38,9 +38,14 @@ pub(super) fn progress(s: &App, k: &Kit, dark: bool, flow: Flow) -> Paged {
                 None => "Opening it now.".to_owned(),
             },
         ),
-        (Step::Done { vault, .. }, Flow::Create) => {
-            ("Vault created".to_owned(), format!("Opening {vault} now."))
-        }
+        (Step::Done { vault, kit, .. }, Flow::Create) => (
+            "Vault created".to_owned(),
+            if kit.is_some() {
+                "Save its recovery kit next.".to_owned()
+            } else {
+                format!("Opening {vault} now.")
+            },
+        ),
         (_, Flow::Create) => (
             "Creating your vault".to_owned(),
             "It lives on this device, encrypted with your passphrase.".to_owned(),
