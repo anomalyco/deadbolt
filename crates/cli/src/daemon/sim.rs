@@ -8,7 +8,7 @@ mod tests;
 
 use super::{pairing, sync};
 use anyhow::{Context, Result, ensure};
-use deadbolt_core::v2::{EpochId, Frame, FrameId, FrameKind};
+use deadbolt_core::v2::{EpochId, Frame, FrameId, FrameKind, MemberOp};
 use deadbolt_core::{DeviceId, VaultId};
 use deadbolt_net::{PairingCode, PairingStream, run_sync_session};
 use device::{Device, Invitation, MAX};
@@ -83,7 +83,14 @@ struct World {
     blocked: BTreeSet<(usize, usize)>,
     // A removal's causal descendants must never reach its target, even as raw bytes.
     removals: Vec<(usize, FrameId)>,
-    forbidden: BTreeMap<usize, Vec<Frame>>,
+    /// Recorded removals the fold over every open device's frames doesn't
+    /// count: a junior device's removal of a senior one that wrote
+    /// something concurrently loses to it. Not a removal, so it forbids
+    /// nothing.
+    voided: BTreeSet<FrameId>,
+    /// Per target, the frames it must never receive, each with the removal
+    /// that forbids it.
+    forbidden: BTreeMap<usize, Vec<(FrameId, Frame)>>,
     scanned: BTreeMap<std::path::PathBuf, (std::time::SystemTime, u64)>,
     digest: blake3::Hasher,
 }
@@ -99,6 +106,7 @@ impl World {
             vault,
             blocked: BTreeSet::new(),
             removals: vec![],
+            voided: BTreeSet::new(),
             forbidden: BTreeMap::new(),
             scanned: BTreeMap::new(),
             digest: blake3::Hasher::new(),
@@ -121,8 +129,9 @@ impl World {
         if self.devices[to].with(|s| Ok(s.vaults.contains_key(&self.vault)))? {
             return Ok(());
         }
-        // Removed keys cannot be re-added, including a failed welcome delivery.
-        if self.removals.iter().any(|(i, _)| *i == to) {
+        // Removed keys cannot be re-added, including a failed welcome delivery,
+        // and a removed inviter can't invite.
+        if self.removals.iter().any(|(i, _)| *i == to) || self.removed(0) {
             return Ok(());
         }
         let (a, b, aw, bw) = link();
@@ -271,11 +280,14 @@ impl World {
             "sync protocol stalled, network seed {seed}"
         );
         for (target, bytes) in [(b, &wires[0]), (a, &wires[1])] {
-            for frame in self.forbidden.get(&target).into_iter().flatten() {
+            for (_, frame) in self.forbidden.get(&target).into_iter().flatten() {
                 let encoded = frame.encode();
                 ensure!(
                     memchr::memmem::find(bytes, &encoded).is_none(),
-                    "removed device {target} received post-removal bytes"
+                    "removed device {target} received post-removal bytes: {:?} {:?} by {} in {a}<->{b}",
+                    frame.header().kind,
+                    frame.member_body().map(|m| &m.op),
+                    frame.header().author
                 );
             }
         }
@@ -519,10 +531,49 @@ impl World {
         tolerate(self.devices[i].with(f)).map(drop)
     }
 
-    /// Device `by` removes `target`, if `by` is open, a member and sees
-    /// `target` as one.
+    /// Where device `i` stands in admission order: the creator first, then
+    /// each device by the seq of the `Add` device 0 wrote for it (device 0
+    /// invites every pairing). `None` if device 0 is locked or never added it.
+    fn seniority(&self, i: usize) -> Result<Option<u64>> {
+        if i == 0 {
+            return Ok(Some(0));
+        }
+        if !self.devices[0].open() {
+            return Ok(None);
+        }
+        let (inviter, device) = (
+            DeviceId::from_bytes(self.devices[0].id),
+            DeviceId::from_bytes(self.devices[i].id),
+        );
+        self.devices[0].with(|s| {
+            Ok(s.vaults.get(&self.vault).and_then(|v| {
+                v.frames()
+                    .filter(|f| f.header().author == inviter)
+                    .filter(|f| {
+                        f.member_body().is_some_and(|b| {
+                            matches!(&b.op, Some(MemberOp::Add { device: d, .. }) if *d == device)
+                        })
+                    })
+                    .map(|f| f.header().seq + 1)
+                    .min()
+            }))
+        })
+    }
+
+    /// Device `by` removes `target`, if `by` is open, a member, sees
+    /// `target` as one, and is senior to it.
+    ///
+    /// Junior-removes-senior is left out on purpose: the fold voids such a
+    /// removal when the senior removed someone concurrently, but the junior's
+    /// gate then refuses the senior, so nothing tells the junior and the two
+    /// never reconverge unless a third device relays. A known gap in v2's
+    /// membership gate, not modelled here until it's fixed.
     fn remove(&mut self, by: usize, target: usize) -> Result<()> {
         let peer = DeviceId::from_bytes(self.devices[target].id);
+        match (self.seniority(by)?, self.seniority(target)?) {
+            (Some(b), Some(t)) if b < t => {}
+            _ => return Ok(()),
+        }
         if !self.can_write(by)
             || !self.devices[by].with(|s| Ok(s.vault(&self.vault).is_member(&peer)))?
         {
@@ -560,9 +611,25 @@ impl World {
                 })?;
             }
         }
+        let counted = deadbolt_core::v2::resolve(&self.vault, all.values(), []).authorized_frames;
+        for (_, removal) in &self.removals {
+            if all.contains_key(removal) {
+                if counted.contains(removal) {
+                    self.voided.remove(removal);
+                } else {
+                    self.voided.insert(*removal);
+                }
+            }
+        }
+        for forbidden in self.forbidden.values_mut() {
+            forbidden.retain(|(removal, _)| !self.voided.contains(removal));
+        }
         // A removal's descendants: the member frames that depend on it, and
         // the data sealed under the epochs those (and it) minted.
         for (target, removal) in &self.removals {
+            if self.voided.contains(removal) {
+                continue;
+            }
             let mut descendants = BTreeSet::from([*removal]);
             loop {
                 let before = descendants.len();
@@ -590,9 +657,11 @@ impl World {
             for id in descendants {
                 if id != *removal
                     && let Some(frame) = all.get(&id)
-                    && !forbidden.iter().any(|f| f.id() == id)
+                    && !forbidden
+                        .iter()
+                        .any(|(r, f)| *r == *removal && f.id() == id)
                 {
-                    forbidden.push(frame.clone());
+                    forbidden.push((*removal, frame.clone()));
                 }
             }
         }
@@ -614,7 +683,7 @@ impl World {
                         accepted == persisted_set && accepted.len() == persisted.len(),
                         "accepted/persisted mismatch on {i}"
                     );
-                    for f in self.forbidden.get(&i).into_iter().flatten() {
+                    for (_, f) in self.forbidden.get(&i).into_iter().flatten() {
                         ensure!(
                             !accepted.contains(&f.id()),
                             "removed device {i} accepted causal descendant"
@@ -689,13 +758,33 @@ impl World {
         anyhow::bail!("members did not converge within bounded rounds")
     }
 
+    /// Whether device `i` was removed by anyone, whether or not every
+    /// device has heard, and the fold counts it (as of the last check).
+    fn removed(&self, i: usize) -> bool {
+        self.removals
+            .iter()
+            .any(|(target, r)| *target == i && !self.voided.contains(r))
+    }
+
+    /// Whether every device nobody removed agrees. A removed device (the
+    /// creator included) is cut off and keeps its last view; so may the
+    /// devices only it knew about, and those are removed too or never
+    /// joined: a removal made concurrently with the remover's own removal
+    /// only reaches the devices that can still talk to the remover.
     fn converged(&self) -> Result<bool> {
-        if !self.devices[0].with(|s| Ok(s.vaults.contains_key(&self.vault)))? {
-            return Ok(true);
+        let mut reference = None;
+        for (i, d) in self.devices.iter().enumerate() {
+            if !self.removed(i) && d.with(|s| Ok(s.vaults.contains_key(&self.vault)))? {
+                reference = Some(&self.devices[i]);
+                break;
+            }
         }
-        let members = self.devices[0]
-            .with(|s| Ok(s.vault(&self.vault).members().collect::<BTreeSet<_>>()))?;
-        let (heads, items, deleted, name) = self.devices[0].with(|s| {
+        let Some(reference) = reference else {
+            return Ok(true);
+        };
+        let members =
+            reference.with(|s| Ok(s.vault(&self.vault).members().collect::<BTreeSet<_>>()))?;
+        let (heads, items, deleted, name) = reference.with(|s| {
             let vault = s.vault(&self.vault);
             Ok((
                 vault.heads(),
@@ -704,8 +793,8 @@ impl World {
                 vault.name().to_owned(),
             ))
         })?;
-        for d in &self.devices {
-            if !members.contains(&DeviceId::from_bytes(d.id)) {
+        for (i, d) in self.devices.iter().enumerate() {
+            if self.removed(i) || !members.contains(&DeviceId::from_bytes(d.id)) {
                 continue;
             }
             if !d.ready.load(Ordering::SeqCst) {

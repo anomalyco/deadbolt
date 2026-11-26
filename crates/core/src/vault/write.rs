@@ -285,6 +285,11 @@ impl<'a> VaultWrite<'a> {
                 epoch
             }
         };
+        // Parked writes stay in the current epoch, which a lost membership
+        // conflict can leave unauthorized: data sealed there counts for no one.
+        if !self.graph().get(&epoch).is_some_and(|i| i.authorized) {
+            return Err(Error::AwaitingKeys);
+        }
         let key = self
             .keyring
             .get(&epoch)
@@ -307,9 +312,12 @@ impl<'a> VaultWrite<'a> {
         let prev_clock = mine
             .iter()
             .fold(VectorClock::new(), |clock, f| f.clock_after(&clock));
+        // Claim only frames the fold resolved: naming one still waiting on
+        // a frame this device lacks would leave this write waiting too.
+        let resolved = v2::resolved_frames(&self.resolved, self.opened.values());
         let honest = honest_clock(self.data.values().map(|f| {
             let h = f.header();
-            (h.author, h.seq, self.opened.contains_key(&f.id()))
+            (h.author, h.seq, resolved.contains(&f.id()))
         }));
         let payload = DataPayload {
             mheads: self.mheads(),

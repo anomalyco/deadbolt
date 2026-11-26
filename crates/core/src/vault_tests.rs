@@ -385,3 +385,40 @@ fn a_device_parks_when_a_device_it_saw_removed_comes_back() {
         Ok(_) | Err(Error::Parked(_))
     ));
 }
+
+/// A device holding a frame whose causal parent it lacks (a sync cut short)
+/// can't fold that frame yet, so its own writes must not name it: they'd wait
+/// on the same missing parent and vanish until it arrived.
+#[test]
+fn a_write_names_only_frames_the_fold_resolved() {
+    let mut a = first();
+    let mut b = pair(&mut a, 2);
+    let mut c = pair(&mut a, 3);
+    sync(&a, &mut b);
+    let mut stage = |p: &mut Peer, name: &str| {
+        let (pa, v) = (&p.a, &mut p.v);
+        v.transact(
+            |w| w.create_item(pa, "login", Some(name.into()), []),
+            |_, _| Ok::<_, Error>(()),
+        )
+        .unwrap()
+    };
+    let (_, from_c) = stage(&mut c, "from c");
+    sync(&c, &mut b);
+    let (_, from_b) = stage(&mut b, "from b");
+    // a gets b's write, which names c's, but not c's.
+    let only = b.v.frame(&from_b).unwrap().clone();
+    a.v.transact(|w| w.apply(vec![only]), |_, _| Ok::<_, Error>(()))
+        .unwrap();
+    assert!(a.v.frame(&from_c).is_none());
+    assert!(
+        a.v.items()
+            .iter()
+            .all(|i| i.name.as_deref() != Some("from b"))
+    );
+    let (mine, _) = stage(&mut a, "from a");
+    assert!(a.v.item(&mine).is_some(), "a's own write counts at once");
+    // Once c's frame arrives, everything folds.
+    sync(&c, &mut a);
+    assert_eq!(a.v.items().len(), 3);
+}

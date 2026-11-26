@@ -286,6 +286,20 @@ fn apply_chains(
     }
 }
 
+/// The data frames [`fold_from_scratch`] resolves causally: each author's
+/// gap-free chain up to its first frame naming one that isn't held. What a
+/// writer may claim to have seen (rule E7, [`super::honest_clock`]).
+pub fn resolved_frames<'f>(
+    membership: &ResolvedMembership,
+    frames: impl IntoIterator<Item = &'f DataFrame>,
+) -> BTreeSet<FrameId> {
+    chains(membership, frames, &BTreeMap::new())
+        .values()
+        .flatten()
+        .map(|(f, _)| f.id)
+        .collect()
+}
+
 /// Folds every counted data frame from genesis.
 pub fn fold_from_scratch<'f>(
     ctx: &FoldContext<'_>,
