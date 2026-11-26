@@ -1104,8 +1104,8 @@ followed live by every open page:
   tile. Rows stay 46 px either way (`MENU_ROW`). Passkey and "Sign in with …"
   rows in a login list lose their glyph tile with it, so the list stays
   aligned; the generated-password row and address and card menus keep theirs.
-- **Site icons in the vault**, on by default: the popup's rows, and the
-  standalone vault's list and a login's detail. Off, they show the letter.
+- **Site icons in the vault**, on by default: the popup's rows. Off, they show
+  the letter.
 
 Turning both off deletes the kept icons and stops keeping more.
 
@@ -1532,8 +1532,7 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   checks `excludeCredentials` again just before saving, refusing duplicates the
   site excluded even if they appeared while the user was asked. Neither a new
   registration nor an assertion retires the old item automatically. Explicit
-  native passkey deletion asks for Touch ID when enabled and enrolled; standalone
-  Strict deletion requires the local passphrase.
+  passkey deletion asks for Touch ID when enabled and enrolled.
 - **Algorithm:** ES256 (COSE -7) only. A registration whose
   `pubKeyCredParams` lacks it goes to the browser.
 - **Attestation:** `none`, with a fixed AAGUID

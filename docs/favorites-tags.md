@@ -1,8 +1,8 @@
 # Favorites and tags
 
-2026-10-30. Plan for starring items and organizing them with tags (including nested paths such as `work/aws`), matching 1Password across the core log, imports, 1Password sync, CLI, desktop app, quick panel, and browser extension.
+Design for starring items and organizing them with tags (including nested paths such as `work/aws`) across the core log, imports, CLI, desktop app, quick panel, and browser extension.
 
-Favorites and tags live on `Item` inside the signed data log, encrypted at rest in `store.redb` and in transit over iroh like every other item datum. `favorite` resolves as a causal boolean register, and `tags` resolves as a per-tag add-wins Observed-Remove Set, so two devices adding different tags or one unstarring while another edits a password converge without losing work. Every importer (`.1pux`, 1Password CSV, Bitwarden `.json`) and `deadbolt sync 1password` carry favorites and tags or folders over instead of dropping them. Control protocol 20 exposes both to the CLI, desktop app, quick panel, and browser extension, where favorites rank first and `#work` filters to `work` and every tag nested under `work/`.
+Favorites and tags live on `Item` inside the signed data log, epoch-encrypted in `deadbolt-pack` storage (`wal-<n>.log` / `gen-<n>.pack`) and in transit over iroh and blind remote storage like every other item datum. `favorite` resolves as a causal boolean register, and `tags` resolves as a per-tag add-wins Observed-Remove Set, so two devices adding different tags or one unstarring while another edits a password converge without losing work. Every importer (`.1pux`, 1Password CSV, Bitwarden `.json`) carries favorites and tags or folders over instead of dropping them. The daemon control protocol exposes both to the CLI, desktop app, quick panel, and browser extension, where favorites rank first and `#work` filters to `work` and every tag nested under `work/`.
 
 ## Open decisions
 
@@ -36,7 +36,7 @@ Each item below states the recommended default used in this plan and the main al
 
 Both `favorite: bool` and `tags: BTreeSet<String>` belong on `deadbolt_core::Item` in the signed data log (`Log::Data`):
 
-- Deadbolt v1 vaults model one user's devices (`DeviceId`, no `UserId`). Pairing a laptop, phone, or standalone browser (`deadbolt join`), or running `deadbolt sync 1password` on one Mac, must bring stars and tags to every other device through normal sync.
+- Deadbolt vaults model one user's devices (`DeviceId`, no `UserId`). Pairing a laptop or phone (`deadbolt join`) brings stars and tags to every other device through normal sync.
 - Keeping them in signed entries binds every star and tag write to an active member's Ed25519 signature, applies membership removal cutoffs (`Remove.last_seen_seq`) automatically during `Vault::rebuild_items`, and records changes in `Vault::history`.
 
 ### New `Change` variants and `Create` tag `0x03`, not item `fields`
@@ -77,7 +77,7 @@ pub enum Change {
 }
 ```
 
-`DataOp::Create` carries initial `favorite` and `tags` directly because an item's `ItemId` is derived from the `Create` entry's hash (`ItemId::of_create(&entry.hash(), index)`). An item created by `deadbolt new`, an import, or `sync 1password` cannot be edited in the same entry before its hash exists; carrying both on `Create` keeps single-entry atomic creation without a follow-up entry batch.
+`DataOp::Create` carries initial `favorite` and `tags` directly so an item created by `deadbolt new` or an import commits atomically in one op without needing a follow-up edit.
 
 To keep existing vaults and test fixtures byte-identical, `Create` uses a new wire tag `0x03` **only** when `favorite || !tags.is_empty()`:
 
@@ -101,7 +101,7 @@ change  = 0x00 name:str field      Set
 Canonical decoding (`Entry::decode`) enforces one valid encoding per entry:
 - `fav` accepts only `0` or `1` (`DecodeError::InvalidTag` otherwise).
 - In `Create` (`0x03`), `tags` must be strictly ascending (`last >= tag` returns `DecodeError::NotCanonical`), and `!favorite && tags.is_empty()` returns `DecodeError::NotCanonical` because that op belongs on `0x00` or `0x02`.
-- Every existing stored entry in `store.redb` and `vault.redb` decodes with the same hash, signature, and `ItemId`.
+- Stored v2 data frames carry `favorite` and `tags` as reserved item registers, preserving deterministic folding across arrival orders.
 
 ### CRDT rules: causal register for `favorite`, add-wins OR-Set for `tags`
 
@@ -172,43 +172,30 @@ How concurrent cases resolve:
 
 Tag names and favorite flags have the same confidentiality boundary as item names and secret values:
 
-- **At rest (`crates/store` and OPFS):** `Unlocked::append_batch` seals each encoded `Entry` as one `XChaCha20-Poly1305` ciphertext in `store.redb`'s `LOG` table (`vault.redb` on OPFS) under `keys.data`. No secondary redb table or metadata key indexes tags or favorites; filtering scans the unlocked `Vault`'s in-memory items. Nothing on disk reveals tag names, how many tags exist, or which items are starred.
+- **At rest (`deadbolt-pack`):** data frames are Padmé-padded and `XChaCha20-Poly1305`-sealed under the vault's epoch key in `wal-<n>.log` and `gen-<n>.pack`. No unencrypted table or metadata key indexes tags or favorites; filtering scans the unlocked `Vault`'s in-memory items. Nothing on disk reveals tag names, how many tags exist, or which items are starred.
 - **In memory and on lock:** `Entry::encode()` returns `Zeroizing<Vec<u8>>`. Locking the daemon drops `Loaded` (and every `Vault` and `Item`); in the desktop app and quick panel, `App::forget_items` clears `items`, `detail`, `cache`, `edit`, and `search` on lock or close.
 - **In transit (`crates/net`):** entries move only over iroh QUIC connections authenticated to current members' Ed25519 keys after the membership gate passes.
 - **Browser autofill boundary (`SiteLogins`, `FormItems`, `PasskeyList`):** web-page autofill listings never receive `tags`. Ranking uses `item.favorite` inside the Rust daemon (`deadbolt-core`), returning candidates already ordered without exposing organizational tags to the browser host.
-- **Activity log and errors:** `deadbolt activity` records command tiers (`item-list`, `item-set`) and item titles/fields as today (sealed in `store.redb`), never tag query strings in unencrypted logs; import and parse errors never quote raw export lines.
+- **Activity log and errors:** `deadbolt activity` records command tiers (`item-list`, `item-set`) and item titles/fields as today (sealed in `device/activity-<k>.log`), never tag query strings in unencrypted logs; import and parse errors never quote raw export lines.
 
 ---
 
-## 3. Import and 1Password sync
+## 3. Imports
 
-### What exports carry today (and what Deadbolt currently drops)
+### What exports carry
 
-| Source | Favorite field in source | Tags / folders in source | Current behavior | Planned behavior |
-|---|---|---|---|---|
-| 1Password `.1pux` (`import/onepassword.rs`) | `item.favIndex` (`> 0` is starred) | `item.overview.tags` (`["work", "dev"]`, `/` for nested) | Dropped and counted (`FAVORITE`, `TAG`) | Set `Imported.favorite` and `Imported.tags`; stop counting as dropped |
-| 1Password CLI `op` (`import/op.rs`) | `item.favorite` (`bool`, mapped to `favIndex` in `to_1pux`) | `item.tags` (`string[]`, mapped to `overview.tags` in `to_1pux`) | `FAVORITE` dropped; `overview.tags` ignored by `onepassword::item` | Move tag extraction into `onepassword::item` so `.1pux` and `op` share one code path |
-| 1Password / generic CSV (`import/csv.rs`) | `Favorite` column (`true`, `yes`, `1`) | `Tags` column (`,` or `;` separated) | Dropped and counted (`FAVORITE`, `TAG`) | Set `Imported.favorite` and `Imported.tags` |
-| Bitwarden `.json` (`import/bitwarden.rs`) | `item.favorite` (`bool`) | `folders[]` via `item.folderId`; org `collections[]` via `item.collectionIds` (`/` in names for nesting) | Dropped and counted (`FAVORITE`, `FOLDER`, `COLLECTION`) | Set `Imported.favorite`; map resolved folder and collection names to `Imported.tags` |
-| Apple Passwords CSV (`import/csv.rs`) | None in format | None in format | None | Unchanged |
+| Source | Favorite field in source | Tags / folders in source | Mapping |
+|---|---|---|---|
+| 1Password `.1pux` (`import/onepassword.rs`) | `item.favIndex` (`> 0` is starred) | `item.overview.tags` (`["work", "dev"]`, `/` for nested) | Set `Imported.favorite` and `Imported.tags` |
+| 1Password / generic CSV (`import/csv.rs`) | `Favorite` column (`true`, `yes`, `1`) | `Tags` column (`,` or `;` separated) | Set `Imported.favorite` and `Imported.tags` |
+| Bitwarden `.json` (`import/bitwarden.rs`) | `item.favorite` (`bool`) | `folders[]` via `item.folderId`; org `collections[]` via `item.collectionIds` (`/` in names for nesting) | Set `Imported.favorite`; map resolved folder and collection names to `Imported.tags` |
+| Apple Passwords CSV (`import/csv.rs`) | None in format | None in format | Unchanged |
 
 Each raw tag or folder name passes through `deadbolt_core::tag::normalize_tag`. Blank strings are ignored; any value that still fails `valid_tag` (for example one exceeding 128 characters after trimming) is truncated at a character boundary or counted as a warning rather than failing the item.
 
 ### Deduplication on `deadbolt import`
 
-`daemon/import.rs::key` deduplicates re-imports by item content (login host/username/password, card number, SSH private key, or whole fields). `favorite` and `tags` stay **out** of `Key` so re-importing an export after tagging or starring items in Deadbolt still skips existing items rather than creating duplicates.
-
-### `deadbolt sync 1password` (`crates/cli/src/daemon/mirror.rs`)
-
-`docs/sync-1password.md` makes 1Password the one-way source of truth for mirrored items while preserving Deadbolt-only additions on items the sync adopted:
-
-1. **Shared mapping:** `op::to_1pux` already places `favorite` into `favIndex` and `tags` into `overview.tags`. Reading `overview.tags` inside `onepassword::item` (instead of `onepassword::export`) immediately gives `op::Mapping::item` both `favorite` and `tags`.
-2. **Digest v2 (`MirrorVersion`):** Include `favorite` and sorted `tags` in `import::digest` under a new BLAKE3 context (`"deadbolt 2026-10-30 mirror digest v2"`):
-   - Editing a mirrored item's tags or favorite in Deadbolt changes `item_digest(item)`, so `known.fresh` marks it stale and the next sync reconciles it.
-   - Changing the digest context from `v1` to `v2` causes **one** automatic re-fetch on existing mirrored vaults after upgrading, backfilling 1Password favorites and tags onto items mirrored before this feature existed. Subsequent syncs return to zero `op item get` calls when nothing changed.
-3. **Diffing `Origin::Sync` vs. `Origin::Adopted`:**
-   - **`Origin::Sync` (created by sync):** `mirror::diff` emits `DataOp::favorite` when `item.favorite != to.favorite`, `DataOp::tag_add` for tags in `to.tags` missing here, and `DataOp::tag_remove` for tags on `item` missing in 1Password. `MirrorItem.reason` reports `"favorite"` and `"tags"` alongside changed field names.
-   - **`Origin::Adopted` (existing or `.1pux`-imported item taken over by sync):** `MirrorVersion` records the tags 1Password last wrote alongside `fields` (`updated:digest:adopted:fields:tags`, falling back to clearing tracked sets if the version string would exceed `valid_source`'s 2,048-character cap, just as `op.rs` does for `fields` today). Later syncs add new 1Password tags, remove only tags 1Password previously wrote and later deleted, and leave Deadbolt-only tags untouched.
+`daemon/import.rs::key` deduplicates re-imports by item content (login host/username/password, card number, SSH private key, or whole fields). `favorite` and `tags` stay **out** of `Key` so re-importing an export after tagging or starring items in Deadbolt still skips existing items rather than creating duplicates. (The live `deadbolt sync 1password` mirror was retired; see `docs/sync-1password.md`.)
 
 ---
 
@@ -297,13 +284,10 @@ Checked against every shortcut in `keys::SHORTCUTS`, `edit.rs`, `import.rs`, `pa
 ### Quick panel and browser extension ranking
 
 - **Quick panel (`crates/app/src/panel/`):** reuses `App::items` and `App::visible_at()`. Summoning (`⇧⌘Space`) starts with the first favorite selected, so `⇧⌘Space` then `⏎` copies your top favorite immediately; typing `#work` or plain words ranks matching favorites above non-favorites.
-- **Autofill ranking in `deadbolt-core` (shared by native host and standalone wasm):**
-  - `crates/core/src/autofill.rs`: `Rank` becomes `(Closeness, Reverse<bool>, Reverse<u64>, String, Option<String>)` (`closeness`, then `favorite`, then `used`, then `title`, then `username`). Site closeness still comes first so `staging.example.com` never loses to a starred login on `app.example.com`; at equal closeness, a starred login beats unstarred ones, placing it first in the inline menu and giving it the primary `Fill` button in `extension/src/popup.ts`.
+- **Autofill ranking in `deadbolt-core` and `deadbolt-engine`:**
+  - `crates/core/src/autofill.rs`: `Rank` is `(Closeness, Reverse<bool>, Reverse<u64>, String, Option<String>)` (`closeness`, then `favorite`, then `used`, then `title`, then `username`). Site closeness still comes first so `staging.example.com` never loses to a starred login on `app.example.com`; at equal closeness, a starred login beats unstarred ones, placing it first in the inline menu and giving it the primary `Fill` button in `extension/src/popup.ts`.
   - `crates/core/src/forms.rs`: `forms::list` sorts identities and cards by `(!item.favorite, title.to_lowercase(), item.id)`, putting starred cards and identities at the top of checkout and address menus.
-  - `crates/engine/src/passkeys.rs` and `crates/ext-core/src/device/passkeys.rs`: sort passkeys for an RP by `(!item.favorite, username, vault, id)`.
-- **Standalone extension vault UI (`crates/ext-core/src/device/items.rs`, `extension/src/vault/`):**
-  - Include `favorite` and `tags` on `device-items`, `device-item`, `device-item-save`, and `device-save`.
-  - Sort favorites first within both "This site" and "Everything else" / "All items", parse `#tag` and `is:favorite` in the vault search box, and add star toggle + tag chips/editor in `extension/src/vault/tags.ts`.
+  - `crates/engine/src/passkeys.rs`: sorts passkeys for an RP by `(!item.favorite, username, vault, id)`.
 
 ---
 
@@ -344,23 +328,19 @@ New code goes into focused capability modules with **no `mod.rs`**, keeping touc
    - Commit 2: bump `PROTOCOL_VERSION = 20`; wire `ItemNew`, `ItemSet`, `ItemList`, `TagList`, `passkeys::list` favorite sort, CLI flags (`new`, `set`, `ls` / `items`, `show`, `tags`), and `daemon::sim` `Favorite` / `Tag` / `Untag` actions with `SECRET_MARKER`.
    - Gate: `cargo test -p deadbolt-client -p deadbolt-cli` and `DEADBOLT_SIM_SEEDS=1000 cargo test -p deadbolt-cli --bin deadbolt daemon::sim::exploration`.
 
-3. **PR 3: 1Password (`.1pux`, CSV, `sync 1password`) and Bitwarden imports (`crates/cli`).**
-   - Land `import/tags.rs`, carry over favorites and tags/folders in `onepassword.rs`, `op.rs`, `csv.rs`, and `bitwarden.rs`, drop `FAVORITE` / `TAG` / `FOLDER` from dropped tallies, update `MirrorVersion` to digest `v2` with adopted-tag preservation in `mirror.rs`, and update `docs/design.md` and `docs/sync-1password.md`.
-   - Gate: `cargo test -p deadbolt-cli import::` and `cargo test -p deadbolt-cli mirror::`.
+3. **PR 3: 1Password (`.1pux`, CSV) and Bitwarden imports (`crates/cli`).**
+   - Land `import/tags.rs`, carry over favorites and tags/folders in `onepassword.rs`, `csv.rs`, and `bitwarden.rs`, drop `FAVORITE` / `TAG` / `FOLDER` from dropped tallies, and update `docs/design.md`.
+   - Gate: `cargo test -p deadbolt-cli import::`.
 
 4. **PR 4: Desktop app and quick panel (`crates/app`).**
    - Bump Rune `rev` pins first if Rune `dev` has advanced (`AGENTS.md`).
    - Land `model/favorite.rs`, `edit/tags.rs`, `palette/tags.rs`, row stars, item-page `#tag` chips, `⌘D` shortcut, quick-panel ranking, and `tests/app/tags.rs`; compare `crates/app/scripts/snap.sh` stills before and after.
    - Gate: `cargo test -p deadbolt-app`.
 
-5. **PR 5: Browser extension (`extension/`, `crates/ext-core`).**
-   - Wire `favorite` and `tags` in `crates/ext-core/src/device/items.rs` and `extension/src/vault/tags.ts` (`app.ts`, `logins.ts`, `items.ts`), plus native/standalone tests.
-   - Gate: `bun run check` and `cd extension && bun e2e/standalone.ts --smoke`.
+5. **PR 5: Browser extension (`extension/`).**
+   - Wire favorite ranking in `deadbolt-core` / `deadbolt-engine` for popup and inline autofill menus.
+   - Gate: `bun run check`.
 
 ### Risks and mitigations
-
-- **Mixed-version sync across paired devices:** `Entry::decode` strictly rejects unknown `DataOp` and `Change` wire tags (`DecodeError::InvalidTag`). Entries that do not set `favorite` or `tags` keep using tags `0x00` and `0x02`, so upgrading one device breaks nothing by itself; once a user stars or tags an item, older peers will refuse that sync batch until updated with `deadbolt update`. Call this out in release notes.
-- **One-time `sync 1password` backfill prompt:** moving `MirrorVersion` to digest `v2` invalidates cached digests once on existing mirrored vaults so `op item get -` can backfill 1Password favorites and tags. That triggers a single 1Password approval prompt on the first sync after upgrading, then settles.
-- **`MirrorVersion` 2,048-character cap on adopted items:** an item with dozens of long tags could push `:adopted:fields:tags` past `valid_source`'s 2,048-character limit. Apply the same fallback `op.rs` uses for `fields`: if the formatted `Source` exceeds 2,048 characters, omit the tracked tag removal list rather than failing `valid_source`.
 - **Typing `#` in search:** a naive `#tag` filter would match zero items the instant `#` is typed, flashing an empty state before the first letter of the tag. Treating a trailing bare `#` as "items with any tag" (or keeping all items when none have tags) keeps the list steady on every keystroke.
 - **Optimistic `⌘D` race with background sync:** if the user toggles `⌘D` while the store locks or another write lands, `Done::Saved` / `Change::Items` reconciles from the daemon's authoritative list, and `Locked` errors transition cleanly via `on_locked`.

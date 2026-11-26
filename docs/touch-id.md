@@ -1,13 +1,13 @@
 # Touch ID unlock on macOS
 
-2026-10-26. Design for unlocking Deadbolt's local store (`crates/store`) with Touch ID from the background daemon (`crates/cli`, `Deadbolt.app/Contents/Helpers/deadbolt`).
+Design for unlocking Deadbolt's local store (`crates/cli/src/disk.rs` over `deadbolt-pack`) with Touch ID from the background daemon (`crates/cli`, `Deadbolt.app/Contents/Helpers/deadbolt`).
 
 ## Summary
 
-Deadbolt uses a **Secure Enclave P-256 key (`CryptoKit.SecureEnclave.P256.KeyAgreement.PrivateKey`) whose hardware-sealed `dataRepresentation` blob is stored in `store.redb`** alongside a second AEAD-wrapped key-set slot (`"keyset.biometric"`).
+Deadbolt uses a **Secure Enclave P-256 key (`CryptoKit.SecureEnclave.P256.KeyAgreement.PrivateKey`) whose hardware-sealed `dataRepresentation` blob is stored in `device/biometric.slot`** alongside the AEAD-wrapped 256-bit device root.
 
 - **Hardware-bound to Touch ID:** the private key is generated inside the Secure Enclave with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and `[.privateKeyUsage, .biometryCurrentSet]`. The private scalar never leaves the Secure Enclave; decrypting the store's wrapping key requires a live Touch ID match from the currently enrolled fingerprint set.
-- **No Keychain state, no restricted entitlements, no provisioning profile:** unlike `kSecUseDataProtectionKeychain` (which stores items in `secd` and fails with `errSecMissingEntitlement = -34018` or gets `SIGKILL`ed by `amfid` unless every executable is wrapped in an `.app` bundle with an Apple-issued `Contents/embedded.provisionprofile`), `CryptoKit.SecureEnclave`'s `dataRepresentation` is an opaque blob encrypted by the Secure Enclave's hardware UID key and stored in `store.redb`.
+- **No Keychain state, no restricted entitlements, no provisioning profile:** unlike `kSecUseDataProtectionKeychain` (which stores items in `secd` and fails with `errSecMissingEntitlement = -34018` or gets `SIGKILL`ed by `amfid` unless every executable is wrapped in an `.app` bundle with an Apple-issued `Contents/embedded.provisionprofile`), `CryptoKit.SecureEnclave`'s `dataRepresentation` is an opaque blob encrypted by the Secure Enclave's hardware UID key and stored in `device/biometric.slot`.
 - **Authenticated helper beside the daemon:** a small Swift helper (`deadbolt-enclave`, ~50 KB stripped, `CFBundleIdentifier = "anomaly.deadbolt.enclave"`) is compiled once, signed, pinned by the SHA-256 digest of those exact signed bytes (`DEADBOLT_ENCLAVE_SHA256`) inside `deadbolt` and `deadbolt-ui`, and shipped next to the daemon: at `Deadbolt.app/Contents/Helpers/deadbolt-enclave`, and beside `deadbolt` in the macOS CLI tarballs (install script, Homebrew formula). A `deadbolt` without its helper beside it reports `touch_id_available = false` unless talking to a running `Deadbolt.app` daemon over the control socket.
 - **Zero `unsafe` in Rust and zero new crate dependencies:** the daemon verifies the helper's SHA-256 before spawning it and reads the 32-byte key from `stdout` directly into a fixed `Zeroizing<[u8; 32]>` buffer.
 
@@ -70,11 +70,11 @@ There are two ways to persist the Secure Enclave key handle on macOS:
 ### Security trade-offs of Option 3b (explicit threat model)
 
 1. **The gate is a physical finger tap, not Deadbolt's code identity:**
-   Because `secd` is not in the path, there is no `keychain-access-groups` code-signature check before `coreauthd` raises a Touch ID dialog. Any process running as the same UNIX user (`uid`) that can read `~/.local/share/deadbolt/store.redb` (`0600`) can pass the `dataRepresentation` blob to `CryptoKit.SecureEnclave` (or invoke `deadbolt-enclave`) and raise a genuine-looking macOS Touch ID prompt on screen. It still cannot decrypt `"keyset.biometric"` without the user physically touching the sensor, and same-UID code running while Deadbolt is already unlocked can talk to the `0600` control socket directly.
-2. **Copied `store.redb` blobs on the same Mac remain unlockable with a finger tap until fingerprints change:**
-   The Secure Enclave does not maintain per-key revocation state in NVRAM. Removing `"keyset.biometric"` from the live `store.redb` (on passphrase change, Settings toggle-off, or the 14-day timer) prevents Deadbolt from offering Touch ID, and changing the passphrase re-wraps `"keyset"` under a new Argon2id salt, but `data_key` is unchanged. An attacker with local access to **this same Mac** who kept an earlier copy of `store.redb` containing `"biometric.token"` and `"keyset.biometric"` could still unlock that copy if they also obtain a live Touch ID tap from the user on this Mac before the enrolled fingerprint set changes. A copied `store.redb` moved to any other machine is useless because the `dataRepresentation` blob is sealed under this Mac's Secure Enclave UID key.
+   Because `secd` is not in the path, there is no `keychain-access-groups` code-signature check before `coreauthd` raises a Touch ID dialog. Any process running as the same UNIX user (`uid`) that can read `<data>/device/biometric.slot` (`0600`) can pass the `dataRepresentation` blob to `CryptoKit.SecureEnclave` (or invoke `deadbolt-enclave`) and raise a genuine-looking macOS Touch ID prompt on screen. It still cannot decrypt the wrapped device root without the user physically touching the sensor, and same-UID code running while Deadbolt is already unlocked can talk to the `0600` control socket directly.
+2. **Copied `biometric.slot` files on the same Mac remain unlockable with a finger tap until fingerprints change:**
+   The Secure Enclave does not maintain per-key revocation state in NVRAM. Deleting `device/biometric.slot` (on passphrase change, Settings toggle-off, or the 14-day timer) prevents Deadbolt from offering Touch ID, and changing the passphrase re-wraps the device root under a new Argon2id salt in `device/local-<m>.sealed`, but the device root itself is unchanged. An attacker with local access to **this same Mac** who kept an earlier copy of `device/biometric.slot` alongside the store directory could still unlock that copy if they also obtain a live Touch ID tap from the user on this Mac before the enrolled fingerprint set changes. A copy moved to any other machine is useless because the `dataRepresentation` blob is sealed under this Mac's Secure Enclave UID key.
 
-| Property | 1. Data Protection Keychain (`secd`) | 2. Legacy File Keychain + `LAContext` | 3b. Secure Enclave `dataRepresentation` in `store.redb` |
+| Property | 1. Data Protection Keychain (`secd`) | 2. Legacy File Keychain + `LAContext` | 3b. Secure Enclave `dataRepresentation` in `biometric.slot` |
 | --- | --- | --- | --- |
 | Key gated in Secure Enclave hardware | Yes | **No** (userspace boolean only) | **Yes** (P-256 ECDH in SEP) |
 | Invalidated in hardware when fingers change (`.biometryCurrentSet`) | Yes | **No** | **Yes** |
@@ -109,20 +109,20 @@ There are two ways to persist the Secure Enclave key handle on macOS:
 
 ### 1. What is stored where
 
-#### In `store.redb` (`crates/store`)
+#### In `device/biometric.slot` (`crates/cli/src/disk.rs`)
 
-Two optional entries in the existing `header` table (`TableDefinition<&str, &[u8]>`), written and removed together in one two-phase-commit `redb` write transaction:
+An optional `0600` file in `<data>/device/`, created and deleted whole, storing the opaque platform token and the XChaCha20-Poly1305-wrapped 256-bit device root:
 
-| Table | Key | Value |
-| --- | --- | --- |
-| `header` | `"biometric.token"` | Opaque platform token bytes (on macOS, the `deadbolt-enclave` sealed envelope) |
-| `header` | `"keyset.biometric"` | `AEAD(biometric_key, data_key ‖ device_secret)` (104 bytes: 24-byte nonce + 64-byte keyset + 16-byte tag) |
+| Field | Value |
+| --- | --- |
+| `token` | Opaque platform token bytes (on macOS, the `deadbolt-enclave` sealed envelope) |
+| `sealed` | `AEAD(biometric_key, device_root)` (72 bytes: 24-byte nonce + 32-byte device root + 16-byte tag) |
 
-- **`biometric_key`:** a fresh random 256-bit key (`Zeroizing<[u8; 32]>`, generated by `deadbolt_store::generate_biometric_key()`).
-- **AAD for `"keyset.biometric"`:** `"deadbolt-store/v1/keyset.biometric" ‖ format_version (u32 LE) ‖ token_len (u64 LE) ‖ biometric.token`. Tampering with `"biometric.token"`, swapping it from another store, or flipping any byte in `"keyset.biometric"` fails AEAD verification with `Error::InvalidBiometric`.
-- **Single-file invariant preserved:** `store.redb` remains the only file in the data directory. Existing stores without `"keyset.biometric"` require no format migration (`FORMAT_VERSION` stays `2`).
+- **`biometric_key`:** a fresh random 256-bit key (`Zeroizing<[u8; 32]>`, generated by `crate::disk::generate_biometric_key()`).
+- **AAD for `sealed`:** `"deadbolt/v2 biometric slot" ‖ token` (`AAD_BIOMETRIC`). Tampering with the token, swapping it from another store, or flipping any byte in the ciphertext fails AEAD verification with `Error::InvalidBiometric`.
+- **Device root separation:** unlocking `biometric.slot` recovers the device root, which opens `device/local-<m>.sealed` (holding the device seed and per-vault rollback anchors) and each vault's `v/<vault>/local-<m>.sealed`.
 
-#### Inside `"biometric.token"` (the `deadbolt-enclave` binary envelope)
+#### Inside `token` (the `deadbolt-enclave` binary envelope)
 
 ```text
 magic           "DBSE" (4 bytes)
@@ -155,35 +155,35 @@ touch_id = true
 - **Release builds sign the helper first, then build against it** (`.github/workflows/release.yml`, [releasing.md](releasing.md)). The pin covers the helper's code signature, so the Developer ID signature must exist before `deadbolt` is compiled, and the signing job must never compile repository code. The release splits it into four jobs: `build-enclave` (no secrets) compiles both architectures with `crates/enclave/scripts/build-enclave.sh`; `sign-enclave` (the `release` environment, only `.github/release/` checked out) signs each thin helper with the Developer ID (`--options runtime --timestamp --identifier anomaly.deadbolt.enclave`) and changes nothing else; `build-macos` (no secrets) builds `deadbolt` and `deadbolt-ui` with `DEADBOLT_ENCLAVE_PREBUILT=<dir>`, so `crates/enclave/build.rs` takes `<dir>/<arch>/deadbolt-enclave` as is (it must be a thin Mach-O of the target architecture; any failure is a build error, never a Touch-ID-less build) and pins those signed bytes; `sign-macos` signs `deadbolt` and the app around the helper and checks the helper's bytes are unchanged. `verify-macos` then checks that each architecture slice's SHA-256 is the digest compiled into `deadbolt`.
 - This keeps the exact-bytes pin for every build, local and released. A code-signing-requirement pin (Developer ID team + identifier, checked through `SecStaticCode`) was rejected: it would accept any helper the team ever signs with that identifier, including older releases' helpers and anything signed with a stolen or misused Developer ID certificate, and checking it from Rust needs `unsafe` FFI or a new dependency. The exact-bytes pin is unaffected by the certificate: a compromised Developer ID certificate cannot produce a helper that already-shipped `deadbolt` binaries accept.
 - `crates/app/scripts/bundle.sh` reuses the `deadbolt-enclave` binary staged by `build.rs` (copying it into `Deadbolt.app/Contents/Helpers/deadbolt-enclave`, or `lipo -create`ing the two signed architecture slices for `--universal`) and **never re-signs `deadbolt-enclave`**, because re-signing after `deadbolt` was compiled would change its `__LINKEDIT` code-signature bytes and invalidate `DEADBOLT_ENCLAVE_SHA256`.
-- `crates/app/build.rs` pins the same helper into the desktop app (the prebuilt one with `DEADBOLT_ENCLAVE_PREBUILT`, else the one staged above), and the app verifies the `deadbolt-enclave` beside its daemon the same way before it uses it to check the daemon's code signature.
+- `crates/enclave` compiles and pins the helper once for both `deadbolt` and `deadbolt-ui`, and exposes the shared Mach-O slice verifier (`deadbolt_enclave::matches_sha256_or_fat_slice`). The desktop app verifies the `deadbolt-enclave` beside its daemon before sending a passphrase (daemon identity itself is checked through `deadbolt-os`).
 - At runtime (`cfg(not(test))`), the daemon only looks for `deadbolt-enclave` next to its own executable (`Deadbolt.app/Contents/Helpers/deadbolt-enclave`, or beside a tarball or Homebrew `deadbolt`) and verifies that its SHA-256 (or, for a valid `{arm64, x86_64}` universal binary, the current architecture's slice SHA-256) matches `DEADBOLT_ENCLAVE_SHA256` before spawning it. Verification or status probe failures are cached as unavailable for 2 s and logged with `warn!` at most once until a subsequent probe succeeds.
 
 ### 3. When the slot is written and wiped
 
-| Event | What happens to `"keyset.biometric"` in `store.redb` |
+| Event | What happens to `device/biometric.slot` |
 | --- | --- |
-| **Opt-in while unlocked** (`Command::TouchIdSet { enabled: true }` or `deadbolt touchid on`) | Enrolls a fresh Secure Enclave key and writes `"biometric.token"` + `"keyset.biometric"` into `store.redb` (no finger prompt needed to generate the key and encrypt to its public key), then writes `touch_id = true` to `config.toml`. |
+| **Opt-in while unlocked** (`Command::TouchIdSet { enabled: true }` or `deadbolt touchid on`) | Enrolls a fresh Secure Enclave key and writes `device/biometric.slot` (no finger prompt needed to generate the key and encrypt to its public key), then writes `touch_id = true` to `config.toml`. |
 | **Passphrase unlock while `touch_id = true`** | Rotates the Secure Enclave key and `biometric_key`, refreshing `created_at` and `state_hash`. |
 | **Normal lock** (`deadbolt lock`, ⌘L, idle timeout, sleep, screen lock, daemon restart, Mac reboot) | **Kept** on disk. `Session` and `Unlocked` are dropped and zeroized in RAM; the next unlock can use Touch ID. |
 | **14 days since last passphrase unlock** (`now < created_at` or `now - created_at > 14d`) | **Wiped**. A "don't forget your passphrase" rule enforced against wall-clock `SystemTime` (`created_at <= now <= created_at + 14d`): requires entering the passphrase at least once every 14 days (and if the system clock moves backward past `created_at`), which automatically re-enrolls Touch ID. |
 | **Fingerprint added or removed in System Settings** (`stateHash` mismatch) | `deadbolt-enclave` compares `LAContext.domainState.biometry.stateHash` (fallback `evaluatedPolicyDomainState`) against the `state_hash` recorded at enrollment. On mismatch, exits with code `12` (`invalidated`), and the daemon **wipes** the slot and sets `touch_id_reset = true` so the UI explains *"Touch ID was reset; enter your passphrase"*. Upgrading across macOS 14 → macOS 15 transitions the fallback `evaluatedPolicyDomainState` to `domainState.biometry.stateHash`, causing a one-time slot reset on the first unlock after the OS upgrade. |
-| **Passphrase changed** (`Unlocked::change_passphrase_with_params` with `old != new`) | **Wiped atomically** in the same `redb` write transaction that rewrites `"keyset"`. |
-| **Settings toggle off** (`Command::TouchIdSet { enabled: false }` or `deadbolt touchid off`) | **Wiped** immediately from `store.redb` (works whether the store is currently unlocked or locked) and sets `touch_id = false` in `config.toml`. |
-| **This device removed from all its vaults** | **Wiped** when the daemon's vault list is non-empty and this device is no longer a member of any vault in `session.vaults`. |
+| **Passphrase changed** (`Unlocked::change_passphrase_with_params` with `old != new`) | **Deleted** when rewriting the passphrase slot in `device/local-<m>.sealed`. |
+| **Settings toggle off** (`Command::TouchIdSet { enabled: false }` or `deadbolt touchid off`) | **Deleted** immediately (works whether the store is currently unlocked or locked) and sets `touch_id = false` in `config.toml`. |
+| **This device removed from all its vaults** | **Deleted** when the daemon's vault list is non-empty and this device is no longer a member of any vault in `session.vaults`. |
 | **User cancels prompt, lid closed, lockout, failed finger tap, or unknown error** | **Kept** on disk (`exit 10` / `exit 11` / `exit 14`). Never wipes enrollment. |
 
 ### 4. Protocol, CLI, and App UI
 
-- **Protocol (`crates/client/src/protocol.rs`, since protocol version 5):**
+- **Protocol (`crates/proto/src/daemon/`, re-exported as `deadbolt_client::protocol`):**
   - `Command::UnlockBiometric { timeout_secs: Option<u64> }`
   - `Command::TouchIdSet { enabled: bool }`
   - `Status` adds:
     - `touch_id_available: bool` (cached with a 60 s TTL when available and 2 s when unavailable or on probe error, warmed at daemon startup and refreshed in the background via `spawn_blocking` when stale, as well as on passphrase unlock and `TouchIdSet`, so `status()` never blocks on a subprocess and waking from clamshell mode or reconnecting a Magic Keyboard with Touch ID recovers without restarting the daemon)
     - `touch_id_enabled: bool` (`touch_id = true` in `config.toml` and `touch_id_available`)
-    - `touch_id_ready: bool` (`touch_id_enabled` and a valid non-expired token is in `store.redb`, tracked in daemon memory so `status()` never opens `store.redb`)
+    - `touch_id_ready: bool` (`touch_id_enabled` and a valid non-expired token is in `device/biometric.slot`, tracked in daemon memory so `status()` never opens the store)
     - `touch_id_reset: bool` (true when `touch_id_enabled` is true on an initialized store that previously had a biometric slot enrolled whose slot has since expired or been invalidated/wiped, so the UI shows *"Touch ID was reset; enter your passphrase"* rather than the first-time *"Enter your passphrase once to finish turning on Touch ID"*)
 - **Concurrency, timeout, and cancellation (`crates/cli/src/daemon`):**
-  - Interactive `unseal` runs outside `Daemon::transition` with `store.redb` closed and a 60 s deadline (`PROMPT_TIMEOUT`).
+  - Interactive `unseal` runs outside `Daemon::transition` while locked with a 60 s deadline (`PROMPT_TIMEOUT`).
   - Concurrent `UnlockBiometric` requests coalesce onto the single in-flight prompt, and the in-flight entry is cleared before broadcasting the outcome to waiters.
   - A passphrase `Unlock` (once the passphrase has opened the store; a wrong one leaves the prompt up), `Lock`, `TouchIdSet`, `Stop`, or `Daemon` drop cancels any in-flight Touch ID prompt immediately, killing and reaping `deadbolt-enclave` to dismiss the macOS sheet.
   - While unlocked, `Unlock` and `UnlockBiometric` set a shorter idle timeout at once; a longer one, or never, only with the right passphrase or after a Touch ID prompt succeeds. A request joining another's prompt may only shorten the timeout that request set.
