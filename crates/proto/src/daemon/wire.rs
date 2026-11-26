@@ -202,6 +202,16 @@ impl Answer {
     }
 }
 
+/// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+/// A vault an unlock moved from a v1 store, and its new recovery kit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigratedVault {
+    pub vault: VaultInfo,
+    /// Live items moved; the trash moved too.
+    pub items: usize,
+    pub recovery_kit: Secret,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "kebab-case")]
 pub enum Reply {
@@ -213,6 +223,13 @@ pub enum Reply {
     NoApp,
     Vault {
         vault: VaultInfo,
+    },
+    /// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+    /// `unlock` that moved a v1 store to v2 first: every vault it moved,
+    /// each with its new 24-word recovery kit, which the daemon keeps no
+    /// copy of. Any other unlock answers `done`.
+    Unlocked {
+        migrated: Vec<MigratedVault>,
     },
     /// `vault-create`: the new vault and its 24-word recovery kit, which
     /// the daemon keeps no copy of.

@@ -364,6 +364,10 @@ pub async fn join(
         .try_lock()
         .map_err(|_| anyhow!("another pairing is already running on this device"))?;
     let set_up = crate::disk::is_initialized(&daemon.paths.data);
+    // DELETABLE(v1-migrate): joining would hide a v1 store.
+    if !set_up {
+        super::refuse_v1_setup(&daemon.paths.data)?;
+    }
     // A locked device fails here, before a code shows, so the client can
     // unlock and ask again.
     let (node, home) = if set_up {

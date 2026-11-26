@@ -4350,6 +4350,10 @@ mod broker;
 mod health;
 #[path = "cli/mcp.rs"]
 mod mcp;
+// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+#[cfg(feature = "v1-migrate")]
+#[path = "cli/migrate_v1.rs"]
+mod migrate_v1;
 #[path = "cli/recovery.rs"]
 mod recovery;
 #[path = "cli/taint.rs"]

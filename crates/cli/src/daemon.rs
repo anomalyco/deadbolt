@@ -13,6 +13,10 @@ mod import;
 mod legacy;
 mod lifecycle;
 mod macos_autofill;
+// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+#[cfg(feature = "v1-migrate")]
+pub(crate) mod migrate_v1;
+// DELETABLE(v1-migrate): with the `use` below.
 mod pairing;
 mod passkeys;
 mod recovery;
@@ -31,6 +35,7 @@ pub(crate) mod taint;
 #[cfg(test)]
 mod tests;
 mod updates;
+mod upgrade;
 #[cfg(test)]
 mod watch_tests;
 mod watchers;
@@ -58,6 +63,8 @@ use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
 #[cfg(test)]
 use tokio::io::AsyncWriteExt;
+pub(crate) use upgrade::v1_store;
+use upgrade::{migrate_first, refuse_v1_setup, set_up};
 use watchers::Watchers;
 
 /// Tests read the control line limit from here; the daemon itself uses it in
@@ -298,6 +305,8 @@ impl Daemon {
         if crate::disk::is_initialized(&self.paths.data) {
             bail!("this device is already set up");
         }
+        // DELETABLE(v1-migrate)
+        refuse_v1_setup(&self.paths.data)?;
         let device_name = clean_name(&device_name);
         if device_name.is_empty() {
             bail!("the device name cannot be empty");
@@ -336,6 +345,8 @@ impl Daemon {
         if crate::disk::is_initialized(&self.paths.data) {
             bail!("this device was set up meanwhile; nothing from the join was saved");
         }
+        // DELETABLE(v1-migrate)
+        refuse_v1_setup(&self.paths.data)?;
         if passphrase.expose().is_empty() {
             bail!("the passphrase cannot be empty");
         }
@@ -357,11 +368,13 @@ impl Daemon {
     /// timeout: to a shorter one at once, to a longer one (or never) only if
     /// the passphrase is right. A Touch ID prompt in flight is cancelled only
     /// once the passphrase has opened the store.
+    /// Returns the vaults it moved from a v1 store first, if any
+    /// (DELETABLE(v1-migrate): back to `Result<()>` with it).
     async fn unlock(
         self: &Arc<Self>,
         passphrase: zeroize::Zeroizing<String>,
         timeout_secs: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<Vec<crate::protocol::MigratedVault>> {
         let _transition = self.transition.lock().await;
         self.close_quarantined(&_transition).await;
         self.settle_activity(true);
@@ -381,7 +394,7 @@ impl Daemon {
         if let Some(check) = open {
             let check = check?;
             if self.with(|_| self.tighten_timeout(timeout_secs))? {
-                return Ok(());
+                return Ok(Vec::new());
             }
             let turn = self.guesses.turn()?;
             let right =
@@ -390,9 +403,11 @@ impl Daemon {
             if !right {
                 return Err(crate::disk::Error::WrongPassphrase.into());
             }
-            return self.with(|_| self.set_timeout(timeout_secs));
+            return self
+                .with(|_| self.set_timeout(timeout_secs))
+                .map(|()| Vec::new());
         }
-        if !crate::disk::is_initialized(&self.paths.data) {
+        if !set_up(&self.paths.data) {
             return Err(fail(
                 ErrorCode::NotInitialized,
                 "this device is not set up; run `deadbolt init` or `deadbolt join`",
@@ -404,15 +419,26 @@ impl Daemon {
             .unwrap_or(false);
         let enroll_touch_id = want_touch_id && self.refresh_touch_id_available().await;
         let now = session::now();
+        let params = self.kdf;
         let turn = self.guesses.turn()?;
         let opened = tokio::task::spawn_blocking(move || {
+            // DELETABLE(v1-migrate): a v1 store moves to v2 first.
+            let moved = migrate_first(&dir, passphrase.as_bytes(), params)?;
             let loaded = Loaded::open(&dir, passphrase.as_bytes())?;
             if enroll_touch_id && let Err(error) = biometric::enroll(&loaded.store, now) {
                 warn!("Touch ID enrollment on unlock failed: {error:#}");
             }
             let meta =
                 biometric::token_meta(loaded.store.biometric_token().ok().flatten().as_deref());
-            Ok::<_, anyhow::Error>((loaded, meta))
+            let migrated = moved
+                .into_iter()
+                .map(|(id, items, kit)| crate::protocol::MigratedVault {
+                    vault: loaded.vault_info(&id),
+                    items,
+                    recovery_kit: kit.into(),
+                })
+                .collect::<Vec<_>>();
+            Ok::<_, anyhow::Error>((loaded, meta, migrated))
         })
         .await?;
         match &opened {
@@ -421,7 +447,7 @@ impl Daemon {
             // Neither right nor wrong (a damaged store, a store in use).
             Err(_) => drop(turn),
         }
-        let (loaded, slot_meta) = opened?;
+        let (loaded, slot_meta, migrated) = opened?;
         self.cancel_biometric_prompt();
         if slot_meta.is_some() {
             self.biometric_was_enrolled.store(true, Ordering::SeqCst);
@@ -430,7 +456,8 @@ impl Daemon {
             .biometric_slot
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = slot_meta;
-        self.start(loaded, timeout_secs).await
+        self.start(loaded, timeout_secs).await?;
+        Ok(migrated)
     }
 
     /// Unlocks with Touch ID. While unlocked, it changes the idle timeout:
@@ -463,6 +490,13 @@ impl Daemon {
             return Ok(false);
         }
         if !unlocked && !crate::disk::is_initialized(&self.paths.data) {
+            // DELETABLE(v1-migrate): a v1 store has no Touch ID slot yet.
+            if v1_store(&self.paths.data) {
+                return Err(fail(
+                    ErrorCode::Locked,
+                    "unlock with your passphrase once to upgrade to v2",
+                ));
+            }
             return Err(fail(
                 ErrorCode::NotInitialized,
                 "this device is not set up; run `deadbolt init` or `deadbolt join`",
@@ -825,7 +859,7 @@ impl Daemon {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_none()
             {
-                return Err(if crate::disk::is_initialized(&self.paths.data) {
+                return Err(if set_up(&self.paths.data) {
                     fail(ErrorCode::Locked, "locked: run `deadbolt unlock`")
                 } else {
                     fail(

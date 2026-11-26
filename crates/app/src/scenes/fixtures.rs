@@ -223,6 +223,7 @@ pub(super) fn status(unlocked: bool) -> Status {
         touch_id_enabled: false,
         touch_id_ready: false,
         touch_id_reset: false,
+        v1_store: false,
         update: None,
     }
 }

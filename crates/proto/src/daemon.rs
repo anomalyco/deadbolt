@@ -78,7 +78,7 @@ pub use site::{
     SiteValues, Verify,
 };
 pub use status::{DeviceInfo, PeerSync, Status, UpdateInfo, VaultInfo};
-pub use wire::{Answer, Change, ErrorCode, Event, Message, Reply, Secret};
+pub use wire::{Answer, Change, ErrorCode, Event, Message, MigratedVault, Reply, Secret};
 
 // `tests.rs` reads these through `super::*`.
 #[cfg(test)]

@@ -13,6 +13,13 @@ workspace = true
 name = "deadbolt"
 path = "src/main.rs"
 
+[features]
+default = ["v1-migrate"]
+# DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2,
+# with src/migrate_v1.rs, src/migrate_v1/ and tests/cli/migrate_v1.rs.
+# `deadbolt migrate`: reads a v1 store.redb and moves its vaults to v2.
+v1-migrate = ["dep:redb", "dep:chacha20poly1305"]
+
 [dependencies]
 anyhow = "1.0.104"
 argon2 = { version = "0.6", default-features = false, features = ["zeroize"] }
@@ -62,6 +69,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tempfile = "3.27.0"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 zip = { version = "9.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# DELETABLE(v1-migrate): the v1 store.redb's database and record cipher.
+redb = { version = "4.4", optional = true }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"], optional = true }
 
 [dev-dependencies]
 p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
@@ -69,3 +79,5 @@ deadbolt-core = { path = "../core", features = ["sim"] }
 deadbolt-net = { path = "../net", features = ["sim"] }
 tokio = { version = "1.53.3", features = ["test-util"] }
 memchr = "2.8"
+# DELETABLE(v1-migrate): signs the v1 entries of the store.redb test fixture.
+ed25519-dalek = "3.0"

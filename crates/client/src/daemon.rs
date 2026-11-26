@@ -679,6 +679,7 @@ mod tests {
             touch_id_enabled: false,
             touch_id_ready: false,
             touch_id_reset: false,
+            v1_store: false,
             caller: CallerInfo::unverified("test"),
             update: None,
         }

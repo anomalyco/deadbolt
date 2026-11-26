@@ -167,6 +167,29 @@ pub fn check_access(socket: SocketKind, caller: &CallerInfo, command: &Command) 
     Ok(())
 }
 
+impl Daemon {
+    /// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+    ///
+    /// AutoFill can't show the recovery kits an unlock makes when it moves a
+    /// v1 store, so that first unlock happens in the app or the CLI.
+    pub(super) fn refuse_autofill_upgrade(
+        &self,
+        caller: &CallerInfo,
+        command: &Command,
+    ) -> Result<()> {
+        if caller.class == CallerClass::AutoFill
+            && matches!(command, Command::Unlock { .. })
+            && super::v1_store(&self.paths.data)
+        {
+            return Err(fail(
+                ErrorCode::Locked,
+                "open Deadbolt and unlock it once to upgrade to v2",
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn find_any_login(s: &Loaded, login: &LoginRef) -> Result<(VaultId, Item)> {
     let not_found = || fail(ErrorCode::NotFound, "no such login");
     let vault = VaultId::from_bytes(unhex(&login.vault).map_err(|_| not_found())?);
@@ -273,7 +296,8 @@ impl Daemon {
         {
             return Ok(false);
         }
-        if !crate::disk::is_initialized(&self.paths.data) {
+        // DELETABLE(v1-migrate): `super::set_up` back to `disk::is_initialized`.
+        if !super::set_up(&self.paths.data) {
             return Err(fail(
                 ErrorCode::NotInitialized,
                 "this device is not set up; open Deadbolt to set it up",
