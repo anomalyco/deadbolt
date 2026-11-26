@@ -282,6 +282,7 @@ pub(super) async fn update_cli(
     dir: &Path,
     built: Option<&str>,
     macos: bool,
+    quiet: bool,
 ) -> Result<()> {
     let stage = stage_beside(exe)?;
     let archive = stage.path().join("deadbolt.tar.gz");
@@ -338,9 +339,11 @@ pub(super) async fn update_cli(
     }
     files.push((new, exe.to_path_buf()));
     swap(&files, &stage.path().join("old"))?;
-    println!("Updated {}", exe.display());
+    if !quiet {
+        println!("Updated {}", exe.display());
+    }
     if ours && stop_daemon(paths).await {
-        restart_daemon(paths, exe.to_path_buf()).await;
+        restart_daemon(paths, exe.to_path_buf(), quiet).await;
     }
     Ok(())
 }
@@ -446,6 +449,7 @@ pub(super) async fn update_app(
     target: &Target,
     bundle: &Path,
     version: &str,
+    quiet: bool,
 ) -> Result<()> {
     let stage = stage_beside(bundle)?;
     let archive = stage.path().join("Deadbolt.zip");
@@ -504,7 +508,7 @@ pub(super) async fn update_app(
             })
         });
     // Whichever app is in place now, its daemon comes back.
-    restart_daemon(paths, bundle.join("Contents/Helpers/deadbolt")).await;
+    restart_daemon(paths, bundle.join("Contents/Helpers/deadbolt"), quiet).await;
     let reopen = || {
         if app_ran && let Err(error) = Command::new(OPEN).arg(bundle).status() {
             eprintln!("warning: couldn't reopen {}: {error}", bundle.display());
@@ -515,9 +519,12 @@ pub(super) async fn update_app(
         return Err(error);
     }
     let trashed = trash(&old, &format!("Deadbolt-{VERSION}"));
-    println!("Updated {} to {version}", bundle.display());
+    if !quiet {
+        println!("Updated {} to {version}", bundle.display());
+    }
     match trashed {
-        Some(path) => println!("The old app is in the Trash: {}", path.display()),
+        Some(path) if !quiet => println!("The old app is in the Trash: {}", path.display()),
+        Some(_) => {}
         None => {
             std::fs::remove_dir_all(&old).ok();
         }

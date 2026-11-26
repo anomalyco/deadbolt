@@ -40,6 +40,7 @@ fn running(version: &'static str, distribution: &'static str, bucket: u8) -> Run
         target: "macos-arm64",
         distribution,
         bucket,
+        sha256: None,
         channel: None,
     }
 }
@@ -98,6 +99,7 @@ fn decides_like_the_release_protocol() {
         Decision::Notify {
             reason: Reason::Update,
             version: "2.3.9".into(),
+            distribution: "brew".into(),
             command: Some("brew upgrade anomalyco/tap/deadbolt".into()),
             notes_url: None,
         }
@@ -119,6 +121,7 @@ fn decides_like_the_release_protocol() {
         Decision::Notify {
             reason: Reason::Update,
             version: "2.4.0".into(),
+            distribution: "unknown".into(),
             command: None,
             notes_url: None,
         }
@@ -411,6 +414,7 @@ fn npm_installs_only_offer_what_npm_serves() {
     let notify = |version: &str| Decision::Notify {
         reason: Reason::Update,
         version: version.into(),
+        distribution: "npm".into(),
         command: None,
         notes_url: None,
     };
@@ -1116,6 +1120,7 @@ fn takes_npm_from_the_release_once_it_lists_it() {
         Decision::Notify {
             reason: Reason::Update,
             version: "2.4.0".into(),
+            distribution: "npm".into(),
             command: Some("npm install -g @deadbolt/cli@2.4.0".into()),
             notes_url: None,
         }
@@ -1127,6 +1132,7 @@ fn takes_npm_from_the_release_once_it_lists_it() {
         Decision::Notify {
             reason: Reason::Update,
             version: "2.4.0".into(),
+            distribution: "npm".into(),
             command: None,
             notes_url: None,
         }

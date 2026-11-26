@@ -3083,7 +3083,7 @@ fn concurrent_updates_cannot_pass_a_pending_extension_install() {
     let extension = serde_json::json!({
         "schema": 1, "app": "deadbolt", "artifact": "extension", "channel": "dev",
         "sequence": 7, "published_at": "2026-10-28T00:00:00Z",
-        "release": {"version": "1.0", "rollout_percent": 100,
+        "release": {"version": "1.0.0", "rollout_percent": 100,
             "targets": {"chromium": target}, "distributions": []}
     });
     let mut cli = extension.clone();

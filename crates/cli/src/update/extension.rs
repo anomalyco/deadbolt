@@ -6,10 +6,10 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use url::Url;
 
-use super::install::{UpdateState, check_sequence};
 use super::protocol::{Decision, Running, Target, decide};
 use super::replace::{refuse_foreign_root, stage_beside};
 use super::service::{Manifest, SERVICE, Service};
+use super::state::{UpdateState, check_sequence};
 use crate::config::ExtensionDir;
 
 /// The release service target of the `extension` artifact.
@@ -127,9 +127,10 @@ pub(super) async fn extension(
     built: Option<&str>,
     check: bool,
     allow_rollback: bool,
+    quiet: bool,
 ) -> Result<bool> {
     if dirs.is_empty() {
-        if !check {
+        if !check && !quiet {
             println!(
                 "Browser extension: {SERVICE}deadbolt/extension/{channel}/{} (or register \
                  an unpacked copy with `deadbolt browser install --extension-dir <dir>` to \
@@ -140,7 +141,9 @@ pub(super) async fn extension(
         return Ok(false);
     }
     let Some(manifest) = service.manifest("extension", channel, None).await? else {
-        println!("Browser extension: no {channel} release yet");
+        if !quiet {
+            println!("Browser extension: no {channel} release yet");
+        }
         return Ok(false);
     };
     let Manifest::Found(manifest) = manifest else {
@@ -151,7 +154,11 @@ pub(super) async fn extension(
     let mut available = false;
     let mut failed = None;
     for entry in dirs {
-        match extension_dir(entry, service, &url, &text, channel, bucket, built, check).await {
+        match extension_dir(
+            entry, service, &url, &text, channel, bucket, built, check, quiet,
+        )
+        .await
+        {
             Ok(found) => available |= found,
             Err(error) if dirs.len() > 1 => {
                 eprintln!("{}: {error:#}", entry.dir.display());
@@ -178,6 +185,7 @@ pub(super) async fn extension_dir(
     bucket: u8,
     built: Option<&str>,
     check: bool,
+    quiet: bool,
 ) -> Result<bool> {
     let dir = &entry.dir;
     if !extension_dir_ok(dir) {
@@ -193,6 +201,7 @@ pub(super) async fn extension_dir(
         target: TARGET,
         distribution: "direct",
         bucket,
+        sha256: None,
         channel: built,
     };
     let decision = decide("extension", channel, text, &running);
@@ -204,30 +213,38 @@ pub(super) async fn extension_dir(
             version, target, ..
         } => {
             if check {
-                println!(
-                    "Browser extension {version} is available in {}",
-                    dir.display()
-                );
+                if !quiet {
+                    println!(
+                        "Browser extension {version} is available in {}",
+                        dir.display()
+                    );
+                }
             } else {
                 refuse_foreign_root(dir.parent().unwrap_or(dir))?;
                 update_extension(service, url, &target, dir).await?;
-                println!(
-                    "Updated the browser extension in {} to {version}; \
-                     reload Deadbolt in chrome://extensions",
-                    dir.display()
-                );
+                if !quiet {
+                    println!(
+                        "Updated the browser extension in {} to {version}; \
+                         reload Deadbolt in chrome://extensions",
+                        dir.display()
+                    );
+                }
             }
             Ok(true)
         }
         Decision::None("up_to_date") => {
-            println!(
-                "Browser extension {current} is up to date in {}",
-                dir.display()
-            );
+            if !quiet {
+                println!(
+                    "Browser extension {current} is up to date in {}",
+                    dir.display()
+                );
+            }
             Ok(false)
         }
         Decision::None("no_target") => {
-            println!("The {channel} release has no browser extension yet");
+            if !quiet {
+                println!("The {channel} release has no browser extension yet");
+            }
             Ok(false)
         }
         _ => Ok(false),

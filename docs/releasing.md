@@ -219,7 +219,7 @@ yarn install by running that manager (see Updater).
 
 ## Updater
 
-`deadbolt update [--check] [--channel dev|beta|stable] [--yes] [--allow-rollback]`
+`deadbolt update [--check] [--channel dev|beta|stable] [--yes] [--allow-rollback] [--json]`
 (`crates/cli/src/update.rs`) follows the release service's client rules
 (`anomalyco/release` `docs/protocol.md`, `src/protocol/decide.ts`): versions
 are display text, tested only for equality, so an install updates whenever its
@@ -357,7 +357,9 @@ channel's current release isn't the build it runs, a rollback included.
   URL and must stay under its origin's `/release/deadbolt/files/`; a download
   stops past the manifest's size and must match its size and SHA-256 before
   it's unpacked, run or moved. Nothing needs the vault, so it works locked.
-  `--check` prints what's available and exits 10 if anything is, else 0.
+  `--check` prints what's available and exits 10 if anything is, else 0;
+  `--json` prints a structured `{current, latest, channel, available, method, action}`
+  object on stdout (with optional `reason`, `command`, and `notes_url`).
   Requests send `User-Agent: deadbolt/<build channel or source>/<version>/cli`.
 - **Background checks:** the daemon checks ten seconds after it starts,
   then every ten minutes on `dev` and every hour on `stable` and `beta`,
@@ -389,9 +391,12 @@ channel's current release isn't the build it runs, a rollback included.
   only for a URL on 127.0.0.1 or [::1]. `DEADBOLT_UPDATE_CHECK_CHANNEL`
   (debug builds only) makes the daemon check that channel at once and every
   second.
-- It doesn't require the protocol's `install.json` receipt: `update` is a
-  command the user runs on the install in front of them, and package-manager
-  paths are refused instead.
+- **Install receipt:** `site/public/install` writes `install.json` beside
+  `deadbolt` (`{"app":"deadbolt","artifact":"cli","channel":"...","method":"direct","root":"..."}`).
+  `deadbolt update` checks a trusted `install.json` receipt first (regular
+  non-symlink file, user-owned and not group/world-writable, matching `app`,
+  `artifact`, and canonicalized `root`) before falling back to path
+  heuristics.
 
 ## Homebrew
 

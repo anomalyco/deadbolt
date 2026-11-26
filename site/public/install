@@ -76,6 +76,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 if [ -n "${DEADBOLT_VERSION:-}" ]; then
   # A pinned version: stable releases keep their files and SHA256SUMS on GitHub.
+  channel="stable"
   version="${DEADBOLT_VERSION#v}"
   file="deadbolt-$version-$os-$arch$libc.tar.gz"
   base="https://github.com/$repo/releases/download/v$version"
@@ -141,6 +142,20 @@ for extra in deadbolt-enclave deadbolt-ui; do
     chmod 755 "$dir/$extra"
   fi
 done
+
+root="$(cd "$dir" && pwd -P)"
+root_json="$(printf '%s' "$root" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+cat > "$tmp/install.json" <<EOF
+{
+  "app": "deadbolt",
+  "artifact": "cli",
+  "channel": "$channel",
+  "method": "direct",
+  "root": "$root_json"
+}
+EOF
+chmod 644 "$tmp/install.json"
+mv "$tmp/install.json" "$dir/install.json"
 
 echo "Installed $("$dir/deadbolt" --version) to $dir/deadbolt"
 case ":$PATH:" in

@@ -22,7 +22,9 @@ mod method;
 mod notice;
 mod protocol;
 mod replace;
+mod report;
 mod service;
+mod state;
 
 pub use self::extension::extension_dir_ok;
 pub use self::install::{Checked, Etags, UpdateArgs, available, run};
@@ -47,8 +49,8 @@ use crate::protocol::UpdateInfo;
 use self::extension::{EXTENSION_LIMIT, EXTENSION_MARKER, extension_version, unpack_extension};
 #[cfg(test)]
 use self::install::{
-    OUTPUT_LINES, UpdateState, check_sequence, npm_from_release, output_tail, platform_package,
-    served_by_npm, static_for, upgrade_failure, user_link,
+    OUTPUT_LINES, npm_from_release, output_tail, platform_package, served_by_npm, static_for,
+    upgrade_failure, user_link,
 };
 #[cfg(test)]
 use self::method::{
@@ -66,10 +68,14 @@ use self::replace::{
 };
 #[cfg(test)]
 use self::service::{SERVICE, SERVICE_OVERRIDE, file_url, loopback_or};
+#[cfg(test)]
+use self::state::{UpdateState, check_sequence};
 
 /// What `Deadbolt.app` must satisfy (identifier, team, Developer ID,
 /// notarized), the release's `verify-macos` check.
 const APP_REQUIREMENT: &str = include_str!("../../app/update-requirement.txt");
 
+#[cfg(test)]
+mod conformance_tests;
 #[cfg(test)]
 mod tests;
