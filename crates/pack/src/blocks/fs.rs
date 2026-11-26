@@ -224,6 +224,16 @@ impl Blocks for FsBlocks {
             .truncate(false)
             .open(self.root.join(LOCK))
             .map_err(io_error(LOCK))?;
+        // A lock stays held for a moment after its writer drops it while a
+        // child process spawned elsewhere in this process still has the
+        // inherited handle, until its exec closes it. Wait that out briefly.
+        for _ in 0..LOCK_TRIES - 1 {
+            match file.try_lock() {
+                Ok(()) => return Ok(FsLock { _file: file }),
+                Err(TryLockError::WouldBlock) => std::thread::sleep(LOCK_WAIT),
+                Err(TryLockError::Error(err)) => return Err(io_error(LOCK)(err)),
+            }
+        }
         match file.try_lock() {
             Ok(()) => Ok(FsLock { _file: file }),
             Err(TryLockError::WouldBlock) => Err(Error::Locked),
@@ -231,6 +241,10 @@ impl Blocks for FsBlocks {
         }
     }
 }
+
+/// Attempts at `LOCK` before reporting [`Error::Locked`], `LOCK_WAIT` apart.
+const LOCK_TRIES: u32 = 10;
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// The writer's exclusive lock on `LOCK`; the OS releases it when this drops
 /// (or the process dies).
