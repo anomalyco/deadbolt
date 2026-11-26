@@ -546,6 +546,28 @@ fn a_lock_from_the_daemon_does_not_interrupt_a_create_or_join() {
     }
 }
 
+/// A lock, or a reply saying the store is locked, while a new vault's
+/// recovery kit shows wipes the words with the rest.
+#[test]
+fn a_lock_wipes_the_recovery_kit_on_screen() {
+    use deadbolt_proto::daemon::ErrorCode;
+    let locked = || Failure {
+        code: Some(ErrorCode::Locked),
+        message: "locked".into(),
+    };
+    for done in [Done::Locked(Ok(())), Done::FileSaved(Err(locked()))] {
+        let mut rt = runtime("recovery", true);
+        rt.frame(FRAME);
+        assert!(matches!(rt.state.onboarding.step, Step::Recovery(_)));
+        rt.update(move |s, tx| s.apply(done, tx));
+        rt.frame(FRAME);
+        assert_eq!(rt.state.onboarding.step, Step::Welcome);
+        assert!(rt.state.onboarding.copied_kit.is_none());
+        assert_eq!(rt.state.screen, Screen::Locked);
+        assert!(!shows(&rt, "Save your recovery kit"));
+    }
+}
+
 #[test]
 fn notices_say_how_serious_they_are() {
     for (scene, severity) in [

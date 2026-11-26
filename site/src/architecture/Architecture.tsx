@@ -24,28 +24,28 @@ const chapters: Chapter[] = [
       <p>networking is <a className="link" href="https://www.iroh.computer">iroh</a>: a device's public key is its address, and iroh connects two devices directly when it can. when it can't, one of n0's public relays forwards the stream. that stream is end-to-end encrypted, so the relay only ever sees ciphertext.</p>
     </>,
     scene: <MeshStory />,
-    why: <p>the cost of no server: there's no recovery. lose every device and the vault is gone. that was a deliberate call for v1.</p>,
-    code: [["docs/design.md", "the v1 design, two pages"], ["crates/net/src/node.rs", "NodeConfig: relays, address lookup, port mapping"]],
+    why: <p>no server means no account to reset. instead each vault has a 24-word recovery kit: lose every device and the kit brings the vault back on a new one.</p>,
+    code: [["docs/design.md", "the v2 design"], ["crates/net/src/node.rs", "NodeConfig: relays, address lookup, port mapping"]],
   },
   {
     id: "device", title: "one device, four crates",
     body: <>
-      <p>on each machine there are two processes. the <code>deadbolt</code> command you type is a thin client. the work happens in a background daemon that the cli starts on first use. the daemon is the only process that ever opens the store, it keeps the vault unlocked in memory, and while unlocked it runs the iroh node.</p>
-      <p>the code splits along the same lines: <code>deadbolt-core</code> is the pure model (entries, membership, items, merging) with no io at all; <code>deadbolt-store</code> is the encrypted file on disk; <code>deadbolt-net</code> is iroh, sync and pairing; <code>deadbolt-cli</code> is the binary, holding both the client and the daemon.</p>
+      <p>on each machine there are two processes. the <code>deadbolt</code> command you type is a thin client. the work happens in a background daemon that the cli starts on first use. the daemon is the only process that ever writes the vault's files, it keeps the vault unlocked in memory, and while unlocked it runs the iroh node.</p>
+      <p>the code splits along the same lines: <code>deadbolt-core</code> is the pure model (entries, membership, items, merging) with no io at all; <code>deadbolt-pack</code> is the files on disk: signed <code>DBF2</code> frames in append-only logs and checkpoint packs, never renamed or overwritten; <code>deadbolt-net</code> is iroh, sync and pairing; <code>deadbolt-cli</code> is the binary, holding both the client and the daemon.</p>
     </>,
     scene: <DaemonStory />,
     why: <p>the cli was built agent-first: every command works from flags, env and stdin, and it never waits on a human without a terminal. an ai agent can drive it the same way you do.</p>,
     code: [["crates/cli/src/main.rs", "the commands"], ["crates/cli/src/client.rs", "starts, replaces and talks to the daemon"], ["crates/proto/src/daemon.rs", "the socket protocol: one json line per request"], ["crates/cli/src/daemon.rs", "the daemon: lock, unlock, the membership gate"], ["crates/client/src/paths.rs", "where the socket, store and logs live"]],
   },
   {
-    id: "keys", title: "two keys",
+    id: "keys", title: "keys",
     body: <>
-      <p>each device has exactly two keys. the <b>device key</b> (ed25519) is the device's identity: it signs everything the device writes, and its public half is the device's iroh address. the <b>local unlock key</b> comes from your passphrase through argon2id, and it's what seals the device key and the database on disk.</p>
-      <p>there's no shared vault key in v1. data only moves over encrypted iroh connections between current members, and at rest each device seals its own copy under its own unlock key.</p>
+      <p>your passphrase goes through argon2id into the <b>local unlock key</b>, which unwraps a random device root. the root opens the device's sealed local state, which holds its seed. three keys derive from that seed: a <b>signing key</b> (ed25519) for every frame the device writes, a <b>kem key</b> (x25519) that receives each vault's epoch keys, and a separate <b>network key</b> (ed25519) that is the device's iroh address.</p>
+      <p>a vault's data is sealed under its current <b>epoch key</b>, which is wrapped to every member's kem key and to the vault's 24-word recovery kit. removing a device starts a fresh epoch that the removed device can't read.</p>
     </>,
     scene: <KeysStory />,
-    why: <p>why not separate keys for signing and networking? neither could live in the secure enclave (it only does p-256), and both have to be in memory while the daemon runs. two keys there would add a key without adding protection.</p>,
-    code: [["crates/store/src/lib.rs", "the file layout, keys and integrity, documented at the top"], ["crates/store/src/kdf.rs", "argon2id parameters"], ["crates/store/src/crypto.rs", "xchacha20-poly1305 sealing"]],
+    why: <p>why a recovery kit? with no server there's no account to reset. the kit outranks every device, so someone who loses them all can still recover the vault and carry on from it.</p>,
+    code: [["crates/core/src/v2/crypto.rs", "the device seed, its derived keys and epoch key wraps"], ["crates/cli/src/disk.rs", "the device root, unlock slots and sealed local state"], ["crates/pack/src/lib.rs", "the append-only files on disk and their crash rules"]],
   },
   {
     id: "logs", title: "signed logs",
@@ -56,7 +56,7 @@ const chapters: Chapter[] = [
     </>,
     scene: <LogsStory />,
     why: <p>each entry has exactly one valid encoding (hand-rolled, length-prefixed, deps sorted), so its hash and signature mean the same thing on every device.</p>,
-    code: [["crates/core/src/lib.rs", "the model and the wire format, documented at the top"], ["crates/core/src/entry.rs", "entries, ops and signing"], ["crates/core/src/vault.rs", "applying entries, heads, what a peer is missing"]],
+    code: [["crates/core/src/lib.rs", "the model and the wire format, documented at the top"], ["crates/core/src/v2/frame.rs", "signed DBF2 frames"], ["crates/core/src/vault.rs", "applying entries, heads, what a peer is missing"]],
   },
   {
     id: "sync", title: "sync",
@@ -74,7 +74,7 @@ const chapters: Chapter[] = [
       <p>the core also enforces the item rules on every device: an item is created with all its required fields in one entry, a known field always keeps its type, required fields can't be removed and the type can't change. a device refuses to write an entry that breaks them, and when one arrives anyway it skips just the bad ops, in the same way on every device.</p>
     </>,
     scene: <MergeStory />,
-    code: [["crates/core/src/data.rs", "items, versions and history"], ["crates/core/src/item.rs", "item types, field types and the rules"]],
+    code: [["crates/core/src/v2/fold.rs", "folding data frames into items, versions and history"], ["crates/core/src/item.rs", "item types, field types and the rules"]],
   },
   {
     id: "pairing", title: "pairing",
@@ -92,14 +92,14 @@ const chapters: Chapter[] = [
       <p>a removed device keeps whatever it already had; no system can take that back. what it can't do is get anything new.</p>
     </>,
     scene: <RemoveStory />,
-    why: <p>the trade-off: without a shared vault key there's nothing to re-key, so removal has no ciphertext backstop. if the membership check had a bug, there'd be nothing behind it. the design accepts that and asks for dedicated tests of the gate.</p>,
-    code: [["crates/net/src/node.rs", "the gate: before_connect and after_handshake hooks, enforce_membership"], ["crates/core/src/membership.rs", "add, remove, and concurrent removals"]],
+    why: <p>the gate isn't the only line: a removal also rotates the vault to a fresh epoch key the removed device never gets, so even a relay or a remote store that leaked new frames to it would only hand it ciphertext.</p>,
+    code: [["crates/net/src/node.rs", "the gate: before_connect and after_handshake hooks, enforce_membership"], ["crates/core/src/v2/membership.rs", "add, remove, and concurrent removals"]],
   },
 ]
 
 const crates: [string, string, string][] = [
   ["deadbolt-core", "the model: device ids, signed entries, membership, typed items, merging, heads. no io, no async.", "crates/core"],
-  ["deadbolt-store", "one encrypted redb file per device: argon2id, xchacha20-poly1305, keyed hashes, zeroized keys.", "crates/store"],
+  ["deadbolt-pack", "the files on disk: signed DBF2 frames in append-only logs and checkpoint packs, created, appended and deleted but never renamed or overwritten.", "crates/pack"],
   ["deadbolt-net", "iroh endpoint, the membership gate, deadbolt/sync/1 and deadbolt/pair/1, qr rendering.", "crates/net"],
   ["deadbolt-cli", "the deadbolt binary: commands, the background daemon, the socket protocol, bitwarden import.", "crates/cli"],
 ]
@@ -139,17 +139,15 @@ export function Architecture() {
 
         <h3>build and test</h3>
         <pre>{`$ cargo build -j 2
-$ cargo test -j 2            `}<span className="output">{"# core, store, net and multi-device cli tests"}</span>{`
+$ cargo test -j 2            `}<span className="output">{"# core, pack, net and multi-device cli tests"}</span>{`
 $ cargo build --release -j 2 `}<span className="output">{"# target/release/deadbolt"}</span></pre>
         <p className="dim">the cli tests run real daemons for several devices on localhost, with <code>DEADBOLT_NET=local</code> and a fast kdf.</p>
 
         <h3>rough edges</h3>
         <ul className="plain">
           <li>the readme still says "no code yet", and there's no install section, ci or release workflow.</li>
-          <li>no recovery: lose every device, lose the vault. a paper "recovery device" is designed for later.</li>
-          <li>no compaction: history, including deleted items, grows forever on every device.</li>
+          <li>a desktop keeps every version of every item locally; checkpoints and remote gc only compact a remote store's old frames.</li>
           <li>importing the same bitwarden export twice imports everything twice.</li>
-          <li>the os keychain unlock (biometrics instead of the passphrase) is designed but not built.</li>
           <li><code>deadbolt debug daemon stop</code> followed straight away by another command could fail with "the daemon is already running". fixed locally in <Src path="crates/cli/src/client.rs" />, not yet in main.</li>
         </ul>
 
@@ -158,7 +156,6 @@ $ cargo build --release -j 2 `}<span className="output">{"# target/release/deadb
           <li>fix the readme and add install instructions.</li>
           <li>add ci: fmt, clippy and the test suite.</li>
           <li>dedicated tests for the membership gate, as the design asks.</li>
-          <li>the keychain unlock slot in <code>deadbolt-store</code>.</li>
           <li>the convenience commands the design defers: picker, history, totp codes, clipboard, json output.</li>
         </ol>
       </section>

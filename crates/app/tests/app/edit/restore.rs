@@ -45,7 +45,7 @@ fn trash_asks(r: &Rig) -> Vec<(u64, Option<String>)> {
 /// ⇧⌘⌫, answered with `listing`.
 fn open(r: &mut Rig) {
     r.press(Key::Backspace, shift_cmd());
-    assert!(r.rt.state.trash.open, "⇧⌘⌫ opens Recently Deleted");
+    assert!(r.rt.state.trash_open(), "⇧⌘⌫ opens Recently Deleted");
     let asks = trash_asks(r);
     assert_eq!(asks.len(), 1, "{asks:?}");
     let (seq, restore) = asks[0].clone();
@@ -65,16 +65,19 @@ fn recently_deleted_opens_from_its_shortcut_and_actions_and_esc_leaves() {
     assert!(!r.rt.state.search.focused, "the page has the keys");
 
     r.tap(Key::Escape);
-    assert!(!r.rt.state.trash.open, "esc leaves");
+    assert!(!r.rt.state.trash_open(), "esc leaves");
     assert!(r.rt.state.search.focused, "the keys go back to the search");
 
     r.command('k');
     r.press(Key::Backspace, shift_cmd());
-    assert!(r.rt.state.trash.open, "⌘K's Recently deleted opens it too");
+    assert!(
+        r.rt.state.trash_open(),
+        "⌘K's Recently deleted opens it too"
+    );
     assert!(r.rt.state.nav.palette.is_none());
 
     r.press(Key::Backspace, shift_cmd());
-    assert!(!r.rt.state.trash.open, "⇧⌘⌫ again closes it");
+    assert!(!r.rt.state.trash_open(), "⇧⌘⌫ again closes it");
 }
 
 #[test]
@@ -133,7 +136,7 @@ fn a_deleted_item_opens_read_only_and_restores_into_the_vault() {
         )),
     });
     assert!(r.rt.state.trash.shown.is_none(), "back to the list");
-    assert!(r.rt.state.trash.open, "still in Recently Deleted");
+    assert!(r.rt.state.trash_open(), "still in Recently Deleted");
     assert_eq!(r.rt.state.trash.items.len(), 1, "it leaves the list");
     assert!(r.shows("Restored Spare key. It's back in the vault on every device."));
     assert!(
@@ -186,7 +189,7 @@ fn locking_closes_recently_deleted_and_wipes_the_open_item() {
     assert!(r.rt.state.trash.shown.is_some());
     r.command('l');
     r.reply(Done::Locked(Ok(())));
-    assert!(!r.rt.state.trash.open);
+    assert!(!r.rt.state.trash_open());
     assert!(r.rt.state.trash.shown.is_none());
     assert!(r.rt.state.trash.items.is_empty());
 }

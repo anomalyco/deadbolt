@@ -1,5 +1,5 @@
 //! Service resolution and candidate ranking for the macOS AutoFill picker
-//! (`AutofillList`, `docs/macos-autofill.md`).
+//! (`AutofillList`, `docs/autofill.md`).
 
 use std::cmp::Reverse;
 use std::collections::HashMap;

@@ -6,7 +6,7 @@
 use deadbolt_proto::daemon::FieldInfo;
 use rune::{Key, KeyEvent, Tx};
 
-use crate::model::{App, Screen, is_secret};
+use crate::model::{App, Screen, VaultPane, is_secret};
 
 /// Every shortcut, as the ? sheet and Settings list them.
 pub const SHORTCUTS: &[(&[&str], &str)] = &[
@@ -133,7 +133,7 @@ impl App {
             return (!chord(ev, 'l')).then_some(true);
         }
         if chord(ev, ',') {
-            if self.settings_open {
+            if self.settings_open() {
                 self.close_settings();
                 self.search.focused = true;
             } else {
@@ -150,11 +150,11 @@ impl App {
             self.toggle_security();
             return Some(true);
         }
-        if self.settings_open || self.trash.open {
+        if matches!(self.pane, VaultPane::Settings | VaultPane::Trash) {
             return None;
         }
         // The form and the import view have keys of their own.
-        let free = !self.editing() && !self.import.showing() && !self.drop_hovering();
+        let free = !self.editing() && !self.import_showing() && !self.drop_hovering();
         if !free || self.edit.delete.is_some() {
             return None;
         }
@@ -376,10 +376,8 @@ impl App {
             return;
         }
         self.cancel_delete();
-        self.close_security();
         self.import.hover = false;
-        self.trash.forget();
-        self.settings_open = true;
+        self.set_pane(VaultPane::Settings);
         self.nav = Nav::default();
         self.search.focused = false;
     }
@@ -418,8 +416,8 @@ impl App {
         if self.screen != Screen::Vault || self.panel.is_some() {
             return None;
         }
-        let installing = self.installing();
-        if !self.settings_open && !installing && !self.trash.open && !self.security_open() {
+        let pane = self.pane;
+        if matches!(pane, VaultPane::Item | VaultPane::Import) {
             return None;
         }
         // Import Passwords… leaves either for the import view, as the menu
@@ -431,21 +429,14 @@ impl App {
         if chord(ev, 'l') && !self.hotkey.recorder.is_recording() {
             return None;
         }
-        if self.settings_open {
-            return Some(self.settings_key(ev, tx));
-        }
-        if self.trash.open {
-            return Some(self.trash_key(ev, tx));
-        }
-        if self.security_open() {
-            return Some(self.security_key(ev, tx));
+        match pane {
+            VaultPane::Settings => return Some(self.settings_key(ev, tx)),
+            VaultPane::Trash => return Some(self.trash_key(ev, tx)),
+            VaultPane::Security => return Some(self.security_key(ev, tx)),
+            VaultPane::Install | VaultPane::Item | VaultPane::Import => {}
         }
         match ev.key {
-            Key::Escape => {
-                if let Some(installer) = &mut self.installer {
-                    installer.close();
-                }
-            }
+            Key::Escape => self.close_installer(),
             Key::Tab => return Some(false),
             _ => {}
         }

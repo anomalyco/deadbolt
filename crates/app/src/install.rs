@@ -252,8 +252,6 @@ struct Live {
 }
 
 pub struct Installer {
-    /// The install page is showing, in place of the vault.
-    pub open: bool,
     /// The vault's one-time offer was answered; remembered across launches.
     pub offered: bool,
     pub source: PathBuf,
@@ -289,7 +287,6 @@ impl Installer {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let search = binary::search_dirs(&path, Some(&home));
         let mut state = Self {
-            open: false,
             offered: marker.exists(),
             source,
             scan: None,
@@ -312,7 +309,6 @@ impl Installer {
     /// For scenes and tests: a fresh Mac with nothing installed, never touching disk.
     pub fn fixture() -> Self {
         Self {
-            open: false,
             offered: false,
             source: "/Applications/Deadbolt.app/Contents/Helpers/deadbolt".into(),
             scan: Some(Scan {
@@ -344,7 +340,6 @@ impl Installer {
     /// nothing else already provides it.
     pub fn offering(&self) -> bool {
         !self.offered
-            && !self.open
             && self
                 .scan
                 .as_ref()
@@ -446,17 +441,11 @@ impl Installer {
             .is_some_and(|(c, at)| c == which && at.is_none_or(|at| now - at < COPIED_FOR))
     }
 
-    /// Opens the install page with a fresh scan, answering the vault's offer.
+    /// The install page opened (`App::show_installer`): a fresh scan,
+    /// answering the vault's offer.
     pub fn show(&mut self) {
-        self.open = true;
         self.answer();
         self.refresh();
-    }
-
-    /// Leaves the install page.
-    pub fn close(&mut self) {
-        self.open = false;
-        self.answer();
     }
 
     /// "Not now" on the vault's offer.
@@ -522,10 +511,19 @@ impl crate::model::App {
     /// Opens the install page over the vault. It takes no drops, so a drag in
     /// progress is forgotten: the window won't hear when it ends.
     pub fn show_installer(&mut self) {
+        if self.installer.is_none() {
+            return;
+        }
+        self.import.hover = false;
+        self.set_pane(crate::model::VaultPane::Install);
         if let Some(i) = &mut self.installer {
-            self.import.hover = false;
             i.show();
         }
+    }
+
+    /// Leaves the install page for the vault.
+    pub fn close_installer(&mut self) {
+        self.close_pane(crate::model::VaultPane::Install);
     }
 }
 
@@ -709,10 +707,8 @@ mod tests {
         state.offered = false;
         state.show();
         assert!(state.offered, "opening the page answers the offer");
-        assert!(!state.offering(), "not while the page is open");
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
-        state.close();
         assert!(!state.offering());
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
     }
 
     #[test]
@@ -724,7 +720,6 @@ mod tests {
         let post = inbox.poster();
         let destination = home.path().join(".local/bin/deadbolt");
         let mut state = Installer {
-            open: true,
             offered: false,
             source,
             scan: None,

@@ -12,7 +12,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
 use crate::daemon::{Done, Failure, Job, Values};
 use crate::keys::{chord, plain, step};
-use crate::model::{App, Screen, field_words, title_case};
+use crate::model::{App, Screen, VaultPane, field_words, title_case};
 use crate::view::theme::{FACT, PAGE_W, TITLE, kind_icon, kind_name};
 use crate::view::{LIST_EDGE, hint, item_fields, masked_secret, scroll_col};
 
@@ -22,7 +22,6 @@ pub type Listing = (Option<ItemInfo>, Vec<ItemInfo>);
 
 #[derive(Default)]
 pub struct Trash {
-    pub open: bool,
     pub loading: bool,
     /// The deleted items, newest first, without their values.
     pub items: Vec<ItemInfo>,
@@ -44,7 +43,7 @@ pub struct Trash {
 }
 
 impl Trash {
-    /// Closes the page, wipes what it showed, and drops replies on their way.
+    /// Wipes what the page showed, and drops replies on their way.
     pub(crate) fn forget(&mut self) {
         self.set_shown(None);
         let mut fresh = Trash::default();
@@ -100,12 +99,8 @@ impl App {
         }
         self.cancel_delete();
         self.import.hover = false;
-        if self.settings_open {
-            self.close_settings();
-        }
-        self.close_security();
+        self.set_pane(VaultPane::Trash);
         self.trash.forget();
-        self.trash.open = true;
         self.nav = crate::keys::Nav::default();
         self.search.focused = false;
         self.load_trash(None);
@@ -113,12 +108,13 @@ impl App {
 
     /// Closes Recently Deleted, the keys back in the search.
     pub fn close_trash(&mut self) {
+        self.close_pane(VaultPane::Trash);
         self.trash.forget();
         self.search.focused = true;
     }
 
     pub fn toggle_trash(&mut self) {
-        if self.trash.open {
+        if self.trash_open() {
             self.close_trash();
         } else {
             self.open_trash();
@@ -137,7 +133,7 @@ impl App {
     /// The vault's items changed (here or on another device): an open page
     /// asks again.
     pub(crate) fn on_trash_changed(&mut self) {
-        if self.trash.open && self.trash.restoring.is_none() {
+        if self.trash_open() && self.trash.restoring.is_none() {
             self.load_trash(None);
         }
     }
@@ -173,7 +169,7 @@ impl App {
     }
 
     pub(crate) fn on_trash(&mut self, seq: u64, result: Result<Listing, Failure>, tx: &mut Tx) {
-        if !self.trash.open || seq != self.trash.seq {
+        if !self.trash_open() || seq != self.trash.seq {
             return;
         }
         self.trash.loading = false;
@@ -225,7 +221,7 @@ impl App {
     }
 
     pub(crate) fn on_trash_item(&mut self, seq: u64, result: Result<Values, Failure>, tx: &mut Tx) {
-        if !self.trash.open || seq != self.trash.item_seq {
+        if !self.trash_open() || seq != self.trash.item_seq {
             return;
         }
         self.trash.opening = None;

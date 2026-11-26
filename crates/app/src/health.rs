@@ -12,7 +12,7 @@ use rune::{Key, KeyEvent, Tx};
 
 use crate::daemon::{Done, Failure, Job};
 use crate::keys::{plain, step};
-use crate::model::{App, Screen};
+use crate::model::{App, Screen, VaultPane};
 
 /// Category tabs in the Security view (`1`–`6`, plus `7` when items have
 /// ignored findings).
@@ -89,7 +89,6 @@ pub struct RowEntry<'a> {
 
 #[derive(Default)]
 pub struct Health {
-    pub open: bool,
     pub tab: Tab,
     pub row: usize,
     pub report: Option<HealthReport>,
@@ -196,10 +195,6 @@ pub fn is_shortcut(ev: &KeyEvent) -> bool {
 }
 
 impl App {
-    pub fn security_open(&self) -> bool {
-        self.health.open
-    }
-
     pub fn open_security(&mut self) {
         if self.screen != Screen::Vault
             || self.panel.is_some()
@@ -211,9 +206,7 @@ impl App {
         }
         self.cancel_delete();
         self.cancel_import();
-        self.close_settings();
-        self.trash.forget();
-        self.health.open = true;
+        self.set_pane(VaultPane::Security);
         self.health.error = None;
         self.nav = crate::keys::Nav::default();
         self.search.focused = false;
@@ -223,13 +216,11 @@ impl App {
     }
 
     pub fn close_security(&mut self) {
-        self.health.open = false;
-        self.health.row = 0;
-        self.health.error = None;
+        self.close_pane(VaultPane::Security);
     }
 
     pub fn toggle_security(&mut self) {
-        if self.health.open {
+        if self.security_open() {
             self.close_security();
             self.search.focused = true;
         } else {

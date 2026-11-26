@@ -5,6 +5,7 @@
 mod copy;
 mod favorite;
 mod otp;
+mod pane;
 mod selection;
 mod unlock;
 
@@ -14,6 +15,7 @@ mod tests;
 pub use copy::{BAR_W, CLEAR_AFTER, Copy};
 pub use favorite::{sort_items, tag_token};
 pub use otp::{CODE_BAR, CODE_SLACK, Otp, group_code, has_code};
+pub use pane::VaultPane;
 pub use selection::HOLD;
 
 use deadbolt_proto::daemon::{Change, FieldInfo, ItemInfo, Status, code_field};
@@ -36,8 +38,9 @@ pub enum Screen {
 
 pub struct App {
     pub installer: Option<crate::install::Installer>,
-    /// Settings shows in the item's place (⌘,).
-    pub settings_open: bool,
+    /// What shows in the item's place: the item, Settings, Recently
+    /// Deleted, Security, the install page or the import view.
+    pub pane: VaultPane,
     /// Where the keys are past the search: a field, ⌘K's actions, the ? sheet.
     pub nav: crate::keys::Nav,
     /// The quick panel's global shortcut (the main window's).
@@ -120,7 +123,7 @@ impl App {
     pub fn new(daemon: Daemon) -> App {
         App {
             installer: None,
-            settings_open: false,
+            pane: VaultPane::Item,
             nav: crate::keys::Nav::default(),
             hotkey: crate::shortcut::Hotkey::default(),
             shortcut_fallback: true,
@@ -200,17 +203,9 @@ impl App {
                 changed = true;
             }
         }
-        // The install page, Settings, Recently Deleted and Security belong to
-        // the vault; leaving it closes them.
-        if self.screen != Screen::Vault
-            && (self.installing() || self.settings_open || self.trash.open || self.security_open())
-        {
-            if let Some(installer) = &mut self.installer {
-                installer.open = false;
-            }
-            self.close_settings();
-            self.trash.forget();
-            self.close_security();
+        // Every pane belongs to the vault; leaving it closes them.
+        if self.screen != Screen::Vault && self.pane != VaultPane::Item {
+            self.set_pane(VaultPane::Item);
             changed = true;
         }
         changed |= self.poll_panel(now, tx);
@@ -512,6 +507,8 @@ impl App {
     /// The store is locked: drop everything read from it.
     pub(crate) fn on_locked(&mut self, tx: &mut Tx) {
         self.forget_vault(tx);
+        // A recovery kit still showing goes with the rest.
+        self.forget_onboarding();
         if let Some(status) = &mut self.status {
             status.unlocked = false;
             if !status.touch_id_enabled || status.touch_id_reset {
@@ -565,6 +562,7 @@ impl App {
         self.notice = None;
         self.forget_import();
         self.forget_edit();
+        self.set_pane(VaultPane::Item);
         self.activity.forget();
         self.trash.forget();
         self.health.forget();
@@ -596,19 +594,9 @@ impl App {
         }
     }
 
-    /// The install page is showing in place of the vault.
-    pub fn installing(&self) -> bool {
-        self.screen == Screen::Vault && self.installer.as_ref().is_some_and(|i| i.open)
-    }
-
     /// Closes Settings; a recording in it is cancelled.
     pub fn close_settings(&mut self) {
-        self.settings_open = false;
-        self.nav.row = 0;
-        self.hotkey.recorder.cancel();
-        self.hotkey.reset_error = None;
-        self.touch_id_error = None;
-        self.activity.forget();
+        self.close_pane(VaultPane::Settings);
     }
 }
 

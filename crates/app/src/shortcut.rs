@@ -429,7 +429,7 @@ impl App {
             return;
         }
         self.open_settings();
-        if self.settings_open {
+        if self.settings_open() {
             self.nav.row = crate::settings::rows(self)
                 .iter()
                 .position(|r| *r == crate::settings::Row::Shortcut)

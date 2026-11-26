@@ -1,5 +1,6 @@
 //! Pure form state, item field schema, change diffing and daemon refusal parsing.
 
+use deadbolt_core::item::SchemaField;
 use deadbolt_core::tag::fold_tag;
 use deadbolt_proto::daemon::{FieldInfo, FieldInput, ItemInfo};
 use rune::TextEdit;
@@ -15,174 +16,44 @@ pub fn editable(kind: &str) -> bool {
     kind != "passkey"
 }
 
-/// A built-in item type's fields: name, field type, required, spans lines.
-/// The daemon's schema (`deadbolt_core::item`) is the authority; this is the
-/// form's layout.
-fn schema(kind: &str) -> &'static [(&'static str, &'static str, bool, bool)] {
-    match kind {
-        "login" => &[
-            ("username", "text", false, false),
-            ("password", "secret", false, false),
-            ("url", "url", false, false),
-            ("otp", "otp", false, false),
-            ("notes", "note", false, true),
-        ],
-        "card" => &[
-            ("cardholder", "text", false, false),
-            ("number", "secret", true, false),
-            ("expiry", "month", false, false),
-            ("cvv", "secret", false, false),
-            ("pin", "secret", false, false),
-            ("brand", "text", false, false),
-            ("notes", "note", false, true),
-        ],
-        "note" => &[("notes", "secret", false, true)],
-        "ssh" => &[
-            ("private-key", "secret", true, true),
-            ("public-key", "text", false, false),
-            ("fingerprint", "text", false, false),
-            ("passphrase", "secret", false, false),
-            ("comment", "text", false, false),
-            ("notes", "note", false, true),
-        ],
-        "identity" => &[
-            ("honorific", "text", false, false),
-            ("given-name", "text", false, false),
-            ("additional-name", "text", false, false),
-            ("family-name", "text", false, false),
-            ("nickname", "text", false, false),
-            ("organization", "text", false, false),
-            ("job-title", "text", false, false),
-            ("email", "email", false, false),
-            ("phone", "text", false, false),
-            ("address-line1", "text", false, false),
-            ("address-line2", "text", false, false),
-            ("address-line3", "text", false, false),
-            ("city", "text", false, false),
-            ("region", "text", false, false),
-            ("postal-code", "text", false, false),
-            ("country", "text", false, false),
-            ("birthday", "date", false, false),
-            ("national-id", "secret", false, false),
-            ("passport", "secret", false, false),
-            ("license", "secret", false, false),
-            ("notes", "note", false, true),
-        ],
-        "api" => &[
-            ("credential", "secret", true, false),
-            ("username", "text", false, false),
-            ("type", "text", false, false),
-            ("url", "url", false, false),
-            ("host", "text", false, false),
-            ("environment", "text", false, false),
-            ("expires", "date", false, false),
-            ("notes", "note", false, true),
-        ],
-        "database" => &[
-            ("type", "text", false, false),
-            ("host", "text", false, false),
-            ("port", "text", false, false),
-            ("database", "text", false, false),
-            ("username", "text", false, false),
-            ("password", "secret", false, false),
-            ("connection-string", "secret", false, false),
-            ("notes", "note", false, true),
-        ],
-        "server" => &[
-            ("url", "url", false, false),
-            ("username", "text", false, false),
-            ("password", "secret", false, false),
-            ("admin-console", "url", false, false),
-            ("notes", "note", false, true),
-        ],
-        "wifi" => &[
-            ("ssid", "text", false, false),
-            ("password", "secret", false, false),
-            ("security", "text", false, false),
-            ("notes", "note", false, true),
-        ],
-        "license" => &[
-            ("product", "text", false, false),
-            ("version", "text", false, false),
-            ("license-key", "secret", false, true),
-            ("licensed-to", "text", false, false),
-            ("email", "email", false, false),
-            ("order-number", "text", false, false),
-            ("purchased", "date", false, false),
-            ("expires", "date", false, false),
-            ("notes", "note", false, true),
-        ],
-        "bank" => &[
-            ("bank", "text", false, false),
-            ("account-holder", "text", false, false),
-            ("account-number", "secret", false, false),
-            ("routing-number", "text", false, false),
-            ("iban", "secret", false, false),
-            ("swift", "text", false, false),
-            ("pin", "secret", false, false),
-            ("notes", "note", false, true),
-        ],
-        "document" => &[
-            ("file", "file", true, false),
-            ("notes", "note", false, true),
-        ],
-        "passport" => &[
-            ("full-name", "text", false, false),
-            ("number", "secret", false, false),
-            ("type", "text", false, false),
-            ("issuing-country", "text", false, false),
-            ("issuing-authority", "text", false, false),
-            ("nationality", "text", false, false),
-            ("sex", "text", false, false),
-            ("birthday", "date", false, false),
-            ("birthplace", "text", false, false),
-            ("issued", "date", false, false),
-            ("expires", "date", false, false),
-            ("notes", "note", false, true),
-        ],
-        "driver-license" => &[
-            ("full-name", "text", false, false),
-            ("number", "secret", false, false),
-            ("class", "text", false, false),
-            ("conditions", "text", false, false),
-            ("state", "text", false, false),
-            ("country", "text", false, false),
-            ("address", "note", false, true),
-            ("birthday", "date", false, false),
-            ("sex", "text", false, false),
-            ("height", "text", false, false),
-            ("expires", "month", false, false),
-            ("notes", "note", false, true),
-        ],
-        "membership" => &[
-            ("organization", "text", false, false),
-            ("member-name", "text", false, false),
-            ("member-id", "secret", false, false),
-            ("pin", "secret", false, false),
-            ("url", "url", false, false),
-            ("phone", "text", false, false),
-            ("member-since", "month", false, false),
-            ("expires", "month", false, false),
-            ("notes", "note", false, true),
-        ],
-        "crypto" => &[
-            ("recovery-phrase", "secret", false, true),
-            ("password", "secret", false, false),
-            ("address", "text", false, false),
-            ("network", "text", false, false),
-            ("notes", "note", false, true),
-        ],
-        "id-document" => &[
-            ("full-name", "text", false, false),
-            ("number", "secret", false, false),
-            ("type", "text", false, false),
-            ("country", "text", false, false),
-            ("issued", "date", false, false),
-            ("expires", "date", false, false),
-            ("notes", "note", false, true),
-        ],
-        _ => &[],
-    }
+/// Fields the form leaves out: a login's sign-in provider and the login it
+/// signs in with, and a card's billing identity, which link to other items
+/// by id and have no picker here yet. The form neither shows nor sends them,
+/// so an edit leaves an item's values for them as they are, and saving an
+/// item deleted meanwhile as new carries them over (`Form::changes`).
+pub const LINKS: &[(&str, &str)] = &[
+    ("login", "sign-in-with"),
+    ("login", "sign-in-account"),
+    ("card", "billing"),
+];
+
+/// Fields a kind's form puts first, ahead of the schema's order: a login
+/// asks for its username before its password, a card for its holder.
+const FIRST: &[(&str, &[&str])] = &[("login", &["username"]), ("card", &["cardholder"])];
+
+fn linked(kind: &str, field: &str) -> bool {
+    LINKS.iter().any(|&(k, f)| k == kind && f == field)
+}
+
+/// A built-in item type's fields as the form lays them out. The daemon's
+/// schema (`deadbolt_core::item`) says each one's type, whether it's
+/// required and whether it spans lines; the form only reorders (`FIRST`)
+/// and leaves out links (`LINKS`). A passkey has none: it isn't edited here.
+fn schema(kind: &str) -> impl Iterator<Item = &'static SchemaField> + '_ {
+    let all = deadbolt_core::item::schema(kind)
+        .filter(|_| editable(kind))
+        .map_or(&[][..], |s| s.fields);
+    let first = FIRST
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map_or(&[][..], |(_, f)| *f);
+    let lead = first
+        .iter()
+        .filter_map(move |name| all.iter().find(|f| f.name == *name));
+    let rest = all
+        .iter()
+        .filter(move |f| !first.contains(&f.name) && !linked(kind, f.name));
+    lead.chain(rest)
 }
 
 pub struct Form {
@@ -419,23 +290,28 @@ impl Changes {
 impl Form {
     pub(super) fn new(kind: &str, name: &str, item: Option<&ItemInfo>) -> Form {
         let mut fields: Vec<Input> = schema(kind)
-            .iter()
-            .map(|&(field, ty, required, lines)| {
+            .map(|spec| {
                 let saved = item
-                    .and_then(|i| i.fields.iter().find(|f| f.name == field))
+                    .and_then(|i| i.fields.iter().find(|f| f.name == spec.name))
                     .map(|f| f.value.as_str());
-                Input::from_item(field, ty, required, lines, saved)
+                Input::from_item(
+                    spec.name,
+                    spec.kind.as_str(),
+                    spec.required,
+                    spec.multiline,
+                    saved,
+                )
             })
             .collect();
         // Fields the schema doesn't know (an import's extras, or a type this
-        // build doesn't know) follow, as they are.
+        // build doesn't know) follow, as they are; links stay out of sight.
         for FieldInfo {
             name: field,
             kind: ty,
             value,
         } in item.map_or(&[][..], |i| &i.fields[..])
         {
-            if !fields.iter().any(|f| &f.name == field) {
+            if !linked(kind, field) && !fields.iter().any(|f| &f.name == field) {
                 let lines = ty == "note" || (ty != "file" && value.contains('\n'));
                 fields.push(Input::from_item(field, ty, false, lines, Some(value)));
             }
@@ -518,6 +394,18 @@ impl Form {
                 (None, Some(_)) if input.held => {}
                 (None, Some(_)) => changes.unset.push(input.name.clone()),
                 (None, None) => {}
+            }
+        }
+        // An edit leaves the links alone; a save as new carries them over.
+        if self.saves_over().is_none()
+            && let Some(base) = &self.base
+        {
+            for f in base.0.fields.iter().filter(|f| linked(&self.kind, &f.name)) {
+                changes.set.push(FieldInput {
+                    name: f.name.clone(),
+                    kind: Some(f.kind.clone()),
+                    value: f.value.clone(),
+                });
             }
         }
         let name = self.name.text.trim();
@@ -753,6 +641,78 @@ mod tests {
         assert_eq!(masked, ["number", "cvv", "pin"]);
         assert!(form.generates().is_none());
         assert!(Form::new("login", "", None).generates().is_some());
+    }
+
+    /// Every field of every built-in type is in its form or one of `LINKS`
+    /// (a passkey, not edited here, has none), so the app's form and the
+    /// daemon's schema can't drift apart.
+    #[test]
+    fn every_schema_field_is_in_its_form_or_left_out_on_purpose() {
+        for spec in deadbolt_core::item::schemas() {
+            let form = Form::new(spec.kind, "", None);
+            if !editable(spec.kind) {
+                assert!(form.fields.is_empty(), "{}", spec.kind);
+                continue;
+            }
+            for field in spec.fields {
+                let input = form.fields.iter().find(|f| f.name == field.name);
+                match input {
+                    Some(input) => {
+                        assert!(!linked(spec.kind, field.name), "{}", field.name);
+                        assert_eq!(input.kind, field.kind.as_str(), "{}", field.name);
+                        assert_eq!(input.required, field.required, "{}", field.name);
+                        assert_eq!(input.lines, field.multiline, "{}", field.name);
+                        assert_eq!(input.secret(), field.kind.is_secret(), "{}", field.name);
+                    }
+                    None => assert!(
+                        linked(spec.kind, field.name),
+                        "{}.{} is missing from the form",
+                        spec.kind,
+                        field.name
+                    ),
+                }
+            }
+            assert_eq!(
+                form.fields.len() + LINKS.iter().filter(|(k, _)| *k == spec.kind).count(),
+                spec.fields.len(),
+                "{} has fields the schema doesn't",
+                spec.kind
+            );
+        }
+        for &(kind, field) in LINKS {
+            let schema = deadbolt_core::item::schema(kind).unwrap();
+            assert!(schema.field(field).is_some(), "{kind}.{field} is gone");
+        }
+        let names = |kind| -> Vec<String> {
+            Form::new(kind, "", None)
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect()
+        };
+        assert_eq!(names("card")[..2], ["cardholder", "number"]);
+    }
+
+    /// The links a form leaves out stay on an edit and travel with a save
+    /// as new.
+    #[test]
+    fn links_are_kept_but_not_shown() {
+        let login = item(&[
+            ("password", "secret", "pw-1"),
+            ("sign-in-with", "text", "google"),
+            ("sign-in-account", "text", "0a1b2c3d"),
+        ]);
+        let mut form = Form::new("login", &login.label, Some(&login));
+        assert!(form.fields.iter().all(|f| !f.name.starts_with("sign-in")));
+        set(&mut form, "password", "pw-2");
+        let c = form.changes().unwrap();
+        assert!(c.unset.is_empty());
+        assert!(c.set.iter().all(|f| !f.name.starts_with("sign-in")));
+
+        form.conflict = Some(Conflict::Deleted);
+        let c = form.changes().unwrap();
+        let sent: Vec<&str> = c.set.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(sent, ["password", "sign-in-with", "sign-in-account"]);
     }
 
     #[test]

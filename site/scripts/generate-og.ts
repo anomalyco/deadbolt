@@ -370,7 +370,7 @@ html, body {
       <text x="252" y="54" text-anchor="end" fill="#ff2a2a" font-family="IBM Plex Mono, monospace" font-size="14">ed25519</text>
       <line x1="26" y1="71" x2="252" y2="71" stroke="#262626" stroke-dasharray="2 4" />
       <text x="26" y="98" fill="#a8a39a" font-family="IBM Plex Mono, monospace" font-size="14">signed log  #01 → #02</text>
-      <text x="26" y="123" fill="#706d66" font-family="IBM Plex Mono, monospace" font-size="13">local redb · argon2id</text>
+      <text x="26" y="123" fill="#706d66" font-family="IBM Plex Mono, monospace" font-size="13">dbf2 packs · argon2id</text>
 
       <!-- Wire 1 -->
       <line x1="277" y1="80" x2="358" y2="80" stroke="#383838" stroke-width="1.5" />

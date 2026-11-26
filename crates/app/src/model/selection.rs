@@ -421,10 +421,10 @@ impl App {
             return;
         }
         self.sidebar.set_open(true);
-        if self.import.showing() && !self.items.is_empty() {
+        if self.import_showing() && !self.items.is_empty() {
             self.cancel_import();
         }
-        if !self.import.showing() {
+        if !self.import_showing() {
             self.keep_selection_visible();
         }
     }

@@ -5,7 +5,7 @@ description: Use the Deadbolt local-first password manager CLI safely from scrip
 
 # Deadbolt CLI Reference
 
-Deadbolt is a local-first, decentralized password manager written in Rust. Each device keeps its own encrypted store (`redb`, Argon2id + XChaCha20-Poly1305) and syncs directly with your other devices over [iroh](https://www.iroh.computer), end-to-end encrypted, with no accounts and no Deadbolt servers.
+Deadbolt is a local-first, decentralized password manager written in Rust. Each device keeps its own encrypted copy of every vault (signed `DBF2` frames in append-only `deadbolt-pack` files that are never renamed or overwritten, unlocked with Argon2id and sealed with XChaCha20-Poly1305), has a 24-word recovery kit per vault, and syncs directly with your other devices over [iroh](https://www.iroh.computer), end-to-end encrypted, with no accounts and no Deadbolt servers.
 
 > Status: alpha. Every push to `dev` ships a build; stable releases are not yet published.
 
