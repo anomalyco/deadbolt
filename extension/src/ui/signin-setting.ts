@@ -1,5 +1,5 @@
-// Settings' "Offer to sign in": shared by the standalone Settings and the
-// native popup's settings, so either build can turn it off.
+// Settings' "Offer to sign in": lets the popup's settings turn sign-in offers
+// on or off.
 
 import { SIGNIN_SETTING, signInOn } from "../auth-state"
 import { h } from "./dom"

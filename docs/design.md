@@ -1,45 +1,63 @@
-# Deadbolt v1 — simplified design
+# Deadbolt v2 — design
 
-2026-10-15. Supersedes `history/04-proposal-v0.md` and `history/04b-revision-no-infra.md` for v1. Constraints for v1: iroh device-to-device only (n0 relays are fine), no mailbox in v1 (but don't preclude it), no recovery — lose every device, lose the vault.
+Deadbolt is a local-first password manager in Rust with signed `DBF2` frames, epoch-encrypted vault data, a `class = 0` 24-word recovery root, crash-safe append-only on-disk storage (`deadbolt-pack`), direct iroh sync plus optional blind HTTP remote sync (`deadbolt-remote`), process-level capability and taint isolation (`CapTable`, `TaintTable`, `deadbolt broker`, `deadbolt mcp`), and a zero-KDF read-only pack viewer (`deadbolt-viewer`) for mobile AutoFill extensions.
 
-## Keys (two)
-1. **Device key** (Ed25519, one per device). Is the iroh EndpointId *and* signs everything the device writes. Stored encrypted under (2).
-   - Why not separate transport/signing keys: neither can live in Secure Enclave/TPM (P-256 only), both must be in RAM while the app runs, so separating them adds a key without adding protection.
-2. **Local unlock key** (per device). Argon2id(passphrase); optionally also wrapped by a hardware-bound Secure Enclave key behind Touch ID (`docs/touch-id.md`, device-only, never synced) for day-to-day unlock. Encrypts the device key and the local database.
+## Keys
+1. **Device seed & derived device keys** (`crates/core/src/v2/crypto.rs`). Each device generates a 32-byte seed from which domain-separated BLAKE3 KDFs derive three distinct keys:
+   - `D_sign` (Ed25519): signs `DBF2` frames and join/recovery consents.
+   - `D_kem` (X25519): receives wrapped epoch keys (`X25519Wrap`) and sealed `outbox/` saves from mobile viewers.
+   - `D_net` (Ed25519, distinct from `D_sign`): authenticates the device's iroh transport endpoint.
+2. **Local device root & unlock slots** (`crates/cli/src/disk.rs`). A random 256-bit device root seals `device/local-<m>.sealed` (holding the device seed and per-vault rollback anchors), each vault's `v/<vault>/local-<m>.sealed`, and `device/activity-<k>.log`. The device root is wrapped under Argon2id(passphrase) in the local state header and optionally also in `device/biometric.slot` behind a macOS Secure Enclave key (`docs/touch-id.md`, device-only, never synced). While unlocked, the root and seed live in `deadbolt_os::mem::LockedSecret` pages locked in RAM and zeroized on drop.
+3. **24-word recovery root (`class = 0`).** Each vault has a 256-bit BIP-39 recovery kit (`RecoverySecret`) whose derived Ed25519/X25519 keys sit at `class = 0`, outranking ordinary devices (`class = 1`). Every clean-tip epoch wraps its epoch key to the current recovery root so a user who loses every device can recover the vault and mint a fresh lineage, and `RotateRecovery` lets active devices rotate the recovery root with consent.
 
-No shared vault key in v1. Data only ever moves over iroh connections (end-to-end encrypted, authenticated to device keys) between current members, and at rest it is under each device's local unlock key. Re-keying on removal would protect nothing extra: a removed device can only receive data from a member that hasn't learned of the removal, and that member would still be on the old key too.
+## Signed `DBF2` frames, `X25519Wrap` clean-tip epochs, and back-links
+- Every vault event is a canonical, Ed25519-signed `DBF2` frame (`crates/core/src/v2/frame.rs`) split across two logs: plaintext-signed `Member` frames (`members.log`) and epoch-encrypted `Data` / `Checkpoint` frames (`wal-<n>.log`).
+- **Epoch encryption & `X25519Wrap`:** `Data` bodies are Padmé-padded (`PADME_FLOOR = 256`) and XChaCha20-Poly1305-sealed under `K_data(e)`, derived from an `EpochKey` `K_e` (`SUITE_X25519_WRAP`, with `SUITE_XWING_RESERVED` reserved for future hybrid PQ). Each `Rotate` or `Create` mints a fresh epoch, commits to `K_e` via `commit = KDF("epoch commit", ...)`, and wraps `K_e` to every current member's `D_kem` and the recovery root.
+- **Clean-tip epochs & back-links:** removing a device triggers a clean-tip epoch rotation so future writes are cryptographically unreadable to the removed device even over an untrusted store or relay. Each rotation seals encrypted back-links (`K_back(e)`) to predecessor epoch keys so authorized members and newly joined devices can decrypt historical frames without re-encrypting the log; `Rewrap` frames deliver keys to devices that need them.
+- **Equivocation & causal ordering:** `FraudProof` detects a device signing two distinct frames at the same `(author, seq)`. Data frames carry delta clocks (`DeltaClock`) and fold deterministically (`crates/core/src/v2/fold.rs`) in any arrival order without wall-clock timestamps.
 
-Accepted cost: removal rests entirely on the membership check (no ciphertext fallback if that check has a bug), and adding a mailbox later means introducing a vault key + re-keying then, which changes the entry format.
+## Membership & recovery-lineage resolver
+- Signed `Member` ops (`Create`, `Add` with join consent, `Remove`, `Rotate`, `Rewrap`, `RotateRecovery`) form a causal DAG resolved by `crates/core/src/v2/membership.rs`.
+- The `class = 0` recovery root outranks ordinary devices in conflict resolution; among ordinary devices, seniority and recovery-lineage rules resolve mutual removals deterministically. Removed keys can never be re-added.
+- `check_parking` parks local writes when the device detects unresolved epochs, missing keys (`Error::AwaitingKeys`), or verified fraud, preventing silent forks until reconciled.
+- **Transport membership gate (`crates/net`):** one check ("is this peer's `D_net` a current member?") runs on accept and on dial. When a `Remove` arrives, open connections to that device close immediately. On startup, membership syncs with reachable peers before serving data.
 
-Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, X25519/HPKE, per-item and per-edit keys, key commitment, recovery kit + tiers, expiring heads, mailbox trait. (A PAKE came back for pairing; see Pairing.)
+## On-disk storage (`deadbolt-pack`, W1–W6)
+Local persistence lives in `crates/pack` and `crates/cli/src/disk.rs` (no embedded SQL/B-tree database). Directories are `0700`, files `0600`:
 
-## Membership check (security-critical)
-- One small function: "is this EndpointId in the current member set?" Applied on accept **and** on dial.
-- When a `Remove` arrives, immediately close any open connection to that device, not just refuse new ones.
-- On startup, sync membership with every reachable peer before serving data to anyone (shrinks the window where a long-offline device still trusts a removed one).
-- Dedicated tests for all of the above.
+```text
+<data>/
+  device/
+    local-<m>.sealed          device seed + metadata + per-vault rollback anchors (passphrase slot in header)
+    biometric.slot            device root wrapped under Secure Enclave key + opaque token
+    activity-<k>.log          sealed Activity rows (90-day retention)
+    LOCK                      single-writer lock
+  v/<vault>/
+    members.log               Member frames, append-only, never compacted
+    gen-<n>.pack              immutable checkpoint pack (head/secret split, byte-identical to remote p/<pack_hash>)
+    wal-<n>.log               Data and Checkpoint frames written or received after generation n
+    blob/<hash>               content-addressed attachments
+    local-<m>.sealed          vault-local state (parking memory, remote config/credentials)
+    outbox/<rand>.wrap        offline saves sealed to the app's D_kem (e.g. from deadbolt-viewer)
+    LOCK                      single-writer lock; readers never take it
+```
 
-## Membership
-- Signed log of `Add(device)` / `Remove(device)` ops, each referencing the ops it saw (causal).
-- Each author has a lifetime budget of **1,000 non-removal membership entries per vault**, including the creator's genesis; data has a separate log. `Remove` is exempt so an exhausted author can still revoke a compromised device, but cannot `Rename` or `Add`. Commit and apply count non-removal entries in the author's contiguous, fork-rejecting signed chain, independent of other authors' arrival order. This is a per-author bound, not a bound on Sybil devices or total membership growth. Historical over-budget histories are unavailable: the CLI retains and lists them with an error while other vaults remain usable, never silently changing the default or replacing the history; the single-vault browser reports the failure and preserves storage. Older peers can still create over-budget histories, and joining one is rejected, so mixed-version rollout needs review.
-- `Add` carries the new device's signature too: it consents to joining *this* vault through *this* inviter (vault id, inviter, new device), so the consent can't back anyone else's `Add`.
-- `Remove(B)` records the last entry of B's log the remover had seen; anything B wrote beyond that is ignored. Removed keys can never be re-added (`Vault::add` and `Vault::apply` reject an `Add` of a removed key, and any concurrent `Add` that did not see the removal is ignored once resolved). Only a current member can be removed.
-- A removal cuts every op by B it didn't see, including devices B added that the remover hadn't seen. A device with several `Add`s stays a member while any of them survives, so an extra `Add` never takes membership away.
-- Seniority is the DAG depth of a device's first `Add` (ties broken by entry hash). An `Add` must see its inviter's admission, so an invited device always sits deeper than its inviter.
-- Conflicting removals (mutual, cycles, or a removal of someone's inviter): removals are considered in their authors' seniority order, and each is kept only if it leaves itself and every earlier kept removal authorized. So in a mutual removal the device added earlier wins. The full rule and its reference model are in `crates/core/src/membership_tests.rs`.
-- Known limitations (open; a recovery key or similar is a separate decision):
-  - A causal removal is final only when the remover is senior. A removed device that is senior to its remover can sign a removal of the remover with parents from before its own removal, and seniority wins it the race.
-  - Seniority ignores cuts: a device keeps the rank of its first `Add` even when that `Add` was cut and only a later one survives. A removed device that had secretly added a device (which consented to it) can thereby lend that device an early rank if another member adds it again. Consent commits to neither seq nor parents, so a single inviter can do the same with one consent if its own first admission was cut and it was admitted again: an early `Add` that gets cut and a later one that survives. Either way this only changes who wins removal races.
-- Sync always exchanges membership first; a device refuses connections from non-members and never accepts data whose membership dependencies it lacks. So any device holding post-removal data already knows about the removal and won't talk to the removed device. A receiver drops data from a peer it no longer admits, except that the sync stream delivering the peer's own `Remove` still applies the data in it the peer held as a member (written before the removal in causal order), in whichever of the stream's prefix batches it arrives; data after the removal, and every later stream from that peer, are refused.
+Enforced crash rules:
+- **W1** create-new, append, and delete only — never rename or overwrite (`Blocks`).
+- **W2** the commit point is the fsync of an appended record.
+- **W3** reopen from the newest verifying pack, then replay every WAL.
+- **W4** a torn trailing record is truncated; corruption before a valid record fails with `CorruptLog`.
+- **W5** compaction writes and syncs the new generation before deleting the old.
+- **W6** readers (`VaultReader`, `PackReader`) take no lock.
+Local state commits use alternating `local-<m>.sealed` files guarded by a two-phase rollback anchor.
 
-## Data
-- Each device appends to its own signed log. Entries reference the entries they were based on (causal), never wall-clock time.
-- Items are maps of fields. An edit replaces a field only if it was based on the previous value; truly concurrent edits keep one (tie broken by entry hash) and push the other into the item's history, so nothing is silently lost.
-- Sync = "here are my heads, send me what I'm missing", over iroh. Entries are signed; confidentiality in transit comes from iroh.
-- Limits: an entry travels as one frame (16 MiB), so core refuses at commit an entry that would encode larger (`MAX_ENTRY_LEN`) rather than store one that can never sync; an import splits into ~1 MiB entries and fails only on an item too large on its own. A receiver hands entries on in batches of at most 64 Ki entries or 32 MiB plus one frame, so a session's size is unbounded but its memory is not, and closes a session a peer opened that runs past 60 seconds (the CLI gives up on its own after 15). A new device runs at most 16 pairing attempts at once and queues 16 more. A node allows 256 concurrent inbound handshakes with a 5-second timeout, separate from 32 established inbound sync connections reserved for authenticated members (at most two per member). Pairing uses its own bounds after handoff; outbound connections consume neither inbound budget. Sync connections close after 60 seconds idle waiting for the first or next stream, independently of each session deadline. A sender must first answer a QUIC Retry (source address validation; over a relay, only an extra round trip) before taking a handshake slot. Excess handshakes are refused before TLS (`CONNECTION_REFUSED`, which the QUIC transport can also return for its own limits); excess authenticated sync connections are closed after TLS with `BUSY` (code 9). Both surface as `Rejected` and startup retries rather than counting the peer as unreachable or contacted. Unfinished or nonmember handshakes cannot take the 32 established sync slots. These are resource bounds, not network-level DoS protection: reachable attackers can still saturate the handshake budget or network, and enough admitted members can fill the sync budget; idle expiry reclaims silent connections but does not prevent continual reconnects.
-- A sender takes a fixed snapshot of the missing author chains after reading the peer’s heads (or committing the pairing admission). For each chain it keeps only its next sequence and signed last hash. The contiguous, fork-rejecting chain pins every predecessor; later appends never leak into an older transfer. A small heap merges these cursors by dependency depth, all vaults’ membership before any data. Each pull checks live authority and readiness under the state lock, encodes one entry and releases the lock before transport I/O. In ordinary sync, a resolved `Remove(peer)` drops any remaining membership and data cursors for that vault for the rest of the exchange, but only if another vault in the original exchange still admits the peer. A missing vault or pending signed tip, loss of admission without a resolved `Remove(peer)` (including a cut of the inviter’s `Add`), or a closed data gate aborts; pairing always aborts if either party loses membership. These checks prevent new pulls; they cannot retract a frame already handed to the transport. This bounds sender scratch to one frame plus frontier/metadata, not total unlocked state, concurrent transfers or transport buffers. Wire framing and receiver verification are unchanged.
-- **Throughput follow-up:** encoding a single near-16 MiB entry is synchronous under the session mutex. Network I/O is outside the lock, but local callers (and the standalone vault worker) can still wait on the encode. Measure lock hold time and concurrent local request latency during large transfers before changing ownership or moving encoding off-lock; retain the per-frame live authority check and one-frame scratch bound.
-- No compaction in v1. Deleted items stay in the history on your own devices, encrypted at rest under the local unlock key. (Later: snapshots.)
+## Sync: direct iroh & blind HTTP remote (`deadbolt-remote`)
+- **Direct iroh sync (`crates/net`):** devices exchange heads and stream missing `DBF2` frames (membership before data) over authenticated QUIC connections with bounded handshakes (256, 5 s timeout, QUIC Retry), bounded authenticated sync slots (32 total, 2 per member, 60 s idle close), and one-frame sender scratch.
+- **Blind HTTP remote sync (`crates/remote`):** optional four-verb `ObjStore` (create-only `PUT`, ranged `GET`, sorted `LIST`, idempotent `DELETE`) over S3/R2 (SigV4) or WebDAV. The remote sees only signed/sealed `DBF2` frames and immutable `gen-<n>.pack` checkpoints — never plaintext items, field names, or keys. `deadbolt-remote` includes a push/pull planner, rollback/withholding/self-rollback detection, and store-backed Deadbolt Send.
+- **Checkpoints & GC (`crates/core/src/v2/{checkpoint,gc}`):** once WAL bytes or frame counts pass compaction thresholds, devices emit signed `Checkpoint` frames pointing to immutable `gen-<n>.pack` snapshots and reclaim superseded logs after a grace window.
+
+## Zero-KDF mobile reader (`deadbolt-viewer`)
+`crates/viewer` reads a single `gen-<n>.pack` directly inside memory-constrained mobile AutoFill extensions using pack-scoped keys (`K_pack`, `K_ix`, never `K_e` or `D_sign`), and seals offline saves to the host app's `D_kem` into `outbox/`. A lockfile test (`crates/viewer/src/tests/deps.rs`) enforces that `argon2`, `tokio`, `iroh`, `reqwest`, `hyper`, `redb`, `rune`, `wgpu`, and `deadbolt-net` never enter its dependency graph.
 
 ### Catch-up across interrupted sessions
 
@@ -186,7 +204,7 @@ of preceding entries don't solve that separate limit.
 - `deadbolt code <query>` prints the item's current TOTP code. The daemon computes it (`ItemCode`), so the secret never leaves the daemon. `show` prints the current code with its time left in the otp field's place; the secret takes `show --reveal` or `get -f` naming a field of type otp (`-f otp` asks up front; another otp field comes back empty, so `get` asks again by id). Only then does `ItemGet` carry otp secrets (`otp: true`): otherwise every field of type otp comes back empty, so the app never receives one. An import's second otp becomes an extra secret field, since only one gives codes.
 - Asking for a code doesn't count as use for the idle lock (`unlock_timeout`): the app asks once a period for as long as an item shows, which would otherwise keep the vault unlocked forever. Copying one, from the app or the CLI, is the same request, so it doesn't either; the other commands around it (opening the item, `show`) do.
 - `deadbolt send` hands files, a secret or vault items to anyone through a one-time link that opens in a browser (`deadbolt.pw/r`), served live by the daemon from an iroh endpoint of its own until picked up, expired (default 1h) or revoked; `deadbolt send ls`, `show` and `revoke` list, show and revoke them. Model, threat model and protocol: `docs/proposals/send.md`. Protocol 10.
-- `deadbolt debug whoami` shows how the daemon sees the calling process (its class, verified program, signature, terminal and parents), and `deadbolt activity [--since 1h]` lists what callers asked for and what the app showed or copied, never values. Entries are sealed in `store.redb` on this device for 90 days; those made while locked wait in memory until unlock. See "Callers" below. Protocol 11.
+- `deadbolt debug whoami` shows how the daemon sees the calling process (its class, verified program, signature, terminal and parents), and `deadbolt activity [--since 1h]` lists what callers asked for and what the app showed or copied, never values. Entries are sealed in `device/activity-<k>.log` on this device for 90 days; those made while locked wait in memory until unlock. See "Callers" below.
 - `deadbolt run`, `inject` and `read` put values where a command needs them by reference (`deadbolt://vault/item/field`), masked in `run`'s output (`docs/secrets.md`). Protocol 18.
 - The browser fills forms from identities and cards (`form-items`, `form-fill`; `docs/autofill.md`, "Forms"): metadata only in the list, only the fields asked in a fill, Touch ID for a card's number or code when it's on. Protocol 16.
 - File fields take a path on the command line (`deadbolt new document file=./scan.pdf`, `deadbolt set github recovery:file=./codes.pdf`); the client reads the file (at most 10 MiB). `deadbolt get` writes a file field's contents to `-o FILE` (mode 0600), or to stdout when it isn't a terminal. `ItemGet` carries files' contents only with `files`; `Import` carries a `.1pux`'s attachments in `files`. Protocol 19.
@@ -201,7 +219,10 @@ of preceding entries don't solve that separate limit.
 - What protects the vault: being locked (the store is encrypted at rest under the passphrase-derived key), OS user separation (another user's processes can't reach the socket, and the CLI and the app check the daemon is this build before sending a passphrase), the idle lock (`unlock_timeout`), locking on sleep and screen lock, and Touch ID unlock. Settings that ask for every caller stay: Touch ID for a card's number or code in the browser, for exporting an SSH private key, for deleting a saved passkey, and for passkey ceremonies that ask for verification.
 - Caller identity (`crates/cli/src/daemon/caller.rs`) is for Activity labels and for the commands only Deadbolt's own pieces send: the app's Activity reports (macOS: by code signature, its team's `anomaly.deadbolt` wherever it runs for a Developer ID build, else the daemon's own bundle's app), the browser host's quiet page look-ups, and the macOS AutoFill extension's socket. Linux can't verify a peer's code, so every Linux caller is a plain caller, marked unverified.
 - Activity records each caller request (item names and field names, never values), so you can see after the fact what was read, by what, and when.
-- `deadbolt run` masks values in its command's output, which keeps them out of logs and transcripts by accident, not from a command that means to show them.
+- **Process taint & capabilities (`CapTable` / `TaintTable`):** `deadbolt run` registers itself with the daemon's `TaintTable` (`crates/cli/src/daemon/taint.rs`) before spawning the child command. On every control connection, the daemon walks caller ancestry by `(pid, start time)` (via `deadbolt-os`); descendants of a `deadbolt run` are pinned to that run's `CapTable` capability (`crates/engine`, none by default) and receive no ambient vault reads, secrets, unlocks, or prompts.
+- **Secret brokering (`deadbolt run --broker`, `docs/broker.md`):** injects placeholder tokens and a loopback URL into the child's environment while a hardened `deadbolt broker` process (`RLIMIT_CORE = 0`, `PR_SET_DUMPABLE = 0`) holds the real credentials and swaps them into outgoing HTTP headers or AWS SigV4 signatures on allowed routes.
+- **Metadata-only agent MCP (`deadbolt mcp`):** speaks JSON-RPC 2.0 over stdio for AI coding agents, exposing only value-free metadata tools (`status`, `vault-list`, `item-list`, `health`) and guiding agents to emit `deadbolt run --broker` commands when a task needs credentials.
+- Plain `deadbolt run` (without `--broker`) masks injected values in its command's output, which keeps them out of logs and transcripts by accident, not from a command that means to show them.
 
 ## Pairing
 One command per device and one code, typed once:
@@ -231,8 +252,4 @@ laptop$ deadbolt approve violin-garden-tiger-lamp-zoo
 - **Residual risk.** The code is the only secret. Anyone who sees it while it is live (over a shoulder, in a screen share, in a shell history synced elsewhere) and uses it first can pose as the new device: they get the vault. The legitimate existing device then fails loudly as above, and the new device shows the vault and inviter it joined, which it reports before the passphrase prompt. Conversely, anyone who sees the code can pose as the inviter and pair the new device into a vault of theirs; the new device shows that vault's name and inviter. The `spake2` crate is a RustCrypto pre-release (0.5.0-pre.0, chosen because it shares this workspace's curve25519-dalek 5 / sha2 0.11 stack) and unaudited, as was 0.4. Pairing ALPN `deadbolt/pair/3`.
 
 ## Removing a device
-Sign `Remove(B)`; it spreads to the other members as they sync. B is refused at connection time (and any open connection is closed) and can't get anything new; it keeps what it already had (inherent; prompt the user to rotate passwords it saw).
-
-## Later (designed for, not built)
-- Mailbox: add a shared vault key that encrypts entries, re-keyed on removal and wrapped to per-device X25519 keys so offline devices can pick it up from the mailbox. Entry format changes at that point.
-- Recovery kit: a paper device with its own device key, added like any other device.
+Sign `Remove(B)` and rotate to a fresh clean-tip epoch wrapped only to the remaining members and the recovery root. The removal spreads over iroh and blind remote storage; B is refused at connection time (any open connection closes immediately) and cannot decrypt any frame written in the new epoch. B still keeps whatever it already decrypted before removal (inherent; prompt the user to rotate passwords it saw).

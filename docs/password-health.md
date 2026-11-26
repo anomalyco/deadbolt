@@ -1,8 +1,6 @@
 # Password health
 
-2026-10-30. Plan, not built yet. Open decisions are at the end.
-
-Deadbolt audits saved credentials inside `deadbolt daemon` and sends `Deadbolt.app` and the CLI only finding flags, counts, and item references, never secret values or password hashes. Five checks run offline by default using `zxcvbn` and ~292 KiB of bundled directory tables: **weak passwords**, **reused passwords**, **compromised websites**, **missing two-factor authentication**, and **passkeys available**. A sixth check, **breached passwords**, is strictly opt-in and queries Have I Been Pwned's k-anonymity range API (`5`-hex SHA-1 prefix with `Add-Padding: true`) directly from the daemon, caching results encrypted in `store.redb`. Selecting a finding opens the item's edit form with a site-compatible generated password ready, keeps a one-click copy of the current password for the site's "Current password" prompt, and opens the site's change-password or 2FA setup page directly.
+Deadbolt audits saved credentials inside `deadbolt daemon` and sends `Deadbolt.app` and the CLI only finding flags, counts, and item references, never secret values or password hashes. Five checks run offline by default using `zxcvbn` and ~292 KiB of bundled directory tables: **weak passwords**, **reused passwords**, **compromised websites**, **missing two-factor authentication**, and **passkeys available**. A sixth check, **breached passwords**, is strictly opt-in and queries Have I Been Pwned's k-anonymity range API (`5`-hex SHA-1 prefix with `Add-Padding: true`) directly from the daemon, caching results encrypted in the device's sealed local state (`device/local-<m>.sealed`). Selecting a finding opens the item's edit form with a site-compatible generated password ready, keeps a one-click copy of the current password for the site's "Current password" prompt, and opens the site's change-password or 2FA setup page directly.
 
 ## Only password fields are scored, and weak ones use `zxcvbn`
 
@@ -13,7 +11,7 @@ Deadbolt's two existing strength functions solve different problems:
 
 ### Estimator and thresholds
 
-Use `zxcvbn` (`3.1`, MIT, safe Rust, `default-features = false`) in `crates/core/src/health/strength.rs`, behind a `health` Cargo feature on `deadbolt-core` enabled by `deadbolt-cli` and `deadbolt-client`. Leaving the feature off on `deadbolt-ext-core` keeps `zxcvbn`'s ~500 KiB frequency tables and regex dependencies out of the standalone browser-worker WebAssembly build until the extension grows its own health view. Because `deadbolt-app` already links `deadbolt-core` through `deadbolt-client`, onboarding's vault passphrase meter (`crates/app/src/onboarding.rs`) can switch to the same `zxcvbn` wrapper and retire the character-pool estimate.
+Use `zxcvbn` (`3.1`, MIT, safe Rust, `default-features = false`) in `crates/core/src/health/strength.rs`, behind a `health` Cargo feature on `deadbolt-core` enabled by `deadbolt-cli` and `deadbolt-client`. Leaving the feature off on minimal crates like `deadbolt-viewer` keeps `zxcvbn`'s ~500 KiB frequency tables and regex dependencies out of memory-constrained builds. Because `deadbolt-app` already links `deadbolt-core` through `deadbolt-client`, onboarding's vault passphrase meter (`crates/app/src/onboarding.rs`) uses the same `zxcvbn` wrapper.
 
 Pass item-specific context strings as `zxcvbn(password, &user_inputs)`:
 
@@ -104,7 +102,7 @@ Deadbolt runs no Anomaly server or proxy, and vault data only ever syncs device-
 
 ### Caching and schedule
 
-Cache HIBP range results locally in `store.redb` (`meta` key `"cli/hibp-cache"`), AEAD-sealed under `data_key`. Instead of indexing by raw SHA-1 (which would store an unsalted hash of every vault password inside `meta`), derive a store-bound key with BLAKE3 KDF from `store.device_secret()` and map:
+Cache HIBP range results locally in the device's sealed local state (`device/local-<m>.sealed`, `meta` key `"cli/hibp-cache"`), AEAD-sealed under the device root. Instead of indexing by raw SHA-1 (which would store an unsalted hash of every vault password inside `meta`), derive a store-bound key with BLAKE3 KDF from the device secret and map:
 
 ```text
 blake3::keyed_hash(hibp_cache_key, &sha1_bytes) -> { count: u64, checked_day: u32 }
@@ -119,13 +117,13 @@ blake3::keyed_hash(hibp_cache_key, &sha1_bytes) -> { count: u64, checked_day: u3
 
 ### Breach dates vs password change dates
 
-Deadbolt's signed log entries intentionally carry no wall-clock timestamps (`docs/design.md`), so `Entry` cannot tell when a password was set. Recording a device-local `first_seen` timestamp in `store.redb` also fails: existing items and newly paired devices would appear "changed today" and silently miss older site breaches.
+Deadbolt's signed frames intentionally carry no wall-clock timestamps (`docs/design.md`), so a frame cannot tell when a password was set. Recording a device-local `first_seen` timestamp in local state also fails: existing items and newly paired devices would appear "changed today" and silently miss older site breaches.
 
-Instead, store an optional daemon-managed `password_changed` (`YYYY-MM-DD`) stamp on `Item` via `Change::PasswordChanged(Option<String>)` (wire tag `11` in `crates/core/src/entry.rs`), kept apart from `Item::fields` just like `Change::Source`:
+Instead, store an optional daemon-managed `password_changed` (`YYYY-MM-DD`) stamp on `Item` via `Change::PasswordChanged(Option<String>)` (kept in a reserved register apart from `Item::fields`, just like `Change::Source`):
 
-- **Day precision (`YYYY-MM-DD`)** matches `passkey.created` and HIBP's `BreachDate`, leaks no typing-time or timezone patterns across synced devices, keeps `data.rs` conflict resolution 100% causal (ties broken by entry hash), and powers the password age line on the item page (`"Login · Changed Mar 14, 2024"`).
-- **Written automatically:** whenever the daemon creates an item with an audited password or changes that password (`items::create`, `items::set`, `autofill::site_save`), it writes `Change::PasswordChanged(Some(today))` in the same signed entry.
-- **Preserved on import and 1Password sync:** `.1pux` and `op` imports populate `password_changed` from the latest `passwordHistory` timestamp (falling back to `updatedAt`), and Bitwarden JSON imports populate it from `login.passwordRevisionDate` (falling back to `revisionDate`). Keeping `password_changed` off `Item::fields` preserves `item.fields` invariants and leaves `deadbolt sync 1password` `MirrorVersion` digests unchanged.
+- **Day precision (`YYYY-MM-DD`)** matches `passkey.created` and HIBP's `BreachDate`, leaks no typing-time or timezone patterns across synced devices, keeps conflict resolution 100% causal, and powers the password age line on the item page (`"Login · Changed Mar 14, 2024"`).
+- **Written automatically:** whenever the daemon creates an item with an audited password or changes that password (`items::create`, `items::set`, `autofill::site_save`), it writes `Change::PasswordChanged(Some(today))` in the same signed frame.
+- **Preserved on import:** `.1pux` imports populate `password_changed` from the latest `passwordHistory` timestamp (falling back to `updatedAt`), and Bitwarden JSON imports populate it from `login.passwordRevisionDate` (falling back to `revisionDate`). Keeping `password_changed` off `Item::fields` preserves `item.fields` invariants.
 
 Site breaches come from `GET https://haveibeenpwned.com/api/v3/breaches` (CC-BY-4.0, unauthenticated), filtered to verified, non-retired, non-fabricated, non-spam breaches that have a `Domain` and include `"Passwords"` in `DataClasses` (622 domains, 48 KiB compact JSON). Downloading the full 622-domain list sends **zero** user domains over the network. A snapshot ships bundled for offline use and refreshes at most once every 7 days into `"cli/site-breaches"` when `breach_checks = true`.
 
@@ -252,9 +250,8 @@ deadbolt health unignore Linear weak
 
 ## Sync: derived findings stay local, ignored warnings sync cleanly
 
-- **Health findings and HIBP cache never sync.** Weak, Reused, Missing 2FA, and Passkeys are deterministic functions of the vault and bundled tables; each device computes them locally. `"cli/hibp-cache"` and `"cli/site-breaches"` stay in local `store.redb` so enabling `breach_checks` on one device never writes network-derived rows to the append-only signed log or reveals `breach_checks` activity to another device.
-- **Ignored warnings (`Change::Ignore`).** Ignoring a voicemail PIN on a desktop should not leave the laptop nagging about the same item. Keep dismissals on `Item` **apart from `fields`**, just like `Source` (`Change::Source`, wire tag `4` in `crates/core/src/entry.rs`), via `Change::Ignore { kind: String, at: Option<Hash> }` (wire tag `10`, `None` clears the ignore):
-  - Because `mirror::item_digest` hashes `&item.fields` only, ignoring a warning on a 1Password-mirrored item survives every future `deadbolt sync 1password`.
+- **Health findings and HIBP cache never sync.** Weak, Reused, Missing 2FA, and Passkeys are deterministic functions of the vault and bundled tables; each device computes them locally. `"cli/hibp-cache"` and `"cli/site-breaches"` stay in device-local sealed state (`device/local-<m>.sealed`) so enabling `breach_checks` on one device never writes network-derived rows to the signed vault log or reveals `breach_checks` activity to another device.
+- **Ignored warnings (`Change::Ignore`).** Ignoring a voicemail PIN on a desktop should not leave the laptop nagging about the same item. Keep dismissals on `Item` **apart from `fields`**, just like `Source`, via `Change::Ignore { kind: String, at: Option<Hash> }` (`None` clears the ignore):
   - Dismissals never appear in `ItemGet`, edit forms, exports, or `deadbolt send`.
   - For password findings (`weak`, `reused`, `breached`, `site-breach`), `at` is the `Entry::hash()` of the winning write to `password` (`ItemState` in `crates/core/src/data.rs`). Every vault member already holds that `Entry` hash, so storing it leaks zero password-equality information while automatically expiring the ignore the instant any new `password` write wins. For item-level findings (`missing-2fa`, `passkey`), `at` is `Hash([0; 32])` and clears automatically once an `otp` or `passkey` exists.
 

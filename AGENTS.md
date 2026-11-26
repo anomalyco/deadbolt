@@ -4,16 +4,21 @@
 An alpha, local-first password manager in Rust. No compatibility shims: change
 internal APIs directly and update their callers.
 
-- `crates/core`: signed vault log, membership and item rules.
-- `crates/store`: encrypted redb persistence and passphrase derivation.
-- `crates/net`: iroh transport, membership gates, sync and pairing.
-- `crates/proto`: the wire schemas, pure data: the daemon control protocol (`daemon`, re-exported as `deadbolt_client::protocol`) and the extension's native messaging (`browser`). `bun run gen:proto` writes the browser types to `extension/src/gen/proto.ts`; CI fails when it's stale.
-- `crates/engine`: the vault engine (`deadbolt-engine`): the unlocked vaults and the item, autofill, form, passkey, secret, SSH key and Activity rules the daemon serves them by. Sans-IO: storage (`VaultStore`) and time (`Clock`) come from the host, and CI clippies it for `wasm32-unknown-unknown` (`bun run check:wasm`), so no tokio, sockets, filesystem, env or OS code goes in it.
-- `crates/cli`: commands, background daemon (`src/daemon/`: the engine's host, with the socket, sync, pairing, Touch ID and breach checks), control socket, deterministic simulator and `deadbolt update` (`src/update.rs`, docs/releasing.md "Updater").
-- `crates/app`: the Rune desktop app, its own binary `deadbolt-ui` (`src/main.rs`; Deadbolt.app's `Contents/MacOS/Deadbolt`). `deadbolt` is always headless and never links it; `deadbolt app` finds and opens `deadbolt-ui`, `deadbolt ui` runs it with Rune's flags (docs/app.md).
-- `crates/enclave`: the macOS Touch ID helper (`deadbolt-enclave`, Swift) and its SHA-256 pin, built once for both `deadbolt` and `deadbolt-ui` (docs/touch-id.md).
+- `crates/core`: v2 signed `DBF2` frame log, `X25519Wrap` clean-tip epochs and back-links, recovery-lineage membership resolver (`class = 0` 24-word recovery root), fraud proofs, delta clocks, item rules, password health, and autofill/form/tag rules (pure, `wasm32`-clean).
+- `crates/proto`: wire schemas, pure data: the daemon control protocol (`daemon`, re-exported as `deadbolt_client::protocol`) and the extension's native messaging (`browser`). `bun run gen:proto` writes the browser types to `extension/src/gen/proto.ts`; CI fails when it's stale.
+- `crates/os`: safe wrappers for the few OS calls no dependency wraps (BSD process facts and arguments, code signing info, process hardening, and locked key memory); the one crate where `unsafe` is allowed.
+- `crates/pack`: v2 on-disk storage — append-only framed logs (`members.log`, `wal-<n>.log`), immutable checkpoint packs (`gen-<n>.pack`), alternating sealed local state (`local-<m>.sealed`) with a two-phase rollback anchor, and W1–W6 crash rules over a create/append/delete-only `Blocks` trait (`wasm32`-clean).
+- `crates/remote`: blind HTTP remote sync — four-verb `ObjStore` (S3/R2 SigV4 and WebDAV), canonical object names, push/pull planner, rollback/withholding/self-rollback detection, and store-backed Send (pure core is `wasm32`-clean; `reqwest` transport behind the default `http` feature).
+- `crates/send`: Deadbolt Send links, sealing and delivery over iroh or the vault's remote store (native and `wasm32`).
+- `crates/send-web`: browser WebAssembly receiver of `deadbolt-send` for the site's `/r`.
+- `crates/engine`: the sans-IO vault engine (`deadbolt-engine`): unlocked vaults, capability tokens (`CapTable`), and the item, autofill, form, passkey, secret, SSH key and Activity rules the daemon serves them by. Storage (`VaultStore`) and time (`Clock`) come from the host, and CI clippies it for `wasm32-unknown-unknown` (`bun run check:wasm`), so no tokio, sockets, filesystem, env or OS code goes in it.
+- `crates/net`: iroh transport, membership gates, device-to-device sync and SPAKE2 pairing.
+- `crates/client`: daemon file locations, peer verification, and the client that starts and talks to the daemon over `deadbolt-proto`.
+- `crates/enclave`: the macOS Touch ID helper (`deadbolt-enclave`, Swift), its SHA-256 pin, and the shared Mach-O slice verifier used by both `deadbolt` and `deadbolt-ui` (docs/touch-id.md).
 - `crates/ffi`: Deadbolt for Swift through UniFFI (`deadbolt-ffi`). Its `client` feature is the macOS AutoFill extension's daemon client: socket, protocol and the daemon's code check. `crates/app/scripts/build-autofill.sh` links it into `DeadboltAutoFill.appex` (`crates/app/autofill/*.swift`) and generates the Swift bindings with `crates/ffi/bindgen`, UniFFI's generator in its own workspace and lockfile.
-- `crates/send`: Deadbolt Send links, sealing and delivery (native and wasm32); `crates/send-web`: its browser build for the site's `/r`.
+- `crates/viewer`: zero-KDF, read-only `gen-<n>.pack` reader for mobile AutoFill extensions using pack-scoped keys (never `K_e` or `D_sign`) and sealing offline saves to `outbox/` (no `argon2`, `tokio`, `iroh` or network).
+- `crates/app`: the Rune desktop app, its own binary `deadbolt-ui` (`src/main.rs`; Deadbolt.app's `Contents/MacOS/Deadbolt`). `deadbolt` is always headless and never links it; `deadbolt app` finds and opens `deadbolt-ui`, `deadbolt ui` runs it with Rune's flags (docs/app.md).
+- `crates/cli`: commands, background daemon (`src/daemon/`: the engine's host, `deadbolt-pack` storage in `src/disk/`, socket, taint/capability enforcement, sync, pairing, Touch ID and breach checks), `deadbolt broker` (docs/broker.md), `deadbolt mcp`, deterministic simulator and `deadbolt update` (`src/update.rs`, docs/releasing.md "Updater").
 - `extension/`: the Chromium MV3 extension (TypeScript, `bun build`), talking to `deadbolt browser-host`.
 - `docs/`: design and simulation reference. `site/`: project site.
 

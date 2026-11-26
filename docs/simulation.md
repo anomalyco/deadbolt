@@ -1,6 +1,6 @@
 # Replay sync failures without sockets
 
-The CLI's `daemon::sim` tests run four devices with real encrypted redb stores,
+The CLI's `daemon::sim` tests run four devices with real encrypted `deadbolt-pack` stores,
 the core vault model, the membership gate, and production sync handlers. Run them
 with:
 
@@ -89,8 +89,8 @@ convergence, and pairing such a device again finishes the join without a second
 Crashes drop and reopen stores between actions. Connection cuts cover protocol
 cancellation during a session. Failed-write actions inject an error at the
 production persistence seam before durable append; they do not simulate torn
-redb pages or power loss during fsync. Store corruption and process-kill tests
-remain in `deadbolt-store`.
+log frames or power loss during fsync. Store corruption and crash-recovery tests
+live in `deadbolt-pack` and `crates/cli/src/disk/`.
 
 ## Failures print a replayable, reduced trace
 
@@ -116,9 +116,9 @@ only with the net crate's `sim` feature, enabled by the CLI's dev-dependency.
 `Loaded` owns transport-independent unlocked state. A `Session` adds its iroh
 node. Vault changes build a private validated staging view, append new entries in
 one durable transaction, then publish the view. Validation and pre-commit errors
-leave live heads unchanged. A commit error is different: redb may already have
-persisted the new root, including a removal, even though its final sync returned
-an error. The store reports `AppendUncertain`; native `Loaded` permanently
+leave live heads unchanged. A commit error is different: the log append may
+already have persisted frames, including a removal, even though its final sync
+returned an error. The store reports `AppendUncertain`; native `Loaded` permanently
 invalidates all live vaults until replay. The daemon refuses reads, writes, sync
 and pairing, clears the membership gate and closes its sync connections, cancels
 background sync/health work and marks readiness closed. Startup deadlines and
@@ -129,7 +129,7 @@ treated as already unlocked: a bad passphrase leaves the device locked. Explicit
 `deadbolt lock` still closes the failed handle. No uncertain mutation is retried.
 A warning records only the typed failure class, I/O kind and numeric OS error,
 never backend messages, paths or vault values.
-Native and standalone writes use the same core transaction: validation borrows the
+Daemon writes use the same core transaction: validation borrows the
 committed log and checks each new entry against that prefix plus previously
 accepted entries in this batch. Only the new entries are encoded, one at a time,
 in membership-then-data order inside one store transaction. After confirmation
@@ -198,7 +198,7 @@ membership-admitted handshake may claim a sync slot. Pairing transfers to its ow
 bounds. Idle waits for the first or next stream expire after 60 seconds by default,
 independently of the session timeout, closing the connection and releasing its
 slots. Real-connection net tests stall TLS after Retry, verify member sync still
-works, and exercise idle closure followed by a new successful sync. CLI and browser
-background rounds dial fresh connections; callers reusing `SyncConnection` must
+works, and exercise idle closure followed by a new successful sync. Background sync
+rounds dial fresh connections; callers reusing `SyncConnection` must
 redial after closure. The caps do not guarantee availability under handshake or
 network saturation, nor prevent a member from continually reconnecting.

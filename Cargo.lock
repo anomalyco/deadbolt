@@ -1454,7 +1454,6 @@ dependencies = [
  "rune-theme-opencode",
  "rustix 1.1.6",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -1469,7 +1468,6 @@ dependencies = [
  "anyhow",
  "argon2",
  "blake3",
- "chacha20poly1305",
  "clap",
  "csv",
  "data-encoding",
@@ -1561,6 +1559,9 @@ dependencies = [
 [[package]]
 name = "deadbolt-enclave"
 version = "0.0.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "deadbolt-engine"

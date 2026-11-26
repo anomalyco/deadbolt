@@ -4,7 +4,7 @@ use crate::item::ItemError;
 /// Why a frame or operation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    #[error("entry is for vault {found}, expected {expected}")]
+    #[error("frame is for vault {found}, expected {expected}")]
     WrongVault { expected: VaultId, found: VaultId },
     #[error("this vault holds the most frames it can")]
     TooManyFrames,
@@ -26,7 +26,7 @@ pub enum Error {
     InvalidName,
     #[error("not a valid vault genesis")]
     InvalidGenesis,
-    /// A change whose entry could never be sent to another device.
+    /// A change whose frame could never be sent to another device.
     #[error(
         "too large to sync to other devices: {len} bytes in one change, the limit is {max} bytes"
     )]

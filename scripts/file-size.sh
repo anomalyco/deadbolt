@@ -48,7 +48,7 @@ measure() {
       skip = (FILENAME ~ /(^|\/)node_modules\// || FILENAME ~ /^extension\/src\/gen\// || FILENAME ~ /\.d\.ts$/ || FILENAME ~ /\.(generated|gen|g|pb)\.(rs|tsx?|swift)$/ || FILENAME ~ /_generated\.rs$/)
       if (skip) { name = ""; next }
       isrs = (FILENAME ~ /\.rs$/)
-      testfile = (FILENAME ~ /(^|\/)(tests?|benches|e2e|__tests__)\// || FILENAME ~ /(^|\/)[^\/]*Tests\// || FILENAME ~ /(^|\/)tests?\.rs$/ || FILENAME ~ /_tests?\.rs$/ || FILENAME ~ /\.(test|spec)\.tsx?$/ || FILENAME ~ /Tests\.swift$/)
+      testfile = (FILENAME ~ /(^|\/)(tests?|benches|e2e|__tests__)\// || FILENAME ~ /(^|\/)[^\/]*Tests\// || FILENAME ~ /_tests?\// || FILENAME ~ /(^|\/)tests?\.rs$/ || FILENAME ~ /_tests?\.rs$/ || FILENAME ~ /\.(test|spec)\.tsx?$/ || FILENAME ~ /Tests\.swift$/)
     }
     {
       if (name == "") next
@@ -94,7 +94,7 @@ check_shape() {
       in_scope = (p ~ /^crates\/.*\.(rs|swift)$/ || p ~ /^extension\/src\/.*\.ts$/ || p ~ /^site\/src\/.*\.tsx?$/)
       if (!in_scope) next
       if (p ~ /(^|\/)(vendor|vendored|third_party|target|dist|build|\.build|out|generated|__generated__|gen|fixtures?|Pods|DerivedData)\// || p ~ /\.d\.ts$/ || p ~ /\.(generated|gen|g|pb)\.(rs|tsx?|swift)$/ || p ~ /_generated\.rs$/) next
-      if (p ~ /(^|\/)(tests?|benches|e2e|__tests__)\// || p ~ /(^|\/)[^\/]*Tests\// || p ~ /(^|\/)tests?\.rs$/ || p ~ /_tests?\.rs$/ || p ~ /\.(test|spec)\.tsx?$/ || p ~ /Tests\.swift$/) next
+      if (p ~ /(^|\/)(tests?|benches|e2e|__tests__)\// || p ~ /(^|\/)[^\/]*Tests\// || p ~ /_tests?\// || p ~ /(^|\/)tests?\.rs$/ || p ~ /_tests?\.rs$/ || p ~ /\.(test|spec)\.tsx?$/ || p ~ /Tests\.swift$/) next
 
       folder = dirname_of(p)
       name = basename_of(p)

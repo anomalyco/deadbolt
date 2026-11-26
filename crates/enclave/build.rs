@@ -2,8 +2,8 @@
 //! prebuilt, already-signed one from `DEADBOLT_ENCLAVE_PREBUILT` (release
 //! builds, docs/releasing.md), and pins its SHA-256 for every binary that
 //! checks it: `deadbolt` before it runs the helper, and `deadbolt-ui` before it
-//! trusts what the helper says about the daemon (docs/touch-id.md). One build
-//! script, run once per target and profile, so both pin the same bytes.
+//! sends a passphrase to its daemon (docs/touch-id.md). One build script, run
+//! once per target and profile, so both pin the same bytes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -67,14 +67,14 @@ fn a_missing_helper_is_named() {
 
 #[test]
 fn fat_binary_requires_arm64_and_x86_64_and_matches_current_arch() {
-    const ARM64: u32 = 0x0100_000c;
-    const X86_64: u32 = 0x0100_0007;
+    const ARM64: u32 = deadbolt_enclave::CPU_TYPE_ARM64;
+    const X86_64: u32 = deadbolt_enclave::CPU_TYPE_X86_64;
     const OTHER: u32 = 0x0000_0007;
 
     let arm_slice = b"arm64-helper-slice";
     let x86_slice = b"x86_64-helper-slice";
-    let arm_sha = macos::hex_encode(&macos::sha256(arm_slice));
-    let x86_sha = macos::hex_encode(&macos::sha256(x86_slice));
+    let arm_sha = deadbolt_enclave::sha256_hex(arm_slice);
+    let x86_sha = deadbolt_enclave::sha256_hex(x86_slice);
 
     fn build_fat(slices: &[(u32, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -97,32 +97,32 @@ fn fat_binary_requires_arm64_and_x86_64_and_matches_current_arch() {
 
     let valid_fat = build_fat(&[(ARM64, arm_slice), (X86_64, x86_slice)]);
     // Current arch matches its own slice and rejects the other arch's hash.
-    assert!(macos::matches_sha256_or_fat_slice(
+    assert!(deadbolt_enclave::matches_sha256_or_fat_slice(
         &valid_fat, &arm_sha, ARM64
     ));
-    assert!(!macos::matches_sha256_or_fat_slice(
+    assert!(!deadbolt_enclave::matches_sha256_or_fat_slice(
         &valid_fat, &x86_sha, ARM64
     ));
-    assert!(macos::matches_sha256_or_fat_slice(
+    assert!(deadbolt_enclave::matches_sha256_or_fat_slice(
         &valid_fat, &x86_sha, X86_64
     ));
-    assert!(!macos::matches_sha256_or_fat_slice(
+    assert!(!deadbolt_enclave::matches_sha256_or_fat_slice(
         &valid_fat, &arm_sha, X86_64
     ));
 
     // Fat binary with duplicate arch or wrong arch pair is rejected.
     let dup_arch = build_fat(&[(ARM64, arm_slice), (ARM64, x86_slice)]);
-    assert!(!macos::matches_sha256_or_fat_slice(
+    assert!(!deadbolt_enclave::matches_sha256_or_fat_slice(
         &dup_arch, &arm_sha, ARM64
     ));
     let wrong_arch = build_fat(&[(ARM64, arm_slice), (OTHER, x86_slice)]);
-    assert!(!macos::matches_sha256_or_fat_slice(
+    assert!(!deadbolt_enclave::matches_sha256_or_fat_slice(
         &wrong_arch,
         &arm_sha,
         ARM64
     ));
     let single_slice_fat = build_fat(&[(ARM64, arm_slice)]);
-    assert!(!macos::matches_sha256_or_fat_slice(
+    assert!(!deadbolt_enclave::matches_sha256_or_fat_slice(
         &single_slice_fat,
         &arm_sha,
         ARM64
