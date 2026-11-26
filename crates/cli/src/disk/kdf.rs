@@ -1,14 +1,12 @@
 //! Argon2id over the passphrase, and the small AEAD the key slots use.
 
 use argon2::{Algorithm, Argon2, Block, Params, Version};
-use chacha20poly1305::{AeadInOut, KeyInit, XChaCha20Poly1305};
+use deadbolt_core::v2::{CryptoError, NONCE_LEN, aead_open, aead_seal};
 use zeroize::Zeroizing;
 
 use super::{Error, Result};
 
 pub(crate) const KEY_LEN: usize = 32;
-const NONCE_LEN: usize = 24;
-const TAG_LEN: usize = 16;
 
 pub(crate) type SecretKey = Zeroizing<[u8; KEY_LEN]>;
 
@@ -160,36 +158,21 @@ pub(crate) fn random_key() -> Result<SecretKey> {
 
 /// `nonce (24) || ciphertext || tag (16)` of `plain` under `key`.
 pub(crate) fn seal(key: &[u8; KEY_LEN], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
-    let cipher = XChaCha20Poly1305::new(key.into());
-    let nonce = random::<NONCE_LEN>()?;
-    let mut out = Vec::with_capacity(NONCE_LEN + plain.len() + TAG_LEN);
+    let (nonce, ct) = aead_seal(key, aad, plain).map_err(|err| match err {
+        CryptoError::Rng => Error::corrupt("system random number generator failed"),
+        _ => Error::corrupt("message too long to encrypt"),
+    })?;
+    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
     out.extend_from_slice(&nonce);
-    out.extend_from_slice(plain);
-    let Ok(tag) =
-        cipher.encrypt_inout_detached(&nonce.into(), aad, out[NONCE_LEN..].as_mut().into())
-    else {
-        zeroize::Zeroize::zeroize(&mut out);
-        return Err(Error::corrupt("message too long to encrypt"));
-    };
-    out.extend_from_slice(&tag);
+    out.extend_from_slice(&ct);
     Ok(out)
 }
 
 /// Inverse of [`seal`]; `None` if authentication fails.
 pub(crate) fn open(key: &[u8; KEY_LEN], aad: &[u8], sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-    if sealed.len() < NONCE_LEN + TAG_LEN {
-        return None;
-    }
-    let cipher = XChaCha20Poly1305::new(key.into());
-    let (nonce, rest) = sealed.split_at(NONCE_LEN);
-    let (ciphertext, tag) = rest.split_at(rest.len() - TAG_LEN);
+    let (nonce, ct) = sealed.split_at_checked(NONCE_LEN)?;
     let nonce: [u8; NONCE_LEN] = nonce.try_into().ok()?;
-    let tag: [u8; TAG_LEN] = tag.try_into().ok()?;
-    let mut buf = Zeroizing::new(ciphertext.to_vec());
-    cipher
-        .decrypt_inout_detached(&nonce.into(), aad, buf.as_mut_slice().into(), &tag.into())
-        .ok()?;
-    Some(buf)
+    aead_open(key, &nonce, aad, ct).ok()
 }
 
 /// A 32-byte key out of an opened slot.
