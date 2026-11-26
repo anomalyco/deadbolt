@@ -217,7 +217,7 @@ async fn a_full_replica_never_trades_its_history_for_a_pack() {
         let every = RemoteIndex::from_names(&vault, &names(&mut v.frames()));
         let none = SyncAnchor::default();
         assert!(!super::sync::collected_behind(
-            v, &every, &none, &f, &payload
+            v, &every, &none, &f, &payload, s.id
         ));
 
         // A replica missing the covered frames, the store listing only the tail.
@@ -230,11 +230,11 @@ async fn a_full_replica_never_trades_its_history_for_a_pack() {
         let thin = Vault::open(&s.keys(), tail.iter().cloned())?;
         let listed = RemoteIndex::from_names(&vault, &names(&mut tail.iter()));
         assert!(super::sync::collected_behind(
-            &thin, &listed, &none, &f, &payload
+            &thin, &listed, &none, &f, &payload, s.id
         ));
         // ...but every covered frame still listed: fetch them instead.
         assert!(!super::sync::collected_behind(
-            &thin, &every, &none, &f, &payload
+            &thin, &every, &none, &f, &payload, s.id
         ));
         // A frontier naming frames nothing evidences.
         let mut phantom = payload.clone();
@@ -242,7 +242,7 @@ async fn a_full_replica_never_trades_its_history_for_a_pack() {
             .frontier
             .push((DeviceId::from_bytes([7; 32]), 40, FrameId::ZERO));
         assert!(!super::sync::collected_behind(
-            &thin, &listed, &none, &f, &phantom
+            &thin, &listed, &none, &f, &phantom, s.id
         ));
         Ok(())
     })
@@ -470,10 +470,11 @@ async fn a_member_cannot_vouch_for_its_own_poisoned_checkpoint() {
 
 /// B and C removed each other and A removed B: the vault parks on the
 /// mutual removal. Recovering from the kit settles it (the root acts after
-/// both, and neither is left), so the new device writes its card unparked.
+/// both, and neither is left), so the new device writes its card unparked,
+/// and rotating the kit afterwards doesn't park it again.
 #[tokio::test]
 async fn recovery_settles_a_mutual_removal_no_one_is_left_to_choose() {
-    use deadbolt_core::v2::{DeviceKeys, Frame, ParkingReason};
+    use deadbolt_core::v2::{DeviceKeys, Frame, ParkingReason, RecoverySecret};
     use deadbolt_core::{Author, Vault};
 
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -541,6 +542,186 @@ async fn recovery_settles_a_mutual_removal_no_one_is_left_to_choose() {
         assert!(v.parked().is_empty(), "{:?}", v.parked());
         assert!(v.is_member(&s.id));
         assert!(v.device_card(&s.id).is_some(), "the new device's card");
+        Ok(())
+    })
+    .unwrap();
+
+    // Handing the kit on retires the root that settled it; the settlement
+    // stands.
+    d.with(|s| {
+        s.rotate_recovery(vault, &words, &RecoverySecret::from_bytes([0x52; 32]))?;
+        let v = &s.vaults[&vault];
+        assert!(v.parked().is_empty(), "{:?}", v.parked());
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A compromised member M adds a puppet M2, uploads M2's second frame but
+/// not its first (a delete), and its own checkpoint `d/M/0.c` over both
+/// with empty membership heads (so it names no one who must have acked it)
+/// and a poisoned pack. Heads that can't be the checkpoint's own refuse it,
+/// and this device, synced already, never acked it: the replica keeps its
+/// history.
+#[tokio::test]
+async fn a_puppet_and_empty_heads_cannot_vouch_for_a_poisoned_checkpoint() {
+    use deadbolt_core::ops::{Change, DataOp};
+    use deadbolt_core::v2::{DeviceKeys, Frame, LogKind, PackCommitment};
+    use deadbolt_core::{Author, Vault, recovery};
+    use deadbolt_remote::{Outbox, plan_push, push};
+
+    let dir = tempfile::tempdir().unwrap();
+    let a = device(dir.path(), 79).await;
+    let (vault, words) = a.with(|s| s.create_vault_with_kit("personal")).unwrap();
+    login(&a, vault, 0);
+    let remote = webdav("puppet-checkpoint");
+    let set = Command::RemoteSet {
+        vault: None,
+        remote: remote.clone(),
+    };
+    a.remote_command(set).await.unwrap();
+    let sync = || Command::RemoteSync { vault: None };
+    a.remote_command(sync()).await.unwrap();
+    let (item, before) = a
+        .with(|s| {
+            let v = &s.vaults[&vault];
+            Ok((v.items()[0].id, v.items()))
+        })
+        .unwrap();
+
+    // The root admits M; M admits its puppet M2.
+    let root = recovery::decode(&words).unwrap();
+    let held: Vec<Frame> = a
+        .with(|s| Ok(s.vaults[&vault].frames().cloned().collect()))
+        .unwrap();
+    let mut rv = Vault::open_as(root.recovery_id(), &root.kem_secret(), held).unwrap();
+    let author = |seed: u8| Author::new(DeviceKeys::from_seed(&[seed; 32]), 1_700_000_000_000);
+    let (m, m2) = (author(0x4d), author(0x4e));
+    let consent = m.join_consent(&vault, &root.recovery_id());
+    let mut uploads = Vec::new();
+    rv.transact(
+        |w| w.add_signed(&root.signing_key(), m.id(), m.keys().kem_public(), consent),
+        |_: &Vault, fs: &[&Frame]| {
+            uploads.extend(fs.iter().map(|f| (*f).clone()));
+            Ok::<_, deadbolt_core::Error>(())
+        },
+    )
+    .unwrap();
+    let mut mv = Vault::open(m.keys(), rv.frames().cloned()).unwrap();
+    let consent = m2.join_consent(&vault, &m.id());
+    mv.transact(
+        |w| w.add(&m, m2.id(), m2.keys().kem_public(), consent),
+        |_: &Vault, fs: &[&Frame]| {
+            uploads.extend(fs.iter().map(|f| (*f).clone()));
+            Ok::<_, deadbolt_core::Error>(())
+        },
+    )
+    .unwrap();
+    // M2's frame 0 deletes A's item; frame 1 is all the store will show.
+    let mut puppet = Vault::open(m2.keys(), mv.frames().cloned()).unwrap();
+    let mut written = Vec::new();
+    let delete = DataOp::Edit {
+        item,
+        change: Change::Delete { at: None },
+    };
+    puppet
+        .transact(
+            |w| w.write(&m2, vec![delete]),
+            |_: &Vault, fs: &[&Frame]| {
+                written.extend(fs.iter().map(|f| (*f).clone()));
+                Ok::<_, deadbolt_core::Error>(())
+            },
+        )
+        .unwrap();
+    let fields = [("password".into(), Field::new(FieldType::Secret, "pw"))];
+    puppet
+        .transact(
+            |w| w.create_item(&m2, "login", Some("m2".into()), fields),
+            |_: &Vault, fs: &[&Frame]| {
+                written.extend(fs.iter().map(|f| (*f).clone()));
+                Ok::<_, deadbolt_core::Error>(())
+            },
+        )
+        .unwrap();
+    let written: Vec<Frame> = written
+        .into_iter()
+        .filter(|f| f.header().kind.log_kind() == LogKind::Data)
+        .collect();
+    assert_eq!(written.len(), 2);
+    let kem = m.keys().kem_key();
+    mv.transact(
+        |w| w.apply(kem, written.clone()),
+        |_, _| Ok::<_, deadbolt_core::Error>(()),
+    )
+    .unwrap();
+    let made = mv
+        .transact(
+            |w| {
+                w.checkpoint(&m, |pack, site| {
+                    let place = deadbolt_viewer::PackPlace {
+                        vault: *site.vault.as_bytes(),
+                        author: *site.author.as_bytes(),
+                        seq: site.seq,
+                        epoch: *site.epoch.as_bytes(),
+                        generation: 1,
+                    };
+                    let input =
+                        deadbolt_viewer::pack_input(pack, place).map_err(|e| e.to_string())?;
+                    Ok(deadbolt_pack::pack::encode(&input, site.key.as_bytes())
+                        .map_err(|e| e.to_string())?
+                        .bytes)
+                })
+            },
+            |_, _| Ok::<_, deadbolt_core::Error>(()),
+        )
+        .unwrap();
+    // The same checkpoint, re-signed with no membership heads.
+    let (f, mut payload) = mv
+        .checkpoints()
+        .find(|(f, _)| f.id == made.frame)
+        .map(|(f, p)| (f.clone(), p.clone()))
+        .unwrap();
+    assert_eq!(f.seq, 0, "d/M/0.c");
+    payload.mheads = Vec::new();
+    let key = mv.epoch_key(&f.epoch).unwrap().clone();
+    let bad = payload
+        .seal(m.keys().sign_key(), vault, f.seq, f.prev, f.epoch, &key)
+        .unwrap();
+    uploads.push(written[1].clone());
+    uploads.push(bad.clone());
+    let store = super::Remote::open(&remote).unwrap();
+    let plan = plan_push(
+        &vault,
+        Outbox {
+            frames: uploads,
+            packs: vec![(PackCommitment::of(&made.sealed).hash, made.sealed.clone())],
+            ..Outbox::default()
+        },
+    )
+    .unwrap();
+    push(&store, &plan).await.unwrap();
+
+    let Reply::RemoteSynced { report } = a.remote_command(sync()).await.unwrap() else {
+        panic!("not a sync report");
+    };
+    assert!(
+        report
+            .anomalies
+            .iter()
+            .any(|a| a.contains("checkpoint covers frames")),
+        "{:?}",
+        report.anomalies
+    );
+    a.with(|s| {
+        let v = &s.vaults[&vault];
+        assert!(v.is_member(&m2.id()), "the puppet is admitted");
+        assert!(v.frame(&bad.id()).is_some(), "the checkpoint is held");
+        assert_ne!(
+            v.base_checkpoint(),
+            Some(bad.id()),
+            "the poisoned pack isn't the base"
+        );
+        assert_eq!(v.items(), before, "nothing the pack claims was applied");
         Ok(())
     })
     .unwrap();

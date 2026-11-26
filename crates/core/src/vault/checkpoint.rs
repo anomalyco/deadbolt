@@ -280,9 +280,13 @@ impl Vault {
         {
             return true;
         }
+        let ctx = FoldContext {
+            membership: &self.resolved,
+            adders: &self.adders,
+        };
         self.opened
             .values()
-            .filter(|f| f.author == *by)
+            .filter(|f| f.author == *by && ctx.counts(f))
             .any(|f| match &f.body {
                 DataBody::Data(p) => p
                     .dclock
@@ -295,37 +299,55 @@ impl Vault {
             })
     }
 
-    /// The members whose admission the membership frames `mheads` already
-    /// depend on (the creator included): who existed when a frame naming
-    /// those heads was written.
-    pub fn members_before(&self, mheads: &[FrameId]) -> BTreeSet<DeviceId> {
+    /// The current members whose admission checkpoint `f`'s membership
+    /// heads already depend on (the creator included): who existed when it
+    /// was written. None when those heads can't be the ones it was written
+    /// on: they must reach the frame that minted its epoch and a counted
+    /// admission of its author and of every author its frontier names, so
+    /// empty or backdated heads never shrink who must have acked it.
+    pub fn members_before(
+        &self,
+        f: &v2::DataFrame,
+        payload: &v2::CheckpointPayload,
+    ) -> Option<BTreeSet<DeviceId>> {
         let mut seen: BTreeSet<FrameId> = BTreeSet::new();
-        let mut todo: Vec<FrameId> = mheads.to_vec();
+        let mut todo: Vec<FrameId> = payload.mheads.clone();
         while let Some(id) = todo.pop() {
             if !seen.insert(id) {
                 continue;
             }
-            if let Some(body) = self.members.get(&id).and_then(|f| f.member_body()) {
-                todo.extend(body.deps.iter().copied());
+            if let Some(frame) = self.members.get(&id) {
+                let h = frame.header();
+                todo.extend((h.seq > 0).then_some(h.prev));
+                if let Some(body) = frame.member_body() {
+                    todo.extend(body.deps.iter().copied());
+                }
             }
         }
-        self.resolved
-            .devices
-            .iter()
-            .copied()
-            .filter(|m| {
-                seen.iter().any(|id| {
-                    let Some(f) = self.members.get(id) else {
-                        return false;
-                    };
-                    match f.member_body().and_then(|b| b.op.as_ref()) {
-                        Some(v2::MemberOp::Add { device, .. }) => device == m,
-                        Some(v2::MemberOp::Create { .. }) => f.header().author == *m,
-                        _ => false,
-                    }
-                })
+        let admits = |m: &DeviceId| {
+            seen.iter().any(|id| {
+                let Some(frame) = self.members.get(id) else {
+                    return false;
+                };
+                let admission = match frame.member_body().and_then(|b| b.op.as_ref()) {
+                    Some(v2::MemberOp::Add { device, .. }) => device == m,
+                    Some(v2::MemberOp::Create { .. }) => frame.header().author == *m,
+                    _ => false,
+                };
+                admission && self.resolved.authorized_frames.contains(id)
             })
-            .collect()
+        };
+        let plausible = seen.contains(&f.epoch.as_frame_id())
+            && admits(&f.author)
+            && payload.frontier.iter().all(|(a, _, _)| admits(a));
+        plausible.then(|| {
+            self.resolved
+                .devices
+                .iter()
+                .copied()
+                .filter(|m| admits(m))
+                .collect()
+        })
     }
 
     /// The installed base while the membership still counts what it covers.

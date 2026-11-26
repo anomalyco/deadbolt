@@ -217,7 +217,8 @@ impl Daemon {
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("no key"))?,
                 };
-                let collected = !needs_pack || collected_behind(v, &plan.index, anchor, f, payload);
+                let collected =
+                    !needs_pack || collected_behind(v, &plan.index, anchor, f, payload, me);
                 Ok(Some((
                     frontier.clone(),
                     payload.pack_hash,
@@ -525,8 +526,9 @@ impl Daemon {
 /// every frontier seq is evidenced by something the checkpoint's author
 /// doesn't control (the store's listing of another author's stream, the
 /// anchor, this device's frames, another member's clock), and every member
-/// that already existed when it was made has signed that it saw it (GC never
-/// collects before they all have). A full replica whose covered frames are
+/// that already existed when it was made, this device included once it has
+/// synced, has signed that it saw it (GC never collects before they all
+/// have). Membership heads that can't be the checkpoint's own refuse it. A full replica whose covered frames are
 /// all still listed never trades its history for a pack.
 pub(super) fn collected_behind(
     v: &deadbolt_core::Vault,
@@ -534,6 +536,7 @@ pub(super) fn collected_behind(
     anchor: &SyncAnchor,
     f: &deadbolt_core::v2::DataFrame,
     payload: &deadbolt_core::v2::CheckpointPayload,
+    me: DeviceId,
 ) -> bool {
     let author = f.author;
     let frontier = payload.frontier_map();
@@ -572,12 +575,17 @@ pub(super) fn collected_behind(
     let gone = frontier
         .iter()
         .any(|(a, (seq, _))| (0..=*seq).any(|s| !held.contains(&(*a, s)) && !listed(a, s)));
-    let acked = v
-        .members_before(&payload.mheads)
+    let Some(before) = v.members_before(f, payload) else {
+        return false;
+    };
+    let acked = before
         .iter()
         .filter(|m| **m != author)
         .all(|m| v.acked(m, &author, f.seq));
-    evidenced && gone && acked
+    // Once this device has synced with the store, GC can't collect behind
+    // the checkpoint until this device itself has acked it.
+    let mine = anchor.seen.is_empty() || !v.is_member(&me) || v.acked(&me, &author, f.seq);
+    evidenced && gone && acked && mine
 }
 
 /// The pack hash of the checkpoint `v`'s base belongs to.
