@@ -55,7 +55,7 @@ impl SyncHandler for Handler {
 
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.0
-            .with(|s| hello(s, &DeviceId::from_bytes(peer), Some(s.own_addr())))
+            .with(|s| hello(s, &s.device_of(&peer)?, Some(s.own_addr())))
             .map_err(handler_error)
     }
 
@@ -68,7 +68,8 @@ impl SyncHandler for Handler {
             .0
             .with(|s| {
                 let ready = *self.0.ready.borrow();
-                missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready)
+                let peer = s.device_of(&peer)?;
+                missing_for(s, &peer, &peer_heads, ready)
             })
             .map_err(handler_error)?;
         Ok(history.outgoing(|h| {
@@ -86,7 +87,7 @@ impl SyncHandler for Handler {
         done: bool,
     ) -> Result<(), HandlerError> {
         let daemon = &self.0;
-        let peer = DeviceId::from_bytes(peer);
+        let peer = daemon.with(|s| s.device_of(&peer)).map_err(handler_error)?;
         let Receiving {
             stream,
             pending_forward,
@@ -229,15 +230,19 @@ async fn sync_round(
         };
         let targets: Vec<_> = peers
             .into_iter()
-            .map(|id| s.addr_of(&DeviceId::from_bytes(id)))
+            .map(|id| (id, s.addr_of(&DeviceId::from_bytes(id))))
             .collect();
         Ok((s.node.clone(), targets))
     })?;
     let mut tasks = JoinSet::new();
-    for addr in targets {
+    for (id, addr) in targets {
         let node = node.clone();
         tasks.spawn(async move {
-            let id = addr.id;
+            // A member whose card hasn't arrived has no transport key to dial.
+            let Some(addr) = addr else {
+                let error = "no device card yet, so no transport key to dial".to_owned();
+                return (id, Attempt::Unreachable, Err(error));
+            };
             let (attempt, result) = attempt(node.connect(addr), |conn| async move {
                 let result = conn.sync().await;
                 conn.close();
@@ -251,8 +256,8 @@ async fn sync_round(
     while let Some(joined) = tasks.join_next().await {
         results.push(joined?);
     }
-    let connected: HashSet<PeerId> = node.connected_peers().into_iter().collect();
     daemon.with(|s| {
+        let connected = s.connected_devices(node.connected_peers());
         let attempts = results
             .iter()
             .map(|(id, attempt, _)| (*id, *attempt))
@@ -261,6 +266,26 @@ async fn sync_round(
             .into_iter()
             .map(|(id, _, result)| {
                 let device = s.device_info(&DeviceId::from_bytes(id), &connected);
+                // A removed device is told its removal and sent nothing
+                // else: say so, unless another vault is still shared.
+                let peer = DeviceId::from_bytes(id);
+                let removed: Vec<&str> = s
+                    .vaults
+                    .values()
+                    .filter(|v| !v.is_member(&s.id) && (v.is_member(&peer) || v.was_removed(&s.id)))
+                    .map(|v| v.name())
+                    .collect();
+                let shares = s
+                    .vaults
+                    .values()
+                    .any(|v| v.is_member(&s.id) && v.is_member(&peer));
+                let result = match result {
+                    Ok(_) if !shares && !removed.is_empty() => Err(format!(
+                        "rejected: this device was removed from {}",
+                        removed.join(", ")
+                    )),
+                    result => result,
+                };
                 match result {
                     Ok(outcome) => PeerSync {
                         device,
@@ -455,6 +480,8 @@ mod tests {
             for seed in seeds {
                 let (keys, consent) = peer(*seed, &vault, &me);
                 v.add(a, keys.device_id(), keys.kem_public(), consent)?;
+                // Connections name a device by the transport key its card gives.
+                v.card(a, keys.device_id(), keys.net_public(), "peer")?;
             }
             Ok(())
         })
@@ -485,7 +512,7 @@ mod tests {
             .unwrap();
         let sender = author(2);
         let third = author(3);
-        let peer = *sender.id().as_bytes();
+        let peer = *sender.keys().net_public().as_bytes();
         let (mut shared, mut sole_sender) = daemon
             .with(|s| {
                 s.sync_task.take();
@@ -705,7 +732,7 @@ mod tests {
         let mut items: Vec<_> = (0..3000).map(login).collect();
         items.extend((0..4).map(|i| note(&format!("big {i}"), 1 << 20)));
         import(&mut a, items);
-        let offer_blob = super::super::pairing::offer(&a, vault, &b.id, None).unwrap();
+        let offer_blob = super::super::pairing::offer(&a, vault, b.id.as_bytes(), None).unwrap();
         let (offer, _) = super::super::pairing::read_offer(&offer_blob).unwrap();
         let join = super::super::pairing::join_blob(&b.keys(), "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
@@ -745,8 +772,68 @@ mod tests {
         assert_eq!(sent.unwrap().sent, received.unwrap().received);
         assert!(b.1.load(std::sync::atomic::Ordering::SeqCst) >= 1);
         let (a, b) = (a.0.into_inner().unwrap(), b.0.into_inner().unwrap());
-        assert_eq!(b.vault(&vault).heads(), a.vault(&vault).heads());
+        // b holds all of a's history; past it, only its own card and the
+        // checkpoints it compacted its large tail into after joining.
+        let (bh, ah) = (b.vault(&vault).heads(), a.vault(&vault).heads());
+        for (log, author, seq) in ah.iter().filter(|(_, d, _)| *d != b.id) {
+            assert_eq!(
+                (bh.get(log, &author), bh.tip(log, &author)),
+                (seq, ah.tip(log, &author))
+            );
+        }
+        for (log, author, _) in bh.iter().filter(|(l, d, _)| ah.tip(*l, d).is_none()) {
+            assert_eq!((log, author), (LogKind::Data, b.id), "only b's own frames");
+        }
+        assert!(bh.get(LogKind::Data, &b.id) >= ah.get(LogKind::Data, &b.id));
+        assert!(b.vault(&vault).base().is_some());
         assert_eq!(b.vault(&vault).items().len(), 6005);
+    }
+
+    /// A checkpoint that arrives from a peer is judged on arrival, before
+    /// this device's next write acks it: one whose state disagrees with this
+    /// device's own fold gets a `Dispute`.
+    #[test]
+    fn a_bad_checkpoint_from_a_peer_is_disputed_on_arrival() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
+        let id = target.create_vault("personal").unwrap();
+        add_all(&mut target, id, &[2]);
+        target
+            .update(id, |v, a| {
+                Ok(v.create_item(a, "login", Some("x".into()), [])?)
+            })
+            .unwrap();
+        let peer = author(2);
+        let mut theirs = target.vault(&id).clone();
+        let made = local(&mut theirs, |w| {
+            w.checkpoint(&peer, |pack, _| pack.encode().map_err(|e| e.to_string()))
+        });
+        let (f, mut payload) = theirs
+            .checkpoints()
+            .find(|(f, _)| f.id == made.frame)
+            .map(|(f, p)| (f.clone(), p.clone()))
+            .unwrap();
+        payload.state_mac[0] ^= 1;
+        let key = theirs.epoch_key(&f.epoch).unwrap().clone();
+        let bad = payload
+            .seal(peer.keys().sign_key(), id, f.seq, f.prev, f.epoch, &key)
+            .unwrap();
+        receive(
+            &mut target,
+            &peer.id(),
+            vec![Blob::new(bad.encode())],
+            true,
+            &mut Default::default(),
+        )
+        .unwrap();
+        let v = target.vault(&id);
+        assert!(v.frame(&bad.id()).is_some());
+        assert!(v.is_disputed(&bad.id()));
+        assert!(
+            v.disputes()
+                .iter()
+                .any(|d| d.checkpoint == bad.id() && d.author == target.id)
+        );
     }
 
     #[test]
@@ -890,6 +977,7 @@ mod tests {
                 addr: None,
                 peers: BTreeMap::new(),
                 vaults: BTreeMap::new(),
+                members: BTreeMap::new(),
             };
             Ok(serde_json::to_vec(&hello)?)
         }
@@ -986,6 +1074,7 @@ mod tests {
             addr: None,
             peers: BTreeMap::new(),
             vaults,
+            members: BTreeMap::new(),
         })
         .unwrap();
         (dir, source, author(2).id(), hello)

@@ -340,7 +340,7 @@ fn data_under_a_rotation_a_root_fork_voided_is_uncounted_and_re_emitted() {
         vec![last],
         d.device_id(),
         d.kem_public(),
-        sign_join_consent(d.sign_key(), &vault, &a.device_id(), &d.kem_public()),
+        sign_join_consent(d, &vault, &a.device_id()),
         Some((v.e0, &v.k0)),
     )
     .unwrap();
@@ -461,7 +461,7 @@ fn data_under_a_losing_removals_epoch_is_uncounted_and_re_emitted() {
         vec![last],
         e.device_id(),
         e.kem_public(),
-        sign_join_consent(e.sign_key(), &vault, &b.device_id(), &e.kem_public()),
+        sign_join_consent(e, &vault, &b.device_id()),
         Some((v.e0, &v.k0)),
     )
     .unwrap();

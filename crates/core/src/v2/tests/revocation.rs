@@ -35,7 +35,7 @@ pub(super) fn vault_with(devices: &[&DeviceKeys]) -> Vault {
             vec![prev],
             dev.device_id(),
             dev.kem_public(),
-            sign_join_consent(dev.sign_key(), &vault, &r0.recovery_id(), &dev.kem_public()),
+            sign_join_consent(dev, &vault, &r0.recovery_id()),
             Some((e0, &k0)),
         )
         .unwrap();
@@ -69,7 +69,7 @@ fn reader_duty_never_rewraps_an_unplaced_removal_epoch() {
         heads,
         d.device_id(),
         d.kem_public(),
-        sign_join_consent(d.sign_key(), &vault, &a.device_id(), &d.kem_public()),
+        sign_join_consent(d, &vault, &a.device_id()),
         Some((v.e0, &v.k0)),
     )
     .unwrap();
@@ -154,7 +154,7 @@ fn a_removed_device_cannot_be_readded_with_an_inline_rewrap() {
     let e1 = EpochId::from_frame_id(rem_c.id());
     v.frames.push(rem_c.clone());
     let after = resolve(&vault, &v.frames, &[]);
-    let consent = sign_join_consent(c.sign_key(), &vault, &a.device_id(), &c.kem_public());
+    let consent = sign_join_consent(c, &vault, &a.device_id());
     let readd = |resolved: &ResolvedMembership| {
         build_add_frame(
             a.sign_key(),

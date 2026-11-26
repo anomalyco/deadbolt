@@ -12,7 +12,8 @@ use std::{
 
 use data_encoding::HEXLOWER;
 use deadbolt_core::v2::{
-    DeviceKeys, EpochGraph, EpochKeyring, Frame, FrameId, KemPublic, LogKind, NetPublic,
+    DeviceKeys, EpochGraph, EpochId, EpochKeyring, Frame, FrameId, FrameKind, JoinConsent,
+    KemPublic, LogKind, MemberOp, NetPublic,
 };
 use deadbolt_core::{Author, DeviceId, Heads, Signature, Vault, VaultId, VaultWrite, valid_name};
 use n0_future::time::Instant;
@@ -116,6 +117,12 @@ pub struct Hello {
     #[serde(default)]
     pub peers: BTreeMap<String, Hint>,
     pub vaults: BTreeMap<String, String>,
+    /// Vaults that removed the receiver, each with the sender's membership
+    /// heads alone: the receiver may push membership frames there (its
+    /// removal may have lost to its own concurrent one) and is sent only the
+    /// membership up to its removal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub members: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,14 +130,29 @@ pub struct Offer {
     pub v: u32,
     pub vault: String,
     pub vault_name: String,
+    /// The inviter's device id (`D_sign`): transport runs on its `D_net`, so
+    /// the connection alone doesn't name it. The welcome must hold a card for
+    /// it naming the connection's key ([`check_transport`]).
+    pub device: String,
     pub name: String,
     pub addr: Option<Addr>,
+}
+
+impl Offer {
+    /// The device the offer says invites.
+    pub fn inviter(&self) -> Result<DeviceId, Error> {
+        Ok(DeviceId::from_bytes(unhex(&self.device)?))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct JoinBlob {
     pub v: u32,
+    /// The joiner's device id (`D_sign`), which `consent` is signed by.
+    pub device: String,
     pub consent: String,
+    /// The joiner's transport key's signature binding it to `device`.
+    pub net_proof: String,
     /// The joiner's KEM public key, which epoch keys are wrapped to.
     pub kem: String,
     /// The joiner's transport key, for its `DeviceCard`.
@@ -188,12 +210,21 @@ pub fn hello(s: &impl State, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<
         .filter(|v| v.is_member(peer))
         .map(|v| (v.id().to_string(), HEXLOWER.encode(&v.heads().encode())))
         .collect();
+    let members = s
+        .vaults()
+        .filter(|v| !v.is_member(peer) && v.was_removed(peer))
+        .map(|v| {
+            let heads = v.heads().members_only();
+            (v.id().to_string(), HEXLOWER.encode(&heads.encode()))
+        })
+        .collect();
     Ok(serde_json::to_vec(&Hello {
         v: 1,
         name: s.device_name().into(),
         addr,
         peers: s.hints_for(peer),
         vaults,
+        members,
     })?)
 }
 
@@ -203,11 +234,41 @@ pub fn hello(s: &impl State, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<
 pub struct Missing(VecDeque<FrameId>);
 
 impl Missing {
+    /// Everything of `log` past `heads`.
     fn of(vault: &Vault, heads: &Heads, log: LogKind) -> Self {
         Self(
             vault
                 .missing(heads, log)
                 .into_iter()
+                .map(Frame::id)
+                .collect(),
+        )
+    }
+
+    /// What of `log` `peer` lacks and this device `me` may send it:
+    /// never anything that depends on a removal of `peer` this device holds
+    /// (the membership after it, the data under the epochs they minted),
+    /// the removal itself excepted, so a removed peer learns it was removed
+    /// and nothing more. A removal this device placed and found void
+    /// withholds nothing, unless `me` or `peer` is removed here: then
+    /// every held removal of `peer` counts, since this view may be stale.
+    /// A device removed itself relays no one's frames, only its own (its
+    /// removal may have lost a race).
+    fn for_peer(
+        vault: &Vault,
+        heads: &Heads,
+        log: LogKind,
+        peer: &DeviceId,
+        me: &DeviceId,
+    ) -> Self {
+        let relays = vault.is_member(me);
+        let withheld = withheld_from(vault, peer, !relays || !vault.is_member(peer));
+        Self(
+            vault
+                .missing(heads, log)
+                .into_iter()
+                .filter(|f| !withheld.contains(&f.id()))
+                .filter(|f| relays || f.header().author == *me)
                 .map(Frame::id)
                 .collect(),
         )
@@ -224,6 +285,66 @@ impl Missing {
     }
 }
 
+/// What `peer` must never be sent: the frames depending on a removal of it
+/// (counted or unplaced; any held one when `strict`) and the data sealed
+/// under the epochs those frames and the removal minted.
+fn withheld_from(vault: &Vault, peer: &DeviceId, strict: bool) -> BTreeSet<FrameId> {
+    let m = vault.membership();
+    let removals: BTreeSet<FrameId> = vault
+        .frames()
+        .filter(|f| {
+            f.member_body()
+                .and_then(|b| b.op.as_ref())
+                .is_some_and(|op| matches!(op, MemberOp::Remove { device, .. } if device == peer))
+        })
+        .map(Frame::id)
+        .filter(|id| strict || m.authorized_frames.contains(id) || m.unplaced_frames.contains(id))
+        .collect();
+    if removals.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut out = descendants(vault, &removals);
+    let epochs: BTreeSet<EpochId> = out
+        .iter()
+        .chain(&removals)
+        .map(|id| EpochId::from_frame_id(*id))
+        .collect();
+    out.extend(
+        vault
+            .frames()
+            .filter(|f| f.header().kind.log_kind() == LogKind::Data)
+            .filter(|f| epochs.contains(&f.header().epoch))
+            .map(Frame::id),
+    );
+    out
+}
+
+/// The membership frames that depend, directly or not, on one of `roots`
+/// (the roots themselves excluded).
+fn descendants(vault: &Vault, roots: &BTreeSet<FrameId>) -> BTreeSet<FrameId> {
+    let members: Vec<&Frame> = vault
+        .frames()
+        .filter(|f| f.header().kind == FrameKind::Member)
+        .collect();
+    let mut seen = roots.clone();
+    loop {
+        let before = seen.len();
+        for f in &members {
+            if !seen.contains(&f.id())
+                && f.member_body()
+                    .is_some_and(|b| b.deps.iter().any(|d| seen.contains(d)))
+            {
+                seen.insert(f.id());
+            }
+        }
+        if seen.len() == before {
+            break;
+        }
+    }
+    seen.retain(|id| !roots.contains(id));
+    seen
+}
+
 /// Snapshot selection is made under the state lock. A pull reacquires that
 /// lock only long enough to check current authority and encode one frame.
 pub struct OutgoingHistory {
@@ -231,6 +352,9 @@ pub struct OutgoingHistory {
     meta: Option<Blob>,
     logs: VecDeque<(VaultId, Missing)>,
     scope: HistoryScope,
+    /// Vaults that removed the peer, queued with only the membership up to
+    /// its removal ([`Missing::for_peer`]).
+    removal_only: BTreeSet<VaultId>,
 }
 
 enum HistoryScope {
@@ -251,7 +375,7 @@ impl OutgoingHistory {
                 .vaults()
                 .find(|v| v.id() == *id)
                 .ok_or(Error::VaultNotHeld)?;
-            if !v.is_member(&self.peer) {
+            if !v.is_member(&self.peer) && !self.removal_only.contains(id) {
                 self.omit_revoked(s)?;
                 continue;
             }
@@ -282,7 +406,7 @@ impl OutgoingHistory {
         let mut held = 0;
         for v in s.vaults().filter(|v| negotiated.contains(&v.id())) {
             held += 1;
-            if !v.is_member(&self.peer) {
+            if !v.is_member(&self.peer) && !self.removal_only.contains(&v.id()) {
                 if !v.was_removed(&self.peer) {
                     return Err(denied());
                 }
@@ -292,9 +416,8 @@ impl OutgoingHistory {
         if held != negotiated.len() {
             return Err(Error::VaultNotHeld);
         }
-        if held == removed.len() {
-            return Err(denied()); // No other negotiated vault still admits the peer.
-        }
+        // With no vault left that admits the peer the stream simply ends: a
+        // removal relayed mid-stream (by this peer or another) is ordinary.
         self.logs.retain(|(id, _)| !removed.contains_key(id));
         negotiated.retain(|id| !removed.contains_key(id));
         Ok(())
@@ -319,21 +442,55 @@ pub fn missing_for<S: State>(
         return Err(Error::Protocol("unsupported sync envelope").into());
     }
     s.learn(peer, &hello.name, hello.addr, hello.peers)?;
+    let me = s.device_id();
     let mut logs = VecDeque::new();
     let mut data = Vec::new();
+    let mut removal_only = BTreeSet::new();
     for (id, heads) in &hello.vaults {
         let Ok(id) = unhex::<32>(id).map(VaultId::from_bytes) else {
             continue;
         };
+        let Some(vault) = s.vaults().find(|v| v.id() == id) else {
+            continue;
+        };
+        let bytes = HEXLOWER.decode(heads.as_bytes()).map_err(|_| Error::Hex)?;
+        let heads = Heads::decode(&bytes).map_err(Error::from)?;
+        let member = Missing::for_peer(vault, &heads, LogKind::Member, peer, &me);
+        if !vault.is_member(peer) {
+            // A removed peer that doesn't know yet: tell it, nothing more.
+            if vault.was_removed(peer) {
+                logs.push_back((id, member));
+                removal_only.insert(id);
+            }
+            continue;
+        }
+        logs.push_back((id, member));
+        // A device removed itself sends no data.
+        if ready && vault.is_member(&me) {
+            data.push((
+                id,
+                Missing::for_peer(vault, &heads, LogKind::Data, peer, &me),
+            ));
+        }
+    }
+    // A vault that removed the peer's sender only takes membership frames:
+    // send what of the membership it lacks, never data.
+    for (id, heads) in &hello.members {
+        let Ok(id) = unhex::<32>(id).map(VaultId::from_bytes) else {
+            continue;
+        };
+        if hello.vaults.contains_key(&id.to_string()) {
+            continue;
+        }
         let Some(vault) = s.vaults().find(|v| v.id() == id && v.is_member(peer)) else {
             continue;
         };
         let bytes = HEXLOWER.decode(heads.as_bytes()).map_err(|_| Error::Hex)?;
         let heads = Heads::decode(&bytes).map_err(Error::from)?;
-        logs.push_back((id, Missing::of(vault, &heads, LogKind::Member)));
-        if ready {
-            data.push((id, Missing::of(vault, &heads, LogKind::Data)));
-        }
+        logs.push_back((
+            id,
+            Missing::for_peer(vault, &heads, LogKind::Member, peer, &me),
+        ));
     }
     let negotiated = logs.iter().map(|(id, _)| *id).collect();
     logs.extend(data);
@@ -345,28 +502,37 @@ pub fn missing_for<S: State>(
             negotiated,
             data: ready,
         },
+        removal_only,
     })
 }
 
+/// The most membership frames one stream takes from a peer a vault removed:
+/// enough for any honest removal race, too few to flood the vault.
+pub const MAX_FROM_REMOVED: usize = 1024;
+
 /// One incoming frame stream's memory across its batches: the vaults whose
-/// removal of the peer this stream delivered. The sync protocol commits a
-/// stream in prefix batches (1, 2, 4, ... frames), so the removal and the
-/// data written before it usually arrive in different batches. Keep one per
-/// stream, never per peer or across streams.
+/// removal of the peer this stream delivered, and how many frames it took
+/// from a peer already removed. The sync protocol commits a stream in prefix
+/// batches (1, 2, 4, ... frames), so the removal and the data written before
+/// it usually arrive in different batches. Keep one per stream, never per
+/// peer or across streams.
 #[derive(Debug, Default)]
 pub struct ReceiveStream {
     removed: BTreeSet<VaultId>,
+    from_removed: BTreeMap<VaultId, usize>,
 }
 
 /// Skip malformed frames, not the valid removals beside them, and commit
 /// independently per vault.
 ///
-/// Data relayed by a peer the vault no longer admits is dropped, with one
-/// exception: the stream that delivers the peer's own removal may still bring
-/// data, in that batch or a later one of the same stream. Which of it counts
-/// is the fold's call (a removal names the last of the device's frames that
-/// does), so data the peer wrote after its removal never counts. Every later
-/// stream from it is refused.
+/// A vault takes frames only from a member or a device it removed. From a
+/// removed one it takes membership alone (its removal may have lost to its
+/// own concurrent one), at most [`MAX_FROM_REMOVED`] frames a stream, and
+/// never data. The one exception: the stream that delivers the peer's own
+/// removal may still bring data, in that batch or a later one of the same
+/// stream. Which of it counts is the fold's call (a removal names the last of
+/// the device's frames that does), so data the peer wrote after its removal
+/// never counts.
 pub fn receive<S: State>(
     s: &mut S,
     peer: &DeviceId,
@@ -385,7 +551,10 @@ pub fn receive<S: State>(
         };
         let h = frame.header();
         let data = h.kind.log_kind() == LogKind::Data;
-        if !s.vaults().any(|v| v.id() == h.vault) || (data && !ready) {
+        let admits = s
+            .vaults()
+            .any(|v| v.id() == h.vault && (v.is_member(peer) || v.was_removed(peer)));
+        if !admits || (data && !ready) {
             continue;
         }
         grouped.entry(h.vault).or_default().push(frame);
@@ -393,12 +562,18 @@ pub fn receive<S: State>(
     let mut added = 0;
     for (id, frames) in grouped {
         let removed_here = stream.removed.contains(&id);
-        let (count, removed) = s.update(id, |vault, author| {
+        let taken = stream.from_removed.get(&id).copied().unwrap_or(0);
+        let (count, removed, took) = s.update(id, |vault, author| {
             let kem = author.keys().kem_key();
             let before = vault.is_member(peer);
-            let (members, data): (Vec<Frame>, Vec<Frame>) = frames
+            let (mut members, mut data): (Vec<Frame>, Vec<Frame>) = frames
                 .into_iter()
                 .partition(|f| f.header().kind.log_kind() == LogKind::Member);
+            let mut took = 0;
+            if !before && !removed_here {
+                members.truncate(MAX_FROM_REMOVED.saturating_sub(taken));
+                took = members.len();
+            }
             let mut added = match vault.apply(kem, members) {
                 Ok(n) => n,
                 Err(error) => {
@@ -407,24 +582,37 @@ pub fn receive<S: State>(
                 }
             };
             let removed = before && !vault.is_member(peer);
-            if vault.is_member(peer) || removed || removed_here {
+            if !(vault.is_member(peer) || removed || removed_here) {
+                data.clear();
+            }
+            if !data.is_empty() {
                 match vault.apply(kem, data) {
                     Ok(n) => added += n,
                     Err(error) => debug!(peer = %peer, "rejected frames: {error}"),
                 }
             }
             // What arrived may leave a member without a key it needs (rule
-            // E6): rewrap it in the same commit.
-            if added > 0
-                && let Err(error) = vault.fulfill_reader_duty(author)
-            {
-                debug!(peer = %peer, "reader duty: {error}");
+            // E6): rewrap it in the same commit. A checkpoint that arrived is
+            // judged before this device's next write acks it.
+            if added > 0 {
+                if let Err(error) = vault.fulfill_reader_duty(author) {
+                    debug!(peer = %peer, "reader duty: {error}");
+                }
+                if ready
+                    && vault.is_member(&author.id())
+                    && let Err(error) = vault.judge_checkpoints(author)
+                {
+                    debug!(peer = %peer, "judging checkpoints: {error}");
+                }
             }
-            Ok((added, removed))
+            Ok((added, removed, took))
         })?;
         added += count;
         if removed {
             stream.removed.insert(id);
+        }
+        if took > 0 {
+            *stream.from_removed.entry(id).or_default() += took;
         }
     }
     s.received(peer)?;
@@ -434,21 +622,30 @@ pub fn receive<S: State>(
     Ok(added)
 }
 
+/// The offer to the device on the other end of a pairing connection, whose
+/// transport key is `peer`. A key a removed device's card names is refused
+/// before anything goes out; [`welcome`] checks the device itself.
 pub fn offer(
     s: &impl State,
     vault: VaultId,
-    device: &DeviceId,
+    peer: &PeerId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>, Error> {
     let held = s
         .vaults()
         .find(|v| v.id() == vault)
         .ok_or(Error::VaultNotHeld)?;
-    can_invite(held, &s.device_id(), device)?;
+    if !held.is_member(&s.device_id()) {
+        return Err(Error::NotMember(held.name().into()));
+    }
+    if let Some(device) = held.device_with_net(peer) {
+        can_invite(held, &s.device_id(), &device)?;
+    }
     Ok(serde_json::to_vec(&Offer {
-        v: 2,
+        v: 3,
         vault: vault.to_string(),
         vault_name: held.name().into(),
+        device: s.device_id().to_string(),
         name: s.device_name().into(),
         addr,
     })?)
@@ -456,14 +653,42 @@ pub fn offer(
 
 pub fn read_offer(bytes: &[u8]) -> Result<(Offer, VaultId), Error> {
     let offer: Offer = serde_json::from_slice(bytes)?;
-    if offer.v != 2 {
+    if offer.v != 3 {
         return Err(Error::Protocol("unsupported pairing envelope"));
     }
     if !valid_name(&offer.vault_name) {
         return Err(Error::Protocol("invalid vault name"));
     }
+    offer.inviter()?;
     let vault = VaultId::from_bytes(unhex(&offer.vault)?);
     Ok((offer, vault))
+}
+
+/// The device a join blob speaks for, after checking its transport key is
+/// the pairing connection's (`peer`): transport authenticated `peer`, and
+/// the blob binds the device to it.
+pub fn join_device(bytes: &[u8], peer: &PeerId) -> Result<DeviceId, Error> {
+    let join: JoinBlob = serde_json::from_slice(bytes)?;
+    if join.v != 5 {
+        return Err(Error::Protocol("unsupported pairing envelope"));
+    }
+    if unhex::<32>(&join.net)? != *peer {
+        return Err(Error::Protocol(
+            "the join names another transport key than the connection's",
+        ));
+    }
+    Ok(DeviceId::from_bytes(unhex(&join.device)?))
+}
+
+/// Checks that the transport key `device` signed into its `Add` in `vault`
+/// is `peer`, the key of the connection it spoke on.
+pub fn check_transport(vault: &Vault, device: &DeviceId, peer: &PeerId) -> Result<(), Error> {
+    match vault.device_net(device) {
+        Some(net) if net.as_bytes() == peer => Ok(()),
+        _ => Err(Error::Protocol(
+            "the device's transport key is another than the connection's",
+        )),
+    }
 }
 
 pub fn join_blob(
@@ -473,11 +698,12 @@ pub fn join_blob(
     vault: &VaultId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>, Error> {
-    let consent =
-        deadbolt_core::v2::sign_join_consent(keys.sign_key(), vault, &inviter, &keys.kem_public());
+    let consent = deadbolt_core::v2::sign_join_consent(keys, vault, &inviter);
     Ok(serde_json::to_vec(&JoinBlob {
-        v: 3,
-        consent: HEXLOWER.encode(consent.as_bytes()),
+        v: 5,
+        device: keys.device_id().to_string(),
+        consent: HEXLOWER.encode(consent.consent.as_bytes()),
+        net_proof: HEXLOWER.encode(consent.net_proof.as_bytes()),
         kem: HEXLOWER.encode(keys.kem_public().as_bytes()),
         net: HEXLOWER.encode(keys.net_public().as_bytes()),
         name: name.into(),
@@ -509,12 +735,19 @@ pub fn welcome<S: State>(
     fallback_addr: Option<Addr>,
 ) -> Result<OutgoingHistory, S::Error> {
     let join: JoinBlob = serde_json::from_slice(bytes).map_err(Error::from)?;
-    if join.v != 3 {
+    if join.v != 5 {
         return Err(Error::Protocol("unsupported pairing envelope").into());
     }
-    let consent = Signature::from_bytes(unhex(&join.consent)?);
+    if unhex::<32>(&join.device)? != *device.as_bytes() {
+        return Err(Error::Protocol("the join speaks for another device").into());
+    }
     let kem = KemPublic::from_bytes(unhex(&join.kem)?);
     let net = NetPublic::from_bytes(unhex(&join.net)?);
+    let consent = JoinConsent {
+        net,
+        consent: Signature::from_bytes(unhex(&join.consent)?),
+        net_proof: Signature::from_bytes(unhex(&join.net_proof)?),
+    };
     let label = clean_name(&join.name);
     let (add, card) = {
         let held = s
@@ -564,6 +797,7 @@ pub fn welcome<S: State>(
         meta: Some(meta),
         logs,
         scope: HistoryScope::Pairing,
+        removal_only: BTreeSet::new(),
     })
 }
 

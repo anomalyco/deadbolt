@@ -29,12 +29,7 @@ fn rotate_recovery_beats_depth1_backdating_stolen_laptop() {
         vec![create.id()],
         laptop.device_id(),
         laptop.kem_public(),
-        sign_join_consent(
-            laptop.sign_key(),
-            &vault,
-            &r0.recovery_id(),
-            &laptop.kem_public(),
-        ),
+        sign_join_consent(laptop, &vault, &r0.recovery_id()),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -47,12 +42,7 @@ fn rotate_recovery_beats_depth1_backdating_stolen_laptop() {
         vec![add_laptop.id()],
         phone.device_id(),
         phone.kem_public(),
-        sign_join_consent(
-            phone.sign_key(),
-            &vault,
-            &r0.recovery_id(),
-            &phone.kem_public(),
-        ),
+        sign_join_consent(phone, &vault, &r0.recovery_id()),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -182,7 +172,7 @@ fn competing_root_rotations_freeze_lineage_with_no_hash_lottery() {
         vec![create.id()],
         dev.device_id(),
         dev.kem_public(),
-        sign_join_consent(dev.sign_key(), &vault, &r0.recovery_id(), &dev.kem_public()),
+        sign_join_consent(dev, &vault, &r0.recovery_id()),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -278,7 +268,7 @@ fn data_fork_removes_at_seq_minus_1_and_member_fork_filters_mheads() {
         vec![create.id()],
         a.device_id(),
         a.kem_public(),
-        sign_join_consent(a.sign_key(), &vault, &r0.recovery_id(), &a.kem_public()),
+        sign_join_consent(a, &vault, &r0.recovery_id()),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -291,7 +281,7 @@ fn data_fork_removes_at_seq_minus_1_and_member_fork_filters_mheads() {
         vec![add_a.id()],
         b.device_id(),
         b.kem_public(),
-        sign_join_consent(b.sign_key(), &vault, &r0.recovery_id(), &b.kem_public()),
+        sign_join_consent(b, &vault, &r0.recovery_id()),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -369,7 +359,7 @@ fn exhaustive_small_scope_all_delivery_permutations_and_removal_cycles() {
         vec![create.id()],
         a.device_id(),
         a.kem_public(),
-        sign_join_consent(a.sign_key(), &vault, &r0.recovery_id(), &a.kem_public()),
+        sign_join_consent(a, &vault, &r0.recovery_id()),
         None,
     )
     .unwrap();
@@ -382,7 +372,7 @@ fn exhaustive_small_scope_all_delivery_permutations_and_removal_cycles() {
         vec![add_a.id()],
         b.device_id(),
         b.kem_public(),
-        sign_join_consent(b.sign_key(), &vault, &r0.recovery_id(), &b.kem_public()),
+        sign_join_consent(b, &vault, &r0.recovery_id()),
         None,
     )
     .unwrap();
@@ -395,7 +385,7 @@ fn exhaustive_small_scope_all_delivery_permutations_and_removal_cycles() {
         vec![add_b.id()],
         c.device_id(),
         c.kem_public(),
-        sign_join_consent(c.sign_key(), &vault, &r0.recovery_id(), &c.kem_public()),
+        sign_join_consent(c, &vault, &r0.recovery_id()),
         None,
     )
     .unwrap();

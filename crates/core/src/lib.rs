@@ -49,7 +49,8 @@ pub use id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 pub use item::{Field, FieldType, ItemError, Schema, SchemaField, schema, schemas};
 pub use ops::{Change, DataOp, Source, valid_name};
 pub use vault::{
-    Author, Deleted, Heads, Item, MAX_FRAME_LEN, MAX_FRAMES, Touch, Vault, VaultWrite,
+    Author, Checkpointed, Deleted, Heads, Item, MAX_FRAME_LEN, MAX_FRAMES, PackSite, Touch, Vault,
+    VaultWrite, parking_message,
 };
 
 #[cfg(test)]

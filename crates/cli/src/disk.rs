@@ -15,6 +15,7 @@
 //!     LOCK                      held while unlocked
 //!   v/<vault>/                  one vault (see `deadbolt_pack`)
 //!     members.log, wal-<n>.log  its frames
+//!     gen-<n>.pack              its newest checkpoint pack (`packs`)
 //!     local-<m>.sealed          this device's state for the vault: parking
 //!                               memory, remote config and credentials
 //! ```
@@ -32,6 +33,7 @@
 
 mod activity;
 mod kdf;
+mod packs;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -50,6 +52,7 @@ pub use zeroize::Zeroizing;
 pub use activity::{Budget, Dropped};
 pub use kdf::KdfParams;
 use kdf::{KEY_LEN, KdfHeader, SecretKey};
+pub use packs::open_pack;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

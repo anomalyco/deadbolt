@@ -42,6 +42,7 @@ mod command;
 mod health;
 mod items;
 mod reference;
+mod remote;
 mod reports;
 mod resolve;
 mod send;
@@ -67,6 +68,7 @@ pub use items::{
     TagCount, code_field, noun, primary_field, sign_in_name, sign_in_provider,
 };
 pub use reference::{Reference, SCHEME};
+pub use remote::{ParkedReason, RemoteInfo, RemoteInput, RemoteReport, VaultState};
 pub use reports::{Code, ImportReport, ImportSource, SignInCounts, Tally};
 pub use resolve::{Purpose, ResolvedSecret};
 pub use send::{SendInfo, SendState, SenderInfo};

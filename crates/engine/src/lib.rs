@@ -20,11 +20,13 @@
 pub mod activity;
 pub mod autofill;
 pub mod cap;
+mod checkpoint;
 pub mod clock;
 pub mod forms;
 pub mod generate;
 pub mod items;
 pub mod passkeys;
+pub mod recovery;
 pub mod secrets;
 pub mod ssh_keys;
 pub mod state;

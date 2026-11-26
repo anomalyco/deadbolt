@@ -4350,6 +4350,8 @@ mod broker;
 mod health;
 #[path = "cli/mcp.rs"]
 mod mcp;
+#[path = "cli/recovery.rs"]
+mod recovery;
 #[path = "cli/taint.rs"]
 mod taint;
 #[path = "cli/updates.rs"]

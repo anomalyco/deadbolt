@@ -1,9 +1,12 @@
-use deadbolt_core::v2::{EpochKey, KemSecret};
+use std::sync::OnceLock;
+
+use deadbolt_core::v2::{DeviceKeys, EpochKey, KemSecret, Pack, RecoverySecret};
+use deadbolt_core::{Author, DataOp, Error, Field, FieldType, ItemId, Vault};
 use deadbolt_pack::names::hex;
 use deadbolt_pack::{Blocks, PackInput, PackSummary, pack};
 use zeroize::Zeroizing;
 
-use crate::{ViewerHit, ViewerKeyBundle, ViewerPasskey, ViewerSecret, pack_item};
+use crate::{PackPlace, ViewerHit, ViewerKeyBundle, ViewerPasskey, ViewerSecret, pack_input};
 
 mod bundle;
 mod deps;
@@ -25,28 +28,98 @@ pub(crate) fn device_kem() -> KemSecret {
     KemSecret::from_bytes(&[9; 32])
 }
 
+/// The most items any test packs.
+const MAX_ITEMS: usize = 5_000;
+
+/// One vault holding item `i` for every `i < MAX_ITEMS`, compacted into
+/// a core pack: `(ids, pack)`, ids in creation order.
+fn fixture() -> &'static (Vec<ItemId>, Pack) {
+    static FIXTURE: OnceLock<(Vec<ItemId>, Pack)> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let author = Author::new(DeviceKeys::from_seed(&[5; 32]), NOW * 1000);
+        let (mut vault, _) =
+            Vault::create(&RecoverySecret::from_bytes([6; 32]), &author, "viewer", "t").unwrap();
+        let ops: Vec<DataOp> = (0..MAX_ITEMS).map(create).collect();
+        let (ids, _) = vault
+            .transact(|w| w.create_items(&author, ops), |_, _| Ok::<_, Error>(()))
+            .unwrap();
+        let made = vault
+            .transact(
+                |w| w.checkpoint(&author, |pack, _| pack.encode().map_err(|e| e.to_string())),
+                |_, _| Ok::<_, Error>(()),
+            )
+            .unwrap();
+        (ids, made.pack)
+    })
+}
+
+/// Item `i` is a login on `site-<i>.com`, or every tenth a passkey there;
+/// every third also has a TOTP secret.
+fn create(i: usize) -> DataOp {
+    let text = |name: &str, value: String| (name.to_owned(), Field::new(FieldType::Text, value));
+    let mut fields = vec![text("username", format!("user{i}@example.com"))];
+    let kind = if i.is_multiple_of(10) {
+        fields.extend([
+            text("rp-id", format!("site-{i}.com")),
+            text("credential-id", format!("cred-{i}")),
+            text("user-handle", format!("handle-{i}")),
+            (
+                "private-key".into(),
+                Field::new(FieldType::Secret, format!("pkcs8-{i}")),
+            ),
+        ]);
+        "passkey"
+    } else {
+        fields.extend([
+            (
+                "password".into(),
+                Field::new(FieldType::Secret, password(i)),
+            ),
+            (
+                "url".into(),
+                Field::new(FieldType::Url, format!("https://login.site-{i}.com/signin")),
+            ),
+        ]);
+        "login"
+    };
+    if i.is_multiple_of(3) {
+        fields.push(("otp".into(), Field::new(FieldType::Otp, "JBSWY3DPEHPK3PXP")));
+    }
+    DataOp::create(kind, Some(format!("Site {i}")), fields)
+}
+
 pub(crate) fn item_id(i: usize) -> String {
-    let mut id = [0xab; 16];
-    id[8..].copy_from_slice(&(i as u64).to_be_bytes());
-    hex(&id)
+    hex(fixture().0[i].as_bytes())
+}
+
+/// The fixture's first `items` items as a pack of their own.
+pub(crate) fn core_pack(items: usize) -> Pack {
+    let (ids, pack) = fixture();
+    let mut pack = pack.clone();
+    let keep: std::collections::BTreeSet<_> = ids[..items].iter().collect();
+    pack.state.items.retain(|id, _| keep.contains(id));
+    pack
 }
 
 pub(crate) fn password(i: usize) -> String {
     format!("pw-{i}-{}", "z".repeat(i % 23))
 }
 
-/// Item `i` is a login on `site-<i>.com`; every tenth also has a passkey
-/// there, every third a TOTP secret.
+/// What the viewer shows for item `i`.
 pub(crate) fn head(i: usize) -> ViewerHit {
     let passkey = i.is_multiple_of(10);
     ViewerHit {
         item_id: item_id(i),
         title: format!("Site {i}"),
         username: Some(format!("user{i}@example.com")),
-        urls: vec![format!("https://login.site-{i}.com/signin")],
+        urls: if passkey {
+            Vec::new()
+        } else {
+            vec![format!("https://login.site-{i}.com/signin")]
+        },
         passkey_rp_id: passkey.then(|| format!("site-{i}.com")),
         passkey_credential_id: passkey.then(|| format!("cred-{i}")),
-        has_password: true,
+        has_password: !passkey,
         has_totp: i.is_multiple_of(3),
     }
 }
@@ -67,17 +140,14 @@ pub(crate) fn secret(i: usize) -> ViewerSecret {
 }
 
 pub(crate) fn input(items: usize, generation: u64) -> PackInput {
-    PackInput {
+    let place = PackPlace {
         vault: VAULT,
         author: AUTHOR,
         seq: items as u64,
         epoch: EPOCH,
         generation,
-        meta: Zeroizing::new(b"frontier and clocks".to_vec()),
-        items: (0..items)
-            .map(|i| pack_item(&head(i), &secret(i)).unwrap())
-            .collect(),
-    }
+    };
+    pack_input(&core_pack(items), place).unwrap()
 }
 
 /// Writes `gen-<generation>.pack` with `items` items.

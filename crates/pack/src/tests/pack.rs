@@ -62,10 +62,10 @@ fn the_header_is_fixed_and_names_the_pack() {
         PackId(blake3::hash(&bytes[..HEADER_LEN]).into())
     );
     let body = &bytes[..bytes.len() - 32];
-    assert_eq!(summary.hash, <[u8; 32]>::from(blake3::hash(body)));
-    assert_eq!(bytes[body.len()..], summary.hash);
+    assert_eq!(summary.trailer, <[u8; 32]>::from(blake3::hash(body)));
+    assert_eq!(bytes[body.len()..], summary.trailer);
     let reader = PackReader::open(&blocks, NAME).unwrap();
-    assert_eq!(reader.verify_trailer().unwrap(), summary.hash);
+    assert_eq!(reader.verify_trailer().unwrap(), summary.trailer);
 }
 
 #[test]

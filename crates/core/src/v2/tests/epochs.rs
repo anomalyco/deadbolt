@@ -207,7 +207,7 @@ proptest! {
                 deps,
                 dev.device_id(),
                 dev.kem_public(),
-                sign_join_consent(dev.sign_key(), &vault, &r0.recovery_id(), &dev.kem_public()),
+                sign_join_consent(dev, &vault, &r0.recovery_id()),
                 Some((e0, &k0)),
             )
             .unwrap();
@@ -268,12 +268,7 @@ proptest! {
                         deps,
                         target_dev.device_id(),
                         target_dev.kem_public(),
-                        sign_join_consent(
-                            target_dev.sign_key(),
-                            &vault,
-                            &actor_dev.device_id(),
-                            &target_dev.kem_public(),
-                        ),
+                        sign_join_consent(target_dev, &vault, &actor_dev.device_id()),
                         wrap_epoch.as_ref().map(|(e, k)| (*e, k)),
                     )
                     .unwrap();

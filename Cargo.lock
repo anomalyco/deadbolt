@@ -1482,6 +1482,7 @@ dependencies = [
  "deadbolt-proto",
  "deadbolt-remote",
  "deadbolt-send",
+ "deadbolt-viewer",
  "flate2",
  "getrandom 0.4.3",
  "http-body-util",

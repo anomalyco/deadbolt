@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::Error;
-use crate::id::DeviceId;
-use crate::v2::{self, EpochId, FoldContext, FrameId, KemPublic, LogKind};
+use crate::id::{DeviceId, DeviceSecret};
+use crate::v2::{self, EpochId, FoldContext, FrameId, KemPublic, LogKind, RecoverySecret};
 
 use super::write::{Author, VaultWrite, frame_err};
 
@@ -16,10 +16,25 @@ impl VaultWrite<'_> {
     /// Does nothing unless `author` is a member and isn't parked. Returns the
     /// `Rewrap` frames made.
     pub fn fulfill_reader_duty(&mut self, author: &Author) -> Result<Vec<FrameId>, Error> {
-        let me = author.id();
-        if !self.is_member(&me) || !self.parked.is_empty() {
+        if !self.is_member(&author.id()) || !self.parked.is_empty() {
             return Ok(Vec::new());
         }
+        self.rewrap_missing(author.keys().sign_key())
+    }
+
+    /// Reader duty as the recovery root `root`, which holds every epoch's
+    /// key: after a recovery, the new device must reach every clean tip and
+    /// every epoch with counted data, however many concurrent ones there
+    /// are. Only a frozen lineage stops it, never a device parking.
+    pub fn root_reader_duty(&mut self, root: &RecoverySecret) -> Result<Vec<FrameId>, Error> {
+        if self.recovery_root() != Some(root.recovery_id()) {
+            return Err(Error::NotRecoveryRoot);
+        }
+        self.rewrap_missing(&root.signing_key())
+    }
+
+    fn rewrap_missing(&mut self, signer: &DeviceSecret) -> Result<Vec<FrameId>, Error> {
+        let me = signer.device_id();
         let ctx = FoldContext {
             membership: &self.resolved,
             adders: &self.adders,
@@ -48,7 +63,7 @@ impl VaultWrite<'_> {
             }
             let (seq, prev) = self.position(&me, LogKind::Member);
             let frame = v2::build_rewrap_frame(
-                author.keys().sign_key(),
+                signer,
                 self.id,
                 &self.resolved,
                 seq,

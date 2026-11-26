@@ -10,9 +10,9 @@ use zeroize::Zeroizing;
 
 use super::{
     ActivityEntry, Code, DeviceInfo, FormCard, FormIdentity, HealthReport, ImportReport, ItemInfo,
-    LoginRef, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync, ResolvedSecret,
-    SendInfo, SenderInfo, SiteLogin, SitePasskey, SiteStatus, SiteValues, Status, TagCount,
-    VaultInfo,
+    LoginRef, OneTimeCodeIdentity, PasskeyIdentity, PasswordIdentity, PeerSync, RemoteInfo,
+    RemoteReport, ResolvedSecret, SendInfo, SenderInfo, SiteLogin, SitePasskey, SiteStatus,
+    SiteValues, Status, TagCount, VaultInfo, VaultState,
 };
 
 /// A secret on the wire: wiped on drop; Debug leaves it out. A newtype, so
@@ -205,6 +205,23 @@ pub enum Reply {
     },
     Vaults {
         vaults: Vec<VaultInfo>,
+    },
+    /// `vault-status`.
+    VaultStates {
+        vaults: Vec<VaultState>,
+    },
+    /// `recovery-rotate`: the vault and its new 24-word kit, which the
+    /// daemon keeps no copy of.
+    RecoveryRotated {
+        vault: VaultInfo,
+        recovery_kit: Secret,
+    },
+    /// A vault's remote, redacted; `None` once removed or never set.
+    Remote {
+        remote: Option<RemoteInfo>,
+    },
+    RemoteSynced {
+        report: RemoteReport,
     },
     /// A device added to (`pair`) or removed from (`device-remove`) a vault.
     Device {

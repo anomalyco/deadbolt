@@ -28,6 +28,18 @@ impl Heads {
         self.0.get(&(log, *author)).map(|(_, tip)| *tip)
     }
 
+    /// The membership streams alone: what a peer that may only push
+    /// membership is told.
+    pub fn members_only(&self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|((log, _), _)| *log == LogKind::Member)
+                .map(|(k, v)| (*k, *v))
+                .collect(),
+        )
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (LogKind, DeviceId, u64)> + '_ {
         self.0
             .iter()

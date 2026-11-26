@@ -14,8 +14,9 @@ pub use super::codec::{
     rewrap_wire_len, rotate_wire_len, validate_member_body,
 };
 use super::crypto::{
-    CryptoError, EpochId, EpochKey, FrameId, KemPublic, NONCE_LEN, PADME_FLOOR, TAG_LEN, aead_open,
-    aead_seal, derive_frame_id, padme_pad, padme_padded_len, padme_unpad, sign, verify_strict,
+    CryptoError, DeviceKeys, EpochId, EpochKey, FrameId, KemPublic, NONCE_LEN, NetPublic,
+    PADME_FLOOR, TAG_LEN, aead_open, aead_seal, derive_frame_id, padme_pad, padme_padded_len,
+    padme_unpad, sign, verify_net, verify_strict,
 };
 
 /// Wire magic prefix for v2 frames.
@@ -44,6 +45,7 @@ pub const MAX_WRAPS: usize = 256;
 
 const SIG_FRAME_PREFIX: &[u8] = b"deadbolt/v2 frame\0";
 const SIG_JOIN_CONSENT_PREFIX: &[u8] = b"deadbolt/v2 join consent\0";
+const SIG_NET_BINDING_PREFIX: &[u8] = b"deadbolt/v2 net binding\0";
 const SIG_ROTATE_RECOVERY_CONSENT_PREFIX: &[u8] = b"deadbolt/v2 rotate recovery consent\0";
 
 /// Frame decoding, structural validation, and sealing errors.
@@ -517,31 +519,70 @@ pub fn frame_signature_message(header_bytes: &[u8; HEADER_LEN], body_hash: &[u8;
     msg
 }
 
-/// Builds the join consent message binding vault, inviter, new device, and its X25519 `kem`.
+/// Builds the join consent message binding vault, inviter, new device, its
+/// X25519 `kem` and its transport key `net`.
 pub fn join_consent_message(
     vault: &VaultId,
     inviter: &DeviceId,
     device: &DeviceId,
     kem: &KemPublic,
-) -> [u8; 153] {
-    let mut msg = [0u8; 153];
+    net: &NetPublic,
+) -> [u8; 185] {
+    let mut msg = [0u8; 185];
     msg[..25].copy_from_slice(SIG_JOIN_CONSENT_PREFIX);
     msg[25..57].copy_from_slice(vault.as_bytes());
     msg[57..89].copy_from_slice(inviter.as_bytes());
     msg[89..121].copy_from_slice(device.as_bytes());
     msg[121..153].copy_from_slice(kem.as_bytes());
+    msg[153..185].copy_from_slice(net.as_bytes());
     msg
 }
 
-/// Signs join consent with the joining device's `D_sign`.
-pub fn sign_join_consent(
-    device_secret: &DeviceSecret,
-    vault: &VaultId,
-    inviter: &DeviceId,
-    kem: &KemPublic,
-) -> Signature {
-    let msg = join_consent_message(vault, inviter, &device_secret.device_id(), kem);
-    sign(device_secret, &msg)
+/// The message a transport key signs to bind itself to `device`.
+pub fn net_binding_message(device: &DeviceId) -> [u8; 56] {
+    let mut msg = [0u8; 56];
+    msg[..24].copy_from_slice(SIG_NET_BINDING_PREFIX);
+    msg[24..56].copy_from_slice(device.as_bytes());
+    msg
+}
+
+/// A joining device's consent to one `Add`: its `D_sign` over the join,
+/// transport key included, and that transport key's own signature binding it
+/// to the device. Membership alone then names every device's transport key,
+/// and no one but its holder can claim one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinConsent {
+    pub net: NetPublic,
+    pub consent: Signature,
+    pub net_proof: Signature,
+}
+
+impl JoinConsent {
+    /// True iff both signatures hold for `device` with `kem`, joining
+    /// `vault` through `inviter`.
+    pub fn verify(
+        &self,
+        vault: &VaultId,
+        inviter: &DeviceId,
+        device: &DeviceId,
+        kem: &KemPublic,
+    ) -> bool {
+        let msg = join_consent_message(vault, inviter, device, kem, &self.net);
+        verify_strict(device, &msg, &self.consent)
+            && verify_net(&self.net, &net_binding_message(device), &self.net_proof)
+    }
+}
+
+/// Signs join consent with the joining device's `D_sign` and `D_net`.
+pub fn sign_join_consent(keys: &DeviceKeys, vault: &VaultId, inviter: &DeviceId) -> JoinConsent {
+    let device = keys.device_id();
+    let net = keys.net_public();
+    let msg = join_consent_message(vault, inviter, &device, &keys.kem_public(), &net);
+    JoinConsent {
+        net,
+        consent: sign(keys.sign_key(), &msg),
+        net_proof: keys.net_key().sign(&net_binding_message(&device)),
+    }
 }
 
 /// Builds the `RotateRecovery` consent message signed by the new root's `R_sign`.

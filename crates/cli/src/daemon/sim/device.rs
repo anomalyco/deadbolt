@@ -4,8 +4,8 @@ pub(super) use super::super::session::Loaded;
 use super::super::{pairing, session::Changes, sync};
 use crate::disk::KdfParams;
 use anyhow::Result;
+use deadbolt_core::VaultId;
 use deadbolt_core::v2::{DeviceKeys, FrameId};
-use deadbolt_core::{DeviceId, VaultId};
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PeerId, SyncHandler,
 };
@@ -24,7 +24,10 @@ pub(super) struct Device {
     pub(super) dir: tempfile::TempDir,
     pub(super) state: Arc<Mutex<Option<Loaded>>>,
     pub(super) gate: MembershipGate,
+    /// The device id (`D_sign`).
     pub(super) id: PeerId,
+    /// The transport key (`D_net`) connections name it by.
+    pub(super) net: PeerId,
     pub(super) ready: Arc<AtomicBool>,
     pub(super) offer: Mutex<Option<pairing::Offer>>,
     /// Accepted sync batches whose changes went unreported to watchers.
@@ -35,7 +38,9 @@ impl Device {
     pub(super) fn new(index: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let key = [index as u8 + 1; 32];
-        let id = *DeviceKeys::from_seed(&key).device_id().as_bytes();
+        let keys = DeviceKeys::from_seed(&key);
+        let id = *keys.device_id().as_bytes();
+        let net = *keys.net_public().as_bytes();
         let store = crate::disk::init_with_params(
             dir.path(),
             PASS,
@@ -54,13 +59,14 @@ impl Device {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|s| s.peer_set().contains(peer))
+                .is_some_and(|s| s.admitted_nets().contains(peer))
         }));
         Self {
             dir,
             state,
             gate,
             id,
+            net,
             ready: Arc::new(AtomicBool::new(true)),
             offer: Mutex::default(),
             unreported: Arc::default(),
@@ -145,12 +151,9 @@ impl SyncHandler for Handler {
 
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         let guard = self.state.lock().unwrap();
-        sync::hello(
-            guard.as_ref().ok_or("locked")?,
-            &DeviceId::from_bytes(peer),
-            None,
-        )
-        .map_err(|e| e.to_string().into())
+        let s = guard.as_ref().ok_or("locked")?;
+        let peer = s.device_of(&peer).map_err(|e| e.to_string())?;
+        sync::hello(s, &peer, None).map_err(|e| e.to_string().into())
     }
     async fn missing_for(
         &self,
@@ -158,13 +161,10 @@ impl SyncHandler for Handler {
         heads: Vec<u8>,
     ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         let mut guard = self.state.lock().unwrap();
-        let history = sync::missing_for(
-            guard.as_mut().ok_or("locked")?,
-            &DeviceId::from_bytes(peer),
-            &heads,
-            self.ready.load(Ordering::SeqCst),
-        )
-        .map_err(|e| -> HandlerError { e.to_string().into() })?;
+        let s = guard.as_mut().ok_or("locked")?;
+        let peer = s.device_of(&peer).map_err(|e| e.to_string())?;
+        let history = sync::missing_for(s, &peer, &heads, self.ready.load(Ordering::SeqCst))
+            .map_err(|e| -> HandlerError { e.to_string().into() })?;
         Ok(history.outgoing(|h| {
             let g = self.state.lock().unwrap();
             Ok(h.next(
@@ -182,16 +182,11 @@ impl SyncHandler for Handler {
     ) -> Result<(), HandlerError> {
         let mut guard = self.state.lock().unwrap();
         let s = guard.as_mut().ok_or("locked")?;
+        let peer = s.device_of(&peer).map_err(|e| e.to_string())?;
         // Local writes and pairing record changes too; judge only this batch.
         s.changes = Changes::default();
         let before = accepted(s);
-        let result = sync::receive(
-            s,
-            &DeviceId::from_bytes(peer),
-            entries,
-            self.ready.load(Ordering::SeqCst),
-            stream,
-        );
+        let result = sync::receive(s, &peer, entries, self.ready.load(Ordering::SeqCst), stream);
         let reported = std::mem::take(&mut s.changes);
         if let Some(problem) = report_problem(s, &before, &reported) {
             self.unreported.lock().unwrap().push(problem);
@@ -206,9 +201,8 @@ pub(super) struct Invitation<'a> {
 }
 impl Inviter for Invitation<'_> {
     async fn offer(&self, ctx: &PairingContext) -> Result<Vec<u8>, HandlerError> {
-        let device = DeviceId::from_bytes(ctx.remote);
         self.device
-            .with(|s| pairing::offer(s, self.vault, &device, None))
+            .with(|s| pairing::offer(s, self.vault, &ctx.remote, None))
             .map_err(|e| e.to_string().into())
     }
     async fn welcome(
@@ -219,8 +213,8 @@ impl Inviter for Invitation<'_> {
         let history = self
             .device
             .with(|s| {
-                pairing::welcome(s, self.vault, DeviceId::from_bytes(ctx.remote), &join, None)
-                    .map(|(blobs, _)| blobs)
+                let device = deadbolt_net::application::join_device(&join, &ctx.remote)?;
+                pairing::welcome(s, self.vault, device, &join, None).map(|(blobs, _)| blobs)
             })
             .map_err(|e| -> HandlerError { e.to_string().into() })?;
         Ok(history.outgoing(|h| {
@@ -232,10 +226,10 @@ impl Inviter for Invitation<'_> {
 }
 impl Joiner for Device {
     type Welcome = deadbolt_net::application::WelcomeReplay;
-    async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
-        let inviter = DeviceId::from_bytes(ctx.remote);
+    async fn join(&self, _: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let (offer, vault) =
             pairing::read_offer(&offer).map_err(|e| -> HandlerError { e.to_string().into() })?;
+        let inviter = offer.inviter()?;
         let join = self
             .with(|s| {
                 anyhow::ensure!(!s.vaults.contains_key(&vault), "already held");
@@ -252,7 +246,8 @@ impl Joiner for Device {
     ) -> Result<(), HandlerError> {
         let offer = self.offer.lock().unwrap().take().ok_or("no offer")?;
         self.with(|s| {
-            pairing::apply_welcome(s, DeviceId::from_bytes(ctx.remote), offer, welcome).map(|_| ())
+            let welcomed = pairing::verify_welcome_from(&s.keys(), &ctx.remote, offer, welcome)?;
+            pairing::adopt(s, welcomed).map(|_| ())
         })
         .map_err(|e| e.to_string().into())
     }

@@ -249,6 +249,12 @@ impl NetSecret {
     pub fn public_key(&self) -> NetPublic {
         NetPublic(self.0.verifying_key().to_bytes())
     }
+
+    /// Signs `message` with the transport key: proof this device holds it.
+    pub fn sign(&self, message: &[u8]) -> Signature {
+        use ed25519_dalek::Signer;
+        Signature::from_bytes(self.0.sign(message).to_bytes())
+    }
 }
 
 impl fmt::Debug for NetSecret {
@@ -502,6 +508,15 @@ impl fmt::Debug for EpochKey {
 /// Verifies an Ed25519 signature using strict verification only (rejecting malleable/small-order encodings).
 pub fn verify_strict(public_key: &DeviceId, message: &[u8], signature: &Signature) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(public_key.as_bytes()) else {
+        return false;
+    };
+    let sig = ed25519_dalek::Signature::from_bytes(signature.as_bytes());
+    key.verify_strict(message, &sig).is_ok()
+}
+
+/// Verifies a transport key's (`D_net`) signature, strictly.
+pub fn verify_net(net: &NetPublic, message: &[u8], signature: &Signature) -> bool {
+    let Ok(key) = VerifyingKey::from_bytes(&net.0) else {
         return false;
     };
     let sig = ed25519_dalek::Signature::from_bytes(signature.as_bytes());

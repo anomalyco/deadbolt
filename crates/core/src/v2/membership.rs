@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::id::{DeviceId, VaultId};
 
-use super::crypto::{EpochId, FrameId, KemPublic};
+use super::crypto::{EpochId, FrameId, KemPublic, NetPublic};
 use super::dag::{DagNode, build_dag};
 use super::frame::{Frame, FrameKind, LogKind, MemberOp};
 pub use super::fraud::{
@@ -27,6 +27,9 @@ pub struct ResolvedMembership {
     pub removed: BTreeMap<DeviceId, Option<u64>>,
     /// Canonical X25519 KEM public keys for active devices and the active recovery root.
     pub kem_keys: BTreeMap<DeviceId, KemPublic>,
+    /// Every admitted device's transport key (`D_net`), removed ones included, from its
+    /// first authorized `Add`: signed by the device and by the key itself.
+    pub nets: BTreeMap<DeviceId, NetPublic>,
     /// All authorized `Member` frame IDs (chosen removals + authorized non-removal ops).
     pub authorized_frames: BTreeSet<FrameId>,
     /// Structurally authorized mutual removal pairs `(a, b)` with `a < b`, for parking detection.
@@ -249,7 +252,7 @@ pub fn resolve<'a>(
             )
             && member_fork_seq.get(&n.frame.header().author) == Some(&0)
     });
-    let mutual_removals = find_mutual_removals(&nodes, &structural);
+    let mutual_removals = find_mutual_removals(&nodes, &structural, &structural_lineage);
     let (chosen, authority) = choose_removals(vault, &nodes, structural, &structural_lineage);
 
     // A retired root's handoff is a non-void frame, so any later `Member` fork of that root is
@@ -313,6 +316,21 @@ pub fn resolve<'a>(
     let mut authorized_frames = authority.non_removal_frames;
     authorized_frames.extend(chosen_ids);
 
+    let mutual_removals: BTreeSet<(DeviceId, DeviceId)> = mutual_removals
+        .into_iter()
+        .filter(|(pair, between)| {
+            !settled_by_root(
+                &nodes,
+                &authority.lineage,
+                &authorized_frames,
+                &devices,
+                *pair,
+                between,
+            )
+        })
+        .map(|(pair, _)| pair)
+        .collect();
+
     let mut kem_keys = BTreeMap::new();
     for &dev in &devices {
         if let Some(&kem) = authority.kem_keys.get(&dev) {
@@ -332,6 +350,7 @@ pub fn resolve<'a>(
         recovery_frozen,
         removed,
         kem_keys,
+        nets: authority.nets,
         authorized_frames,
         mutual_removals,
         member_fork_seq,
@@ -349,6 +368,7 @@ struct Authority {
     lineage_order: Vec<DeviceId>,
     retired_roots: BTreeMap<DeviceId, usize>,
     kem_keys: BTreeMap<DeviceId, KemPublic>,
+    nets: BTreeMap<DeviceId, NetPublic>,
     removals: BTreeSet<usize>,
     non_removal_frames: BTreeSet<FrameId>,
 }
@@ -462,7 +482,12 @@ fn authorize(
         }
         match &body.op {
             Some(MemberOp::Create { .. }) => {}
-            Some(MemberOp::Add { device, kem, .. }) => {
+            Some(MemberOp::Add {
+                device,
+                kem,
+                consent,
+                ..
+            }) => {
                 // Re-adding a device whose removal this frame saw would hand the removed key
                 // the post-removal epoch through the inline `Rewrap`.
                 let readd = cuts
@@ -471,6 +496,7 @@ fn authorize(
                 if !known_lineage.contains(device) && !readd {
                     state.admissions.entry(*device).or_default().push(idx);
                     state.kem_keys.entry(*device).or_insert(*kem);
+                    state.nets.entry(*device).or_insert(consent.net);
                     state.non_removal_frames.insert(node.frame.id());
                 }
             }
@@ -571,21 +597,71 @@ fn choose_removals(
     (chosen, current)
 }
 
+/// Pairs of devices that removed each other, each with the removals between
+/// them, unless a recovery-lineage (`class = 0`) removal of either one, made
+/// after seeing every removal between them, has settled it.
 fn find_mutual_removals(
     nodes: &[DagNode<'_>],
     structural: &Authority,
-) -> BTreeSet<(DeviceId, DeviceId)> {
-    let mut edges: BTreeSet<(DeviceId, DeviceId)> = BTreeSet::new();
+    lineage: &BTreeSet<DeviceId>,
+) -> BTreeMap<(DeviceId, DeviceId), Vec<usize>> {
+    let mut edges: BTreeMap<(DeviceId, DeviceId), Vec<usize>> = BTreeMap::new();
+    let mut by_root: Vec<(usize, DeviceId)> = Vec::new();
     for &idx in &structural.removals {
         if let Some(victim) = remove_target(nodes[idx].frame) {
-            edges.insert((nodes[idx].frame.header().author, victim));
+            let author = nodes[idx].frame.header().author;
+            edges.entry((author, victim)).or_default().push(idx);
+            if lineage.contains(&author) {
+                by_root.push((idx, victim));
+            }
         }
     }
     edges
-        .iter()
+        .keys()
         .copied()
-        .filter(|&(a, b)| a < b && edges.contains(&(b, a)))
+        .filter(|&(a, b)| a < b && edges.contains_key(&(b, a)))
+        .map(|(a, b)| {
+            let between: Vec<usize> = edges[&(a, b)]
+                .iter()
+                .chain(&edges[&(b, a)])
+                .copied()
+                .collect();
+            ((a, b), between)
+        })
+        .filter(|((a, b), between)| {
+            !by_root.iter().any(|&(r, victim)| {
+                (victim == *a || victim == *b) && between.iter().all(|&j| nodes[r].saw(j))
+            })
+        })
         .collect()
+}
+
+/// Whether the recovery root has acted since a mutual removal (a counted
+/// `Add` or `Remove` by a lineage root that saw every removal `between`
+/// the pair) and neither device of the pair is still active: no one is left
+/// whose side needs a person to choose. A root's frame stays counted when it
+/// hands the kit on, so a rotation never undoes the settlement.
+fn settled_by_root(
+    nodes: &[DagNode<'_>],
+    lineage: &BTreeSet<DeviceId>,
+    authorized: &BTreeSet<FrameId>,
+    devices: &BTreeSet<DeviceId>,
+    (a, b): (DeviceId, DeviceId),
+    between: &[usize],
+) -> bool {
+    if devices.contains(&a) || devices.contains(&b) {
+        return false;
+    }
+    nodes.iter().any(|n| {
+        let author = n.frame.header().author;
+        authorized.contains(&n.frame.id())
+            && lineage.contains(&author)
+            && matches!(
+                n.frame.member_body().and_then(|b| b.op.as_ref()),
+                Some(MemberOp::Add { .. } | MemberOp::Remove { .. })
+            )
+            && between.iter().all(|&j| n.saw(j))
+    })
 }
 
 fn is_genesis(vault: &VaultId, frame: &Frame) -> bool {

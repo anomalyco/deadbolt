@@ -15,6 +15,8 @@ mod lifecycle;
 mod macos_autofill;
 mod pairing;
 mod passkeys;
+mod recovery;
+mod remote;
 mod secrets;
 mod send;
 mod session;

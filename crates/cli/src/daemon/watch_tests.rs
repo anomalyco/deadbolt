@@ -153,7 +153,8 @@ async fn a_watcher_sees_lock_state_local_writes_and_one_change_per_sync_batch() 
             let me = s.id;
             s.update(vault, |v, a| {
                 let (keys, consent) = super::session::tests::peer(52, &vault, &me);
-                Ok(v.add(a, keys.device_id(), keys.kem_public(), consent)?)
+                v.add(a, keys.device_id(), keys.kem_public(), consent)?;
+                Ok(v.card(a, keys.device_id(), keys.net_public(), "other")?)
             })
         })
         .unwrap();
@@ -173,7 +174,12 @@ async fn a_watcher_sees_lock_state_local_writes_and_one_change_per_sync_batch() 
         .collect();
     daemon.ready.send_replace(true);
     sync::Handler(daemon.clone())
-        .receive(*other.id().as_bytes(), batch, &mut Default::default(), true)
+        .receive(
+            *other.keys().net_public().as_bytes(),
+            batch,
+            &mut Default::default(),
+            true,
+        )
         .await
         .unwrap();
     assert_eq!(

@@ -39,14 +39,16 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
 }
 
+/// The offer to the device whose pairing connection runs on transport key
+/// `peer`.
 pub(super) fn offer(
     s: &Loaded,
     vault: VaultId,
-    device: &DeviceId,
+    peer: &PeerId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>> {
     s.ensure_usable()?;
-    Ok(application::offer(s, vault, device, addr)?)
+    Ok(application::offer(s, vault, peer, addr)?)
 }
 
 pub(super) fn read_offer(offer: &[u8]) -> Result<(Offer, VaultId)> {
@@ -98,6 +100,20 @@ pub(super) fn verify_welcome(
     welcome: application::WelcomeReplay,
 ) -> Result<Welcomed> {
     Ok(application::verify_welcome(keys, inviter, offer, welcome)?)
+}
+
+/// [`verify_welcome`] from the inviter on transport key `peer`: the device
+/// the offer names, whose card in the welcomed vault must name `peer`.
+pub(super) fn verify_welcome_from(
+    keys: &DeviceKeys,
+    peer: &PeerId,
+    offer: Offer,
+    welcome: application::WelcomeReplay,
+) -> Result<Welcomed> {
+    let inviter = offer.inviter()?;
+    let welcomed = verify_welcome(keys, inviter, offer, welcome)?;
+    application::check_transport(&welcomed.vault, &inviter, peer)?;
+    Ok(welcomed)
 }
 
 /// Stores a checked welcome.
@@ -219,9 +235,9 @@ struct NewDevice<'a> {
 
 impl Joiner for NewDevice<'_> {
     type Welcome = application::WelcomeReplay;
-    async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+    async fn join(&self, _: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let (offer, vault) = read_offer(&offer).map_err(handler_error)?;
-        let inviter = DeviceId::from_bytes(ctx.remote);
+        let inviter = offer.inviter().map_err(|e| handler_error(e.into()))?;
         let join = match &self.home {
             Home::Store(daemon) => daemon.with(|s| {
                 if s.contains_vault(&vault) {
@@ -259,12 +275,12 @@ impl Joiner for NewDevice<'_> {
             .unwrap_or_else(|e| e.into_inner())
             .take()
             .ok_or("no offer")?;
-        let inviter = DeviceId::from_bytes(ctx.remote);
         let keys = match &self.home {
             Home::Store(daemon) => daemon.with(|s| Ok(s.keys())).map_err(handler_error)?,
             Home::Memory(memory) => DeviceKeys::from_seed(&memory.seed),
         };
-        let welcomed = verify_welcome(&keys, inviter, offer, welcome).map_err(handler_error)?;
+        let welcomed =
+            verify_welcome_from(&keys, &ctx.remote, offer, welcome).map_err(handler_error)?;
         match &self.home {
             Home::Store(daemon) => {
                 let inviter = inviter_info(&welcomed);
@@ -466,9 +482,8 @@ struct ExistingDevice<'a> {
 
 impl Inviter for ExistingDevice<'_> {
     async fn offer(&self, ctx: &PairingContext) -> Result<Vec<u8>, HandlerError> {
-        let device = DeviceId::from_bytes(ctx.remote);
         self.daemon
-            .with_data(|s| offer(s, self.vault, &device, Some(s.own_addr())))
+            .with_data(|s| offer(s, self.vault, &ctx.remote, Some(s.own_addr())))
             .map_err(handler_error)
     }
 
@@ -477,7 +492,8 @@ impl Inviter for ExistingDevice<'_> {
         ctx: &PairingContext,
         join: Vec<u8>,
     ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
-        let device = DeviceId::from_bytes(ctx.remote);
+        let device =
+            application::join_device(&join, &ctx.remote).map_err(|e| handler_error(e.into()))?;
         let (blobs, info) = self
             .daemon
             .with_data(|s| {
@@ -628,8 +644,15 @@ mod tests {
         )
     }
 
+    /// The daemon's transport key: what a pairing connection names it by.
     fn id(daemon: &Daemon) -> PeerId {
-        daemon.with(|s| Ok(*s.id.as_bytes())).unwrap()
+        daemon
+            .with(|s| Ok(*s.keys().net_public().as_bytes()))
+            .unwrap()
+    }
+
+    fn dev(daemon: &Daemon) -> DeviceId {
+        daemon.with(|s| Ok(s.id)).unwrap()
     }
 
     #[tokio::test]
@@ -684,9 +707,9 @@ mod tests {
         for keep in [false, true] {
             let mut seed = Zeroizing::new([0u8; 32]);
             getrandom::fill(seed.as_mut_slice()).unwrap();
-            let b_id = *deadbolt_core::v2::DeviceKeys::from_seed(&seed)
-                .device_id()
-                .as_bytes();
+            let b_keys = deadbolt_core::v2::DeviceKeys::from_seed(&seed);
+            let b_id = *b_keys.net_public().as_bytes();
+            let b_dev = b_keys.device_id();
             let inviter = ExistingDevice {
                 daemon: &a,
                 vault,
@@ -720,24 +743,20 @@ mod tests {
             if keep {
                 let (loaded, info) = fresh.persist(&store, &Secret::new("pass"), KDF).unwrap();
                 assert_eq!(info.name, "personal");
-                assert_eq!(loaded.id.as_bytes(), &b_id);
+                assert_eq!(loaded.id, b_dev);
                 drop(loaded);
                 let reopened = Loaded::open(&store, b"pass").unwrap();
                 assert!(reopened.vaults.contains_key(&vault));
                 assert_eq!(reopened.meta.device_name, "beta");
                 assert_eq!(
-                    reopened
-                        .peer(&DeviceId::from_bytes(id(&a)))
-                        .unwrap()
-                        .name
-                        .as_deref(),
+                    reopened.peer(&dev(&a)).unwrap().name.as_deref(),
                     Some("alpha")
                 );
             } else {
                 drop(fresh);
                 assert!(!store.exists());
                 // The inviter admitted it; it shows as never seen until removed.
-                let device = DeviceId::from_bytes(b_id);
+                let device = b_dev;
                 assert!(a.with(|s| Ok(s.vault(&vault).is_member(&device))).unwrap());
                 a.with(|s| s.update(vault, |v, key| Ok(v.remove(key, device)?)))
                     .unwrap();
@@ -757,11 +776,12 @@ mod tests {
         let b = test_daemon(b_dir.path(), "beta").await;
         let vault = a.with(|s| s.create_vault("personal")).unwrap();
         let (a_id, b_id) = (id(&a), id(&b));
-        let b_dev = DeviceId::from_bytes(b_id);
+        let b_dev = dev(&b);
+        let a_dev = dev(&a);
 
         // The inviter commits b's Add, but b never stores the welcome.
         let join = b
-            .with(|s| join_blob(&s.keys(), "beta", DeviceId::from_bytes(a_id), &vault, None))
+            .with(|s| join_blob(&s.keys(), "beta", a_dev, &vault, None))
             .unwrap();
         a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
         let entries = a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap();
@@ -830,17 +850,12 @@ mod tests {
         let a = test_daemon(a_dir.path(), "alpha").await;
         let b = test_daemon(b_dir.path(), "beta").await;
         let vault = a.with(|s| s.create_vault("personal")).unwrap();
-        let a_dev = DeviceId::from_bytes(id(&a));
-        let b_dev = DeviceId::from_bytes(id(&b));
+        let a_dev = dev(&a);
+        let b_dev = dev(&b);
         let (kem, net, consent, join) = b
             .with(|s| {
                 let keys = s.keys();
-                let consent = deadbolt_core::v2::sign_join_consent(
-                    keys.sign_key(),
-                    &vault,
-                    &a_dev,
-                    &keys.kem_public(),
-                );
+                let consent = deadbolt_core::v2::sign_join_consent(&keys, &vault, &a_dev);
                 let join = join_blob(&keys, "beta", a_dev, &vault, None)?;
                 Ok((keys.kem_public(), keys.net_public(), consent, join))
             })
@@ -886,14 +901,25 @@ mod tests {
         let a = test_daemon(a_dir.path(), "alpha").await;
         let b = test_daemon(b_dir.path(), "beta").await;
         let vault = a.with(|s| s.create_vault("personal")).unwrap();
-        let a_dev = DeviceId::from_bytes(id(&a));
-        let b_dev = DeviceId::from_bytes(id(&b));
+        let a_dev = dev(&a);
+        let b_dev = dev(&b);
+        let b_net = id(&b);
         let wrong = DeviceKeys::from_seed(&[9; 32]).kem_public();
         let (consent, join) = b
             .with(|s| {
                 let keys = s.keys();
-                let consent =
-                    deadbolt_core::v2::sign_join_consent(keys.sign_key(), &vault, &a_dev, &wrong);
+                // Consent to the wrong KEM key, signed as the joiner.
+                let mut consent = deadbolt_core::v2::sign_join_consent(&keys, &vault, &a_dev);
+                consent.consent = deadbolt_core::v2::sign(
+                    keys.sign_key(),
+                    &deadbolt_core::v2::join_consent_message(
+                        &vault,
+                        &a_dev,
+                        &keys.device_id(),
+                        &wrong,
+                        &keys.net_public(),
+                    ),
+                );
                 Ok((consent, join_blob(&keys, "beta", a_dev, &vault, None)?))
             })
             .unwrap();
@@ -901,7 +927,7 @@ mod tests {
             .unwrap();
         let (offered, replay) = a
             .with(|s| {
-                let (offered, _) = read_offer(&offer(s, vault, &b_dev, None)?)?;
+                let (offered, _) = read_offer(&offer(s, vault, &b_net, None)?)?;
                 let (history, _) = welcome(s, vault, b_dev, &join, None)?;
                 Ok((offered, test_replay(s, history)))
             })
@@ -942,9 +968,10 @@ mod tests {
         let other = a.with(|s| s.create_vault("work")).unwrap();
         let named = |vault: String, name: &str| {
             serde_json::to_vec(&Offer {
-                v: 2,
+                v: 3,
                 vault,
                 vault_name: name.into(),
+                device: dev(&a).to_string(),
                 name: "alpha".into(),
                 addr: None,
             })

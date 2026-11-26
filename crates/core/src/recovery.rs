@@ -58,10 +58,12 @@ pub fn encode(secret: &RecoverySecret) -> Zeroizing<String> {
 /// whitespace, case-insensitive. The first four letters of a word are
 /// enough, as BIP-39 guarantees they are unique.
 pub fn decode(phrase: &str) -> Result<RecoverySecret, KitError> {
-    let given: Vec<String> = phrase
-        .split_whitespace()
-        .map(str::to_ascii_lowercase)
-        .collect();
+    let given: Zeroizing<Vec<String>> = Zeroizing::new(
+        phrase
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect(),
+    );
     if given.len() != WORDS {
         return Err(KitError::Length(given.len()));
     }

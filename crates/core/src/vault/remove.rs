@@ -55,12 +55,28 @@ impl VaultWrite<'_> {
         if !self.is_member(&device) {
             return Err(Error::RemoveNonMember);
         }
+        // Frames behind the base checkpoint may be gone (a store collected
+        // them): they count as held, or every checkpoint covering them would
+        // be invalidated after the frames themselves are lost
+        // (`v2::removal_last_seen`).
+        let collected = self
+            .base
+            .as_ref()
+            .and_then(|b| b.meta.frontier.get(&device))
+            .map_or(0, |(seq, _)| seq + 1);
         let mut counted = 0u64;
-        while let Some(f) = self
-            .data
-            .values()
-            .find(|f| f.header().author == device && f.header().seq == counted)
-        {
+        loop {
+            let Some(f) = self
+                .data
+                .values()
+                .find(|f| f.header().author == device && f.header().seq == counted)
+            else {
+                if counted < collected {
+                    counted = collected;
+                    continue;
+                }
+                break;
+            };
             let before = match stolen {
                 Some(Some(since)) => self
                     .opened

@@ -5,9 +5,9 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
-use deadbolt_core::VaultId;
-use deadbolt_core::v2::Frame;
+use anyhow::{Context, Result, bail};
+use deadbolt_core::v2::{EpochId, EpochKey, Frame, Pack};
+use deadbolt_core::{PackSite, VaultId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
@@ -35,6 +35,44 @@ pub trait VaultStore: Send + Sync {
     /// A diagnostic when `error`, from [`VaultStore::append`], may have
     /// committed anyway; `None` when the append certainly failed.
     fn uncertain(&self, error: &anyhow::Error) -> Option<String>;
+
+    /// Whether this store keeps checkpoint packs (`gen-<n>.pack`). One
+    /// that doesn't never checkpoints; its vaults fold from genesis.
+    fn keeps_packs(&self) -> bool {
+        false
+    }
+
+    /// Lays `pack` out as the vault's next local generation and seals it
+    /// under `site.key`: the exact bytes a checkpoint frame commits to.
+    fn seal_pack(&self, pack: &Pack, site: &PackSite) -> Result<Vec<u8>> {
+        let _ = (pack, site);
+        bail!("this store keeps no packs")
+    }
+
+    /// Installs sealed pack bytes as `vault`'s newest generation. Every
+    /// frame stays: only a remote collects behind a checkpoint.
+    fn install_pack(&self, vault: VaultId, sealed: &[u8]) -> Result<()> {
+        let _ = (vault, sealed);
+        bail!("this store keeps no packs")
+    }
+
+    /// The sealed bytes of `vault`'s newest local pack that verifies.
+    fn load_pack(&self, vault: VaultId) -> Result<Option<Vec<u8>>> {
+        let _ = vault;
+        Ok(None)
+    }
+
+    /// Opens sealed pack bytes of `vault`, local or fetched, with the key
+    /// of the epoch its header names.
+    fn open_pack(
+        &self,
+        sealed: &[u8],
+        vault: VaultId,
+        key_for: &dyn Fn(&EpochId) -> Option<EpochKey>,
+    ) -> Result<Pack> {
+        let _ = (sealed, vault, key_for);
+        bail!("this store keeps no packs")
+    }
 }
 
 /// Reads the JSON metadata value `name`.
@@ -47,7 +85,9 @@ pub fn get_json<T: DeserializeOwned>(store: &dyn VaultStore, name: &str) -> Resu
 
 /// Writes `value` as the JSON metadata value `name`.
 pub fn set_json<T: Serialize>(store: &dyn VaultStore, name: &str, value: &T) -> Result<()> {
-    store.meta_set(name, &serde_json::to_vec(value)?)
+    // The value may be secret (a remote's credentials): wipe the bytes.
+    let bytes = Zeroizing::new(serde_json::to_vec(value)?);
+    store.meta_set(name, &bytes)
 }
 
 /// A store in memory, gone when dropped.

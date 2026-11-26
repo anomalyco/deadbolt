@@ -190,7 +190,7 @@ fn rotate_recovery_to_an_added_device_is_rejected() {
         vec![create.id()],
         d.device_id(),
         d.kem_public(),
-        sign_join_consent(d.sign_key(), &vault, &r0.recovery_id(), &d.kem_public()),
+        sign_join_consent(d, &vault, &r0.recovery_id()),
         Some((e0, &k0)),
     )
     .unwrap();
@@ -243,7 +243,7 @@ fn withheld_fork_chain_heads_never_count() {
         vec![create.id()],
         b.device_id(),
         b.kem_public(),
-        sign_join_consent(b.sign_key(), &vault, &r0.recovery_id(), &b.kem_public()),
+        sign_join_consent(b, &vault, &r0.recovery_id()),
         Some((e0, &k0)),
     )
     .unwrap();
