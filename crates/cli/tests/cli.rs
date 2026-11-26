@@ -353,6 +353,20 @@ fn init_vaults_and_locking() {
     assert!(a.state().contains("locks in 3"));
 }
 
+/// `init --json` prints the vault and its kit as one object and nothing else.
+#[test]
+fn init_json_prints_the_kit_as_one_object() {
+    let a = Device::new();
+    let out = a.run(&["init", "--device-name", "alpha", "--json"]);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let created: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(created["name"], "personal");
+    assert_eq!(created["default"], true);
+    assert!(!created["vault"].as_str().unwrap().is_empty(), "{out}");
+    let words = created["recovery_kit"].as_str().unwrap();
+    assert_eq!(words.split(' ').count(), 24, "{out}");
+}
+
 #[test]
 fn pairing_membership_and_removal() {
     let a = Device::new();

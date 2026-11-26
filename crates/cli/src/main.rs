@@ -83,6 +83,9 @@ enum Commands {
         /// This device's name, shown to your other devices (default: hostname).
         #[arg(long)]
         device_name: Option<String>,
+        /// Print {vault, name, default, recovery_kit} as one JSON line.
+        #[arg(long)]
+        json: bool,
     },
     /// Join a vault from one of your other devices: shows a code, then
     /// waits until `deadbolt approve <code>` runs on a device with the vault.
@@ -659,7 +662,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
         }
-        Commands::Init { name, device_name } => {
+        Commands::Init {
+            name,
+            device_name,
+            json,
+        } => {
             let status = client::ensure_running(&paths).await?;
             if !status.initialized {
                 setup(&paths, device_name, from_stdin).await?;
@@ -671,12 +678,22 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             else {
                 bail!("unexpected reply");
             };
-            let default = if vault.default { " (default)" } else { "" };
-            println!("created vault {}{default}", vault.name);
-            print!(
-                "{}",
-                recovery::kit_text(&vault.id, recovery_kit.expose()).as_str()
-            );
+            if json {
+                let line = recovery::kit_json(
+                    &vault.id,
+                    &vault.name,
+                    vault.default,
+                    recovery_kit.expose(),
+                )?;
+                println!("{}", line.as_str());
+            } else {
+                let default = if vault.default { " (default)" } else { "" };
+                println!("created vault {}{default}", vault.name);
+                print!(
+                    "{}",
+                    recovery::kit_text(&vault.id, recovery_kit.expose()).as_str()
+                );
+            }
         }
         Commands::Join { device_name } => {
             let status = client::ensure_running(&paths).await?;
