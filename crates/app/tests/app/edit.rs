@@ -665,7 +665,7 @@ fn a_refusal_shows_on_its_field_and_keeps_the_form() {
     r.fill("number", "");
     assert!(r.rt.state.edit.form.as_ref().unwrap().problem.is_none());
     r.command('s');
-    assert!(r.shows("Number can't be empty.") && r.sent().is_empty());
+    assert!(r.shows("Number can’t be empty.") && r.sent().is_empty());
 }
 
 #[test]
@@ -989,7 +989,7 @@ fn add_offers_every_type() {
     let form = r.rt.state.edit.form.as_ref().unwrap();
     assert_eq!(
         form.problem_for("credential"),
-        Some("Credential can't be empty.")
+        Some("Credential can’t be empty.")
     );
     r.fill("credential", "sk_live_1");
     r.sent();

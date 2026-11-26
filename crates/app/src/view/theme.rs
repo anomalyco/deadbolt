@@ -211,6 +211,15 @@ pub(crate) fn kind_icon(kind: &str) -> &'static Icon {
     }
 }
 
+/// One item of `kind`, in words ("login", "SSH key"), or "item" for a type
+/// this version doesn't know.
+pub(crate) fn kind_noun(kind: &str) -> &'static str {
+    deadbolt_core::listing::KINDS
+        .iter()
+        .find(|(id, ..)| *id == kind)
+        .map_or("item", |(_, one, _)| one)
+}
+
 /// "Login", "Card", "Secure note", "SSH key"…
 pub(crate) fn kind_name(kind: &str) -> &'static str {
     match kind {

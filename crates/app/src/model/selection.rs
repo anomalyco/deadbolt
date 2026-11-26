@@ -423,7 +423,8 @@ impl App {
         }
     }
 
-    /// The quick panel's clear button: an empty search, still focused.
+    /// The quick panel's clear button and the list's Clear search: an empty
+    /// search, still focused.
     pub fn clear_search(&mut self) {
         self.search.clear();
         self.search.focused = true;

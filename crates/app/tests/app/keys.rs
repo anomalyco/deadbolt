@@ -504,6 +504,28 @@ fn a_press_on_the_focused_search_never_blurs_it() {
     }
 }
 
+/// A search that matches nothing offers Clear search under "No matches":
+/// it empties the search, keeps the keys there and brings every row back.
+#[test]
+fn clear_search_empties_a_search_with_no_matches() {
+    let mut rt = scene("vault");
+    let all = ids(&rt);
+    for c in "zzz".chars() {
+        tap(&mut rt, Key::Text(c.into()));
+    }
+    assert!(ids(&rt).is_empty());
+    let shows =
+        |rt: &Runtime<App>, s: &str| rt.elements().iter().any(|e| e.text.as_deref() == Some(s));
+    assert!(shows(&rt, "No matches") && shows(&rt, "Clear search"));
+
+    click(&mut rt, "clear-search");
+    assert_eq!(rt.state.search.text, "");
+    assert!(rt.state.search.focused, "the keys stay in the search");
+    assert_eq!(ids(&rt), all);
+    settle(&mut rt, 0.5);
+    assert!(!shows(&rt, "Clear search"), "it goes with “No matches”");
+}
+
 /// From the import view too, ↑↓ and a search edit open a hidden list, and a
 /// search edit during an import that can't be cancelled opens it while
 /// leaving the import view up.
