@@ -3,7 +3,7 @@
 //!
 //! Opening reads each candidate pack's 136-byte header until one has the
 //! bundle's `PackId`, then decrypts the index (record 1). A lookup reads
-//! one Head record per hit; a fill reads one Secret record. Nothing else is
+//! one Head record per hit; a fill checks its Head before reading its Secret. Nothing else is
 //! read or decrypted, so a fill touches a few hundred bytes past the index
 //! however large the vault is.
 //!
@@ -167,11 +167,14 @@ impl<R: BlockReader> PackViewer<R> {
         Ok(None)
     }
 
-    /// One item's Secret: one range read, one decryption, no other item
-    /// touched.
+    /// One item's Secret, after checking its Head is live and autofillable.
     pub fn fill_secret(&self, item_id: &str) -> Result<ViewerSecret> {
         let id = parse_item_id(item_id)?;
         for item in self.refs(&item_key(&id)) {
+            let hit = self.head(&item)?.ok_or(ViewerError::NotFound)?;
+            if hit.item_id != crate::item::hex_id(&id) {
+                continue;
+            }
             let plain = self.reader.read_secret(&self.keys, &item)?;
             let secret = ItemSecret::decode(&plain).map_err(corrupt)?;
             if *secret.id.as_bytes() == id {

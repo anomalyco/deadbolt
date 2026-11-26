@@ -806,7 +806,13 @@ mod tests {
         let peer = author(2);
         let mut theirs = target.vault(&id).clone();
         let made = local(&mut theirs, |w| {
-            w.checkpoint(&peer, |pack, _| pack.encode().map_err(|e| e.to_string()))
+            w.checkpoint(&peer, |pack, site| {
+                let input =
+                    deadbolt_viewer::pack_input(pack, site, 1).map_err(|e| e.to_string())?;
+                Ok(deadbolt_pack::pack::encode(&input, site.key.as_bytes())
+                    .map_err(|e| e.to_string())?
+                    .bytes)
+            })
         });
         let (f, mut payload) = theirs
             .checkpoints()

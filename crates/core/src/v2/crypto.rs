@@ -40,8 +40,6 @@ const CTX_DEVICE_NET: &str = "deadbolt/v2 device net";
 const CTX_EPOCH_DATA: &str = "deadbolt/v2 epoch data";
 const CTX_EPOCH_BACK: &str = "deadbolt/v2 epoch back";
 const CTX_EPOCH_STATE: &str = "deadbolt/v2 epoch state";
-const CTX_EPOCH_PACK: &str = "deadbolt/v2 epoch pack";
-const CTX_EPOCH_INDEX: &str = "deadbolt/v2 epoch index";
 const CTX_EPOCH_COMMIT: &str = "deadbolt/v2 epoch commit";
 const CTX_X25519_WRAP: &str = "deadbolt/v2 x25519 wrap";
 const CTX_RECOVERY_WRAP_KEM: &str = "deadbolt/v2 recovery wrap kem";
@@ -444,32 +442,6 @@ impl EpochKey {
         kdf_secret(
             CTX_EPOCH_STATE,
             &[self.as_bytes(), vault.as_bytes(), epoch.as_bytes()],
-        )
-    }
-
-    /// `K_pack(e, p) = KDF("epoch pack", K_e || vault || EpochId || PackId)`.
-    pub fn pack_key(
-        &self,
-        vault: &VaultId,
-        epoch: &EpochId,
-        pack_id: &[u8; 32],
-    ) -> Zeroizing<[u8; 32]> {
-        kdf_secret(
-            CTX_EPOCH_PACK,
-            &[self.as_bytes(), vault.as_bytes(), epoch.as_bytes(), pack_id],
-        )
-    }
-
-    /// `K_ix(e, p) = KDF("epoch index", K_e || vault || EpochId || PackId)`.
-    pub fn index_key(
-        &self,
-        vault: &VaultId,
-        epoch: &EpochId,
-        pack_id: &[u8; 32],
-    ) -> Zeroizing<[u8; 32]> {
-        kdf_secret(
-            CTX_EPOCH_INDEX,
-            &[self.as_bytes(), vault.as_bytes(), epoch.as_bytes(), pack_id],
         )
     }
 

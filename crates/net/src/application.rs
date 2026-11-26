@@ -757,7 +757,7 @@ pub fn welcome<S: State>(
         can_invite(held, &s.device_id(), &device)?;
         (
             !held.is_member(&device),
-            held.device_card(&device).is_none(),
+            held.device_label(&device).is_none(),
         )
     };
     if add || card {

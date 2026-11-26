@@ -8,7 +8,23 @@ use crate::{Author, Error, Field, FieldType, Vault};
 /// care how the host lays it out, only that the frame commits to them.
 fn checkpoint(v: &mut Vault, a: &Author) -> crate::Checkpointed {
     v.transact(
-        |w| w.checkpoint(a, |pack, _| pack.encode().map_err(|e| e.to_string())),
+        |w| {
+            w.checkpoint(a, |pack, _| {
+                let records = pack.split().map_err(|e| e.to_string())?;
+                let joined = Pack::join(
+                    &records.meta,
+                    records.items.iter().map(|i| (&i.head[..], &i.secret[..])),
+                )
+                .map_err(|e| e.to_string())?;
+                assert_eq!(&joined, pack);
+                let mut bytes = records.meta.to_vec();
+                for item in records.items {
+                    bytes.extend_from_slice(&item.head);
+                    bytes.extend_from_slice(&item.secret);
+                }
+                Ok(bytes)
+            })
+        },
         |_, _| Ok::<_, Error>(()),
     )
     .unwrap()

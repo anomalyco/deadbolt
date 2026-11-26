@@ -344,12 +344,11 @@ impl Vault {
         self.parked = check_parking(&self.previously_removed, &self.resolved).reasons;
     }
 
-    /// A device's transport key (from its card) and label. The label is the
-    /// device's own word once it has written a card, its adder's before; the
-    /// transport key to trust is [`Vault::device_net`].
-    pub fn device_card(&self, device: &DeviceId) -> Option<(NetPublic, &str)> {
+    /// A device's label: its own word once it has written a card, its adder's
+    /// before. Transport keys come from [`Vault::device_net`].
+    pub fn device_label(&self, device: &DeviceId) -> Option<&str> {
         let card = &self.state.device_cards.get(device)?.winner()?.value;
-        Some((card.net_pk, card.label.as_str()))
+        Some(card.label.as_str())
     }
 
     /// The transport key `device` signed into its `Add`, for a member or a

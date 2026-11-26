@@ -16,7 +16,14 @@ fn login(password: &str) -> OutboxMutation {
 }
 
 fn queue(blocks: &MemBlocks, mutation: &OutboxMutation) -> String {
-    queue_save(blocks, &VAULT, &device_kem().public_key(), mutation).unwrap()
+    queue_save(
+        blocks,
+        &VAULT,
+        &device_kem().public_key(),
+        mutation,
+        super::NOW * 1000,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -161,7 +168,13 @@ fn oversized_mutations_are_refused() {
     let blocks = MemBlocks::new();
     let huge = login(&"x".repeat(crate::outbox::MAX_MUTATION_LEN));
     assert!(matches!(
-        queue_save(&blocks, &VAULT, &device_kem().public_key(), &huge),
+        queue_save(
+            &blocks,
+            &VAULT,
+            &device_kem().public_key(),
+            &huge,
+            super::NOW * 1000
+        ),
         Err(ViewerError::InvalidInput { .. })
     ));
     assert!(list_outbox(&blocks).unwrap().is_empty());
@@ -171,4 +184,61 @@ fn oversized_mutations_are_refused() {
 fn debug_leaves_secrets_out() {
     let shown = format!("{:?}", login("hunter2"));
     assert!(!shown.contains("hunter2") && shown.contains("alex@example.com"));
+}
+
+#[test]
+fn mutations_drain_in_chronological_order() {
+    let blocks = MemBlocks::new();
+    let times = [
+        0xfe,
+        0xff,
+        0x100,
+        0xffff,
+        0x10000,
+        super::NOW * 1000,
+        (1 << 48) - 1,
+    ];
+    let mut expected = Vec::new();
+    let mut names = Vec::new();
+    for now_ms in times {
+        let mutation = login(&format!("password-{now_ms}"));
+        let name = queue_save(
+            &blocks,
+            &VAULT,
+            &device_kem().public_key(),
+            &mutation,
+            now_ms,
+        )
+        .unwrap();
+        assert!(name.starts_with(&format!("outbox/{now_ms:012x}")));
+        names.push(name);
+        expected.push(mutation);
+    }
+    assert_eq!(list_outbox(&blocks).unwrap(), names);
+    let mut replayed = Vec::new();
+    let drained = drain_outbox(&blocks, &VAULT, &device_kem(), |_, mutation| {
+        replayed.push(mutation);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(replayed, expected);
+    assert_eq!(drained.applied, names);
+    assert!(drained.rejected.is_empty());
+    assert!(list_outbox(&blocks).unwrap().is_empty());
+}
+
+#[test]
+fn an_out_of_range_timestamp_is_not_silently_truncated() {
+    let blocks = MemBlocks::new();
+    assert!(matches!(
+        queue_save(
+            &blocks,
+            &VAULT,
+            &device_kem().public_key(),
+            &login("pw"),
+            1 << 48
+        ),
+        Err(ViewerError::InvalidInput { .. })
+    ));
+    assert!(list_outbox(&blocks).unwrap().is_empty());
 }

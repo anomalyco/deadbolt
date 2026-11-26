@@ -74,7 +74,7 @@ fn non_transitive_e7_clocks_fold_identically_with_and_without_compaction() {
             assert_eq!(state, full, "view {view:?} seed {seed}");
             assert_eq!(state_mac(&K_MAC, &state).unwrap(), mac);
         }
-        let again = Pack::decode(&pack.encode().unwrap()).unwrap();
+        let again = super::sim::round_trip(&pack);
         assert_eq!(again, pack);
     }
 }
@@ -107,7 +107,7 @@ fn a_compacted_frame_still_dominates_the_tail_frame_it_saw() {
 
     let full = fold_from_scratch(&ctx, sim.shuffled(3));
     assert_eq!(values(&full), ["c"]);
-    let decoded = Pack::decode(&pack.encode().unwrap()).unwrap();
+    let decoded = super::sim::round_trip(&pack);
     assert_eq!(
         fold_from_checkpoint(&ctx, &decoded, sim.shuffled(4)).unwrap(),
         full

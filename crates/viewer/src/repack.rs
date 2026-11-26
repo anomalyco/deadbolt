@@ -1,6 +1,7 @@
 //! The app's side of a pack: laying a core [`Pack`] out as `deadbolt-pack`
 //! input, and reading a whole pack back into one.
 
+use deadbolt_core::PackSite;
 use deadbolt_core::v2::Pack;
 use deadbolt_core::v2::pack::ItemHead;
 use deadbolt_pack::{BlockReader, PackInput, PackItem, PackKeys, PackReader};
@@ -8,20 +9,9 @@ use deadbolt_pack::{BlockReader, PackInput, PackItem, PackKeys, PackReader};
 use crate::error::{Result, ViewerError};
 use crate::item::{ViewerHit, keys_of};
 
-/// Where a pack sits: the checkpoint frame it belongs to, and its local
-/// generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PackPlace {
-    pub vault: [u8; 32],
-    pub author: [u8; 32],
-    pub seq: u64,
-    pub epoch: [u8; 32],
-    pub generation: u64,
-}
-
 /// A core pack as `deadbolt-pack` input: Meta, then each item's Head and
 /// Secret, filed under its id, its sites and its passkey's rp id.
-pub fn pack_input(pack: &Pack, place: PackPlace) -> Result<PackInput> {
+pub fn pack_input(pack: &Pack, site: &PackSite, generation: u64) -> Result<PackInput> {
     let records = pack
         .split()
         .map_err(|err| ViewerError::invalid(err.to_string()))?;
@@ -37,11 +27,11 @@ pub fn pack_input(pack: &Pack, place: PackPlace) -> Result<PackInput> {
         });
     }
     Ok(PackInput {
-        vault: place.vault,
-        author: place.author,
-        seq: place.seq,
-        epoch: place.epoch,
-        generation: place.generation,
+        vault: *site.vault.as_bytes(),
+        author: *site.author.as_bytes(),
+        seq: site.seq,
+        epoch: *site.epoch.as_bytes(),
+        generation,
         meta: records.meta,
         items,
     })

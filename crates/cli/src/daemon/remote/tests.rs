@@ -408,15 +408,8 @@ async fn a_member_cannot_vouch_for_its_own_poisoned_checkpoint() {
         .transact(
             |w| {
                 w.checkpoint(&m, |pack, site| {
-                    let place = deadbolt_viewer::PackPlace {
-                        vault: *site.vault.as_bytes(),
-                        author: *site.author.as_bytes(),
-                        seq: site.seq,
-                        epoch: *site.epoch.as_bytes(),
-                        generation: 1,
-                    };
                     let input =
-                        deadbolt_viewer::pack_input(pack, place).map_err(|e| e.to_string())?;
+                        deadbolt_viewer::pack_input(pack, site, 1).map_err(|e| e.to_string())?;
                     Ok(deadbolt_pack::pack::encode(&input, site.key.as_bytes())
                         .map_err(|e| e.to_string())?
                         .bytes)
@@ -541,7 +534,7 @@ async fn recovery_settles_a_mutual_removal_no_one_is_left_to_choose() {
         let v = &s.vaults[&vault];
         assert!(v.parked().is_empty(), "{:?}", v.parked());
         assert!(v.is_member(&s.id));
-        assert!(v.device_card(&s.id).is_some(), "the new device's card");
+        assert!(v.device_label(&s.id).is_some(), "the new device's card");
         Ok(())
     })
     .unwrap();
@@ -658,15 +651,8 @@ async fn a_puppet_and_empty_heads_cannot_vouch_for_a_poisoned_checkpoint() {
         .transact(
             |w| {
                 w.checkpoint(&m, |pack, site| {
-                    let place = deadbolt_viewer::PackPlace {
-                        vault: *site.vault.as_bytes(),
-                        author: *site.author.as_bytes(),
-                        seq: site.seq,
-                        epoch: *site.epoch.as_bytes(),
-                        generation: 1,
-                    };
                     let input =
-                        deadbolt_viewer::pack_input(pack, place).map_err(|e| e.to_string())?;
+                        deadbolt_viewer::pack_input(pack, site, 1).map_err(|e| e.to_string())?;
                     Ok(deadbolt_pack::pack::encode(&input, site.key.as_bytes())
                         .map_err(|e| e.to_string())?
                         .bytes)
