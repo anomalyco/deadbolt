@@ -224,6 +224,7 @@ pub async fn remote(
     client::ensure_running(paths).await?;
     match command {
         RemoteCommand::Set(set) => {
+            one_stdin(from_stdin, &[("--credentials-stdin", set.reads_stdin())])?;
             let command = Command::RemoteSet {
                 vault,
                 remote: input(set)?,
@@ -275,21 +276,37 @@ impl SetCommand {
     }
 }
 
+/// Refuses two things on one stdin: `--passphrase-stdin` (`passphrase`)
+/// with any of `flags` that is set. clap can't see them together: the
+/// passphrase flag is global, the store's `--credentials-stdin` belongs to
+/// a subcommand.
+fn one_stdin(passphrase: bool, flags: &[(&str, bool)]) -> Result<()> {
+    let mut reading = flags.iter().filter(|(_, on)| *on).map(|(name, _)| *name);
+    if let (Some(first), Some(second)) = (
+        reading.next(),
+        passphrase
+            .then_some("--passphrase-stdin")
+            .or_else(|| reading.next()),
+    ) {
+        bail!("{first} and {second} both read stdin: pass one of them in the environment instead");
+    }
+    Ok(())
+}
+
 impl RecoverArgs {
-    /// Refuses two things on one stdin: clap can't see the store's
-    /// `--credentials-stdin`, which belongs to the subcommand.
-    fn check(&self) -> Result<()> {
-        if self.words_stdin && self.remote.reads_stdin() {
-            bail!(
-                "--words-stdin and --credentials-stdin both read stdin: pass the credentials in the environment instead"
-            );
-        }
-        Ok(())
+    fn check(&self, passphrase: bool) -> Result<()> {
+        one_stdin(
+            passphrase,
+            &[
+                ("--words-stdin", self.words_stdin),
+                ("--credentials-stdin", self.remote.reads_stdin()),
+            ],
+        )
     }
 }
 
 pub async fn recover(paths: &Paths, args: RecoverArgs, from_stdin: bool) -> Result<()> {
-    args.check()?;
+    args.check(from_stdin)?;
     let remote = input(args.remote)?;
     let words = words(args.words_stdin, "Recovery kit (24 words)")?;
     client::ensure_running(paths).await?;
@@ -313,6 +330,7 @@ pub async fn recovery(
     from_stdin: bool,
 ) -> Result<()> {
     let RecoveryCommand::Rotate { words_stdin, json } = command;
+    one_stdin(from_stdin, &[("--words-stdin", words_stdin)])?;
     let words = words(words_stdin, "Current recovery kit (24 words)")?;
     client::ensure_running(paths).await?;
     let Reply::RecoveryRotated {
@@ -432,7 +450,7 @@ mod tests {
             "https://dav/",
             "--credentials-stdin",
         ]);
-        let error = both.check().unwrap_err().to_string();
+        let error = both.check(false).unwrap_err().to_string();
         assert!(
             error.contains("--words-stdin and --credentials-stdin"),
             "{error}"
@@ -447,10 +465,10 @@ mod tests {
             "b",
             "--credentials-stdin",
         ]);
-        assert!(s3.check().is_err());
+        assert!(s3.check(false).is_err());
         assert!(
             parse(&["abcd", "--words-stdin", "webdav", "--url", "https://dav/"])
-                .check()
+                .check(false)
                 .is_ok()
         );
         assert!(
@@ -461,8 +479,29 @@ mod tests {
                 "https://dav/",
                 "--credentials-stdin"
             ])
-            .check()
+            .check(false)
             .is_ok()
         );
+        // Nor does the passphrase share it with either.
+        let words = parse(&["abcd", "--words-stdin", "webdav", "--url", "https://dav/"]);
+        let error = words.check(true).unwrap_err().to_string();
+        assert!(
+            error.contains("--words-stdin and --passphrase-stdin"),
+            "{error}"
+        );
+        let creds = parse(&[
+            "abcd",
+            "webdav",
+            "--url",
+            "https://dav/",
+            "--credentials-stdin",
+        ]);
+        assert!(creds.check(true).is_err());
+        assert!(
+            parse(&["abcd", "webdav", "--url", "https://dav/"])
+                .check(true)
+                .is_ok()
+        );
+        assert!(super::one_stdin(true, &[]).is_ok());
     }
 }

@@ -273,3 +273,136 @@ fn a_withheld_frame_is_reported_once_in_author_and_seq_order() {
     let compacted = BTreeMap::from([(lo, 3), (hi, 1)]);
     assert!(withheld(&clocks, &index, &compacted).is_empty());
 }
+
+/// A store-planted junk `<seq>.c` beside this device's own `<seq>` is no
+/// way around the self-rollback check: the frame that wins the twin is
+/// judged as any own frame is.
+#[tokio::test]
+async fn a_junk_twin_beside_an_own_frame_still_trips_self_rollback() {
+    let (vault, _, members) = genesis(0);
+    let me = device(1);
+    let chain = data_chain(&me, vault, 3, 1, &[]);
+    let mut frames = members;
+    frames.extend(chain.iter().cloned());
+    let (_, store) = seed(frames, false).await;
+    let bare = RemotePath::frame(vault, FrameKind::Data, me.device_id(), 2);
+    let dotc = RemotePath::frame(vault, FrameKind::Checkpoint, me.device_id(), 2);
+    store.inner().plant(&dotc.to_name(), b"junk");
+
+    let anchor = SyncAnchor::default();
+    let plan = plan_pull(&store, &vault, &anchor, None).await.unwrap();
+    assert_eq!(plan.twins, [(bare, dotc)]);
+    // The replica holds seqs 0 and 1 (restored from a backup), not 2.
+    let ids: Vec<_> = chain.iter().map(Frame::id).collect();
+    let local = |log, seq: u64| (log == LogKind::Data && seq < 2).then(|| ids[seq as usize]);
+    let judged = plan.judge(
+        &vault,
+        &anchor,
+        &me.device_id(),
+        local,
+        &fetch(&store, &plan).await,
+    );
+    let rollbacks: Vec<_> = judged
+        .anomalies
+        .iter()
+        .filter_map(|a| match a {
+            RemoteAnomaly::SelfRollback(r) => Some(r.remote_ahead.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rollbacks, [vec![bare]], "{:?}", judged.anomalies);
+    assert!(!judged.frames.contains(&chain[2]), "never applied");
+}
+
+/// A twin the store kept only one half of between LIST and GET is that
+/// half, judged like any other object.
+#[tokio::test]
+async fn a_twin_with_one_half_gone_is_judged_by_the_half_left() {
+    let (vault, _, members) = genesis(0);
+    let a = device(1);
+    let chain = data_chain(&a, vault, 2, 1, &[]);
+    let mut frames = members;
+    frames.extend(chain.iter().cloned());
+    let (_, store) = seed(frames, false).await;
+    let twin = data_frame(&a, vault, 2, chain[1].id(), 1, true);
+    let bare = RemotePath::frame(vault, FrameKind::Data, a.device_id(), 2);
+    let dotc = RemotePath::frame(vault, FrameKind::Checkpoint, a.device_id(), 2);
+    store.inner().plant(&bare.to_name(), b"junk");
+    store.inner().plant(&dotc.to_name(), &twin.encode());
+
+    let anchor = SyncAnchor::default();
+    let plan = plan_pull(&store, &vault, &anchor, None).await.unwrap();
+    assert_eq!(plan.twins, [(bare, dotc)]);
+    let mut fetched = fetch(&store, &plan).await;
+    fetched.remove(&bare);
+    let me = device(9).device_id();
+    let judged = plan.judge(&vault, &anchor, &me, |_, _| None, &fetched);
+    assert!(judged.anomalies.is_empty(), "{:?}", judged.anomalies);
+    assert!(judged.frames.contains(&twin), "the half left is kept");
+    // ...and a half left that is junk is an anomaly, not silence.
+    let mut fetched = fetch(&store, &plan).await;
+    fetched.remove(&dotc);
+    let judged = plan.judge(&vault, &anchor, &me, |_, _| None, &fetched);
+    assert!(
+        judged.anomalies.iter().any(|x| matches!(x,
+            RemoteAnomaly::Mismatched { name, .. } if *name == bare.to_name())),
+        "{:?}",
+        judged.anomalies
+    );
+}
+
+/// A twin at the anchored tip is checked against the anchor, never applied
+/// again: junk beside the anchored frame is quiet, a swapped frame beside
+/// junk is a regression.
+#[tokio::test]
+async fn a_twin_at_the_anchored_tip_is_checked_not_applied_again() {
+    let (vault, _, members) = genesis(0);
+    let a = device(1);
+    let chain = data_chain(&a, vault, 3, 1, &[]);
+    let mut frames = members;
+    frames.extend(chain.iter().cloned());
+    let (_, store) = seed(frames, false).await;
+    let mut anchor = SyncAnchor::default();
+    let first = plan_pull(&store, &vault, &anchor, None).await.unwrap();
+    apply(&store, &vault, &mut anchor, &first).await;
+    let bare = RemotePath::frame(vault, FrameKind::Data, a.device_id(), 2);
+    let dotc = RemotePath::frame(vault, FrameKind::Checkpoint, a.device_id(), 2);
+    store.inner().plant(&dotc.to_name(), b"junk");
+
+    let me = device(9).device_id();
+    let plan = plan_pull(&store, &vault, &anchor, None).await.unwrap();
+    assert!(plan.verify.contains(&bare) && plan.verify.contains(&dotc));
+    let judged = plan.judge(
+        &vault,
+        &anchor,
+        &me,
+        |_, _| None,
+        &fetch(&store, &plan).await,
+    );
+    assert!(judged.anomalies.is_empty(), "{:?}", judged.anomalies);
+    assert!(
+        judged.frames.is_empty(),
+        "the anchored tip isn't applied again"
+    );
+
+    let swapped = data_frame(&a, vault, 2, chain[1].id(), 7, false);
+    store.inner().plant(&bare.to_name(), &swapped.encode());
+    let judged = plan.judge(
+        &vault,
+        &anchor,
+        &me,
+        |_, _| None,
+        &fetch(&store, &plan).await,
+    );
+    assert!(
+        judged.anomalies.iter().any(|x| matches!(
+            x,
+            RemoteAnomaly::RemoteRegressed {
+                expected_seq: 2,
+                ..
+            }
+        )),
+        "{:?}",
+        judged.anomalies
+    );
+}

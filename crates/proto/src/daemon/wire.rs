@@ -35,6 +35,12 @@ impl Secret {
     }
 }
 
+impl From<String> for Secret {
+    fn from(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+}
+
 impl From<Zeroizing<String>> for Secret {
     fn from(value: Zeroizing<String>) -> Self {
         Self(value)

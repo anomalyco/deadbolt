@@ -55,11 +55,13 @@ pub struct Judged {
 
 impl PullPlan {
     /// Judges what was fetched for this plan by `me` (`fetched`, by name;
-    /// what the store no longer had is skipped): each twin folds to one
-    /// frame or a fraud proof ([`resolve_twin`]), every other frame passes
-    /// [`check_fetched_as`] (`local` as there), every proof
-    /// [`check_fetched_fraud`], and every anchored tip in `verify`
-    /// [`check_fetched`].
+    /// what the store no longer had is skipped). Each twin folds to a fraud
+    /// proof, or to the one of its objects that verifies under its name
+    /// ([`resolve_twin`]); a twin the store kept only one half of is that
+    /// half. Then every object of a position: a fraud proof passes
+    /// [`check_fetched_fraud`], an anchored tip in `verify` only
+    /// [`check_fetched`] (it is never applied again), and every other frame
+    /// [`check_fetched_as`] (`local` as there).
     pub fn judge(
         &self,
         vault: &VaultId,
@@ -70,35 +72,41 @@ impl PullPlan {
     ) -> Judged {
         let mut out = Judged::default();
         let twinned: BTreeSet<RemotePath> = self.twins.iter().flat_map(|(a, b)| [*a, *b]).collect();
+        let mut objects: Vec<(RemotePath, &[u8])> = Vec::new();
         for (bare, checkpoint) in &self.twins {
-            let (Some(a), Some(b)) = (fetched.get(bare), fetched.get(checkpoint)) else {
-                continue;
-            };
-            match resolve_twin((bare, a), (checkpoint, b)) {
-                Ok(Twin::Fraud(proof)) => out.proofs.push(*proof),
-                Ok(Twin::One(frame)) => out.frames.push(*frame),
-                Err(anomaly) => out.anomalies.push(anomaly),
+            match (fetched.get(bare), fetched.get(checkpoint)) {
+                (Some(a), Some(b)) => match resolve_twin((bare, a), (checkpoint, b)) {
+                    Ok(Twin::Fraud(proof)) => out.proofs.push(*proof),
+                    // The one that verifies under its name: its header names it.
+                    Ok(Twin::One(frame)) => {
+                        let h = frame.header();
+                        let path = RemotePath::frame(*vault, h.kind, h.author, h.seq);
+                        let bytes = if path == *bare { a } else { b };
+                        objects.push((path, bytes));
+                    }
+                    Err(anomaly) => out.anomalies.push(anomaly),
+                },
+                (Some(a), None) => objects.push((*bare, a)),
+                (None, Some(b)) => objects.push((*checkpoint, b)),
+                (None, None) => {}
             }
         }
-        for path in self.fetch.iter().filter(|p| !twinned.contains(p)) {
-            let Some(bytes) = fetched.get(path) else {
-                continue;
-            };
+        for path in self.fetch.iter().chain(&self.verify) {
+            if let Some(bytes) = fetched.get(path).filter(|_| !twinned.contains(path)) {
+                objects.push((*path, bytes));
+            }
+        }
+        let anchored: BTreeSet<&RemotePath> = self.verify.iter().collect();
+        for (path, bytes) in objects {
             let judged = match path {
                 RemotePath::Fraud { .. } => {
-                    check_fetched_fraud(vault, path, bytes).map(|proof| out.proofs.push(proof))
+                    check_fetched_fraud(vault, &path, bytes).map(|proof| out.proofs.push(proof))
                 }
-                _ => check_fetched_as(anchor, me, &local, path, bytes)
+                _ if anchored.contains(&path) => check_fetched(anchor, &path, bytes).map(drop),
+                _ => check_fetched_as(anchor, me, &local, &path, bytes)
                     .map(|frame| out.frames.push(frame)),
             };
             if let Err(anomaly) = judged {
-                out.anomalies.push(anomaly);
-            }
-        }
-        for path in self.verify.iter().filter(|p| !twinned.contains(p)) {
-            if let Some(bytes) = fetched.get(path)
-                && let Err(anomaly) = check_fetched(anchor, path, bytes)
-            {
                 out.anomalies.push(anomaly);
             }
         }

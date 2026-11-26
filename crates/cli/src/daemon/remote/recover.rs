@@ -54,9 +54,18 @@ impl Daemon {
         remote: RemoteInput,
     ) -> Result<Reply> {
         let id = self.install_recovered(vault, words, remote).await?;
-        let report = self.remote_sync(id).await?;
-        for line in &report.anomalies {
-            tracing::warn!(vault = %id, "{line}");
+        match self.remote_sync(id).await {
+            Ok(report) => {
+                for line in &report.anomalies {
+                    tracing::warn!(vault = %id, "{line}");
+                }
+            }
+            // The vault is installed: the background sync tries again,
+            // unless this session can no longer trust what it committed.
+            Err(error) => {
+                self.with(|s| s.ensure_usable())?;
+                tracing::warn!(vault = %id, "the first sync after recovery failed: {error:#}");
+            }
         }
         self.sync_now.notify_one();
         Ok(Reply::Vault {
@@ -158,8 +167,9 @@ impl Daemon {
             let frames: Vec<Frame> = v.frames().cloned().collect();
             let base = base.map(|b| (b.checkpoint, b.pack, b.sealed, b.site));
             let adopted = s.adopt_recovered(frames, base, proofs);
-            if adopted.is_err() && !s.contains_vault(&vault) {
-                // Nothing stored: forget the remote too, for a clean retry.
+            // Nothing stored (certainly: an uncertain append may have
+            // landed): forget the remote too, for a clean retry.
+            if adopted.is_err() && !s.append_uncertain && !s.contains_vault(&vault) {
                 let forgot = save(s, &vault, None)
                     .and_then(|()| save_anchor(s, &vault, &SyncAnchor::default()));
                 if let Err(error) = forgot {

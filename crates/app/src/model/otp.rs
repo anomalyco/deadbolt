@@ -69,7 +69,7 @@ impl Otp {
             self.valid_until = code.valid_until;
             self.turns += 1;
         }
-        self.code = Some(code.code.clone());
+        self.code = Some(code.code.clone().into_inner());
         self.error = None;
         self.until = now + remaining;
         self.woken = false;
@@ -112,7 +112,7 @@ impl App {
         // its period is left.
         if std::mem::take(&mut otp.copy_next) {
             let field = otp.field.clone();
-            self.put_on_clipboard(field, code.code.to_string(), tx);
+            self.put_on_clipboard(field, code.code.expose().to_string(), tx);
         }
     }
 

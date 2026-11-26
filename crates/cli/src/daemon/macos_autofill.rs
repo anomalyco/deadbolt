@@ -422,7 +422,10 @@ impl Daemon {
                             let (_, item) = find_any_login(s, &login)?;
                             let values = extract_values(&item, &want, now)?;
                             let key = format!("{}:{}", login.vault, login.item);
-                            s.set_filled(key, now.as_secs())?;
+                            // Only ranks logins: never fail an allowed fill.
+                            if let Err(error) = s.set_filled(key, now.as_secs()) {
+                                tracing::warn!(%error, "remembering the fill failed");
+                            }
                             Ok((values, identities_hash(s)))
                         })?;
                         Ok(Reply::AutofillFill {

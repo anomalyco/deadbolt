@@ -208,6 +208,8 @@ impl Engine {
             Ok(w.card(a, a.id(), a.keys().net_public(), &label)?)
         });
         warn("signing this device's card", card.map(drop));
+        // An uncertain commit is no bookkeeping failure: never swallow it.
+        self.ensure_usable()?;
         if self.meta.default_vault.is_none() {
             self.meta.default_vault = Some(id);
             let saved = self.save_meta();

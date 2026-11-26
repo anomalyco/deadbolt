@@ -565,7 +565,7 @@ pub async fn run(
         ItemCommand::Code { query } => {
             println!(
                 "{}",
-                code(paths, vault, query, from_stdin).await?.code.as_str()
+                code(paths, vault, query, from_stdin).await?.code.expose()
             );
         }
         ItemCommand::Show { query, reveal } => {
@@ -585,7 +585,7 @@ pub async fn run(
                     match code(paths, vault.clone(), id, from_stdin).await {
                         Ok(code) => Some(format!(
                             "{} ({}s left)",
-                            code.code.as_str(),
+                            code.code.expose(),
                             code.remaining_ms.div_ceil(1000)
                         )),
                         Err(error) => Some(format!("•••••••• (no code: {error:#})")),

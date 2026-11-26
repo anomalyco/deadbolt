@@ -41,7 +41,7 @@ fn codes_come_from_the_otp_field() {
     let fields = vec![input("password", "pw"), input("otp", &otp)];
     create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
     let code = code(&s, None, &words("site"), Duration::from_millis(59_250)).unwrap();
-    assert_eq!(code.code.as_str(), "94287082");
+    assert_eq!(code.code.expose(), "94287082");
     assert_eq!(
         (code.period, code.valid_until, code.remaining_ms),
         (30, 60, 750)
@@ -54,7 +54,7 @@ fn codes_come_from_the_otp_field() {
     let fields = vec![otp_input("backup", &secret.to_lowercase())];
     set(&mut s, None, &words("plain"), fields, None, &[]).unwrap();
     let code = super::code(&s, None, &words("plain"), at(59)).unwrap();
-    assert_eq!(code.code.as_str(), "287082");
+    assert_eq!(code.code.expose(), "287082");
 }
 
 /// Under a millisecond before the boundary still reads as time left.

@@ -27,11 +27,11 @@ use deadbolt_core::v2::FrameId;
 use deadbolt_core::{
     DataOp, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 use deadbolt_core::listing::{detail, input_field, searchable};
 pub use deadbolt_core::listing::{host, label};
-use deadbolt_proto::daemon::{Code, FieldInfo, FieldInput, ItemInfo, TagCount};
+use deadbolt_proto::daemon::{Code, FieldInfo, FieldInput, ItemInfo, Secret, TagCount};
 
 use crate::Engine;
 
@@ -405,7 +405,7 @@ pub fn code(s: &Engine, vault: Option<&str>, query: &[String], now: Duration) ->
     let valid_until = totp.valid_until(now.as_secs());
     let remaining = Duration::from_secs(valid_until).saturating_sub(now);
     Ok(Code {
-        code: Zeroizing::new(totp.code(now.as_secs())),
+        code: Secret::new(totp.code(now.as_secs())),
         period: totp.period(),
         valid_until,
         // Never 0, which would read as already over.
