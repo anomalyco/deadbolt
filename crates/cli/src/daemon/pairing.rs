@@ -876,6 +876,48 @@ mod tests {
         b.lock().await;
     }
 
+    /// A welcome that admits the joiner but wraps no epoch key it can open
+    /// (here, wrapped to the wrong KEM key) would store a vault this device
+    /// can never read: it's refused.
+    #[tokio::test]
+    async fn a_welcome_the_joiner_cannot_read_is_refused() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = test_daemon(a_dir.path(), "alpha").await;
+        let b = test_daemon(b_dir.path(), "beta").await;
+        let vault = a.with(|s| s.create_vault("personal")).unwrap();
+        let a_dev = DeviceId::from_bytes(id(&a));
+        let b_dev = DeviceId::from_bytes(id(&b));
+        let wrong = DeviceKeys::from_seed(&[9; 32]).kem_public();
+        let (consent, join) = b
+            .with(|s| {
+                let keys = s.keys();
+                let consent =
+                    deadbolt_core::v2::sign_join_consent(keys.sign_key(), &vault, &a_dev, &wrong);
+                Ok((consent, join_blob(&keys, "beta", a_dev, &vault, None)?))
+            })
+            .unwrap();
+        a.with(|s| s.update(vault, |v, key| Ok(v.add(key, b_dev, wrong, consent)?)))
+            .unwrap();
+        let (offered, replay) = a
+            .with(|s| {
+                let (offered, _) = read_offer(&offer(s, vault, &b_dev, None)?)?;
+                let (history, _) = welcome(s, vault, b_dev, &join, None)?;
+                Ok((offered, test_replay(s, history)))
+            })
+            .unwrap();
+        let err = b
+            .with(|s| verify_welcome(&s.keys(), a_dev, offered, replay))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("gives this device no key"),
+            "{err:#}"
+        );
+        a.lock().await;
+        b.lock().await;
+    }
+
     #[tokio::test]
     async fn bad_offers_are_refused_before_consent() {
         struct BadInviter(Vec<u8>);

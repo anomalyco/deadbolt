@@ -11,7 +11,9 @@ use std::{
 };
 
 use data_encoding::HEXLOWER;
-use deadbolt_core::v2::{DeviceKeys, Frame, FrameId, KemPublic, LogKind, NetPublic};
+use deadbolt_core::v2::{
+    DeviceKeys, EpochGraph, EpochKeyring, Frame, FrameId, KemPublic, LogKind, NetPublic,
+};
 use deadbolt_core::{Author, DeviceId, Heads, Signature, Vault, VaultId, VaultWrite, valid_name};
 use n0_future::time::Instant;
 use n0_future::{FuturesUnorderedBounded, StreamExt};
@@ -614,6 +616,19 @@ pub fn verify_welcome(
     }
     if !vault.is_member(device) || !vault.is_member(&inviter) {
         return Err(Error::Protocol("the welcome does not admit this device"));
+    }
+    // A store this device can't read can't be repaired by this device:
+    // refuse it before it's stored rather than keep a vault of sealed frames.
+    let graph = EpochGraph::build(vault.id(), vault.frames(), vault.membership());
+    let mut keyring = EpochKeyring::new();
+    let report = graph.unlock(device, keys.kem_key(), &mut keyring);
+    if keyring.is_empty() {
+        return Err(Error::Protocol("the welcome gives this device no key"));
+    }
+    if !report.bad_epochs().is_empty() {
+        return Err(Error::Protocol(
+            "the welcome holds a key this device can't open",
+        ));
     }
     Ok(Welcomed {
         vault,
