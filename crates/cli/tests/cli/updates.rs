@@ -354,3 +354,81 @@ fn update_runs_bun_for_a_bun_install_pinned_to_what_npm_serves() {
             .contains("0.0.0-dev-9999")
     );
 }
+
+#[test]
+fn update_check_json_emits_structured_report_and_honors_install_receipt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let a = Device::new();
+    let bin = a.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let exe = bin.join("deadbolt");
+    copy_deadbolt(&exe);
+    let root = bin.canonicalize().unwrap();
+    let receipt = bin.join("install.json");
+    std::fs::write(
+        &receipt,
+        serde_json::json!({
+            "app": "deadbolt",
+            "artifact": "cli",
+            "channel": "dev",
+            "method": "direct",
+            "root": root,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&receipt, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let files = Arc::new(Mutex::new(HashMap::from([(
+        DEV.to_string(),
+        manifest(env!("CARGO_PKG_VERSION"), 1),
+    )])));
+    let base = release_service(files.clone());
+    let run_json = |args: &[&str]| {
+        let mut cmd = a.cmd_of(&exe, args);
+        cmd.env("DEADBOLT_RELEASE_URL", &base);
+        a.output(&mut cmd)
+    };
+
+    // Up to date: exit 0, clean JSON with method = "direct", available = false, action = "none".
+    let out = run_json(&["update", "--check", "--channel", "dev", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "current": env!("CARGO_PKG_VERSION"),
+            "latest": env!("CARGO_PKG_VERSION"),
+            "channel": "dev",
+            "available": false,
+            "method": "direct",
+            "action": "none",
+            "reason": "up_to_date",
+        })
+    );
+
+    // Update available: exit 10, clean JSON with available = true, action = "install".
+    files
+        .lock()
+        .unwrap()
+        .insert(DEV.to_string(), manifest("0.0.0-dev-9999", 2));
+    let out = run_json(&["update", "--check", "--channel", "dev", "--json"]);
+    assert_eq!(out.status.code(), Some(10));
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "current": env!("CARGO_PKG_VERSION"),
+            "latest": "0.0.0-dev-9999",
+            "channel": "dev",
+            "available": true,
+            "method": "direct",
+            "action": "install",
+            "reason": "update",
+        })
+    );
+}

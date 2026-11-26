@@ -1,9 +1,192 @@
 //! How the running `deadbolt` is installed, and the package manager that
 //! updates it.
 
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+
+use serde::Deserialize;
+
+/// Receipt written beside an install by the installer (`site/public/install`),
+/// identifying who owns it so `deadbolt update` knows before guessing from
+/// paths.
+pub(super) const RECEIPT_FILE: &str = "install.json";
+/// Largest `install.json` receipt we will read.
+const RECEIPT_LIMIT: u64 = 64 * 1024;
+
+/// Parsed `install.json` receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(super) struct InstallReceipt {
+    pub(super) app: String,
+    pub(super) artifact: String,
+    #[serde(default)]
+    pub(super) channel: Option<String>,
+    pub(super) method: String,
+    pub(super) root: String,
+}
+
+/// Ownership and permission snapshot for checking receipt trust without root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FileMeta {
+    pub(super) uid: u32,
+    pub(super) gid: u32,
+    pub(super) mode: u32,
+    pub(super) is_file: bool,
+    pub(super) is_symlink: bool,
+    pub(super) len: u64,
+}
+
+impl FileMeta {
+    fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        let kind = meta.file_type();
+        Self {
+            uid: meta.uid(),
+            gid: meta.gid(),
+            mode: meta.mode(),
+            is_file: kind.is_file(),
+            is_symlink: kind.is_symlink(),
+            len: meta.len(),
+        }
+    }
+}
+
+/// Whether an `install.json` receipt and its directory may be trusted for
+/// `method`: the receipt must be a regular, non-symlink, small file that
+/// neither group nor others can write; the directory must not be world-writable
+/// or writable by another group; and `direct` receipts must be owned by the
+/// current user (managed receipts may also be owned by root).
+pub(super) fn receipt_trusted(
+    method: &str,
+    euid: u32,
+    egid: u32,
+    dir: FileMeta,
+    file: FileMeta,
+) -> bool {
+    if !file.is_file || file.is_symlink || file.len > RECEIPT_LIMIT {
+        return false;
+    }
+    if file.mode & 0o022 != 0 {
+        return false;
+    }
+    if dir.mode & 0o002 != 0 || (dir.mode & 0o020 != 0 && dir.gid != egid) {
+        return false;
+    }
+    let owner_ok = |uid: u32| {
+        if method == "direct" {
+            uid == euid
+        } else {
+            uid == euid || uid == 0
+        }
+    };
+    owner_ok(dir.uid) && owner_ok(file.uid)
+}
+
+fn same_dir(recorded: &Path, actual: &Path) -> bool {
+    if !recorded.is_absolute() {
+        return false;
+    }
+    let Ok(recorded) = recorded.canonicalize() else {
+        return false;
+    };
+    let actual = actual
+        .canonicalize()
+        .unwrap_or_else(|_| actual.to_path_buf());
+    recorded == actual
+}
+
+/// Reads and validates an `install.json` receipt for `exe` if a trusted one
+/// exists beside the binary (or inside a macOS `Deadbolt.app` bundle). Any
+/// missing, corrupt, untrusted, or mismatched receipt returns `None` so the
+/// caller falls back to path heuristics.
+pub(super) fn read_receipt(exe: &Path, macos: bool) -> Option<Install> {
+    let exe_dir = exe.parent()?;
+    let bundle = if macos {
+        crate::app::bundle_of(exe)
+    } else {
+        None
+    };
+    let mut candidates = vec![exe_dir.join(RECEIPT_FILE)];
+    if let Some(bundle) = &bundle {
+        candidates.push(bundle.join("Contents/Resources").join(RECEIPT_FILE));
+        candidates.push(bundle.join(RECEIPT_FILE));
+    }
+    let euid = rustix::process::geteuid().as_raw();
+    let egid = rustix::process::getegid().as_raw();
+    for path in candidates {
+        let Ok(file_raw) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let file_meta = FileMeta::from_metadata(&file_raw);
+        let receipt_dir = path.parent()?;
+        let Ok(dir_raw) = std::fs::metadata(receipt_dir) else {
+            return None;
+        };
+        let dir_meta = FileMeta::from_metadata(&dir_raw);
+        if !file_meta.is_file || file_meta.is_symlink || file_meta.len > RECEIPT_LIMIT {
+            return None;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            return None;
+        };
+        let Ok(receipt) = serde_json::from_slice::<InstallReceipt>(&bytes) else {
+            return None;
+        };
+        if receipt.app != super::protocol::APP {
+            return None;
+        }
+        if receipt
+            .channel
+            .as_deref()
+            .is_some_and(|c| !super::protocol::is_name(c))
+        {
+            return None;
+        }
+        if !receipt_trusted(&receipt.method, euid, egid, dir_meta, file_meta) {
+            return None;
+        }
+        let expected_root = match receipt.artifact.as_str() {
+            "cli" => exe_dir,
+            "desktop" => bundle.as_deref()?,
+            _ => return None,
+        };
+        if !same_dir(Path::new(&receipt.root), expected_root) {
+            return None;
+        }
+        return match receipt.method.as_str() {
+            "direct" => match receipt.artifact.as_str() {
+                "cli" => Some(Install::Standalone(exe_dir.to_path_buf())),
+                "desktop" => {
+                    let bundle = bundle?;
+                    let text = bundle.to_string_lossy();
+                    if text.starts_with("/Volumes/") || text.contains("/AppTranslocation/") {
+                        Some(Install::Unmovable(bundle))
+                    } else {
+                        Some(Install::App(bundle))
+                    }
+                }
+                _ => None,
+            },
+            "homebrew" | "brew" => {
+                if receipt.artifact == "desktop" || bundle.is_some() {
+                    Some(Install::Managed(Manager::BrewCask))
+                } else {
+                    Some(Install::Managed(Manager::Brew))
+                }
+            }
+            "brew-cask" | "homebrew-cask" => Some(Install::Managed(Manager::BrewCask)),
+            "npm" => Some(Install::Managed(Manager::Npm)),
+            "pnpm" => Some(Install::Managed(Manager::Pnpm)),
+            "bun" => Some(Install::Managed(Manager::Bun)),
+            "yarn" => Some(Install::Managed(Manager::Yarn)),
+            "nix" => Some(Install::Managed(Manager::Nix)),
+            "cargo" => Some(Install::Managed(Manager::Cargo)),
+            "system" | "apt" | "rpm" | "aur" => Some(Install::Managed(Manager::System)),
+            _ => None,
+        };
+    }
+    None
+}
 
 /// npm's package, which links to its platform package's `deadbolt`.
 pub(super) const PACKAGE: &str = "@deadbolt/cli";
@@ -189,13 +372,20 @@ pub(super) fn upgrade_command(manager: Manager, version: &str) -> Option<Upgrade
     })
 }
 
-/// The install method's name for the daemon's check: the
-/// install script's directory (`$DEADBOLT_INSTALL`, else `~/.local/bin`)
-/// is `curl`, any other standalone `deadbolt` `standalone`.
+/// The install method's name for the daemon's check: a standalone install
+/// with a direct `install.json` receipt is `direct`; the install script's
+/// directory (`$DEADBOLT_INSTALL`, else `~/.local/bin`) without one is
+/// `curl`; any other standalone `deadbolt` is `standalone`.
 pub fn method_key(install: &Install) -> &'static str {
     match install {
         Install::App(_) | Install::Unmovable(_) => "app",
         Install::Standalone(dir) => {
+            if matches!(
+                read_receipt(&dir.join("deadbolt"), false),
+                Some(Install::Standalone(_))
+            ) {
+                return "direct";
+            }
             let script = crate::config::env("DEADBOLT_INSTALL")
                 .ok()
                 .filter(|d| !d.is_empty())
@@ -216,7 +406,7 @@ pub fn method_key(install: &Install) -> &'static str {
 pub fn installed_with(key: &str) -> String {
     match key {
         "app" => "Deadbolt.app".into(),
-        "curl" => "installed with the install script".into(),
+        "direct" | "curl" => "installed with the install script".into(),
         "standalone" => "standalone".into(),
         "brew" => "installed with Homebrew".into(),
         "package" => "installed with a JavaScript package manager".into(),
@@ -265,13 +455,23 @@ pub fn classify(exe: &Path, macos: bool, exists: impl Fn(&Path) -> bool) -> Inst
     Install::Standalone(dir)
 }
 
-/// How the `deadbolt` at `exe` (symlinks resolved) is installed, as
-/// OpenCode's updater tells: [`classify`], and for npm's package (one whose
-/// `@deadbolt/cli` links to `exe`, [`package_of`]) the first of npm, pnpm,
-/// bun and yarn that says it has `@deadbolt/cli` globally, those named in
-/// `exe`'s path first.
+/// Checks `install.json` beside `exe` (or inside a macOS `Deadbolt.app`
+/// bundle) first, falling back to path heuristics ([`classify`]) when no
+/// trusted receipt is present.
+pub fn classify_with_receipt(exe: &Path, macos: bool, exists: impl Fn(&Path) -> bool) -> Install {
+    if let Some(install) = read_receipt(exe, macos) {
+        return install;
+    }
+    classify(exe, macos, exists)
+}
+
+/// How the `deadbolt` at `exe` (symlinks resolved) is installed: checks a
+/// trusted `install.json` receipt first, then [`classify`], and for npm's
+/// package (one whose `@deadbolt/cli` links to `exe`, [`package_of`]) the
+/// first of npm, pnpm, bun and yarn that says it has `@deadbolt/cli`
+/// globally, those named in `exe`'s path first.
 pub async fn method(exe: &Path) -> Install {
-    let install = classify(exe, cfg!(target_os = "macos"), Path::exists);
+    let install = classify_with_receipt(exe, cfg!(target_os = "macos"), Path::exists);
     if install != Install::Managed(Manager::Package) || package_of(exe).is_none() {
         return install;
     }

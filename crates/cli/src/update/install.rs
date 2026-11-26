@@ -21,7 +21,9 @@ use super::protocol::{
     Decision, Reason, Running, VERSION, build_channel, decide, rollout_bucket, target, validated,
 };
 use super::replace::{refuse_foreign_root, update_app, update_cli};
+use super::report::build_report;
 use super::service::{Manifest, Service};
+use super::state::{UpdateState, check_sequence, read_floors};
 use crate::paths::Paths;
 use crate::protocol::UpdateInfo;
 
@@ -43,6 +45,9 @@ pub struct UpdateArgs {
     /// Accept a manifest older than one already seen (a lower `sequence`).
     #[arg(long)]
     allow_rollback: bool,
+    /// Print the result as JSON on stdout.
+    #[arg(long)]
+    json: bool,
 }
 
 /// For npm's package: npm, pnpm, bun and yarn install only what the
@@ -254,6 +259,7 @@ pub async fn available(paths: &Paths, channel: &str, etags: &mut Etags) -> Resul
         target: &target,
         distribution,
         bucket: rollout_bucket(&state),
+        sha256: None,
         channel: Some(channel),
     };
     let service = Service::new(Some(channel))?;
@@ -337,6 +343,7 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         target: &target,
         distribution,
         bucket,
+        sha256: None,
         channel: built,
     };
     let Some(fetched) = find(&service, &install, artifact, channel, &running, None).await? else {
@@ -351,14 +358,18 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         decision,
         ..
     } = *found;
-    let mut available = false;
     if let Decision::Reject(reason) = decision {
         bail!("{url} is not a usable {artifact} manifest ({reason})");
     }
     check_sequence(&state, artifact, channel, &text, args.allow_rollback)?;
-    match decision {
+    let manifest_version = validated(artifact, channel, &text)
+        .map(|m| m.release_version().to_string())
+        .unwrap_or_default();
+    let quiet = args.json;
+    let mut available = false;
+    match &decision {
         Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),
-        Decision::None("up_to_date") => {
+        Decision::None("up_to_date") if !quiet => {
             println!("{what} {shown} is up to date on {channel} ({how})");
             if let Install::Managed(manager) = &install
                 && upgrade_command(*manager, "").is_none()
@@ -366,11 +377,11 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
                 println!("{} updates it: {}", manager.name(), manager.hint(channel));
             }
         }
-        Decision::None("rollout_deferred") => println!(
+        Decision::None("rollout_deferred") if !quiet => println!(
             "{what} {shown}: a new {channel} release is rolling out and hasn't reached this \
              computer yet; try again later"
         ),
-        Decision::None("distribution_pending" | "distribution_unlisted") => {
+        Decision::None("distribution_pending" | "distribution_unlisted") if !quiet => {
             let manager = match &install {
                 Install::Managed(manager) => manager.name(),
                 _ => "its package manager",
@@ -380,39 +391,54 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
                  {channel}'s current release yet; try again later"
             )
         }
+        Decision::None(
+            "up_to_date" | "rollout_deferred" | "distribution_pending" | "distribution_unlisted",
+        ) => {}
         Decision::None(reason) => bail!("{channel} has no {what} for {target} ({reason})"),
         Decision::Notify {
             reason,
             version,
             command,
             notes_url,
+            ..
         } => {
             let Install::Managed(manager) = install else {
                 bail!("unexpected decision for {what}");
             };
             available = true;
-            println!("{what} {version} is available on {channel} (this is {shown}, {how})");
-            if let Some(notes) = notes_url {
-                println!("Release notes: {notes}");
-            }
-            match upgrade_command(manager, &version) {
-                Some(upgrade) if args.check => println!("deadbolt update runs: {}", upgrade.shown),
-                Some(upgrade) => {
-                    if reason == Reason::Switch {
-                        confirm_switch(built.unwrap_or("source"), channel, &version, args.yes)?;
-                    } else {
-                        confirm_upgrade(&upgrade.shown, args.yes)?;
-                    }
-                    update_package(paths, manager, &upgrade, &exe, &version).await?;
+            if !quiet {
+                println!("{what} {version} is available on {channel} (this is {shown}, {how})");
+                if let Some(notes) = notes_url {
+                    println!("Release notes: {notes}");
                 }
-                None => match (manager, command) {
-                    // A package no manager claimed gets its own hint: the
-                    // release's npm command may name the wrong manager.
+            }
+            match upgrade_command(manager, version) {
+                Some(upgrade) if args.check => {
+                    if !quiet {
+                        println!("deadbolt update runs: {}", upgrade.shown);
+                    }
+                }
+                Some(upgrade) => {
+                    if *reason == Reason::Switch {
+                        confirm_switch(
+                            built.unwrap_or("source"),
+                            channel,
+                            version,
+                            args.yes,
+                            quiet,
+                        )?;
+                    } else {
+                        confirm_upgrade(&upgrade.shown, args.yes, quiet)?;
+                    }
+                    update_package(paths, manager, &upgrade, &exe, version, quiet).await?;
+                }
+                None if !quiet => match (manager, command) {
                     (Manager::Package, _) | (_, None) => {
                         println!("To update: {}", manager.hint(channel))
                     }
                     (_, Some(command)) => println!("Update it with: {command}"),
                 },
+                None => {}
             }
         }
         Decision::Install {
@@ -422,26 +448,35 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         } => {
             available = true;
             if args.check {
-                match reason {
-                    Reason::Switch => {
-                        println!("{what} {version} is on {channel} (this is {shown})");
+                if !quiet {
+                    match reason {
+                        Reason::Switch => {
+                            println!("{what} {version} is on {channel} (this is {shown})");
+                        }
+                        _ => {
+                            println!("{what} {version} is available on {channel} (this is {shown})")
+                        }
                     }
-                    _ => println!("{what} {version} is available on {channel} (this is {shown})"),
                 }
             } else {
-                if reason == Reason::Switch {
-                    confirm_switch(built.unwrap_or("source"), channel, &version, args.yes)?;
+                if *reason == Reason::Switch {
+                    confirm_switch(built.unwrap_or("source"), channel, version, args.yes, quiet)?;
                 }
-                println!("Updating {what} {shown} to {version} ({channel})...");
+                if !quiet {
+                    println!("Updating {what} {shown} to {version} ({channel})...");
+                }
                 match &install {
                     Install::App(bundle) => {
                         refuse_foreign_root(bundle.parent().unwrap_or(bundle))?;
-                        update_app(paths, &service, &url, &target, bundle, &version).await?;
+                        update_app(paths, &service, &url, target, bundle, version, quiet).await?;
                     }
                     Install::Standalone(dir) => {
                         refuse_foreign_root(dir)?;
                         let macos = cfg!(target_os = "macos");
-                        update_cli(paths, &service, &url, &target, &exe, dir, built, macos).await?;
+                        update_cli(
+                            paths, &service, &url, target, &exe, dir, built, macos, quiet,
+                        )
+                        .await?;
                     }
                     _ => bail!("unexpected install for {what}"),
                 }
@@ -449,7 +484,7 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         }
     }
     let extensions = crate::config::Config::load(&paths.config)?.extensions;
-    available |= extension(
+    let ext_available = extension(
         &extensions,
         &service,
         &state,
@@ -458,8 +493,22 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         built,
         args.check,
         args.allow_rollback,
+        quiet,
     )
     .await?;
+    available |= ext_available;
+    if args.json {
+        let report = build_report(
+            VERSION,
+            &manifest_version,
+            channel,
+            &install,
+            &decision,
+            args.check,
+            ext_available,
+        );
+        println!("{}", serde_json::to_string(&report)?);
+    }
     Ok(if args.check && available {
         ExitCode::from(EXIT_AVAILABLE)
     } else {
@@ -467,9 +516,9 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
     })
 }
 
-/// Running a package manager is asked on a terminal, unless `--yes`.
-fn confirm_upgrade(command: &str, yes: bool) -> Result<()> {
-    if yes || !crate::prompt::interactive() {
+/// Running a package manager is asked on a terminal, unless `--yes` or `--json`.
+fn confirm_upgrade(command: &str, yes: bool, json: bool) -> Result<()> {
+    if yes || json || !crate::prompt::interactive() {
         return Ok(());
     }
     if !crate::prompt::confirm(&format!("Run {command}?"))? {
@@ -554,6 +603,7 @@ async fn update_package(
     upgrade: &Upgrade,
     exe: &Path,
     version: &str,
+    quiet: bool,
 ) -> Result<()> {
     let who = manager.name();
     let Some(program) = find_program(upgrade.program, exe) else {
@@ -581,7 +631,9 @@ async fn update_package(
         args.insert(at, cache.path().into());
         args.insert(at, "--cache-dir".into());
     }
-    println!("Running {}", upgrade.shown);
+    if !quiet {
+        println!("Running {}", upgrade.shown);
+    }
     let output = tokio::process::Command::new(&program)
         .args(&args)
         .stdin(Stdio::null())
@@ -630,7 +682,7 @@ async fn update_package(
     let new = link.canonicalize().unwrap_or_else(|_| link.clone());
     // Whatever is in place now, its daemon comes back.
     if ours && stop_daemon(paths).await {
-        restart_daemon(paths, new).await;
+        restart_daemon(paths, new, quiet).await;
     }
     if said.split_whitespace().nth(1) != Some(version) {
         bail!(
@@ -640,16 +692,18 @@ async fn update_package(
             upgrade.shown
         );
     }
-    println!("Updated {} to {version} with {who}", link.display());
+    if !quiet {
+        println!("Updated {} to {version} with {who}", link.display());
+    }
     Ok(())
 }
 
 /// A channel switch is the user's choice: asked on a terminal, else `--yes`.
-fn confirm_switch(from: &str, to: &str, version: &str, yes: bool) -> Result<()> {
+fn confirm_switch(from: &str, to: &str, version: &str, yes: bool, json: bool) -> Result<()> {
     if yes {
         return Ok(());
     }
-    if !crate::prompt::interactive() {
+    if json || !crate::prompt::interactive() {
         bail!("this build is from {from}; pass --yes to switch to {to} {version}");
     }
     if !crate::prompt::confirm(&format!(
@@ -658,105 +712,6 @@ fn confirm_switch(from: &str, to: &str, version: &str, yes: bool) -> Result<()> 
         bail!("cancelled");
     }
     Ok(())
-}
-
-/// One CLI update at a time per state directory, through the final replacement,
-/// not just the floor write: an older in-flight download must not install last.
-/// Keep the lock file in place; locking the atomically replaced JSON would let
-/// another process lock a different inode.
-pub(super) struct UpdateState {
-    pub(super) dir: PathBuf,
-    pub(super) lock: std::fs::File,
-}
-
-impl UpdateState {
-    pub(super) fn open(dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        let path = dir.join("update.lock");
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                bail!("another deadbolt update is running; try again when it finishes");
-            }
-            Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
-        }
-        Ok(Self {
-            dir: dir.to_path_buf(),
-            lock,
-        })
-    }
-}
-
-impl Drop for UpdateState {
-    fn drop(&mut self) {
-        // Closing our descriptor alone may leave the lock held by a concurrent
-        // fork until exec closes its inherited CLOEXEC descriptor. The update
-        // transaction is finished now; unlock the shared description explicitly.
-        if let Err(error) = self.lock.unlock() {
-            eprintln!(
-                "warning: couldn't release {}: {error}",
-                self.dir.join("update.lock").display()
-            );
-        }
-    }
-}
-
-/// The highest manifest `sequence` seen for each artifact and channel, kept
-/// in the state directory, so a replayed older manifest can't take an
-/// install back. A real rollback is a new write with a higher sequence
-/// (docs/protocol.md, "Operations"), so it passes.
-pub(super) fn check_sequence(
-    state: &UpdateState,
-    artifact: &str,
-    channel: &str,
-    text: &str,
-    allow_rollback: bool,
-) -> Result<()> {
-    let sequence = validated(artifact, channel, text)
-        .map_err(|reason| anyhow::anyhow!("not a usable {artifact} manifest ({reason})"))?
-        .sequence;
-    let path = state.dir.join("release-sequences.json");
-    let mut seen = read_floors(&state.dir)?;
-    let key = format!("{artifact}/{channel}");
-    let highest = seen.get(&key).copied().unwrap_or(0);
-    if sequence < highest && !allow_rollback {
-        bail!(
-            "the service sent an older {artifact} manifest for {channel} (sequence {sequence}, \
-             but {highest} was seen); pass --allow-rollback to accept it"
-        );
-    }
-    if sequence > highest {
-        seen.insert(key, sequence);
-        crate::browser::write_atomic(&path, &serde_json::to_string(&seen)?)?;
-    }
-    Ok(())
-}
-
-/// The highest manifest sequences seen, from `release-sequences.json` in
-/// `dir`, the state directory.
-fn read_floors(dir: &Path) -> Result<BTreeMap<String, u64>> {
-    let path = dir.join("release-sequences.json");
-    let recovery = || {
-        format!(
-            "reading {}: cannot use release sequence state; restore this file from a trusted \
-             backup (or correct its read permissions). Deleting it loses all remembered \
-             replay floors; deadbolt will not delete it automatically",
-            path.display()
-        )
-    };
-    Ok(match std::fs::read(&path) {
-        Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
-        Ok(bytes) => serde_json::from_slice(&bytes).with_context(recovery)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-        Err(error) => return Err(error).with_context(recovery),
-    })
 }
 
 /// Whether the daemon that runs is this `program`, so replacing it should
@@ -773,9 +728,10 @@ pub(super) async fn daemon_runs(paths: &Paths, program: impl Fn(&Path) -> bool) 
 /// Restarts the daemon from `program` after an update. Not through
 /// `ensure_running`: its daemon check wants this process's own binary, which
 /// the update just replaced or deleted, so the new daemon would never pass.
-pub(super) async fn restart_daemon(paths: &Paths, program: PathBuf) {
+pub(super) async fn restart_daemon(paths: &Paths, program: PathBuf, quiet: bool) {
     let launch = deadbolt_client::Launch { program };
     match deadbolt_client::start(paths, &launch).await {
+        Ok(_) if quiet => {}
         Ok(_) if deadbolt_store::is_initialized(&paths.data) => {
             println!("Restarted the daemon; the vault is locked until you unlock it.");
         }
