@@ -212,3 +212,39 @@ fn activity_keeps_to_its_budget_across_chunks_and_unlocks() {
         .unwrap();
     assert_eq!(rows(&store).len(), 1);
 }
+
+#[test]
+fn a_torn_first_setup_is_no_device_and_setup_runs_again() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(DEVICE)).unwrap();
+    // A power cut during setup's first commit: a strict prefix of local-1.
+    fs::write(
+        dir.path().join(DEVICE).join("local-1.sealed"),
+        b"DBLS\x02\0\0\0\0\0\0\0\0\0\0\x01",
+    )
+    .unwrap();
+    assert!(!is_initialized(dir.path()));
+    assert!(matches!(
+        unlock(dir.path(), b"pass"),
+        Err(Error::NotInitialized(_))
+    ));
+    drop(init_with_params(dir.path(), b"pass", &[7; 32], FAST).unwrap());
+    assert!(is_initialized(dir.path()));
+    assert_eq!(unlock(dir.path(), b"pass").unwrap().device_seed(), &[7; 32]);
+}
+
+#[test]
+fn a_damaged_device_state_is_still_a_device() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(DEVICE)).unwrap();
+    fs::write(dir.path().join(DEVICE).join("local-1.sealed"), b"junk").unwrap();
+    assert!(is_initialized(dir.path()));
+    assert!(matches!(
+        init_with_params(dir.path(), b"pass", &[7; 32], FAST),
+        Err(Error::Corrupt(_))
+    ));
+    assert!(matches!(
+        unlock(dir.path(), b"pass"),
+        Err(Error::Corrupt(_))
+    ));
+}

@@ -217,15 +217,14 @@ fn device_blocks(dir: &Path) -> Result<FsBlocks> {
     Ok(FsBlocks::open(dir.join(DEVICE))?)
 }
 
-/// Whether `dir` holds a device.
+/// Whether `dir` holds a device: a local state whose first commit finished.
+/// Torn files alone (a crash during setup) aren't a device; a damaged state
+/// is one, so unlocking reports it and setup won't replace it.
 pub fn is_initialized(dir: &Path) -> bool {
-    fs::read_dir(dir.join(DEVICE)).is_ok_and(|entries| {
-        entries.flatten().any(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("local-") && name.ends_with(".sealed")
-        })
-    })
+    let device = dir.join(DEVICE);
+    device.is_dir()
+        && FsBlocks::open(device)
+            .is_ok_and(|blocks| !matches!(local::peek_slots(&blocks), Ok(None)))
 }
 
 /// Creates a device in `dir` holding `seed`, its root behind `passphrase`.
@@ -245,6 +244,10 @@ pub fn init_with_params(
     let root = kdf::random_key()?;
     let slots = passphrase_slot(&KdfHeader::generate(params)?, passphrase, &root)?;
     let device_root = DeviceRoot::from_bytes(&root);
+    // Clears what an earlier setup cut short, so this commit can take its name.
+    if local::open(device.blocks(), &NoopAnchor, &NO_VAULT, &device_root)?.is_some() {
+        return Err(Error::AlreadyExists(dir.to_path_buf()));
+    }
     let mut body = Zeroizing::new(seed.to_vec());
     encode_meta(&mut body, &Meta::new());
     let state = local::commit(
