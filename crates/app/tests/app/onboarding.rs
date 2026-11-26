@@ -4,7 +4,7 @@
 
 use deadbolt_app::daemon::{Done, Failure};
 use deadbolt_app::model::{App, Screen};
-use deadbolt_app::onboarding::worker::{Progress, Stage, Worker};
+use deadbolt_app::onboarding::worker::{Created, Progress, RecoveryKit, Stage, Worker};
 use deadbolt_app::onboarding::{Flow, Step, moment};
 use deadbolt_app::view::Severity;
 use rune::clipboard::MemoryClipboard;
@@ -54,6 +54,15 @@ fn key(key: Key) -> KeyEvent {
     }
 }
 
+/// Clicks the innermost element keyed `key` at its centre.
+fn click(rt: &mut Runtime<App>, key: &str) {
+    let e = find(rt, key).unwrap_or_else(|| panic!("{key} is on screen"));
+    let (x, y) = (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt, 0.4);
+}
+
 /// Types `text` into the focused field and lets hints fade in.
 fn type_text(rt: &mut Runtime<App>, text: &str) {
     for c in text.chars() {
@@ -81,6 +90,19 @@ fn every_state_renders_in_both_appearances() {
         (
             "creating",
             &["Creating your vault", "Protecting your passphrase"],
+        ),
+        (
+            "recovery",
+            &[
+                "Save your recovery kit",
+                "only way to recover your vault",
+                "personal",
+                "b3f9c21a",
+                "Copy recovery words",
+                "I’ve saved these words",
+                "abandon",
+                "aerobic",
+            ],
         ),
         ("join", &["Join from another device", "Continue"]),
         (
@@ -194,6 +216,90 @@ fn the_create_form_confirms_in_place() {
     rt.frame(FRAME);
     assert_eq!(rt.state.onboarding.step, Step::Welcome);
     assert!(rt.state.onboarding.passphrase.text.is_empty());
+}
+
+/// Creation hands the daemon's 24 words to a save step; nothing opens the
+/// vault until they're saved, and saving wipes them from the step.
+#[test]
+fn a_created_vault_holds_its_recovery_words_until_they_are_saved() {
+    const WORDS: &str = "abandon ability able about above absent absorb abstract absurd \
+                         abuse access accident across act action actor adapt add address \
+                         admit adult advance advice aerobic";
+    let mut rt = runtime("welcome", true);
+    let clip = rune::clipboard::memory();
+    rt.use_clipboard(&clip);
+    rt.update(|s, _| {
+        s.onboarding.device_ready = true;
+        s.onboarding.worker = Worker::scripted(vec![(
+            0.1,
+            Progress::Created(Ok(Created {
+                vault: deadbolt_client::protocol::VaultInfo {
+                    id: "b3f9c21a1d4e".into(),
+                    name: "personal".into(),
+                    default: true,
+                    members: 1,
+                    member: true,
+                    error: None,
+                },
+                kit: Some(RecoveryKit::new(WORDS)),
+            })),
+        )]);
+    });
+    // The moment plays first, then the words wait for as long as it takes.
+    settle(&mut rt, moment::OPEN + 0.6);
+    let Step::Recovery(recovery) = &rt.state.onboarding.step else {
+        panic!(
+            "the words show before the vault opens: {:?}",
+            rt.state.onboarding.step
+        );
+    };
+    assert_eq!(recovery.vault, "personal");
+    assert_eq!(recovery.id, "b3f9c21a");
+    assert_eq!(recovery.words(), WORDS.split(' ').collect::<Vec<_>>());
+    assert!(shows(&rt, "Save your recovery kit"));
+    assert!(shows(&rt, "Deadbolt won’t show them again"));
+    for n in 1..=24 {
+        let word = find(&rt, &format!("word-{n}")).unwrap_or_else(|| panic!("word {n} shows"));
+        assert!(word.opacity > 0.99, "word {n} is visible");
+        let number = find(&rt, &format!("number-{n}")).expect("every word is numbered");
+        assert_eq!(number.text.as_deref(), Some(format!("{n:>2}").as_str()));
+    }
+
+    // Escape can't go back: the vault exists and these words show once.
+    rt.key(key(Key::Escape));
+    rt.frame(FRAME);
+    assert!(matches!(rt.state.onboarding.step, Step::Recovery(_)));
+
+    // Both actions sit in the panel, and the copy's check never shifts its
+    // neighbour.
+    let panel = find(&rt, "panel").expect("the step's panel").rect;
+    let save = find(&rt, "save-recovery").expect("the save button").rect;
+    assert!(
+        save[0] >= panel[0] && save[0] + save[2] <= panel[0] + panel[2] + 0.5,
+        "the actions stay inside the panel: {save:?} in {panel:?}"
+    );
+    // Copying puts all 24 words on the clipboard and confirms briefly.
+    click(&mut rt, "copy-recovery");
+    assert_eq!(board(&clip).as_deref(), Some(WORDS));
+    assert!(shows(&rt, "Copied"));
+    assert_eq!(
+        find(&rt, "save-recovery").expect("the save button").rect,
+        save,
+        "Copied doesn't move the button beside it"
+    );
+
+    // Saving opens the vault and drops the step, words and all.
+    click(&mut rt, "save-recovery");
+    assert_eq!(rt.state.screen, Screen::Vault);
+    assert_eq!(rt.state.onboarding.step, Step::Welcome);
+    assert!(!shows(&rt, "Save your recovery kit"));
+    assert!(!shows(&rt, "abandon"));
+    assert!(rt.state.onboarding.copied_kit.is_none(), "no copy is held");
+    assert_eq!(
+        board(&clip),
+        None,
+        "the copied words leave the clipboard with the step"
+    );
 }
 
 #[test]
@@ -393,7 +499,10 @@ fn the_moment_throws_the_bolt_lights_the_strike_and_lets_it_cool() {
         );
     }
 
-    // Then the vault opens.
+    // The vault waits for its words: saving them opens it.
+    assert_eq!(rt.state.screen, Screen::Onboarding);
+    assert!(matches!(rt.state.onboarding.step, Step::Recovery(_)));
+    click(&mut rt, "save-recovery");
     assert_eq!(rt.state.screen, Screen::Vault);
 }
 
@@ -426,14 +535,14 @@ fn a_lock_from_the_daemon_does_not_interrupt_a_create_or_join() {
     for scene in ["creating", "code", "joining"] {
         let mut rt = runtime(scene, false);
         rt.frame(FRAME);
-        let step = rt.state.onboarding.step.clone();
+        let step = format!("{:?}", rt.state.onboarding.step);
         rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
         rt.update(|s, tx| s.apply(Done::Status(Some(locked.clone())), tx));
         rt.update(|s, tx| s.apply(Done::Changed(Change::Stopping), tx));
         rt.update(|s, tx| s.apply(Done::WatchLost, tx));
         rt.frame(FRAME);
         assert_eq!(rt.state.screen, Screen::Onboarding, "{scene}");
-        assert_eq!(rt.state.onboarding.step, step, "{scene}");
+        assert_eq!(format!("{:?}", rt.state.onboarding.step), step, "{scene}");
     }
 }
 

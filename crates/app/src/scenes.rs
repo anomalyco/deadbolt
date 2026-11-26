@@ -14,12 +14,12 @@ use crate::onboarding::{Flow, Step};
 use crate::view::{Notice, Severity};
 use crate::{import, install, shortcut};
 use fixtures::{
-    FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault,
+    FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, created, detail_for_selection, empty_vault,
     fixture_pairing_code, form, generated, import_preview, import_report, inviter, join_notice,
     kind_scene, locked, locked_error, locked_touch_id, locked_touch_id_reset, new_of,
-    other_shortcut, panel_vault, settings_touch_id, show_preview, status, trash, trash_item, typed,
-    vault, vault_243, vault_info, vault_with_health, vault_with_offered_installer, welcome,
-    working,
+    other_shortcut, panel_vault, recovery, settings_touch_id, show_preview, status, trash,
+    trash_item, typed, vault, vault_243, vault_info, vault_with_health,
+    vault_with_offered_installer, welcome, working,
 };
 
 pub(crate) type Scene = (&'static str, fn(&mut App));
@@ -104,9 +104,10 @@ pub(crate) const SCENES: &[Scene] = &[
         );
         s.onboarding.worker = Worker::scripted(vec![
             (0.8, Progress::Stage(Stage::CreatingVault)),
-            (1.2, Progress::Created(Ok(vault_info("personal")))),
+            (1.2, Progress::Created(Ok(created("personal")))),
         ]);
     }),
+    ("recovery", recovery),
     ("join", |s| form(s, Flow::Join)),
     ("code", |s| {
         welcome(s);

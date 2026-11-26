@@ -48,6 +48,7 @@ pub fn screen(s: &App, k: &Kit, dark: bool) -> Paged {
         Step::Working(flow) | Step::Done { flow, .. } => {
             super::ceremony::progress(s, k, dark, *flow)
         }
+        Step::Recovery(recovery) => super::recovery::recovery(s, k, recovery),
         Step::Code => super::ceremony::code(s, k),
     }
 }

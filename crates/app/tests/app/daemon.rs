@@ -417,12 +417,36 @@ fn create_a_vault_in_the_app() {
     let mut rt = app(&device);
     fill_form(&mut rt, Flow::Create, "alpha");
     until(&mut rt, "creating", |s| {
-        matches!(s.onboarding.step, Step::Working(_) | Step::Done { .. })
+        matches!(s.onboarding.step, Step::Working(_) | Step::Recovery(_))
     });
-    until(&mut rt, "the moment", |s| {
-        matches!(s.onboarding.step, Step::Done { .. })
+    // Creation hands the daemon's words to the save step, all 24 of them.
+    until(&mut rt, "the recovery words", |s| {
+        matches!(s.onboarding.step, Step::Recovery(_))
     });
-    assert!(shows(&rt, "Vault created"));
+    // The step arrives with the app's replacement transition; let it land.
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(shows(&rt, "Save your recovery kit"));
+    for n in 1..=24 {
+        assert!(
+            rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some(format!("word-{n}").as_str())),
+            "word {n} shows"
+        );
+    }
+    let save = rt
+        .elements()
+        .into_iter()
+        .rfind(|e| e.key.as_deref() == Some("save-recovery"))
+        .expect("the save button");
+    let (x, y) = (
+        save.rect[0] + save.rect[2] / 2.0,
+        save.rect[1] + save.rect[3] / 2.0,
+    );
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
     until(&mut rt, "the empty vault", |s| {
         s.screen == Screen::Vault && s.loaded
     });

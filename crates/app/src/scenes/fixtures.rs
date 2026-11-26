@@ -8,8 +8,8 @@ use rune::Tx;
 
 use crate::daemon::{self, Daemon, Job};
 use crate::model::{App, Screen};
-use crate::onboarding::worker::Stage;
-use crate::onboarding::{Flow, Step};
+use crate::onboarding::worker::{Created, RecoveryKit, Stage};
+use crate::onboarding::{Flow, Recovery, Step};
 use crate::view::{Notice, Severity};
 use crate::{import, install, shortcut};
 
@@ -121,6 +121,32 @@ pub(super) fn welcome(s: &mut App) {
 pub(super) fn form(s: &mut App, flow: Flow) {
     welcome(s);
     s.choose(flow);
+}
+
+/// The 24 words a created vault shows once. The same fixture in every scene
+/// that needs them, so tests and stills agree.
+pub(super) fn fixture_recovery_words() -> &'static str {
+    "abandon ability able about above absent absorb abstract absurd abuse access \
+     accident across act action actor adapt add address admit adult advance advice aerobic"
+}
+
+/// A vault just created, its words not yet saved.
+pub(super) fn recovery(s: &mut App) {
+    welcome(s);
+    s.onboarding.device_ready = true;
+    s.onboarding.step = Step::Recovery(Box::new(Recovery::new(
+        "personal".into(),
+        "b3f9c21a".into(),
+        RecoveryKit::new(fixture_recovery_words()),
+    )));
+}
+
+/// What the worker reports when the daemon makes a vault.
+pub(super) fn created(name: &str) -> Created {
+    Created {
+        vault: vault_info(name),
+        kit: Some(RecoveryKit::new(fixture_recovery_words())),
+    }
 }
 
 pub(super) fn working(s: &mut App, flow: Flow, plan: Vec<Stage>) {
