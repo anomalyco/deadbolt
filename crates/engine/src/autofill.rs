@@ -141,7 +141,10 @@ pub fn fill(
             }
         }
     }
-    s.set_filled(filled_key(login), now.as_secs())?;
+    // Only ranks a site's logins: never fail a fill that was allowed.
+    if let Err(error) = s.set_filled(filled_key(login), now.as_secs()) {
+        tracing::warn!(%error, "remembering the fill failed");
+    }
     Ok(values)
 }
 

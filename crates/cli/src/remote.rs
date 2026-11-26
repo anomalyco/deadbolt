@@ -265,7 +265,31 @@ pub async fn remote(
     Ok(())
 }
 
+impl SetCommand {
+    /// Whether the credentials come from stdin.
+    fn reads_stdin(&self) -> bool {
+        match self {
+            Self::S3(a) => a.credentials_stdin,
+            Self::Webdav(a) => a.credentials_stdin,
+        }
+    }
+}
+
+impl RecoverArgs {
+    /// Refuses two things on one stdin: clap can't see the store's
+    /// `--credentials-stdin`, which belongs to the subcommand.
+    fn check(&self) -> Result<()> {
+        if self.words_stdin && self.remote.reads_stdin() {
+            bail!(
+                "--words-stdin and --credentials-stdin both read stdin: pass the credentials in the environment instead"
+            );
+        }
+        Ok(())
+    }
+}
+
 pub async fn recover(paths: &Paths, args: RecoverArgs, from_stdin: bool) -> Result<()> {
+    args.check()?;
     let remote = input(args.remote)?;
     let words = words(args.words_stdin, "Recovery kit (24 words)")?;
     client::ensure_running(paths).await?;
@@ -378,4 +402,67 @@ pub async fn status(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::RecoverArgs;
+
+    #[derive(Parser)]
+    struct Recover {
+        #[command(flatten)]
+        args: RecoverArgs,
+    }
+
+    fn parse(argv: &[&str]) -> RecoverArgs {
+        Recover::try_parse_from(["recover"].iter().chain(argv))
+            .unwrap()
+            .args
+    }
+
+    #[test]
+    fn the_words_and_the_credentials_never_share_stdin() {
+        let both = parse(&[
+            "abcd",
+            "--words-stdin",
+            "webdav",
+            "--url",
+            "https://dav/",
+            "--credentials-stdin",
+        ]);
+        let error = both.check().unwrap_err().to_string();
+        assert!(
+            error.contains("--words-stdin and --credentials-stdin"),
+            "{error}"
+        );
+        let s3 = parse(&[
+            "abcd",
+            "--words-stdin",
+            "s3",
+            "--endpoint",
+            "https://s3",
+            "--bucket",
+            "b",
+            "--credentials-stdin",
+        ]);
+        assert!(s3.check().is_err());
+        assert!(
+            parse(&["abcd", "--words-stdin", "webdav", "--url", "https://dav/"])
+                .check()
+                .is_ok()
+        );
+        assert!(
+            parse(&[
+                "abcd",
+                "webdav",
+                "--url",
+                "https://dav/",
+                "--credentials-stdin"
+            ])
+            .check()
+            .is_ok()
+        );
+    }
 }
