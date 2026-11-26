@@ -106,6 +106,7 @@ export class Forms {
       this.lockedShown.clear()
       // Locked or gone: no menu may still pick, and no fill is remembered for a save.
       if (status.state !== "ready") {
+        for (const [token, t] of this.tokens) void sendToFrame(t.owner, { type: "db:close-menu", token })
         this.tokens.clear()
         this.filled.clear()
       }

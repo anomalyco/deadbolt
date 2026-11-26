@@ -32,8 +32,13 @@ describe("locking", () => {
     const open = await menu()
     expect(forms.owns(open)).toBe(true)
 
+    const sent = fake.delivered.length
     host.setStatus({ state: "locked", version: "0.0.0" } as Status)
     expect(forms.owns(open)).toBe(false)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // The open menu closes on the page rather than staying up locked.
+    const closes = fake.delivered.slice(sent).filter((d) => d.message.type === "db:close-menu")
+    expect(closes.map((d) => [d.message.token, (d.options as { documentId: string }).documentId])).toEqual([[open, "top-doc"]])
     expect(forms.filledFrom(1)).toEqual({})
     expect(await forms.menuPick(open, HOME_REF, menuSender())).toEqual({ ok: false, message: "This menu has expired." })
   })
@@ -42,5 +47,7 @@ describe("locking", () => {
     const open = await menu()
     host.setStatus({ state: "ready", version: "0.0.1" } as Status)
     expect(forms.owns(open)).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fake.delivered.some((d) => d.message.type === "db:close-menu")).toBe(false)
   })
 })
