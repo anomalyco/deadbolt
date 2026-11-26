@@ -507,6 +507,8 @@ impl App {
     /// The store is locked: drop everything read from it.
     pub(crate) fn on_locked(&mut self, tx: &mut Tx) {
         self.forget_vault(tx);
+        // A recovery kit still showing goes with the rest.
+        self.forget_onboarding();
         if let Some(status) = &mut self.status {
             status.unlocked = false;
             if !status.touch_id_enabled || status.touch_id_reset {
@@ -560,9 +562,9 @@ impl App {
         self.notice = None;
         self.forget_import();
         self.forget_edit();
+        self.set_pane(VaultPane::Item);
         self.activity.forget();
         self.trash.forget();
-        self.set_pane(VaultPane::Item);
         self.health.forget();
     }
 
