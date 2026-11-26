@@ -1,0 +1,15 @@
+/* The changelog: one section per release, newest first. The head is the release's icon, its version (a link to
+   itself) and its day; then the one-line summary, then the notes. */
+.release { margin-top: var(--s5); scroll-margin-top: var(--s4); }
+.release:first-of-type { margin-top: var(--s4); }
+.release-head { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
+.release-head h2 { margin: 0; font-variant-numeric: tabular-nums; }
+.release-head time { margin-left: auto; opacity: .55; font-size: .9em; }
+.release-icon { flex: none; display: block; width: 24px; height: 24px; }
+.release-summary { color: var(--light); }
+.release-body ul { margin: 0 0 var(--s2); padding-left: 1.4em; display: grid; gap: var(--s1); line-height: 1.7; }
+.release-body li::marker { color: #5a5a5a; }
+.release-body strong { font-weight: 500; }
+.release-body a { border-bottom: 1px dotted #ffffff66; }
+.release-body a:hover { border-bottom-color: #fff; }
+.release-body h3, .release-body h4 { margin: var(--s3) 0 var(--s2); }

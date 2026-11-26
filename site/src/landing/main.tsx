@@ -66,7 +66,7 @@ function Landing() {
         </dl>
       </section>
 
-      <footer>deadbolt · <a className="link" href="/architecture/">architecture</a> · <a className="link" href={github}>github</a> · <a className="link" href="/mock.html">original mock</a></footer>
+      <footer>deadbolt · <a className="link" href="/architecture/">architecture</a> · <a className="link" href="/changelog">changelog</a> · <a className="link" href={github}>github</a> · <a className="link" href="/mock.html">original mock</a></footer>
     </main>
   </div>
 }
