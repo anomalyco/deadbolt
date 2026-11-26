@@ -327,6 +327,10 @@ pub fn clear_biometric(dir: &Path) -> Result<bool> {
 }
 
 /// A fresh 256-bit wrapping key for [`Unlocked::set_biometric`].
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(dead_code, reason = "Touch ID enrolls only on macOS")
+)]
 pub fn generate_biometric_key() -> Result<SecretKey> {
     kdf::random_key()
 }
