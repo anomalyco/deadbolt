@@ -347,6 +347,25 @@ pub fn resolved_frames<'f>(
         .collect()
 }
 
+/// [`resolved_frames`] above `base`, a checkpoint pack the membership still counts: each
+/// author's chain starts past the base's frontier, so a device without the covered frames (a
+/// recovered one) resolves its tail. A base that no longer counts is ignored.
+pub fn resolved_frames_from<'f>(
+    ctx: &FoldContext<'_>,
+    base: Option<&Pack>,
+    frames: impl IntoIterator<Item = &'f DataFrame>,
+) -> BTreeSet<FrameId> {
+    let starts = base
+        .filter(|b| check_still_valid(ctx, &b.meta).is_ok())
+        .map(|b| starts_of(&b.meta))
+        .unwrap_or_default();
+    chains(ctx.membership, frames, &starts)
+        .values()
+        .flatten()
+        .map(|(f, _)| f.id)
+        .collect()
+}
+
 /// Folds every counted data frame from genesis.
 pub fn fold_from_scratch<'f>(
     ctx: &FoldContext<'_>,

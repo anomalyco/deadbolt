@@ -592,11 +592,18 @@ pub fn receive<S: State>(
                 }
             }
             // What arrived may leave a member without a key it needs (rule
-            // E6): rewrap it in the same commit.
-            if added > 0
-                && let Err(error) = vault.fulfill_reader_duty(author)
-            {
-                debug!(peer = %peer, "reader duty: {error}");
+            // E6): rewrap it in the same commit. A checkpoint that arrived is
+            // judged before this device's next write acks it.
+            if added > 0 {
+                if let Err(error) = vault.fulfill_reader_duty(author) {
+                    debug!(peer = %peer, "reader duty: {error}");
+                }
+                if ready
+                    && vault.is_member(&author.id())
+                    && let Err(error) = vault.judge_checkpoints(author)
+                {
+                    debug!(peer = %peer, "judging checkpoints: {error}");
+                }
             }
             Ok((added, removed, took))
         })?;

@@ -115,7 +115,15 @@ impl Vault {
             return false;
         };
         let counted = self.checkpoints().any(|(f, _)| f.id == id);
-        if counted && !self.is_disputed(&id) {
+        // A base the membership stopped counting is only folded around; a
+        // device holding every frame it covers drops it outright, so its
+        // next checkpoint compacts from genesis in this session.
+        let stale = self.live_base().is_none()
+            && self
+                .base
+                .as_ref()
+                .is_some_and(|b| self.holds_frontier(&b.meta.frontier));
+        if counted && !self.is_disputed(&id) && !stale {
             return false;
         }
         self.base = None;
@@ -241,23 +249,129 @@ impl Vault {
         })
     }
 
-    /// Each member's data clock: what its newest opened frame had seen,
-    /// the implicit ack GC counts.
+    /// Each member's data clock: what its newest resolved frame had seen,
+    /// the implicit ack GC counts. Starts from the base's stream clock (its
+    /// frames below the frontier may be gone) and only follows the chain
+    /// the fold resolved, so an unchained or forked frame can't inflate it.
     pub fn member_clocks(&self) -> BTreeMap<DeviceId, VectorClock> {
-        let mut out = BTreeMap::new();
-        for member in self.resolved.devices.iter() {
-            let mut frames: Vec<&v2::DataFrame> = self
-                .opened
-                .values()
-                .filter(|f| f.author == *member)
-                .collect();
-            frames.sort_by_key(|f| f.seq);
-            let clock = frames
-                .iter()
-                .fold(VectorClock::new(), |clock, f| f.clock_after(&clock));
-            out.insert(*member, clock);
+        let resolved = self.resolved_data();
+        self.resolved
+            .devices
+            .iter()
+            .map(|member| {
+                let clock = self.clock_of(member, |f| resolved.contains(&f.id));
+                (*member, clock)
+            })
+            .collect()
+    }
+
+    /// Whether `by`'s own signed frames say it saw `author`'s frame `seq`:
+    /// its clock along the resolved chain, or any of its opened frames
+    /// naming it (a device behind a compaction gap can't chain `by`'s
+    /// stream, but its signature still vouches). No one else can forge it.
+    pub fn acked(&self, by: &DeviceId, author: &DeviceId, seq: u64) -> bool {
+        if *by == *author && self.position_of(by).is_some_and(|tip| tip >= seq) {
+            return true;
         }
-        out
+        if self
+            .member_clocks()
+            .get(by)
+            .is_some_and(|c| c.get(author) > seq)
+        {
+            return true;
+        }
+        self.opened
+            .values()
+            .filter(|f| f.author == *by)
+            .any(|f| match &f.body {
+                DataBody::Data(p) => p
+                    .dclock
+                    .entries()
+                    .iter()
+                    .any(|(a, n)| a == author && *n > seq),
+                DataBody::Checkpoint(p) => {
+                    p.frontier_map().get(author).is_some_and(|(s, _)| *s >= seq)
+                }
+            })
+    }
+
+    /// The members whose admission the membership frames `mheads` already
+    /// depend on (the creator included): who existed when a frame naming
+    /// those heads was written.
+    pub fn members_before(&self, mheads: &[FrameId]) -> BTreeSet<DeviceId> {
+        let mut seen: BTreeSet<FrameId> = BTreeSet::new();
+        let mut todo: Vec<FrameId> = mheads.to_vec();
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(body) = self.members.get(&id).and_then(|f| f.member_body()) {
+                todo.extend(body.deps.iter().copied());
+            }
+        }
+        self.resolved
+            .devices
+            .iter()
+            .copied()
+            .filter(|m| {
+                seen.iter().any(|id| {
+                    let Some(f) = self.members.get(id) else {
+                        return false;
+                    };
+                    match f.member_body().and_then(|b| b.op.as_ref()) {
+                        Some(v2::MemberOp::Add { device, .. }) => device == m,
+                        Some(v2::MemberOp::Create { .. }) => f.header().author == *m,
+                        _ => false,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// The installed base while the membership still counts what it covers.
+    pub(super) fn live_base(&self) -> Option<&Pack> {
+        let ctx = FoldContext {
+            membership: &self.resolved,
+            adders: &self.adders,
+        };
+        self.base
+            .as_ref()
+            .filter(|b| v2::check_still_valid(&ctx, &b.meta).is_ok())
+    }
+
+    /// The data frames the fold resolved causally, from the live base on.
+    pub(super) fn resolved_data(&self) -> BTreeSet<FrameId> {
+        let ctx = FoldContext {
+            membership: &self.resolved,
+            adders: &self.adders,
+        };
+        v2::resolved_frames_from(&ctx, self.base.as_ref(), self.fold_inputs())
+    }
+
+    /// The clock after `author`'s newest frame: its stream clock in the live
+    /// base, then each of its opened frames above the frontier that `take`
+    /// keeps, in order.
+    pub(super) fn clock_of(
+        &self,
+        author: &DeviceId,
+        take: impl Fn(&v2::DataFrame) -> bool,
+    ) -> VectorClock {
+        let base = self.live_base();
+        let floor = base
+            .and_then(|b| b.meta.frontier.get(author))
+            .map(|(s, _)| *s);
+        let start = base
+            .and_then(|b| b.meta.stream_clocks.get(author))
+            .filter(|_| floor.is_some())
+            .cloned()
+            .unwrap_or_default();
+        let mut frames: Vec<&v2::DataFrame> = self
+            .opened
+            .values()
+            .filter(|f| f.author == *author && floor.is_none_or(|s| f.seq > s) && take(f))
+            .collect();
+        frames.sort_by_key(|f| f.seq);
+        frames.iter().fold(start, |clock, f| f.clock_after(&clock))
     }
 
     /// Every `Dispute` a counted frame made.

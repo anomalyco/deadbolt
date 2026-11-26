@@ -3,10 +3,12 @@
 //! that don't count.
 
 use super::{Peer, first, login, pair};
-use crate::v2::{DeviceKeys, Frame, FrameId, LogKind, MemberBody, MemberOp, sign_join_consent};
+use crate::v2::{
+    DeviceKeys, Frame, FrameId, FraudProof, LogKind, MemberBody, MemberOp, sign_join_consent,
+};
 use crate::vault::MAX_REMOVED_UNAUTHORIZED;
 use crate::vault::testing::author;
-use crate::{Author, Error, VaultId};
+use crate::{Author, Error, Vault, VaultId};
 
 fn offer(to: &mut Peer, frames: Vec<Frame>) -> usize {
     let kem = to.a.keys().kem_key();
@@ -110,4 +112,54 @@ fn a_removed_device_stores_a_bounded_number_of_membership_frames() {
     assert!(held <= MAX_REMOVED_UNAUTHORIZED, "{held}");
     // Nor does anyone its adds name become a signer.
     assert!(a.v.members().all(|d| d == a.a.id()));
+}
+
+/// One batch carrying `Add(C)` by B (whose data stream a fraud proof cuts),
+/// C's first data frame and C's own `Add(D)` is taken whole: each pass of
+/// membership vouches for the next pass's signers.
+#[test]
+fn one_batch_admits_the_signers_its_own_adds_name() {
+    let mut a = first();
+    let mut b = pair(&mut a, 2);
+    let mut fork = Vault::open(b.a.keys(), b.v.frames().cloned()).unwrap();
+    let (_, x) =
+        b.v.create_item(&b.a, "login", Some("x".into()), login("u", "p"))
+            .unwrap();
+    let (_, y) = fork
+        .create_item(&b.a, "login", Some("y".into()), login("u", "q"))
+        .unwrap();
+    let proof = FraudProof::from_frames(b.v.frame(&x).unwrap(), fork.frame(&y).unwrap()).unwrap();
+    a.v.add_proofs([proof]);
+    assert!(a.v.membership().data_fork_seq.contains_key(&b.a.id()));
+
+    let mut c = pair(&mut b, 3);
+    c.v.create_item(&c.a, "login", Some("c".into()), login("c", "p"))
+        .unwrap();
+    let d = author(4);
+    let consent = d.join_consent(&c.v.id(), &c.a.id());
+    let (ca, did, kem) = (&c.a, d.id(), d.keys().kem_public());
+    c.v.transact(|w| w.add(ca, did, kem, consent), |_, _| Ok::<_, Error>(()))
+        .unwrap();
+    let heads = a.v.heads();
+    let batch: Vec<Frame> = [LogKind::Member, LogKind::Data]
+        .into_iter()
+        .flat_map(|log| c.v.missing(&heads, log))
+        .filter(|f| f.header().author == c.a.id() || f.header().kind.log_kind() == LogKind::Member)
+        .cloned()
+        .collect();
+    assert!(
+        batch
+            .iter()
+            .any(|f| f.header().author == c.a.id() && f.header().kind.log_kind() == LogKind::Data)
+    );
+    offer(&mut a, batch.clone());
+    for f in &batch {
+        assert!(
+            a.v.frame(&f.id()).is_some(),
+            "{:?} by {}",
+            f.header().kind,
+            f.header().author
+        );
+    }
+    assert!(a.v.is_member(&c.a.id()) && a.v.is_member(&did));
 }

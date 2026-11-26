@@ -502,7 +502,7 @@ impl Engine {
         }
     }
 
-    pub(crate) fn available(&self, id: VaultId) -> Result<VaultId> {
+    pub fn available(&self, id: VaultId) -> Result<VaultId> {
         self.ensure_usable()?;
         if let Some(vault) = self.unavailable.get(&id) {
             bail!(

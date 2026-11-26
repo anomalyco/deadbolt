@@ -52,7 +52,7 @@ pub use crypto::{
 };
 pub use data::{
     DataBody, DataFrame, DataOp, DataPayload, FieldValue, MAX_FIELD_VALUE_LEN, MAX_LABEL_LEN,
-    MAX_OPS, honest_clock, next_dclock,
+    MAX_OPS, honest_clock, honest_clock_from, next_dclock,
 };
 pub use epoch::{
     BadCommit, EpochError, EpochGraph, EpochInfo, EpochKeyring, UnlockReport, WrapOffer,
@@ -60,7 +60,8 @@ pub use epoch::{
 };
 pub use fold::{
     FoldContext, adders_from_frames, check_counts, check_still_valid, compact,
-    fold_from_checkpoint, fold_from_scratch, resolved_frames, uncounted_own_frames,
+    fold_from_checkpoint, fold_from_scratch, resolved_frames, resolved_frames_from,
+    uncounted_own_frames,
 };
 pub use frame::{
     Frame, FrameError, FrameHeader, FrameKind, FrameWitness, HEADER_LEN, JoinConsent, LogKind,

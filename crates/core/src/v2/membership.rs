@@ -313,6 +313,12 @@ pub fn resolve<'a>(
         }
     }
 
+    let mutual_removals: BTreeSet<(DeviceId, DeviceId)> = mutual_removals
+        .into_iter()
+        .filter(|(pair, between)| !settled_by_root(&nodes, &authority, &devices, *pair, between))
+        .map(|(pair, _)| pair)
+        .collect();
+
     let mut authorized_frames = authority.non_removal_frames;
     authorized_frames.extend(chosen_ids);
 
@@ -582,14 +588,14 @@ fn choose_removals(
     (chosen, current)
 }
 
-/// Pairs of devices that removed each other, unless a recovery-lineage
-/// (`class = 0`) removal of either one, made after seeing every removal
-/// between them, has settled it.
+/// Pairs of devices that removed each other, each with the removals between
+/// them, unless a recovery-lineage (`class = 0`) removal of either one, made
+/// after seeing every removal between them, has settled it.
 fn find_mutual_removals(
     nodes: &[DagNode<'_>],
     structural: &Authority,
     lineage: &BTreeSet<DeviceId>,
-) -> BTreeSet<(DeviceId, DeviceId)> {
+) -> BTreeMap<(DeviceId, DeviceId), Vec<usize>> {
     let mut edges: BTreeMap<(DeviceId, DeviceId), Vec<usize>> = BTreeMap::new();
     let mut by_root: Vec<(usize, DeviceId)> = Vec::new();
     for &idx in &structural.removals {
@@ -605,17 +611,47 @@ fn find_mutual_removals(
         .keys()
         .copied()
         .filter(|&(a, b)| a < b && edges.contains_key(&(b, a)))
-        .filter(|&(a, b)| {
+        .map(|(a, b)| {
             let between: Vec<usize> = edges[&(a, b)]
                 .iter()
                 .chain(&edges[&(b, a)])
                 .copied()
                 .collect();
+            ((a, b), between)
+        })
+        .filter(|((a, b), between)| {
             !by_root.iter().any(|&(r, victim)| {
-                (victim == a || victim == b) && between.iter().all(|&j| nodes[r].saw(j))
+                (victim == *a || victim == *b) && between.iter().all(|&j| nodes[r].saw(j))
             })
         })
         .collect()
+}
+
+/// Whether the recovery root has acted since a mutual removal (an `Add` or
+/// `Remove` by an unretired lineage root that saw every removal
+/// `between` the pair) and neither device of the pair is still active: no
+/// one is left whose side needs a person to choose.
+fn settled_by_root(
+    nodes: &[DagNode<'_>],
+    authority: &Authority,
+    devices: &BTreeSet<DeviceId>,
+    (a, b): (DeviceId, DeviceId),
+    between: &[usize],
+) -> bool {
+    if devices.contains(&a) || devices.contains(&b) {
+        return false;
+    }
+    nodes.iter().any(|n| {
+        let author = n.frame.header().author;
+        !n.void
+            && authority.lineage.contains(&author)
+            && !authority.retired_roots.contains_key(&author)
+            && matches!(
+                n.frame.member_body().and_then(|b| b.op.as_ref()),
+                Some(MemberOp::Add { .. } | MemberOp::Remove { .. })
+            )
+            && between.iter().all(|&j| n.saw(j))
+    })
 }
 
 fn is_genesis(vault: &VaultId, frame: &Frame) -> bool {

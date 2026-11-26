@@ -789,6 +789,53 @@ mod tests {
         assert_eq!(b.vault(&vault).items().len(), 6005);
     }
 
+    /// A checkpoint that arrives from a peer is judged on arrival, before
+    /// this device's next write acks it: one whose state disagrees with this
+    /// device's own fold gets a `Dispute`.
+    #[test]
+    fn a_bad_checkpoint_from_a_peer_is_disputed_on_arrival() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
+        let id = target.create_vault("personal").unwrap();
+        add_all(&mut target, id, &[2]);
+        target
+            .update(id, |v, a| {
+                Ok(v.create_item(a, "login", Some("x".into()), [])?)
+            })
+            .unwrap();
+        let peer = author(2);
+        let mut theirs = target.vault(&id).clone();
+        let made = local(&mut theirs, |w| {
+            w.checkpoint(&peer, |pack, _| pack.encode().map_err(|e| e.to_string()))
+        });
+        let (f, mut payload) = theirs
+            .checkpoints()
+            .find(|(f, _)| f.id == made.frame)
+            .map(|(f, p)| (f.clone(), p.clone()))
+            .unwrap();
+        payload.state_mac[0] ^= 1;
+        let key = theirs.epoch_key(&f.epoch).unwrap().clone();
+        let bad = payload
+            .seal(peer.keys().sign_key(), id, f.seq, f.prev, f.epoch, &key)
+            .unwrap();
+        receive(
+            &mut target,
+            &peer.id(),
+            vec![Blob::new(bad.encode())],
+            true,
+            &mut Default::default(),
+        )
+        .unwrap();
+        let v = target.vault(&id);
+        assert!(v.frame(&bad.id()).is_some());
+        assert!(v.is_disputed(&bad.id()));
+        assert!(
+            v.disputes()
+                .iter()
+                .any(|d| d.checkpoint == bad.id() && d.author == target.id)
+        );
+    }
+
     #[test]
     fn bad_frames_do_not_discard_removals_beside_them() {
         let dir = tempfile::tempdir().unwrap();

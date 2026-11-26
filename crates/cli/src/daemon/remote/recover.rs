@@ -49,7 +49,8 @@ impl Daemon {
         let root = recovery::decode(words.expose())
             .map_err(|e| anyhow!("reading the recovery kit: {e}"))?;
         self.with(|s| {
-            if s.vaults.contains_key(&vault) {
+            s.available(vault)?;
+            if s.contains_vault(&vault) {
                 bail!("this device already holds that vault");
             }
             Ok(())

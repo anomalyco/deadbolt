@@ -200,8 +200,12 @@ async fn a_full_replica_never_trades_its_history_for_a_pack() {
     login(&a, vault, 6);
     a.with(|s| {
         let v = &s.vaults[&vault];
-        let me = s.id;
         let frontier = v.base().unwrap().meta.frontier.clone();
+        let (f, payload) = v
+            .checkpoints()
+            .find(|(f, _)| Some(f.id) == v.base_checkpoint())
+            .map(|(f, p)| (f.clone(), p.clone()))
+            .unwrap();
         let names = |frames: &mut dyn Iterator<Item = &deadbolt_core::v2::Frame>| -> Vec<String> {
             frames
                 .map(|f| {
@@ -213,7 +217,7 @@ async fn a_full_replica_never_trades_its_history_for_a_pack() {
         let every = RemoteIndex::from_names(&vault, &names(&mut v.frames()));
         let none = SyncAnchor::default();
         assert!(!super::sync::collected_behind(
-            v, &every, &none, me, &frontier
+            v, &every, &none, &f, &payload
         ));
 
         // A replica missing the covered frames, the store listing only the tail.
@@ -226,18 +230,317 @@ async fn a_full_replica_never_trades_its_history_for_a_pack() {
         let thin = Vault::open(&s.keys(), tail.iter().cloned())?;
         let listed = RemoteIndex::from_names(&vault, &names(&mut tail.iter()));
         assert!(super::sync::collected_behind(
-            &thin, &listed, &none, me, &frontier
+            &thin, &listed, &none, &f, &payload
         ));
         // ...but every covered frame still listed: fetch them instead.
         assert!(!super::sync::collected_behind(
-            &thin, &every, &none, me, &frontier
+            &thin, &every, &none, &f, &payload
         ));
         // A frontier naming frames nothing evidences.
-        let mut phantom = frontier.clone();
-        phantom.insert(DeviceId::from_bytes([7; 32]), (40, FrameId::ZERO));
+        let mut phantom = payload.clone();
+        phantom
+            .frontier
+            .push((DeviceId::from_bytes([7; 32]), 40, FrameId::ZERO));
         assert!(!super::sync::collected_behind(
-            &thin, &listed, &none, me, &phantom
+            &thin, &listed, &none, &f, &phantom
         ));
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A data frame whose signer the vault can't admit yet (its `Add` isn't on
+/// the store) is refused, and the anchor doesn't move over it: once the
+/// `Add` lands, the next sync fetches and takes it.
+#[tokio::test]
+async fn a_refused_frame_is_fetched_again_once_its_signer_is_admitted() {
+    use deadbolt_core::v2::{DeviceKeys, Frame, LogKind};
+    use deadbolt_core::{Author, Vault, recovery};
+    use deadbolt_remote::{Outbox, plan_push, push};
+
+    let dir = tempfile::tempdir().unwrap();
+    let a = device(dir.path(), 75).await;
+    let (vault, words) = a.with(|s| s.create_vault_with_kit("personal")).unwrap();
+    let remote = webdav("refused-frame");
+    let set = Command::RemoteSet {
+        vault: None,
+        remote: remote.clone(),
+    };
+    a.remote_command(set).await.unwrap();
+    let sync = || Command::RemoteSync { vault: None };
+    a.remote_command(sync()).await.unwrap();
+
+    // Elsewhere, the root admits P, and P writes before the Add is pushed.
+    let root = recovery::decode(&words).unwrap();
+    let held: Vec<Frame> = a
+        .with(|s| Ok(s.vaults[&vault].frames().cloned().collect()))
+        .unwrap();
+    let mut rv = Vault::open_as(root.recovery_id(), &root.kem_secret(), held).unwrap();
+    let p = Author::new(DeviceKeys::from_seed(&[0x51; 32]), 1_700_000_000_000);
+    let consent = p.join_consent(&vault, &root.recovery_id());
+    let mut add = Vec::new();
+    rv.transact(
+        |w| w.add_signed(&root.signing_key(), p.id(), p.keys().kem_public(), consent),
+        |_, frames| {
+            add.extend(frames.iter().map(|f| (*f).clone()));
+            Ok::<_, deadbolt_core::Error>(())
+        },
+    )
+    .unwrap();
+    let mut pv = Vault::open(p.keys(), rv.frames().cloned()).unwrap();
+    let mut written = Vec::new();
+    let fields = [("password".into(), Field::new(FieldType::Secret, "pw"))];
+    pv.transact(
+        |w| w.create_item(&p, "login", Some("p".into()), fields),
+        |_, frames| {
+            written.extend(
+                frames
+                    .iter()
+                    .filter(|f| f.header().kind.log_kind() == LogKind::Data)
+                    .map(|f| (*f).clone()),
+            );
+            Ok::<_, deadbolt_core::Error>(())
+        },
+    )
+    .unwrap();
+    assert!(!written.is_empty());
+    let store = super::Remote::open(&remote).unwrap();
+    let upload = |frames: Vec<Frame>| {
+        plan_push(
+            &vault,
+            Outbox {
+                frames,
+                ..Outbox::default()
+            },
+        )
+        .unwrap()
+    };
+    push(&store, &upload(written.clone())).await.unwrap();
+
+    a.remote_command(sync()).await.unwrap();
+    let (tip, took) = a
+        .with(|s| {
+            let anchor = super::load_anchor(s, &vault)?;
+            let v = &s.vaults[&vault];
+            Ok((
+                anchor.tip(LogKind::Data, &p.id()),
+                written.iter().any(|f| v.frame(&f.id()).is_some()),
+            ))
+        })
+        .unwrap();
+    assert!(!took, "P isn't admitted yet");
+    assert_eq!(tip, None, "the anchor stays behind what the vault refused");
+
+    push(&store, &upload(add)).await.unwrap();
+    a.remote_command(sync()).await.unwrap();
+    let (tip, took) = a
+        .with(|s| {
+            let anchor = super::load_anchor(s, &vault)?;
+            let v = &s.vaults[&vault];
+            Ok((
+                anchor.tip(LogKind::Data, &p.id()).map(|(seq, _)| seq),
+                written.iter().all(|f| v.frame(&f.id()).is_some()),
+            ))
+        })
+        .unwrap();
+    assert!(took, "fetched again once P is admitted");
+    assert_eq!(tip, Some(written.len() as u64 - 1));
+}
+
+/// A compromised member uploads a checkpoint (`d/M/1.c`) and a poisoned pack
+/// covering a frame of its own it never uploaded (`d/M/0`, a delete). Its
+/// own listing is no evidence and no earlier member acked it, so an honest
+/// full replica keeps its history.
+#[tokio::test]
+async fn a_member_cannot_vouch_for_its_own_poisoned_checkpoint() {
+    use deadbolt_core::ops::{Change, DataOp};
+    use deadbolt_core::v2::{DeviceKeys, Frame, PackCommitment};
+    use deadbolt_core::{Author, Vault, recovery};
+    use deadbolt_remote::{Outbox, plan_push, push};
+
+    let dir = tempfile::tempdir().unwrap();
+    let a = device(dir.path(), 76).await;
+    let (vault, words) = a.with(|s| s.create_vault_with_kit("personal")).unwrap();
+    login(&a, vault, 0);
+    let remote = webdav("poisoned-checkpoint");
+    let set = Command::RemoteSet {
+        vault: None,
+        remote: remote.clone(),
+    };
+    a.remote_command(set).await.unwrap();
+    let sync = || Command::RemoteSync { vault: None };
+    a.remote_command(sync()).await.unwrap();
+    let (item, before) = a
+        .with(|s| {
+            let v = &s.vaults[&vault];
+            Ok((v.items()[0].id, v.items()))
+        })
+        .unwrap();
+
+    // The root admits M; M deletes A's item, then checkpoints over it.
+    let root = recovery::decode(&words).unwrap();
+    let held: Vec<Frame> = a
+        .with(|s| Ok(s.vaults[&vault].frames().cloned().collect()))
+        .unwrap();
+    let mut rv = Vault::open_as(root.recovery_id(), &root.kem_secret(), held).unwrap();
+    let m = Author::new(DeviceKeys::from_seed(&[0x4d; 32]), 1_700_000_000_000);
+    let consent = m.join_consent(&vault, &root.recovery_id());
+    let mut add = Vec::new();
+    rv.transact(
+        |w| w.add_signed(&root.signing_key(), m.id(), m.keys().kem_public(), consent),
+        |_, frames| {
+            add.extend(frames.iter().map(|f| (*f).clone()));
+            Ok::<_, deadbolt_core::Error>(())
+        },
+    )
+    .unwrap();
+    let mut mv = Vault::open(m.keys(), rv.frames().cloned()).unwrap();
+    let delete = DataOp::Edit {
+        item,
+        change: Change::Delete { at: None },
+    };
+    mv.transact(
+        |w| w.write(&m, vec![delete]),
+        |_, _| Ok::<_, deadbolt_core::Error>(()),
+    )
+    .unwrap();
+    let made = mv
+        .transact(
+            |w| {
+                w.checkpoint(&m, |pack, site| {
+                    let place = deadbolt_viewer::PackPlace {
+                        vault: *site.vault.as_bytes(),
+                        author: *site.author.as_bytes(),
+                        seq: site.seq,
+                        epoch: *site.epoch.as_bytes(),
+                        generation: 1,
+                    };
+                    let input =
+                        deadbolt_viewer::pack_input(pack, place).map_err(|e| e.to_string())?;
+                    Ok(deadbolt_pack::pack::encode(&input, site.key.as_bytes())
+                        .map_err(|e| e.to_string())?
+                        .bytes)
+                })
+            },
+            |_, _| Ok::<_, deadbolt_core::Error>(()),
+        )
+        .unwrap();
+    let checkpoint = mv.frame(&made.frame).unwrap().clone();
+    assert_eq!(
+        checkpoint.header().seq,
+        1,
+        "d/M/0 is the delete, never uploaded"
+    );
+    let store = super::Remote::open(&remote).unwrap();
+    let plan = plan_push(
+        &vault,
+        Outbox {
+            frames: add.into_iter().chain([checkpoint]).collect(),
+            packs: vec![(PackCommitment::of(&made.sealed).hash, made.sealed.clone())],
+            ..Outbox::default()
+        },
+    )
+    .unwrap();
+    push(&store, &plan).await.unwrap();
+
+    let Reply::RemoteSynced { report } = a.remote_command(sync()).await.unwrap() else {
+        panic!("not a sync report");
+    };
+    assert!(
+        report
+            .anomalies
+            .iter()
+            .any(|a| a.contains("checkpoint covers frames")),
+        "{:?}",
+        report.anomalies
+    );
+    a.with(|s| {
+        let v = &s.vaults[&vault];
+        assert!(v.is_member(&m.id()));
+        assert_ne!(
+            v.base_checkpoint(),
+            Some(made.frame),
+            "the poisoned pack isn't the base"
+        );
+        assert_eq!(v.items(), before, "nothing the pack claims was applied");
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// B and C removed each other and A removed B: the vault parks on the
+/// mutual removal. Recovering from the kit settles it (the root acts after
+/// both, and neither is left), so the new device writes its card unparked.
+#[tokio::test]
+async fn recovery_settles_a_mutual_removal_no_one_is_left_to_choose() {
+    use deadbolt_core::v2::{DeviceKeys, Frame, ParkingReason};
+    use deadbolt_core::{Author, Vault};
+
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = device(da.path(), 77).await;
+    let (vault, words) = a.with(|s| s.create_vault_with_kit("personal")).unwrap();
+    login(&a, vault, 0);
+    let peer = |seed: u8| Author::new(DeviceKeys::from_seed(&[seed; 32]), 1_700_000_000_000);
+    let (b, c) = (peer(0x0b), peer(0x0c));
+    a.with(|s| {
+        let me = s.id;
+        s.update(vault, |w, author| {
+            for p in [&b, &c] {
+                let consent = p.join_consent(&vault, &me);
+                w.add(author, p.id(), p.keys().kem_public(), consent)?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    })
+    .unwrap();
+    let held = || -> Vec<Frame> {
+        a.with(|s| Ok(s.vaults[&vault].frames().cloned().collect()))
+            .unwrap()
+    };
+    let mut vb = Vault::open(b.keys(), held()).unwrap();
+    let mut vc = Vault::open(c.keys(), held()).unwrap();
+    let no = |_: &Vault, _: &[&Frame]| Ok::<_, deadbolt_core::Error>(());
+    vb.transact(|w| w.remove(&b, c.id()), no).unwrap();
+    vc.transact(|w| w.remove(&c, b.id()), no).unwrap();
+    a.with(|s| {
+        let frames: Vec<Frame> = vb.frames().chain(vc.frames()).cloned().collect();
+        s.apply_fetched(vault, frames, Vec::new())?;
+        let parked = s.vaults[&vault].parked().to_vec();
+        assert!(
+            parked
+                .iter()
+                .any(|r| matches!(r, ParkingReason::MutualRemoval { .. })),
+            "{parked:?}"
+        );
+        s.update(vault, |w, author| Ok(w.remove(author, b.id())?))?;
+        Ok(())
+    })
+    .unwrap();
+    let remote = webdav("mutual-removal");
+    let set = Command::RemoteSet {
+        vault: None,
+        remote: remote.clone(),
+    };
+    a.remote_command(set).await.unwrap();
+    a.remote_command(Command::RemoteSync { vault: None })
+        .await
+        .unwrap();
+    a.lock().await;
+    drop(a);
+
+    let d = device(db.path(), 78).await;
+    let recover = Command::Recover {
+        vault: vault.to_string(),
+        words: Secret::new(words.as_str()),
+        remote,
+    };
+    d.remote_command(recover).await.unwrap();
+    d.with(|s| {
+        let v = &s.vaults[&vault];
+        assert!(v.parked().is_empty(), "{:?}", v.parked());
+        assert!(v.is_member(&s.id));
+        assert!(v.device_card(&s.id).is_some(), "the new device's card");
         Ok(())
     })
     .unwrap();

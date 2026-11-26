@@ -416,7 +416,19 @@ impl DataFrame {
 /// unless its epoch is unauthorized and it was folded as [`DataFrame::unreadable`].
 /// The result need not be causally closed: the fold closes every clock itself.
 pub fn honest_clock(observed: impl IntoIterator<Item = (DeviceId, u64, bool)>) -> VectorClock {
-    let mut streams: BTreeMap<DeviceId, BTreeMap<u64, bool>> = BTreeMap::new();
+    honest_clock_from(&BTreeMap::new(), observed)
+}
+
+/// [`honest_clock`] with each author's stream already counted up to `floors` (a checkpoint
+/// base's frontier, `seq + 1`): frames below it may be gone, and the prefix resumes there.
+pub fn honest_clock_from(
+    floors: &BTreeMap<DeviceId, u64>,
+    observed: impl IntoIterator<Item = (DeviceId, u64, bool)>,
+) -> VectorClock {
+    let mut streams: BTreeMap<DeviceId, BTreeMap<u64, bool>> = floors
+        .keys()
+        .map(|author| (*author, BTreeMap::new()))
+        .collect();
     for (author, seq, readable) in observed {
         let slot = streams
             .entry(author)
@@ -426,8 +438,9 @@ pub fn honest_clock(observed: impl IntoIterator<Item = (DeviceId, u64, bool)>) -
         *slot &= readable;
     }
     VectorClock::from_counts(streams.into_iter().map(|(author, seqs)| {
-        let mut count = 0u64;
-        for (seq, readable) in seqs {
+        let mut count = floors.get(&author).copied().unwrap_or(0);
+        for (seq, readable) in seqs.range(count..) {
+            let (seq, readable) = (*seq, *readable);
             if seq != count || !readable {
                 break;
             }

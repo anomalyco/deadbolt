@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::v2::{FrameId, FrameKind, LogKind, Pack};
+use crate::v2::{DataBody, FrameId, FrameKind, LogKind, Pack};
 use crate::vault::testing::{author, vault};
 use crate::{Author, Error, Field, FieldType, Vault};
 
@@ -244,4 +244,90 @@ fn a_base_whose_checkpoint_is_disputed_is_dropped() {
     assert!(vb.is_disputed(&made.frame));
     assert!(vb.base().is_none());
     assert_eq!(vb.base_checkpoint(), None);
+}
+
+/// A device that has only the base and the tail (the store collected the
+/// rest, or it recovered from it) writes with a real clock: its edit and
+/// delete of an item written below the frontier supersede it, with no
+/// concurrent write left standing, whichever device id sorts first.
+#[test]
+fn a_device_folded_from_a_base_supersedes_what_the_base_covers() {
+    let a = author(1);
+    let mut lower = None;
+    let mut higher = None;
+    for seed in 2..64u8 {
+        let d = author(seed);
+        if d.id() < a.id() {
+            lower.get_or_insert(d);
+        } else {
+            higher.get_or_insert(d);
+        }
+    }
+    for d in [lower.unwrap(), higher.unwrap()] {
+        supersedes_from_base(&a, &d);
+    }
+}
+
+fn supersedes_from_base(a: &Author, d: &Author) {
+    use crate::ops::{Change, DataOp};
+    let (mut v, _) = vault(a, "personal");
+    let consent = d.join_consent(&v.id(), &a.id());
+    v.transact(
+        |w| w.add(a, d.id(), d.keys().kem_public(), consent),
+        |_, _| Ok::<_, Error>(()),
+    )
+    .unwrap();
+    fill(&mut v, a, 3);
+    let ids: Vec<_> = v.items().into_iter().map(|i| i.id).collect();
+    let (edited, deleted) = (ids[0], ids[1]);
+    // a edits once more, still below the frontier.
+    let set = |value: &str| DataOp::Edit {
+        item: edited,
+        change: Change::Set {
+            field: "password".into(),
+            value: Field::new(FieldType::Secret, value),
+        },
+    };
+    v.write(a, vec![set("from-a")]).unwrap();
+    let made = checkpoint(&mut v, a);
+    let frontier = made.pack.meta.frontier.clone();
+    let tail: Vec<_> = v
+        .frames()
+        .filter(|f| {
+            let h = f.header();
+            h.kind.log_kind() == LogKind::Member
+                || frontier.get(&h.author).is_none_or(|(seq, _)| h.seq > *seq)
+        })
+        .cloned()
+        .collect();
+    let mut vd = Vault::open(d.keys(), tail).unwrap();
+    assert!(vd.adopt_base(made.frame, made.pack, &made.sealed));
+    let edit = vd.write(d, vec![set("from-d")]).unwrap();
+    let delete = DataOp::Edit {
+        item: deleted,
+        change: Change::Delete { at: None },
+    };
+    let gone = vd.write(d, vec![delete]).unwrap();
+    // The first write names what it saw (the next only what's new since).
+    let DataBody::Data(p) = &vd.opened[&edit].body else {
+        panic!("not data");
+    };
+    assert!(!p.dclock.entries().is_empty(), "the write saw a's frames");
+    assert!(vd.opened.contains_key(&gone));
+    // a, holding everything, takes d's writes: each supersedes a's.
+    give(&vd, &mut v, a.keys().kem_key());
+    for w in [&v, &vd] {
+        let writes = w.state.items[&edited].fields["password"].writes();
+        assert_eq!(writes.len(), 1, "no concurrent password left standing");
+        assert_eq!(
+            writes[0].value.as_ref().map(|f| f.value.as_str()),
+            Some("from-d")
+        );
+        assert!(w.state.items[&deleted].deleted());
+        assert_eq!(w.state.items[&deleted].life.writes().len(), 1);
+    }
+    // d's clock, as a member's ack, covers a's frames below the frontier.
+    let clocks = v.member_clocks();
+    let (seq, _) = frontier[&a.id()];
+    assert!(clocks[&d.id()].get(&a.id()) > seq);
 }

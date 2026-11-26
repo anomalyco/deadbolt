@@ -217,8 +217,7 @@ impl Daemon {
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("no key"))?,
                 };
-                let collected =
-                    !needs_pack || collected_behind(v, &plan.index, anchor, f.author, &frontier);
+                let collected = !needs_pack || collected_behind(v, &plan.index, anchor, f, payload);
                 Ok(Some((
                     frontier.clone(),
                     payload.pack_hash,
@@ -273,7 +272,17 @@ impl Daemon {
                 Err(anomaly) => anomalies.push(anomaly),
             }
         }
-        for frame in &frames {
+        // Only what the vault took: a frame it refused (its signer not yet
+        // admitted, say) must be fetched again once it can be.
+        let held: BTreeSet<FrameId> = self.with(|s| {
+            let v = &s.vaults[&vault];
+            Ok(frames
+                .iter()
+                .map(|f| f.id())
+                .filter(|id| v.frame(id).is_some())
+                .collect())
+        })?;
+        for frame in frames.iter().filter(|f| held.contains(&f.id())) {
             if let Err(anomaly) = anchor.observe(frame) {
                 anomalies.push(anomaly);
             }
@@ -511,20 +520,23 @@ impl Daemon {
     }
 }
 
-/// Whether a pack may stand in for the data frames `frontier` covers
-/// (checkpoint `author`'s claim): the store shows some covered frame this
-/// device lacks is gone, so it was collected, and every frontier seq is
-/// evidenced by something other than the checkpoint itself (the store's
-/// listing, the anchor, this device's frames, or another member's clock).
-/// A full replica whose covered frames are all still listed never trades
-/// its history for a pack.
+/// Whether a pack may stand in for the data frames checkpoint `f` covers:
+/// the store shows some covered frame this device lacks is gone (collected),
+/// every frontier seq is evidenced by something the checkpoint's author
+/// doesn't control (the store's listing of another author's stream, the
+/// anchor, this device's frames, another member's clock), and every member
+/// that already existed when it was made has signed that it saw it (GC never
+/// collects before they all have). A full replica whose covered frames are
+/// all still listed never trades its history for a pack.
 pub(super) fn collected_behind(
     v: &deadbolt_core::Vault,
     index: &deadbolt_remote::RemoteIndex,
     anchor: &SyncAnchor,
-    author: DeviceId,
-    frontier: &BTreeMap<DeviceId, (u64, FrameId)>,
+    f: &deadbolt_core::v2::DataFrame,
+    payload: &deadbolt_core::v2::CheckpointPayload,
 ) -> bool {
+    let author = f.author;
+    let frontier = payload.frontier_map();
     let held: BTreeSet<(DeviceId, u64)> = v
         .frames()
         .filter(|f| f.header().kind.log_kind() == LogKind::Data)
@@ -546,7 +558,8 @@ pub(super) fn collected_behind(
     };
     let evidenced = frontier.iter().all(|(a, (seq, _))| {
         [
-            index.tip(LogKind::Data, a),
+            // The author lists its own stream as it likes: no evidence.
+            index.tip(LogKind::Data, a).filter(|_| *a != author),
             anchor.tip(LogKind::Data, a).map(|(s, _)| s),
             anchor.compacted.get(a).copied(),
             held.iter().filter(|(x, _)| x == a).map(|(_, s)| *s).max(),
@@ -559,7 +572,12 @@ pub(super) fn collected_behind(
     let gone = frontier
         .iter()
         .any(|(a, (seq, _))| (0..=*seq).any(|s| !held.contains(&(*a, s)) && !listed(a, s)));
-    evidenced && gone
+    let acked = v
+        .members_before(&payload.mheads)
+        .iter()
+        .filter(|m| **m != author)
+        .all(|m| v.acked(m, &author, f.seq));
+    evidenced && gone && acked
 }
 
 /// The pack hash of the checkpoint `v`'s base belongs to.

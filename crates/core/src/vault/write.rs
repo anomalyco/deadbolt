@@ -11,7 +11,7 @@ use crate::item::{Field, ItemError};
 use crate::ops::{DataOp, valid_name};
 use crate::v2::{
     self, DataPayload, DeviceKeys, EpochId, EpochKey, Frame, FrameId, FrameKind, KemPublic,
-    KemSecret, LogKind, NetPublic, RecoverySecret, VectorClock, WriteEpochDecision, honest_clock,
+    KemSecret, LogKind, NetPublic, RecoverySecret, WriteEpochDecision, honest_clock_from,
     next_dclock,
 };
 
@@ -158,11 +158,28 @@ impl<'a> VaultWrite<'a> {
     /// Applies frames from a peer, opening what they wrap to `kem` (this
     /// device's KEM secret, lent for the call). Returns how many were new.
     pub fn apply(&mut self, kem: &KemSecret, frames: Vec<Frame>) -> Result<usize, Error> {
-        let frames = self.admissible(frames);
-        Ok(self.stage(frames, Some(kem))?.len())
+        let (mut pending, data): (Vec<Frame>, Vec<Frame>) = frames
+            .into_iter()
+            .partition(|f| f.header().kind == FrameKind::Member);
+        let mut added = 0;
+        // Membership first, to a fixed point: each pass admits what the
+        // membership staged so far vouches for (an `Add` in this batch
+        // names the signer of the next pass's frames).
+        while !pending.is_empty() {
+            let (admitted, rest) = self.admissible(std::mem::take(&mut pending));
+            if admitted.is_empty() {
+                break;
+            }
+            added += self.stage(admitted, Some(kem))?.len();
+            pending = rest;
+        }
+        let (data, _) = self.admissible(data);
+        added += self.stage(data, Some(kem))?.len();
+        Ok(added)
     }
 
-    /// The frames from a peer this vault may hold. Not one signed by a key
+    /// Splits frames from a peer into those this vault may hold now and the
+    /// rest. Not one signed by a key
     /// no membership frame names (held, or in the batch from someone it
     /// names), so a stranger can't fill the vault toward `MAX_FRAMES`. Of
     /// a removed device's, at most [`MAX_REMOVED_UNAUTHORIZED`] membership
@@ -170,7 +187,7 @@ impl<'a> VaultWrite<'a> {
     /// cutoff (none of which count). They aren't refused outright: a member
     /// that took them before it heard of the removal holds them, and every
     /// replica must still converge on the same frames.
-    fn admissible(&self, frames: Vec<Frame>) -> Vec<Frame> {
+    fn admissible(&self, frames: Vec<Frame>) -> (Vec<Frame>, Vec<Frame>) {
         let named = |f: &Frame| -> Vec<DeviceId> {
             match f.member_body().and_then(|b| b.op.as_ref()) {
                 Some(v2::MemberOp::Add { device, .. }) => vec![*device],
@@ -189,8 +206,12 @@ impl<'a> VaultWrite<'a> {
             .chain(&self.resolved.recovery_lineage)
             .copied()
             .collect();
-        // A removed device's frames never vouch for a new signer.
-        let vouches = |f: &&Frame| !self.resolved.removed.contains_key(&f.header().author);
+        // A removed device's frames vouch for no new signer, unless the
+        // membership counts the frame (made before its removal).
+        let vouches = |f: &&Frame| {
+            !self.resolved.removed.contains_key(&f.header().author)
+                || self.resolved.authorized_frames.contains(&f.id())
+        };
         known.extend(self.members.values().filter(vouches).flat_map(named));
         if self.members.is_empty() {
             known.extend(
@@ -236,25 +257,22 @@ impl<'a> VaultWrite<'a> {
                 .entry((f.header().author, LogKind::Data))
                 .or_default() += 1;
         }
-        frames
-            .into_iter()
-            .filter(|f| {
-                let h = f.header();
-                if !known.contains(&h.author) {
-                    return false;
-                }
-                let log = h.kind.log_kind();
-                if !self.resolved.removed.contains_key(&h.author)
-                    || (log == LogKind::Data && !past_cutoff(f))
-                    || self.frame(&f.id()).is_some()
-                {
-                    return true;
-                }
-                let count = unauthorized.entry((h.author, log)).or_default();
-                *count += 1;
-                *count <= MAX_REMOVED_UNAUTHORIZED
-            })
-            .collect()
+        frames.into_iter().partition(|f| {
+            let h = f.header();
+            if !known.contains(&h.author) {
+                return false;
+            }
+            let log = h.kind.log_kind();
+            if !self.resolved.removed.contains_key(&h.author)
+                || (log == LogKind::Data && !past_cutoff(f))
+                || self.frame(&f.id()).is_some()
+            {
+                return true;
+            }
+            let count = unauthorized.entry((h.author, log)).or_default();
+            *count += 1;
+            *count <= MAX_REMOVED_UNAUTHORIZED
+        })
     }
 
     /// Where `author`'s next frame in `log` goes: its seq and `prev`.
@@ -394,19 +412,29 @@ impl<'a> VaultWrite<'a> {
         }
         let (epoch, key) = self.write_epoch(author.keys.sign_key())?;
         let (seq, prev) = self.position(&me, LogKind::Data);
-        let mut mine: Vec<&v2::DataFrame> =
-            self.opened.values().filter(|f| f.author == me).collect();
-        mine.sort_by_key(|f| f.seq);
-        let prev_clock = mine
-            .iter()
-            .fold(VectorClock::new(), |clock, f| f.clock_after(&clock));
+        let prev_clock = self.clock_of(&me, |_| true);
         // Claim only frames the fold resolved: naming one still waiting on
-        // a frame this device lacks would leave this write waiting too.
-        let resolved = v2::resolved_frames(&self.resolved, self.fold_inputs());
-        let honest = honest_clock(self.data.values().map(|f| {
-            let h = f.header();
-            (h.author, h.seq, resolved.contains(&f.id()))
-        }));
+        // a frame this device lacks would leave this write waiting too. A
+        // base stands in for the frames below its frontier (a recovered
+        // device never had them).
+        let resolved = self.resolved_data();
+        let floors: BTreeMap<DeviceId, u64> = self
+            .live_base()
+            .map(|b| {
+                b.meta
+                    .frontier
+                    .iter()
+                    .map(|(a, (s, _))| (*a, s.saturating_add(1)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let honest = honest_clock_from(
+            &floors,
+            self.data.values().map(|f| {
+                let h = f.header();
+                (h.author, h.seq, resolved.contains(&f.id()))
+            }),
+        );
         let payload = DataPayload {
             mheads: self.mheads(),
             dclock: next_dclock(&prev_clock, &honest, &me),
