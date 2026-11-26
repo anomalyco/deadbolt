@@ -87,6 +87,7 @@ fn delete_asks_in_place_and_the_next_item_takes_its_place() {
 
     backspace(&mut r);
     assert!(r.shows("Delete “github.com”?"));
+    assert!(r.shows("Delete login"), "the button names what goes");
     r.tap(Key::Escape);
     r.settle(0.3);
     assert!(r.rt.state.edit.delete.is_none() && !r.shows("Delete “github.com”?"));
@@ -200,7 +201,7 @@ fn a_failed_delete_says_why_in_the_confirm() {
         seq,
         result: Err(failure("the vault is read-only")),
     });
-    assert!(r.shows("The vault is read-only.") && r.shows("Delete"));
+    assert!(r.shows("The vault is read-only.") && r.shows("Delete login"));
     assert_eq!(r.rt.state.screen, Screen::Vault);
 }
 

@@ -163,7 +163,7 @@ pub fn page(s: &App, k: &Kit) -> El {
         Some(error) => problem(k, "breach-error", error),
         None => about(
             k,
-            "Send the first 5 characters of each password's SHA-1 hash to Have I Been Pwned",
+            "Send the first 5 characters of each password’s SHA-1 hash to Have I Been Pwned",
         ),
     };
     let breach_switch = Switch::new(s.health.breach_checks_enabled())
@@ -349,7 +349,7 @@ fn devices(s: &App, k: &Kit) -> El {
     let peers = s.status.as_ref().map_or(0, |st| st.peers);
     let online = s.status.as_ref().map_or(0, |st| st.peers_online);
     let shares = match peers {
-        0 => "No other devices yet. Add one with deadbolt invite.".to_owned(),
+        0 => "No other devices yet. Run deadbolt join on the new one, then deadbolt approve its code here.".to_owned(),
         1 => format!("Shares with 1 other device, {online} online"),
         n => format!("Shares with {n} other devices, {online} online"),
     };

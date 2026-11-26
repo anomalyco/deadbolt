@@ -485,7 +485,7 @@ impl App {
         let o = &mut self.onboarding;
         match o.copied.as_ref().map(SecretCopy::state) {
             Some(SecretState::Failed(error)) => {
-                o.notice = Some(Notice::new(Severity::Danger, "Couldn't copy", error));
+                o.notice = Some(Notice::new(Severity::Danger, "Couldn’t copy", error));
             }
             Some(SecretState::Replaced | SecretState::Cleared) => {}
             _ => return false,
@@ -615,9 +615,9 @@ impl App {
         let notice = if flow == Flow::Join && o.cancelled {
             let body = if o.set_up_now {
                 "Nothing was shared. This device is set up now, with the passphrase you \
-                 chose. Make a new code when you're ready."
+                 chose. Make a new code when you’re ready."
             } else {
-                "Nothing was shared. Make a new code when you're ready."
+                "Nothing was shared. Make a new code when you’re ready."
             };
             Notice::new(Severity::Neutral, "Join cancelled", body)
         } else {
@@ -644,7 +644,7 @@ fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
         (
             Severity::Caution,
             "This device is already set up",
-            "It was set up meanwhile, so the passphrase you just typed wasn't used. The \
+            "It was set up meanwhile, so the passphrase you just typed wasn’t used. The \
              passphrase it was set up with is the one that unlocks it."
                 .to_owned(),
         )
@@ -653,7 +653,7 @@ fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
             Severity::Caution,
             "Someone tried a wrong code",
             "Nothing was shared, and that code no longer works. Make a new one. If you \
-             didn't try one yourself, someone may be trying to get in."
+             didn’t try one yourself, someone may be trying to get in."
                 .to_owned(),
         )
     } else if message.contains("expired") {
@@ -670,8 +670,8 @@ fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
         )
     } else {
         let title = match flow {
-            Flow::Create => "Couldn't create the vault",
-            Flow::Join => "Couldn't join",
+            Flow::Create => "Couldn’t create the vault",
+            Flow::Join => "Couldn’t join",
         };
         let detail = sentence(message);
         let detail = if detail.is_empty() {

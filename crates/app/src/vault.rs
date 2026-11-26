@@ -18,7 +18,9 @@ use std::rc::Rc;
 use deadbolt_client::protocol::{ItemInfo, noun};
 use rune::{El, GrowthSpec, Transition, col, el, icon, row, text};
 use rune_kit::shell::{SplitView, Toolbar};
-use rune_kit::{IconButton, IconButtonVariant, Keybind, Kit, TextInput};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Keybind, Kit, TextInput,
+};
 
 use crate::model::App;
 use crate::view::theme::{SLIDERS, STAR_FILL, TRASH, kind_icon};
@@ -185,12 +187,24 @@ fn rows_of(s: &App, k: &Kit, visible: &[usize]) -> El {
         ));
     }
     if visible.is_empty() {
-        return rows.virtualize(ROW_H).child(empty(
-            k,
-            "no-match",
-            "No matches",
-            &format!("Nothing matches “{}”.", s.search.text.trim()),
-        ));
+        return rows.virtualize(ROW_H).child(
+            empty(
+                k,
+                "no-match",
+                "No matches",
+                &format!("Nothing matches “{}”.", s.search.text.trim()),
+            )
+            .child(
+                row().key("no-match-actions").mt(8.0).child(
+                    Button::new("Clear search")
+                        .variant(ButtonVariant::Neutral)
+                        .control_size(ControlSize::Small)
+                        .on_press(|s: &mut App| s.clear_search())
+                        .build(k)
+                        .key("clear-search"),
+                ),
+            ),
+        );
     }
     // The keys change only when the visible ids do (a search, a sync, a sort).
     let version = Ids(visible.iter().map(|&at| s.items[at].id.as_str()));

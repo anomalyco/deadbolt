@@ -50,7 +50,7 @@ const PHONE_IMPULSES = [WAKE, SYNCED]
 
 export const meshScene: StoryScene = {
   label: "Devices hold the vault and sync entries directly over iroh, using an n0 relay for encrypted ciphertext only when direct connection fails.",
-  width: W, height: H, duration: 11.4, poster: 2,
+  width: W, height: H, duration: 11.4,
   sounds: [
     ...SHOTS.flatMap(s => soundOfSend(s, W, .8).cues),
     { at: WAKE, cue: "write", detail: { pan: panX(PHONE[0] + PHONE[2] / 2, W), gain: .7 } },

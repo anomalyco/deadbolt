@@ -749,7 +749,7 @@ pub fn confirm(k: &Kit, d: &Delete) -> El {
                 .truncate_fade(),
         )
         .child(
-            text("It's deleted on all your devices.")
+            text("It’s deleted on all your devices.")
                 .key("body")
                 .font(k.ty.text_small)
                 .color(k.c.text_muted)
@@ -790,7 +790,7 @@ pub fn confirm(k: &Kit, d: &Delete) -> El {
                         .key("cancel"),
                 )
                 .child(
-                    Button::new(if d.busy { "Deleting…" } else { "Delete" })
+                    Button::new(if d.busy { "Deleting…" } else { &d.button })
                         .rolling("delete-label")
                         .variant(ButtonVariant::Danger)
                         .disabled(d.busy)

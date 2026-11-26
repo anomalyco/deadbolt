@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 use crate::daemon::{Failure, Job};
 use crate::model::{App, Screen};
 use crate::onboarding::sentence;
+use crate::view::theme::kind_noun;
 use form::problem;
 
 /// The generator's lengths, from the length control.
@@ -96,6 +97,8 @@ impl Default for Edit {
 pub struct Delete {
     pub id: String,
     pub label: String,
+    /// The confirm's button, naming what goes: "Delete login", "Delete SSH key".
+    pub button: String,
     /// The request is on its way.
     pub busy: bool,
     pub error: Option<String>,
@@ -657,6 +660,7 @@ impl App {
             self.edit.delete = Some(Delete {
                 id: item.id.clone(),
                 label: item.label.clone(),
+                button: format!("Delete {}", kind_noun(&item.kind)),
                 busy: false,
                 error: None,
             });

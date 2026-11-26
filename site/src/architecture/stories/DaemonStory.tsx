@@ -51,7 +51,7 @@ const LAPTOP_IMPULSES = [timing(sSync).lands]
 
 export const daemonScene: StoryScene = {
   label: "The cli sends one JSON line over a user-only Unix socket to the background daemon, which alone opens store.redb and runs the iroh node.",
-  width: W, height: H, duration: 15.6, poster: 2,
+  width: W, height: H, duration: 15.6,
   sounds: [sAsk, sReq, sRead, sAnswer, sSync].flatMap(s => soundOfSend(s, W, .8).cues),
   flights: [sAsk, sReq, sReply, sSync].map(s => soundOfSend(s, W, .75).flight),
   steps: [

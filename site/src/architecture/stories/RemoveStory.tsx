@@ -42,7 +42,7 @@ const PHONE_IMPULSES = [timing(sNormal).lands, sTryLap.at, sTryDesk.at]
 
 export const removeScene: StoryScene = {
   label: "The desktop removes the phone; the removal spreads to the laptop; the phone's attempts to sync are refused at the membership gate.",
-  width: W, height: H, duration: 16.0, poster: 3,
+  width: W, height: H, duration: 16.0,
   sounds: [
     ...soundOfSend(sNormal, W, .8).cues,
     { at: REMOVE_AT, cue: "remove", detail: { pan: panX(DESKTOP[0] + DESKTOP[2] / 2, W) } },

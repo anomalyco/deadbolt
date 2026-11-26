@@ -1517,7 +1517,6 @@ dependencies = [
  "blake3",
  "core-foundation 0.10.1",
  "data-encoding",
- "deadbolt-core",
  "deadbolt-os",
  "deadbolt-proto",
  "nix",

@@ -156,6 +156,20 @@ jobs:
           tool: cargo-deny
       - run: cargo +stable deny check
 
+  # Dependencies a crate declares but never uses. A false positive goes in
+  # that crate's [package.metadata.cargo-machete] ignored list, with why.
+  machete:
+    name: Unused dependencies
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
+        with:
+          tool: cargo-machete
+      - run: cargo machete
+
   site:
     name: Site
     if: github.event_name != 'schedule'

@@ -52,7 +52,7 @@ const QR_MODULES = (() => {
 
 export const pairScene: StoryScene = {
   label: "A new phone shows a ticket; the desktop dials it, both prove the secret, you compare six-digit codes, and the desktop admits the phone.",
-  width: W, height: H, duration: 18.2, poster: 5,
+  width: W, height: H, duration: 18.2,
   sounds: [
     { at: .15, cue: "write", detail: { pan: panX(PHONE[0] + PHONE[2] / 2, W) } },
     ...soundOfSend(sCarry, W, .8).cues,

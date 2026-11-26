@@ -143,6 +143,13 @@ impl App {
                 .split_whitespace()
                 .last()
                 .is_some_and(|w| w.starts_with('#'));
+        // The tag being typed, folded once rather than once per item.
+        let typing = q
+            .tags
+            .last()
+            .filter(|_| trailing_tag)
+            .map(String::as_str)
+            .map(fold_tag);
         self.items
             .iter()
             .enumerate()
@@ -156,9 +163,8 @@ impl App {
                 for (ti, tag_filter) in q.tags.iter().enumerate() {
                     let is_typing = trailing_tag && ti + 1 == q.tags.len();
                     let matched = item_has_tag(item.tags.iter().map(String::as_str), tag_filter)
-                        || (is_typing && {
-                            let prefix = fold_tag(tag_filter);
-                            item.tags.iter().any(|t| fold_tag(t).starts_with(&prefix))
+                        || typing.as_deref().is_some_and(|prefix| {
+                            is_typing && item.tags.iter().any(|t| fold_tag(t).starts_with(prefix))
                         });
                     if !matched {
                         return false;
@@ -423,7 +429,8 @@ impl App {
         }
     }
 
-    /// The quick panel's clear button: an empty search, still focused.
+    /// The quick panel's clear button and the list's Clear search: an empty
+    /// search, still focused.
     pub fn clear_search(&mut self) {
         self.search.clear();
         self.search.focused = true;

@@ -129,7 +129,7 @@ const LOG_FLIGHTS = [consent, ...hashes].map(s => soundOfSend(s, W, .75).flight)
 
 export const logsScene: StoryScene = {
   label: "Two devices (desktop and laptop) each append signed entries to their own log. Each entry points back at the entries its author had seen.",
-  width: W, height: H, duration: 32.5, poster: 6,
+  width: W, height: H, duration: 32.5,
   sounds: LOG_SOUNDS,
   flights: LOG_FLIGHTS,
   steps: [

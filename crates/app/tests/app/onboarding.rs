@@ -77,7 +77,7 @@ fn every_state_renders_in_both_appearances() {
         ("create-typing", &["Fair.", "Doesn't match the passphrase."]),
         ("create-ready", &["Strong.", "Matches"]),
         ("create-invalid", &["Too short", "Use a-z, 0-9"]),
-        ("create-failed", &["Couldn't create the vault"]),
+        ("create-failed", &["Couldn’t create the vault"]),
         (
             "creating",
             &["Creating your vault", "Protecting your passphrase"],
@@ -95,7 +95,7 @@ fn every_state_renders_in_both_appearances() {
         ),
         ("join-wrong-code", &["Someone tried a wrong code"]),
         ("join-cancelled", &["Join cancelled"]),
-        ("join-failed", &["Couldn't join"]),
+        ("join-failed", &["Couldn’t join"]),
         (
             "empty",
             &["personal is empty", "Drop an export here", "Choose File…"],
@@ -559,7 +559,7 @@ fn a_code_that_fails_to_copy_says_so() {
     rt.update(|s, tx| s.copy_code(tx));
     settle(&mut rt, 0.4);
     assert!(rt.state.onboarding.copied.is_none());
-    assert!(shows(&rt, "Couldn't copy") && shows(&rt, "no pasteboard"));
+    assert!(shows(&rt, "Couldn’t copy") && shows(&rt, "no pasteboard"));
     assert!(!shows(&rt, "Copied"));
 }
 
@@ -602,7 +602,7 @@ fn a_tall_step_stays_under_the_title_bar_and_scrolls() {
     rt.update(|s, _| {
         s.onboarding.notice = Some(deadbolt_app::view::Notice {
             severity: Severity::Danger,
-            title: "Couldn't create the vault".into(),
+            title: "Couldn’t create the vault".into(),
             body: "Connecting to the daemon: connection refused. Try again.".into(),
         })
     });

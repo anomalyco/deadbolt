@@ -91,7 +91,7 @@ pub(crate) const SCENES: &[Scene] = &[
         form(s, Flow::Create);
         s.onboarding.notice = Some(Notice::new(
             Severity::Danger,
-            "Couldn't create the vault",
+            "Couldn’t create the vault",
             "Connecting to the daemon: connection refused. Try again.",
         ));
     }),
@@ -136,7 +136,7 @@ pub(crate) const SCENES: &[Scene] = &[
             s,
             Severity::Caution,
             "Someone tried a wrong code",
-            "Nothing was shared, and that code no longer works. Make a new one. If you didn't try one yourself, someone may be trying to get in.",
+            "Nothing was shared, and that code no longer works. Make a new one. If you didn’t try one yourself, someone may be trying to get in.",
         );
     }),
     ("join-cancelled", |s| {
@@ -144,14 +144,14 @@ pub(crate) const SCENES: &[Scene] = &[
             s,
             Severity::Neutral,
             "Join cancelled",
-            "Nothing was shared. Make a new code when you're ready.",
+            "Nothing was shared. Make a new code when you’re ready.",
         );
     }),
     ("join-failed", |s| {
         join_notice(
             s,
             Severity::Danger,
-            "Couldn't join",
+            "Couldn’t join",
             "The daemon stopped. Try again.",
         );
     }),

@@ -7,6 +7,15 @@
 /skill.md
   Content-Type: text/markdown; charset=utf-8
 
+/changelog.md
+  Content-Type: text/markdown; charset=utf-8
+
+/changelog/atom.xml
+  Content-Type: application/atom+xml; charset=utf-8
+
+/changelog/feed.json
+  Content-Type: application/feed+json; charset=utf-8
+
 /r
   Referrer-Policy: no-referrer
   X-Robots-Tag: noindex, nofollow

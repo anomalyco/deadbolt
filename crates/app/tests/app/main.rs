@@ -3,6 +3,10 @@
 
 #![cfg(test)]
 
+// Counts each thread's allocations, so `budget` can hold the hot paths to a ceiling.
+#[global_allocator]
+static ALLOC: procwatch::alloc::Counting = procwatch::alloc::Counting::system();
+
 // Only daemon, autofill, codes and import use it, and they run in debug builds only.
 #[cfg(debug_assertions)]
 mod support;
@@ -11,6 +15,7 @@ mod deadbolt;
 
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod autofill;
+mod budget;
 mod codes;
 mod daemon;
 mod edit;

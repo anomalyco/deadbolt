@@ -502,7 +502,7 @@ impl Form {
             if input.required && value.is_none() {
                 return Err(Problem {
                     field: Some(input.name.clone()),
-                    message: format!("{} can't be empty.", title_case(&input.name)),
+                    message: format!("{} can’t be empty.", title_case(&input.name)),
                 });
             }
             let was = self.saves_over().and_then(|b| b.value(&input.name));
@@ -602,7 +602,7 @@ pub(super) fn problem(message: &str) -> Problem {
             format!("{label} must be {} digits.", range.replace('-', " to "))
         } else {
             match reason {
-                "empty" => format!("{label} can't be empty."),
+                "empty" => format!("{label} can’t be empty."),
                 "not a month (YYYY-MM)" => format!("{label} must be a month, like 08/29."),
                 "not an absolute URL" => {
                     format!("{label} must be a web address, like example.com.")
@@ -619,7 +619,7 @@ pub(super) fn problem(message: &str) -> Problem {
     if let Some(field) = after("missing required field ") {
         return Problem {
             field: Some(field.to_owned()),
-            message: format!("{} can't be empty.", title_case(field)),
+            message: format!("{} can’t be empty.", title_case(field)),
         };
     }
     if message.contains("invalid item name") {
@@ -765,7 +765,7 @@ mod tests {
         let p = problem("missing required field password");
         assert_eq!(
             (p.field.as_deref(), p.message.as_str()),
-            (Some("password"), "Password can't be empty.")
+            (Some("password"), "Password can’t be empty.")
         );
         let p = problem("invalid item name: use 1-128 characters without control characters");
         assert_eq!(p.field.as_deref(), Some("name"));
