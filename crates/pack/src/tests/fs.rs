@@ -11,6 +11,27 @@ fn temp() -> (tempfile::TempDir, FsBlocks) {
     (dir, blocks)
 }
 
+/// Files are `0600` and directories `0700`, whatever the umask allows more.
+#[cfg(unix)]
+#[test]
+fn fs_blocks_keep_files_and_directories_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, blocks) = temp();
+    blocks.create_new("gen-1.pack", b"abc").unwrap();
+    blocks.append_sync("wal-0.log", b"12").unwrap();
+    blocks.create_new("blob/abcd", b"blob").unwrap();
+    let _lock = blocks.try_lock_writer().unwrap();
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let root = dir.path().join("v");
+    for path in [root.clone(), root.join("vault"), root.join("vault/blob")] {
+        assert_eq!(mode(&path), 0o700, "{}", path.display());
+    }
+    for name in ["gen-1.pack", "wal-0.log", "blob/abcd", "LOCK"] {
+        assert_eq!(mode(&root.join("vault").join(name)), 0o600, "{name}");
+    }
+}
+
 #[test]
 fn fs_blocks_create_append_read_list_delete_truncate() {
     let (_dir, blocks) = temp();

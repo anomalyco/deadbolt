@@ -336,11 +336,12 @@ pub fn values<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DataOp, DeviceSecret, Field, FieldType, schema};
+    use crate::vault::testing::{author, vault as new_vault};
+    use crate::{Author, DataOp, Field, FieldType, schema};
 
     fn add(
         vault: &mut Vault,
-        secret: &DeviceSecret,
+        secret: &Author,
         kind: &str,
         name: Option<&str>,
         fields: &[(&str, &str)],
@@ -363,8 +364,8 @@ mod tests {
 
     #[test]
     fn lists_metadata_and_selects_only_allowed_values() {
-        let secret = DeviceSecret::generate();
-        let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+        let secret = author(1);
+        let (mut vault, _) = new_vault(&secret, "personal");
         let home = add(
             &mut vault,
             &secret,
@@ -450,9 +451,9 @@ mod tests {
 
     #[test]
     fn billing_resolves_across_vaults_but_not_to_tombstones_or_other_kinds() {
-        let secret = DeviceSecret::generate();
-        let (mut home, _) = Vault::create(&secret, "home").unwrap();
-        let (mut work, _) = Vault::create(&secret, "work").unwrap();
+        let secret = author(1);
+        let (mut home, _) = new_vault(&secret, "home");
+        let (mut work, _) = new_vault(&secret, "work");
         let identity = add(
             &mut home,
             &secret,
@@ -606,8 +607,8 @@ mod tests {
 
     #[test]
     fn a_typed_number_matches_only_its_own_card() {
-        let secret = DeviceSecret::generate();
-        let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+        let secret = author(1);
+        let (mut vault, _) = new_vault(&secret, "personal");
         let card = add(
             &mut vault,
             &secret,
@@ -634,8 +635,8 @@ mod tests {
 
     #[test]
     fn labels_keep_legacy_names_and_sort_by_title_then_id() {
-        let secret = DeviceSecret::generate();
-        let (mut vault, _) = Vault::create(&secret, "personal").unwrap();
+        let secret = author(1);
+        let (mut vault, _) = new_vault(&secret, "personal");
         let legacy = add(
             &mut vault,
             &secret,

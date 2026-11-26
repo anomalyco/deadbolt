@@ -52,7 +52,7 @@ impl Daemon {
     pub(super) fn with<T>(&self, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
         let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let Some(session) = guard.as_mut() else {
-            return Err(if deadbolt_store::is_initialized(&self.paths.data) {
+            return Err(if crate::disk::is_initialized(&self.paths.data) {
                 fail(ErrorCode::Locked, "locked: run `deadbolt unlock`")
             } else {
                 fail(
@@ -132,7 +132,7 @@ impl Daemon {
     }
 
     pub(super) fn status(&self) -> Status {
-        let initialized = deadbolt_store::is_initialized(&self.paths.data);
+        let initialized = crate::disk::is_initialized(&self.paths.data);
         let touch_id_available = self.is_touch_id_available();
         let touch_id_cfg = Config::load(&self.paths.config)
             .map(|c| c.touch_id())

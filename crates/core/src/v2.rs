@@ -61,7 +61,7 @@ pub use epoch::{
 };
 pub use fold::{
     FoldContext, adders_from_frames, check_counts, check_still_valid, compact,
-    fold_from_checkpoint, fold_from_scratch, uncounted_own_frames,
+    fold_from_checkpoint, fold_from_scratch, resolved_frames, uncounted_own_frames,
 };
 pub use frame::{
     Frame, FrameError, FrameHeader, FrameKind, FrameWitness, HEADER_LEN, LogKind, MAGIC,

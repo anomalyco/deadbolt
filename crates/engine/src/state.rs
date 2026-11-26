@@ -5,13 +5,13 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, MembershipOp, Payload, Vault, VaultId, VaultWrite, valid_name,
-};
+use deadbolt_core::v2::{DeviceKeys, Frame, RecoverySecret};
+use deadbolt_core::{Author, DeviceId, Vault, VaultId, VaultWrite, recovery, valid_name};
 use deadbolt_proto::daemon::{DeviceInfo, ErrorCode, VaultInfo};
 use deadbolt_proto::peer::{Addr, Hint, clean_name};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::cap::{CapAudit, CapCheck, CapError, CapId, CapTable};
 use crate::clock::{Clock, utc_date};
@@ -25,6 +25,10 @@ const META_DEVICE_NAME: &str = "cli/device-name";
 const META_DEFAULT_VAULT: &str = "cli/default-vault";
 const META_PEERS: &str = "cli/peers";
 const META_FILLED: &str = "cli/autofill-filled";
+/// Per vault: devices this device has seen removed (the parking rule's memory).
+fn meta_removed(vault: &VaultId) -> String {
+    format!("vault/{vault}/removed")
+}
 /// The most logins whose last fill is remembered; the longest unused go first.
 const MAX_FILLED: usize = 1000;
 
@@ -73,26 +77,21 @@ impl Changes {
         !self.vaults && self.items.is_empty() && self.devices.is_empty()
     }
 
-    /// Records entries newly committed to `vault`.
-    fn committed(&mut self, vault: VaultId, entries: &[&Entry]) {
-        for entry in entries {
-            match entry.payload() {
-                Payload::Data(_) => {
-                    self.edits.insert(vault);
-                    self.items.insert(vault);
-                }
-                Payload::Membership(MembershipOp::Rename { .. }) => {
-                    self.edits.insert(vault);
-                    self.vaults = true;
-                }
-                Payload::Membership(op) => {
-                    self.vaults = true;
-                    self.devices.insert(vault);
-                    // A removed device's later writes stop counting.
-                    if matches!(op, MembershipOp::Remove { .. }) {
-                        self.items.insert(vault);
-                    }
-                }
+    /// Records frames newly committed to `vault`.
+    fn committed(&mut self, id: VaultId, vault: &Vault, frames: &[&Frame]) {
+        for frame in frames {
+            let touch = vault.touched(frame);
+            if touch.items {
+                self.edits.insert(id);
+                self.items.insert(id);
+            }
+            if touch.name {
+                self.edits.insert(id);
+                self.vaults = true;
+            }
+            if touch.devices {
+                self.vaults = true;
+                self.devices.insert(id);
             }
         }
     }
@@ -150,56 +149,72 @@ impl Engine {
                 .transpose()?,
             peers: get_json(engine.store(), META_PEERS)?.unwrap_or_default(),
         };
-        let mut grouped: IndexMap<VaultId, Vec<Entry>> = IndexMap::new();
-        engine.store.for_each_entry(&mut |bytes| {
-            let entry = Entry::decode(bytes).context("decoding a stored entry")?;
-            grouped.entry(entry.vault()).or_default().push(entry);
+        // Decoding checks every frame's signature: spread it across cores.
+        let mut stored: Vec<(VaultId, Zeroizing<Vec<u8>>)> = Vec::new();
+        engine.store.for_each_frame(&mut |vault, bytes| {
+            stored.push((vault, Zeroizing::new(bytes.to_vec())));
             Ok(())
         })?;
-        for (id, entries) in grouped {
-            let names: BTreeSet<String> = entries
-                .iter()
-                .filter_map(|entry| match entry.payload() {
-                    Payload::Membership(
-                        MembershipOp::Create { name, .. } | MembershipOp::Rename { name },
-                    ) => Some(name.clone()),
-                    _ => None,
-                })
-                .collect();
-            // Rebuild exactly as Vault::load does, retaining the last validated
-            // name on failure, but never publish a partial vault for use/sync.
-            let mut entries = entries.into_iter();
-            let mut name = id.to_string();
-            let genesis = entries.next().context("empty stored vault group")?;
-            let result = Vault::from_genesis(genesis).and_then(|mut vault| {
-                for entry in entries {
-                    name = vault.name().to_owned();
-                    vault.apply(entry)?;
+        let decoded = deadbolt_core::par::map(&stored, |(_, bytes)| Frame::decode(bytes));
+        let mut grouped: IndexMap<VaultId, Result<Vec<Frame>>> = IndexMap::new();
+        for ((vault, _), frame) in stored.iter().zip(decoded) {
+            let slot = grouped.entry(*vault).or_insert_with(|| Ok(Vec::new()));
+            if let Ok(frames) = slot {
+                match frame {
+                    Ok(frame) => frames.push(frame),
+                    Err(error) => *slot = Err(anyhow!("decoding a stored frame: {error}")),
                 }
-                Ok(vault)
-            });
+            }
+        }
+        let keys = engine.keys();
+        for (id, frames) in grouped {
+            // Never publish a partial vault for use or sync.
+            let result = frames.and_then(|frames| Ok(Vault::open(&keys, frames)?));
             match result {
-                Ok(vault) => {
+                Ok(mut vault) => {
+                    let removed: Vec<String> =
+                        get_json(engine.store(), &meta_removed(&id))?.unwrap_or_default();
+                    vault.remember_removed(
+                        removed
+                            .iter()
+                            .filter_map(|d| unhex(d).ok().map(DeviceId::from_bytes)),
+                    );
                     engine.vaults.insert(id, vault);
                 }
                 Err(error) => {
-                    tracing::warn!(vault = %id, %error, "vault unavailable; stored entries retained");
+                    tracing::warn!(vault = %id, %error, "vault unavailable; stored frames retained");
                     engine.unavailable.insert(
                         id,
                         UnavailableVault {
-                            name,
-                            names,
+                            name: id.to_string(),
+                            names: BTreeSet::new(),
                             error: error.to_string(),
                         },
                     );
                 }
             }
         }
+        engine.fulfill_reader_duty();
         Ok(engine)
     }
 
+    /// Rule E6 for every vault: rewraps the keys other members can't reach
+    /// and this device holds. A failure leaves that vault as it was; a peer
+    /// holding the key can still do it, and the next unlock tries again.
+    pub fn fulfill_reader_duty(&mut self) -> usize {
+        let ids: Vec<VaultId> = self.vaults.keys().copied().collect();
+        let mut made = 0;
+        for id in ids {
+            match self.update(id, |v, a| Ok(v.fulfill_reader_duty(a)?)) {
+                Ok(frames) => made += frames.len(),
+                Err(error) => tracing::warn!(vault = %id, %error, "reader duty failed"),
+            }
+        }
+        made
+    }
+
     fn empty(store: Box<dyn VaultStore>, clock: Box<dyn Clock>) -> Self {
-        let id = DeviceSecret::from_bytes(store.device_secret()).device_id();
+        let id = DeviceKeys::from_seed(store.device_seed()).device_id();
         Self {
             store,
             clock,
@@ -229,11 +244,16 @@ impl Engine {
         self.store.as_ref()
     }
 
-    /// This device's signing key, fresh from the store (which keeps it in
-    /// locked memory). The engine holds no copy of its own: take it for one
-    /// signing step and let it drop, which wipes it.
-    pub fn secret(&self) -> DeviceSecret {
-        DeviceSecret::from_bytes(self.store.device_secret())
+    /// This device's keys, fresh from the store's seed (which it keeps in
+    /// locked memory). The engine holds no copy of its own: take them for
+    /// one step and let them drop, which wipes them.
+    pub fn keys(&self) -> DeviceKeys {
+        DeviceKeys::from_seed(self.store.device_seed())
+    }
+
+    /// This device as the author of a write made now.
+    pub fn author(&self) -> Author {
+        Author::new(self.keys(), self.wall_clock().as_millis() as u64)
     }
 
     /// Now, since the Unix epoch.
@@ -281,25 +301,41 @@ impl Engine {
     pub fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &Author) -> Result<T>,
     ) -> Result<T> {
         self.available(id)?;
-        let secret = self.secret();
+        let author = self.author();
         let store = &self.store;
         let changes = &mut self.changes;
-        let result = self
+        let vault = self.vaults.get_mut(&id).context("vault not held")?;
+        let removed = vault.previously_removed().len();
+        let result = vault.transact(
+            |vault| change(vault, &author),
+            |vault, frames| {
+                store.append(id, &mut frames.iter().copied())?;
+                changes.committed(id, vault, frames);
+                Ok(())
+            },
+        );
+        let result = self.check_append(result)?;
+        if self
             .vaults
-            .get_mut(&id)
-            .context("vault not held")?
-            .transact(
-                |vault| change(vault, &secret),
-                |entries| {
-                    persist(store.as_ref(), entries.iter().copied())?;
-                    changes.committed(id, entries);
-                    Ok(())
-                },
-            );
-        self.check_append(result)
+            .get(&id)
+            .is_some_and(|v| v.previously_removed().len() != removed)
+        {
+            self.save_removed(&id)?;
+        }
+        Ok(result)
+    }
+
+    /// Saves the parking rule's memory for `vault`.
+    fn save_removed(&self, vault: &VaultId) -> Result<()> {
+        let removed: Vec<String> = self.vaults[vault]
+            .previously_removed()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        set_json(self.store(), &meta_removed(vault), &removed)
     }
 
     /// Saves the device name, default vault and address book.
@@ -505,11 +541,10 @@ impl Engine {
         if self.contains_vault(&id) {
             bail!("this device already holds vault {}", vault.name());
         }
-        let result = self
-            .store
-            .append(&mut vault.iter_entries().map(Entry::encode));
+        let result = self.store.append(id, &mut vault.frames());
         self.check_append(result)?;
         self.vaults.insert(id, vault);
+        self.save_removed(&id)?;
         self.changes.vaults = true;
         self.changes.items.insert(id);
         self.changes.devices.insert(id);
@@ -519,7 +554,14 @@ impl Engine {
         self.save_meta()
     }
 
+    /// [`Engine::create_vault_with_kit`], dropping (and wiping) the kit.
     pub fn create_vault(&mut self, name: &str) -> Result<VaultId> {
+        Ok(self.create_vault_with_kit(name)?.0)
+    }
+
+    /// Creates a vault under a new recovery root, returning its id and the
+    /// root's 24-word recovery kit. The kit is shown once and never stored.
+    pub fn create_vault_with_kit(&mut self, name: &str) -> Result<(VaultId, Zeroizing<String>)> {
         if !valid_name(name) {
             bail!(
                 "invalid vault name {name:?}: use 1-64 lowercase letters, digits, - or _, starting with a letter"
@@ -528,10 +570,14 @@ impl Engine {
         if self.name_taken(name, None) {
             bail!("a vault named {name} already exists");
         }
-        let (vault, _) = Vault::create(&self.secret(), name)?;
+        let root = RecoverySecret::generate()?;
+        let label = self.meta.device_name.clone();
+        let (vault, _) = Vault::create(&root, &self.author(), name, &label)?;
+        let words = recovery::encode(&root);
+        drop(root);
         let id = vault.id();
         self.add_vault(vault)?;
-        Ok(id)
+        Ok((id, words))
     }
 
     pub fn vault_info(&self, id: &VaultId) -> VaultInfo {
@@ -556,7 +602,7 @@ impl Engine {
                 default: self.meta.default_vault == Some(*id),
                 members: 0,
                 member: false,
-                error: Some(format!("{}; stored entries retained", vault.error)),
+                error: Some(format!("{}; stored frames retained", vault.error)),
             }))
             .collect()
     }
@@ -574,7 +620,9 @@ impl Engine {
         let peer = self.peer(id);
         DeviceInfo {
             id: id.to_string(),
-            name: peer.and_then(|p| p.name.clone()),
+            name: peer
+                .and_then(|p| p.name.clone())
+                .or_else(|| self.card_label(id).map(str::to_owned)),
             this: false,
             connected: connected.contains(id.as_bytes()),
             last_seen: peer.and_then(|p| p.last_seen),
@@ -589,6 +637,14 @@ impl Engine {
                 .is_some_and(|seen| self.now().saturating_sub(seen) <= ONLINE_WINDOW_SECS)
     }
 
+    /// The label `device` gave itself in a vault's `DeviceCard`.
+    pub fn card_label(&self, device: &DeviceId) -> Option<&str> {
+        self.vaults
+            .values()
+            .find_map(|v| v.device_card(device).map(|(_, label)| label))
+            .filter(|l| !l.is_empty())
+    }
+
     /// Finds a member of `vault` by name or id prefix.
     pub fn resolve_device(&self, vault: &VaultId, query: &str) -> Result<DeviceId> {
         let matches = resolve_by_name_or_id(
@@ -596,7 +652,9 @@ impl Engine {
                 let name = if id == self.id {
                     Some(self.meta.device_name.as_str())
                 } else {
-                    self.peer(&id).and_then(|p| p.name.as_deref())
+                    self.peer(&id)
+                        .and_then(|p| p.name.as_deref())
+                        .or_else(|| self.card_label(&id))
                 };
                 (id, name)
             }),
@@ -636,11 +694,6 @@ fn resolve_by_name_or_id<'a, T: Copy + PartialEq + std::fmt::Display>(
         }
     }
     if names.is_empty() { prefixes } else { names }
-}
-
-fn persist<'a>(store: &dyn VaultStore, entries: impl IntoIterator<Item = &'a Entry>) -> Result<()> {
-    // Seal and wipe one encoding at a time, inside the same transaction.
-    store.append(&mut entries.into_iter().map(Entry::encode))
 }
 
 #[cfg(test)]

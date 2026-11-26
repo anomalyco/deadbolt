@@ -285,11 +285,17 @@ fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) 
 #[test]
 fn init_vaults_and_locking() {
     let a = Device::new();
-    assert_eq!(
+    // Each new vault prints its recovery kit once: 24 words and the vault id.
+    let kit = |out: String, first: &str| {
+        assert!(out.starts_with(first), "{out}");
+        assert!(out.contains("Recovery kit"), "{out}");
+        assert!(out.contains("24. "), "{out}");
+    };
+    kit(
         a.run(&["init", "--device-name", "alpha"]),
-        "created vault personal (default)\n"
+        "created vault personal (default)\n",
     );
-    assert_eq!(a.run(&["init", "work"]), "created vault work\n");
+    kit(a.run(&["init", "work"]), "created vault work\n");
     assert!(!a.try_run(&["init", "work"]).status.success());
     assert!(!a.try_run(&["init", "Bad Name"]).status.success());
 
@@ -345,6 +351,20 @@ fn init_vaults_and_locking() {
     .unwrap();
     a.run(&["unlock"]);
     assert!(a.state().contains("locks in 3"));
+}
+
+/// `init --json` prints the vault and its kit as one object and nothing else.
+#[test]
+fn init_json_prints_the_kit_as_one_object() {
+    let a = Device::new();
+    let out = a.run(&["init", "--device-name", "alpha", "--json"]);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let created: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(created["name"], "personal");
+    assert_eq!(created["default"], true);
+    assert!(!created["vault"].as_str().unwrap().is_empty(), "{out}");
+    let words = created["recovery_kit"].as_str().unwrap();
+    assert_eq!(words.split(' ').count(), 24, "{out}");
 }
 
 #[test]
@@ -535,7 +555,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
         assert_eq!(joined["event"]["inviter"]["name"], "alpha");
         assert_eq!(joined["event"]["passphrase"], true);
         assert_eq!(b.state(), "not set up");
-        assert!(!b.path("home").join("store.redb").exists());
+        assert!(!b.path("home").join("device").exists());
         if answer {
             socket
                 .write_all(b"{\"answer\":true,\"passphrase\":\"chosen late\"}\n")
@@ -561,7 +581,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
             wait(&mut bridge, Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(500));
             assert_eq!(b.state(), "not set up");
-            assert!(!b.path("home").join("store.redb").exists());
+            assert!(!b.path("home").join("device").exists());
             let devices = a.run(&["devices"]);
             assert!(
                 devices.contains("beta\t") && devices.contains("never seen"),

@@ -23,8 +23,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use deadbolt_core::tag::{MAX_TAGS, Query, fold_tag, item_has_tag, normalize_tag, tag_counts};
 use deadbolt_core::totp::Totp;
+use deadbolt_core::v2::FrameId;
 use deadbolt_core::{
-    DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
+    DataOp, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -332,18 +333,18 @@ fn clean_tags(raw: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Vec<Stri
     Ok(seen.into_values().collect())
 }
 
-fn write(s: &mut Engine, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
-    s.update(vault, |v, secret| Ok(v.write(secret, ops)?))
+fn write(s: &mut Engine, vault: VaultId, ops: Vec<DataOp>) -> Result<FrameId> {
+    s.update(vault, |v, author| Ok(v.write(author, ops)?))
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "callers just wrote this item while holding the session lock"
-)]
-fn info(s: &Engine, vault: VaultId, id: &ItemId) -> ItemInfo {
+/// The item just written, as listed. A write the vault took but doesn't
+/// count (a frame the membership no longer counts) is an error, not a panic.
+fn info(s: &Engine, vault: VaultId, id: &ItemId) -> Result<ItemInfo> {
     let vault = s.vault(&vault);
-    let item = vault.item(id).expect("just written");
-    live_summary(vault, &item)
+    let item = vault
+        .item(id)
+        .ok_or_else(|| anyhow!("{id} was written but doesn't count on this device yet"))?;
+    Ok(live_summary(vault, &item))
 }
 
 // The caller already knows the precise item. Only its immediate live id
@@ -506,7 +507,7 @@ pub fn create_with(
         }
         Ok((id, entry))
     })?;
-    Ok(info(s, vault, &id))
+    info(s, vault, &id)
 }
 
 fn derive_ssh_create(fields: &mut Vec<(String, Field)>) {
@@ -685,7 +686,7 @@ pub fn set_with(
     if !ops.is_empty() {
         write(s, vault, ops)?;
     }
-    Ok(info(s, vault, &item.id))
+    info(s, vault, &item.id)
 }
 
 pub fn unset(
@@ -704,7 +705,7 @@ pub fn unset(
         ops.push(DataOp::password_changed(item.id, None));
     }
     write(s, vault, ops)?;
-    Ok(info(s, vault, &item.id))
+    info(s, vault, &item.id)
 }
 
 pub fn remove(s: &mut Engine, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
@@ -737,5 +738,5 @@ pub fn restore(s: &mut Engine, vault: Option<&str>, query: &[String]) -> Result<
     let vault = s.resolve(vault)?;
     let id = Listing::deleted(s.vault(&vault)).find(query)?.id;
     write(s, vault, vec![DataOp::restore(id)])?;
-    Ok(info(s, vault, &id))
+    info(s, vault, &id)
 }

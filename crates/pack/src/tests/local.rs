@@ -337,6 +337,48 @@ fn a_power_cut_during_the_first_commit_never_bricks_the_device() {
 }
 
 #[test]
+fn peek_skips_torn_files_and_reports_damaged_ones() {
+    let (full, _) = first_commit_file();
+    for cut in 0..full.len() {
+        let blocks = MemBlocks::new();
+        blocks.put_raw("local-1.sealed", &full[..cut]);
+        assert!(
+            local::peek_slots(&blocks).unwrap().is_none(),
+            "cut at {cut}: torn, so no state"
+        );
+    }
+    let blocks = MemBlocks::new();
+    blocks.put_raw("local-1.sealed", &full);
+    assert_eq!(
+        local::peek_slots(&blocks).unwrap().as_deref(),
+        Some(b"slots".as_slice())
+    );
+    // A torn newer commit falls back to the complete one below it.
+    let mut second = full[..30].to_vec();
+    second[15] = 2;
+    blocks.put_raw("local-2.sealed", &second);
+    assert_eq!(
+        local::peek_slots(&blocks).unwrap().as_deref(),
+        Some(b"slots".as_slice())
+    );
+
+    let mut wrong_seq = full.clone();
+    wrong_seq[15] = 9;
+    for damaged in [
+        [b"XXXX".as_slice(), &full[4..]].concat(),
+        b"XX".to_vec(),
+        wrong_seq,
+    ] {
+        let blocks = MemBlocks::new();
+        blocks.put_raw("local-1.sealed", &damaged);
+        assert!(
+            matches!(local::peek_slots(&blocks), Err(Error::CorruptLocal { .. })),
+            "{damaged:?}"
+        );
+    }
+}
+
+#[test]
 fn a_complete_file_that_fails_to_open_is_reported_and_kept() {
     let (full, _) = first_commit_file();
     // The wrong root: a decrypt failure, and the file stays.

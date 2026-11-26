@@ -84,7 +84,7 @@ mod tests {
     const OTP: &str = "JBSWY3DPEHPK3PXP";
 
     fn loaded(dir: &std::path::Path) -> Loaded {
-        let params = deadbolt_store::KdfParams {
+        let params = crate::disk::KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
             p_cost: 1,

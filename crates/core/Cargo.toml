@@ -12,6 +12,9 @@ workspace = true
 [features]
 default = ["health"]
 health = ["dep:zxcvbn"]
+# A per-thread seeded random stream for the CLI's deterministic simulator.
+# Inert until a thread is seeded; never seed one outside tests.
+sim = []
 
 [dependencies]
 blake3 = { version = "1.8", features = ["zeroize"] }

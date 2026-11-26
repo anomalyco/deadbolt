@@ -18,16 +18,18 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::disk::KdfParams;
 use anyhow::{Context, Result, anyhow, bail};
-use deadbolt_core::{DeviceId, DeviceSecret, VaultId};
+use deadbolt_core::v2::DeviceKeys;
+use deadbolt_core::{DeviceId, VaultId};
 use deadbolt_net::application;
 pub(super) use deadbolt_net::application::{Offer, Welcomed};
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, Node, NodeConfig, PairingCode, PairingContext,
     PairingOptions, PeerId, SyncHandler,
 };
-use deadbolt_store::KdfParams;
 use tracing::info;
+use zeroize::Zeroizing;
 
 use super::session::{Addr, Loaded, clean_name};
 use super::{Conversation, Daemon};
@@ -52,14 +54,14 @@ pub(super) fn read_offer(offer: &[u8]) -> Result<(Offer, VaultId)> {
 }
 
 pub(super) fn join_blob(
-    secret: &DeviceSecret,
+    keys: &DeviceKeys,
     device_name: &str,
     inviter: DeviceId,
     vault: &VaultId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>> {
     Ok(application::join_blob(
-        secret,
+        keys,
         device_name,
         inviter,
         vault,
@@ -90,14 +92,12 @@ fn inviter_info(welcomed: &Welcomed) -> DeviceInfo {
 }
 
 pub(super) fn verify_welcome(
-    device: &DeviceId,
+    keys: &DeviceKeys,
     inviter: DeviceId,
     offer: Offer,
     welcome: application::WelcomeReplay,
 ) -> Result<Welcomed> {
-    Ok(application::verify_welcome(
-        device, inviter, offer, welcome,
-    )?)
+    Ok(application::verify_welcome(keys, inviter, offer, welcome)?)
 }
 
 /// Stores a checked welcome.
@@ -135,7 +135,7 @@ pub(super) fn apply_welcome(
     offer: Offer,
     welcome: application::WelcomeReplay,
 ) -> Result<VaultInfo> {
-    let welcomed = verify_welcome(&s.id, inviter, offer, welcome)?;
+    let welcomed = verify_welcome(&s.keys(), inviter, offer, welcome)?;
     adopt(s, welcomed)
 }
 
@@ -143,7 +143,7 @@ pub(super) fn apply_welcome(
 /// vault it received, held in memory until a passphrase arrives. Dropping it
 /// discards them.
 pub(super) struct Fresh {
-    secret: DeviceSecret,
+    seed: Zeroizing<[u8; 32]>,
     name: String,
     welcomed: Welcomed,
 }
@@ -161,7 +161,7 @@ impl Fresh {
             passphrase.expose().as_bytes(),
             &self.name,
             params,
-            self.secret,
+            &self.seed,
         )?;
         let vault = adopt(&mut loaded, self.welcomed)?;
         Ok((loaded, vault))
@@ -204,7 +204,7 @@ enum Home<'a> {
 }
 
 struct Memory {
-    secret: DeviceSecret,
+    seed: Zeroizing<[u8; 32]>,
     name: String,
     addr: Addr,
 }
@@ -228,7 +228,7 @@ impl Joiner for NewDevice<'_> {
                     bail!("this device already holds vault {}", offer.vault_name);
                 }
                 join_blob(
-                    &s.secret(),
+                    &s.keys(),
                     &s.meta.device_name,
                     inviter,
                     &vault,
@@ -236,7 +236,7 @@ impl Joiner for NewDevice<'_> {
                 )
             }),
             Home::Memory(memory) => join_blob(
-                &memory.secret,
+                &DeviceKeys::from_seed(&memory.seed),
                 &memory.name,
                 inviter,
                 &vault,
@@ -259,9 +259,12 @@ impl Joiner for NewDevice<'_> {
             .unwrap_or_else(|e| e.into_inner())
             .take()
             .ok_or("no offer")?;
-        let device = DeviceId::from_bytes(ctx.local);
         let inviter = DeviceId::from_bytes(ctx.remote);
-        let welcomed = verify_welcome(&device, inviter, offer, welcome).map_err(handler_error)?;
+        let keys = match &self.home {
+            Home::Store(daemon) => daemon.with(|s| Ok(s.keys())).map_err(handler_error)?,
+            Home::Memory(memory) => DeviceKeys::from_seed(&memory.seed),
+        };
+        let welcomed = verify_welcome(&keys, inviter, offer, welcome).map_err(handler_error)?;
         match &self.home {
             Home::Store(daemon) => {
                 let inviter = inviter_info(&welcomed);
@@ -323,8 +326,8 @@ fn explain_pair(error: deadbolt_net::Error) -> anyhow::Error {
     }
 }
 
-async fn fresh_node(daemon: &Daemon, secret: &DeviceSecret) -> Result<Node> {
-    let key = *secret.to_bytes();
+async fn fresh_node(daemon: &Daemon, seed: &[u8; 32]) -> Result<Node> {
+    let key = super::session::node_key(seed);
     let config = if daemon.local_net {
         NodeConfig::local_only(key)
     } else {
@@ -344,7 +347,7 @@ pub async fn join(
         .pairing
         .try_lock()
         .map_err(|_| anyhow!("another pairing is already running on this device"))?;
-    let set_up = deadbolt_store::is_initialized(&daemon.paths.data);
+    let set_up = crate::disk::is_initialized(&daemon.paths.data);
     // A locked device fails here, before a code shows, so the client can
     // unlock and ask again.
     let (node, home) = if set_up {
@@ -357,9 +360,10 @@ pub async fn join(
         if name.is_empty() {
             bail!("the device name cannot be empty");
         }
-        let secret = DeviceSecret::generate();
-        let node = fresh_node(daemon, &secret).await?;
-        (node.clone(), Some((node, secret, name)))
+        let mut seed = Zeroizing::new([0u8; 32]);
+        getrandom::fill(seed.as_mut_slice())?;
+        let node = fresh_node(daemon, &seed).await?;
+        (node.clone(), Some((node, seed, name)))
     };
     let code = PairingCode::generate()?;
     conv.event(Event::Code {
@@ -369,10 +373,10 @@ pub async fn join(
     let listener = node.start_pairing(&code, PairingOptions::default()).await?;
     let (fresh_node, home) = match home {
         None => (None, Home::Store(daemon)),
-        Some((node, secret, name)) => (
+        Some((node, seed, name)) => (
             Some(node.clone()),
             Home::Memory(Box::new(Memory {
-                secret,
+                seed,
                 name,
                 addr: Addr::from(node.addr()),
             })),
@@ -419,7 +423,7 @@ pub async fn join(
             vault
         }
         Home::Memory(memory) => {
-            let Memory { secret, name, .. } = *memory;
+            let Memory { seed, name, .. } = *memory;
             let welcomed = welcomed
                 .into_inner()
                 .unwrap_or_else(|e| e.into_inner())
@@ -430,7 +434,7 @@ pub async fn join(
                 passphrase: passphrase.is_none(),
             };
             let fresh = Fresh {
-                secret,
+                seed,
                 name,
                 welcomed,
             };
@@ -565,7 +569,7 @@ mod tests {
         let daemon = Daemon::new(super::super::tests::test_paths(dir), true, KDF);
         daemon.ready.send_replace(true);
         let node = Node::spawn(
-            NodeConfig::local_only(*loaded.secret().to_bytes()),
+            NodeConfig::local_only(loaded.node_key()),
             Arc::new(|_: &PeerId| false),
             super::super::sync::Handler(daemon.clone()),
         )
@@ -678,8 +682,11 @@ mod tests {
         let a = test_daemon(a_dir.path(), "alpha").await;
         let vault = a.with(|s| s.create_vault("personal")).unwrap();
         for keep in [false, true] {
-            let secret = DeviceSecret::generate();
-            let b_id = *secret.device_id().as_bytes();
+            let mut seed = Zeroizing::new([0u8; 32]);
+            getrandom::fill(seed.as_mut_slice()).unwrap();
+            let b_id = *deadbolt_core::v2::DeviceKeys::from_seed(&seed)
+                .device_id()
+                .as_bytes();
             let inviter = ExistingDevice {
                 daemon: &a,
                 vault,
@@ -687,7 +694,7 @@ mod tests {
             };
             let joiner = NewDevice {
                 home: Home::Memory(Box::new(Memory {
-                    secret,
+                    seed,
                     name: "beta".into(),
                     addr: Addr::default(),
                 })),
@@ -704,9 +711,9 @@ mod tests {
             let Home::Memory(memory) = home else {
                 unreachable!()
             };
-            let Memory { secret, name, .. } = *memory;
+            let Memory { seed, name, .. } = *memory;
             let fresh = Fresh {
-                secret,
+                seed,
                 name,
                 welcomed: welcomed.into_inner().unwrap().unwrap(),
             };
@@ -754,18 +761,10 @@ mod tests {
 
         // The inviter commits b's Add, but b never stores the welcome.
         let join = b
-            .with(|s| {
-                join_blob(
-                    &s.secret(),
-                    "beta",
-                    DeviceId::from_bytes(a_id),
-                    &vault,
-                    None,
-                )
-            })
+            .with(|s| join_blob(&s.keys(), "beta", DeviceId::from_bytes(a_id), &vault, None))
             .unwrap();
         a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
-        let entries = a.with(|s| Ok(s.vault(&vault).entries().len())).unwrap();
+        let entries = a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap();
 
         let inviter = ExistingDevice {
             daemon: &a,
@@ -784,7 +783,7 @@ mod tests {
         assert!(b.with(|s| Ok(s.vaults.contains_key(&vault))).unwrap());
         // No second Add.
         assert_eq!(
-            a.with(|s| Ok(s.vault(&vault).entries().len())).unwrap(),
+            a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap(),
             entries
         );
 
@@ -819,6 +818,104 @@ mod tests {
         a.lock().await;
         b.lock().await;
         other.lock().await;
+    }
+
+    /// The inviter writes a joiner's `Add` and then its `DeviceCard`. A
+    /// crash between the two leaves a member with no card; the retried
+    /// welcome writes the card instead of skipping it with the `Add`.
+    #[tokio::test]
+    async fn a_retried_welcome_writes_the_card_an_interrupted_one_missed() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = test_daemon(a_dir.path(), "alpha").await;
+        let b = test_daemon(b_dir.path(), "beta").await;
+        let vault = a.with(|s| s.create_vault("personal")).unwrap();
+        let a_dev = DeviceId::from_bytes(id(&a));
+        let b_dev = DeviceId::from_bytes(id(&b));
+        let (kem, net, consent, join) = b
+            .with(|s| {
+                let keys = s.keys();
+                let consent = deadbolt_core::v2::sign_join_consent(
+                    keys.sign_key(),
+                    &vault,
+                    &a_dev,
+                    &keys.kem_public(),
+                );
+                let join = join_blob(&keys, "beta", a_dev, &vault, None)?;
+                Ok((keys.kem_public(), keys.net_public(), consent, join))
+            })
+            .unwrap();
+        // Only the Add landed.
+        a.with(|s| s.update(vault, |v, key| Ok(v.add(key, b_dev, kem, consent)?)))
+            .unwrap();
+        let card = |a: &Daemon| {
+            a.with(|s| {
+                Ok(s.vault(&vault)
+                    .device_card(&b_dev)
+                    .map(|(net, label)| (*net.as_bytes(), label.to_owned())))
+            })
+            .unwrap()
+        };
+        assert_eq!(card(&a), None);
+        let frames = a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap();
+
+        a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
+        assert_eq!(card(&a), Some((*net.as_bytes(), "beta".to_owned())));
+        // The card, and no second Add.
+        assert_eq!(
+            a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap(),
+            frames + 1
+        );
+        // Complete now: another retry writes nothing.
+        a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
+        assert_eq!(
+            a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap(),
+            frames + 1
+        );
+        a.lock().await;
+        b.lock().await;
+    }
+
+    /// A welcome that admits the joiner but wraps no epoch key it can open
+    /// (here, wrapped to the wrong KEM key) would store a vault this device
+    /// can never read: it's refused.
+    #[tokio::test]
+    async fn a_welcome_the_joiner_cannot_read_is_refused() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = test_daemon(a_dir.path(), "alpha").await;
+        let b = test_daemon(b_dir.path(), "beta").await;
+        let vault = a.with(|s| s.create_vault("personal")).unwrap();
+        let a_dev = DeviceId::from_bytes(id(&a));
+        let b_dev = DeviceId::from_bytes(id(&b));
+        let wrong = DeviceKeys::from_seed(&[9; 32]).kem_public();
+        let (consent, join) = b
+            .with(|s| {
+                let keys = s.keys();
+                let consent =
+                    deadbolt_core::v2::sign_join_consent(keys.sign_key(), &vault, &a_dev, &wrong);
+                Ok((consent, join_blob(&keys, "beta", a_dev, &vault, None)?))
+            })
+            .unwrap();
+        a.with(|s| s.update(vault, |v, key| Ok(v.add(key, b_dev, wrong, consent)?)))
+            .unwrap();
+        let (offered, replay) = a
+            .with(|s| {
+                let (offered, _) = read_offer(&offer(s, vault, &b_dev, None)?)?;
+                let (history, _) = welcome(s, vault, b_dev, &join, None)?;
+                Ok((offered, test_replay(s, history)))
+            })
+            .unwrap();
+        let err = b
+            .with(|s| verify_welcome(&s.keys(), a_dev, offered, replay))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("gives this device no key"),
+            "{err:#}"
+        );
+        a.lock().await;
+        b.lock().await;
     }
 
     #[tokio::test]
@@ -892,6 +989,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "cancelled");
-        assert!(!deadbolt_store::is_initialized(dir.path()));
+        assert!(!crate::disk::is_initialized(dir.path()));
     }
 }

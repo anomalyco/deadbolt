@@ -21,7 +21,7 @@ fn daemon() -> (Arc<Daemon>, tempfile::TempDir) {
     let daemon = Daemon::new(
         test_paths(dir.path()),
         true,
-        deadbolt_store::KdfParams::DEFAULT,
+        crate::disk::KdfParams::DEFAULT,
     );
     (daemon, dir)
 }

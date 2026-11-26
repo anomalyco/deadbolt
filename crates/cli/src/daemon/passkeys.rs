@@ -211,7 +211,7 @@ pub(super) mod tests {
     use crate::protocol::ErrorCode;
 
     fn loaded(dir: &std::path::Path) -> Loaded {
-        let params = deadbolt_store::KdfParams {
+        let params = crate::disk::KdfParams {
             m_cost_kib: 64,
             t_cost: 1,
             p_cost: 1,
@@ -484,7 +484,7 @@ pub(super) mod tests {
         }
 
         pub(in crate::daemon) async fn unlocked() -> Fixture {
-            unlocked_with(deadbolt_store::KdfParams {
+            unlocked_with(crate::disk::KdfParams {
                 m_cost_kib: 64,
                 t_cost: 1,
                 p_cost: 1,
@@ -493,13 +493,13 @@ pub(super) mod tests {
         }
 
         /// An unlocked daemon whose passphrase ("test") derives with `fast`.
-        pub(in crate::daemon) async fn unlocked_with(fast: deadbolt_store::KdfParams) -> Fixture {
+        pub(in crate::daemon) async fn unlocked_with(fast: crate::disk::KdfParams) -> Fixture {
             let dir = tempfile::tempdir().unwrap();
             let secret = [61; 32];
-            drop(deadbolt_store::init_with_params(dir.path(), b"test", &secret, fast).unwrap());
+            drop(crate::disk::init_with_params(dir.path(), b"test", &secret, fast).unwrap());
             let mut loaded = Loaded::open(dir.path(), b"test").unwrap();
             loaded.create_vault("personal").unwrap();
-            let key = deadbolt_store::generate_biometric_key().unwrap();
+            let key = crate::disk::generate_biometric_key().unwrap();
             let mut token = b"DBSE\x01\x01".to_vec();
             token.extend_from_slice(&session::now().to_le_bytes());
             token.extend_from_slice(b"payload");

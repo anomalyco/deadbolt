@@ -134,6 +134,46 @@ pub struct Tombstone {
     pub at_ms: u64,
 }
 
+/// Which ops one fold pass applies: all of them, or one of `of` disjoint
+/// shards split by item, with the vault-wide ops in shard 0. Items fold
+/// independently, so shards can fold in parallel and merge by union.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Shard {
+    pub k: usize,
+    pub of: usize,
+}
+
+impl Shard {
+    pub const ALL: Self = Self { k: 0, of: 1 };
+
+    fn takes(self, op: &DataOp) -> bool {
+        let item = match op {
+            DataOp::PutItem { item, .. }
+            | DataOp::SetField { item, .. }
+            | DataOp::ClearField { item, .. }
+            | DataOp::DeleteItem { item }
+            | DataOp::RestoreItem { item } => item,
+            DataOp::VaultMeta { .. } | DataOp::DeviceCard { .. } | DataOp::Dispute { .. } => {
+                return self.k == 0;
+            }
+        };
+        usize::from(item.as_bytes()[0]) % self.of == self.k
+    }
+}
+
+/// `field`'s register, cloning its name only the first time: unlock folds
+/// every op, and most fields already exist by their second write.
+fn field_register<'a>(
+    fields: &'a mut BTreeMap<String, Register<Option<FieldValue>>>,
+    field: &str,
+) -> &'a mut Register<Option<FieldValue>> {
+    if !fields.contains_key(field) {
+        fields.insert(field.to_owned(), Register::default());
+    }
+    #[expect(clippy::expect_used, reason = "inserted just above")]
+    fields.get_mut(field).expect("present")
+}
+
 /// One item's registers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ItemState {
@@ -242,8 +282,12 @@ impl FoldedState {
         payload: &DataPayload,
         book: &Book<'_>,
         card_ok: impl Fn(&DeviceId, &DeviceId) -> bool,
+        shard: Shard,
     ) {
         for (index, op) in payload.ops.iter().enumerate() {
+            if !shard.takes(op) {
+                continue;
+            }
             let index = u32::try_from(index).unwrap_or(u32::MAX);
             let alive = Write {
                 dot,
@@ -268,8 +312,7 @@ impl FoldedState {
                         index,
                         value: Some(value.clone()),
                     };
-                    let reg = state.fields.entry(field.clone()).or_default();
-                    reg.insert(write, book);
+                    field_register(&mut state.fields, field).insert(write, book);
                     state.life.insert(alive, book);
                 }
                 DataOp::ClearField { item, field } => {
@@ -279,8 +322,7 @@ impl FoldedState {
                         index,
                         value: None,
                     };
-                    let reg = state.fields.entry(field.clone()).or_default();
-                    reg.insert(write, book);
+                    field_register(&mut state.fields, field).insert(write, book);
                     state.life.insert(alive, book);
                 }
                 DataOp::DeleteItem { item } => {

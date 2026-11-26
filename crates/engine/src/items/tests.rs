@@ -212,13 +212,13 @@ fn a_set_removes_its_unset_fields_in_the_same_entry() {
     let fields = vec![input("password", "pw-1"), input("notes", "old")];
     let id = create(&mut s, None, "login", None, fields).unwrap().id;
     let vault = s.resolve(None).unwrap();
-    let before = s.vault(&vault).entries().len();
+    let before = s.vault(&vault).frames().count();
     let query = [id];
     let unset = ["notes".to_string()];
     let fields = vec![input("password", "pw-2")];
     let name = Some("GitHub".into());
     let item = set(&mut s, None, &query, fields, name, &unset).unwrap();
-    assert_eq!(s.vault(&vault).entries().len(), before + 1);
+    assert_eq!(s.vault(&vault).frames().count(), before + 1);
     assert_eq!(item.label, "GitHub");
     let item = get(&s, None, &query, false, false, &[], false).unwrap();
     let fields: Vec<(&str, &str)> = item
@@ -243,7 +243,7 @@ fn a_set_removes_its_unset_fields_in_the_same_entry() {
     );
     assert!(twice.unwrap_err().to_string().contains("twice"));
     // The card's creation, and nothing refused.
-    assert_eq!(s.vault(&vault).entries().len(), before + 2);
+    assert_eq!(s.vault(&vault).frames().count(), before + 2);
 }
 
 /// An edit that empties a field another device already removed still
@@ -260,11 +260,11 @@ fn a_set_skips_unset_fields_already_gone() {
     let fields = vec![input("password", "pw-1"), input("url", "a.com")];
     let id = create(&mut s, None, "login", None, fields).unwrap().id;
     let vault = s.resolve(None).unwrap();
-    let before = s.vault(&vault).entries().len();
+    let before = s.vault(&vault).frames().count();
     let query = [id];
     let gone = ["notes".to_string(), "pin-hint".to_string()];
     set(&mut s, None, &query, vec![], None, &gone).unwrap();
-    assert_eq!(s.vault(&vault).entries().len(), before, "nothing to write");
+    assert_eq!(s.vault(&vault).frames().count(), before, "nothing to write");
     let unset = ["notes".to_string(), "url".to_string()];
     let item = set(
         &mut s,
@@ -275,7 +275,7 @@ fn a_set_skips_unset_fields_already_gone() {
         &unset,
     );
     assert!(item.is_ok(), "{item:?}");
-    assert_eq!(s.vault(&vault).entries().len(), before + 1);
+    assert_eq!(s.vault(&vault).frames().count(), before + 1);
     let item = get(&s, None, &query, false, false, &[], false).unwrap();
     let names: Vec<&str> = item.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["password"]);
@@ -286,7 +286,7 @@ fn a_set_skips_unset_fields_already_gone() {
     let card = create(&mut s, None, "card", None, card).unwrap().id;
     let error = set(&mut s, None, &[card], vec![], None, &["expiry".into()]);
     assert!(error.is_ok(), "an optional field: {error:?}");
-    assert_eq!(s.vault(&vault).entries().len(), before + 2);
+    assert_eq!(s.vault(&vault).frames().count(), before + 2);
 }
 
 #[test]

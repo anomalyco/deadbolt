@@ -252,8 +252,9 @@ async fn create(
     let status = start(paths, launch, post).await?;
     set_up(paths, &status, device, post).await?;
     post.send(Progress::Stage(Stage::CreatingVault));
+    // The app doesn't show the recovery kit yet; it drops it here.
     match deadbolt_client::simple(paths, Command::VaultCreate { name: vault }).await? {
-        Reply::Vault { vault } => Ok(vault),
+        Reply::VaultCreated { vault, .. } => Ok(vault),
         _ => Err(unexpected()),
     }
 }

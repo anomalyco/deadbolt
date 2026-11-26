@@ -1,13 +1,21 @@
+//! Argon2id over the passphrase, and the small AEAD the key slots use.
+
 use argon2::{Algorithm, Argon2, Block, Params, Version};
+use chacha20poly1305::{AeadInOut, KeyInit, XChaCha20Poly1305};
 use zeroize::Zeroizing;
 
-use crate::crypto::{self, KEY_LEN, SecretKey};
-use crate::error::{Error, Result};
+use super::{Error, Result};
 
-/// Argon2id cost parameters for deriving the local unlock key.
+pub(crate) const KEY_LEN: usize = 32;
+const NONCE_LEN: usize = 24;
+const TAG_LEN: usize = 16;
+
+pub(crate) type SecretKey = Zeroizing<[u8; KEY_LEN]>;
+
+/// Argon2id cost parameters for deriving the passphrase key.
 ///
-/// They are stored (authenticated, not secret) next to the encrypted key set,
-/// so they can be raised later without breaking existing stores.
+/// They are stored (authenticated, not secret) in the passphrase slot, so
+/// they can be raised later without breaking existing stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KdfParams {
     /// Memory cost in KiB.
@@ -28,14 +36,12 @@ impl KdfParams {
         p_cost: 1,
     };
 
-    // Upper bounds on parameters, checked at creation and on every header read,
-    // so a tampered header cannot make unlock allocate more than 256 MiB or run
-    // for more than about the time of 1.5 GiB of passes (a few seconds). They
-    // leave 4x headroom in memory, 8x in passes and 8x in work over `DEFAULT`.
+    // Upper bounds, checked at creation and on every slot read, so a tampered
+    // slot cannot make unlock allocate more than 256 MiB or run for more than
+    // about the time of 1.5 GiB of passes.
     const MAX_M_COST_KIB: u32 = 4 * Self::DEFAULT.m_cost_kib;
     const MAX_T_COST: u32 = 8 * Self::DEFAULT.t_cost;
     const MAX_P_COST: u32 = 64;
-    /// Memory times passes, in KiB.
     const MAX_WORK_KIB: u64 = 8 * Self::DEFAULT.m_cost_kib as u64 * Self::DEFAULT.t_cost as u64;
 
     fn argon2_params(&self) -> Result<Params> {
@@ -61,10 +67,8 @@ const ALG_ARGON2ID_V13: u8 = 1;
 const SALT_LEN: usize = 16;
 pub(crate) const ENCODED_LEN: usize = 1 + 4 + 4 + 4 + SALT_LEN;
 
-/// KDF algorithm, parameters and salt, as stored in the header.
-///
-/// Encoding (29 bytes): `alg (1) || m_cost_kib (u32 LE) || t_cost (u32 LE) ||
-/// p_cost (u32 LE) || salt (16)`.
+/// KDF algorithm, parameters and salt: `alg (1) || m (u32 LE) || t (u32 LE)
+/// || p (u32 LE) || salt (16)`.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct KdfHeader {
     pub(crate) params: KdfParams,
@@ -76,7 +80,7 @@ impl KdfHeader {
         params.validate()?;
         Ok(Self {
             params,
-            salt: crypto::random()?,
+            salt: random()?,
         })
     }
 
@@ -115,13 +119,13 @@ impl KdfHeader {
         Ok(Self { params, salt })
     }
 
-    /// Derives the 256-bit local unlock key.
+    /// Derives the 256-bit passphrase key.
     pub(crate) fn derive(&self, passphrase: &[u8]) -> Result<SecretKey> {
         let params = self.params.argon2_params()?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.clone());
-        // Allocated here (rather than by argon2) so the working memory, which
-        // holds passphrase-derived state, is wiped when dropped. Fallibly, so a
-        // machine short of memory gets an error rather than an abort.
+        // Allocated here so the working memory, which holds passphrase-derived
+        // state, is wiped when dropped; fallibly, so a machine short of memory
+        // gets an error rather than an abort.
         let mut memory = Zeroizing::new(Vec::new());
         memory
             .try_reserve_exact(params.block_count())
@@ -140,4 +144,56 @@ impl KdfHeader {
             .map_err(|e| Error::InvalidKdfParams(e.to_string()))?;
         Ok(key)
     }
+}
+
+pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
+    let mut out = [0u8; N];
+    getrandom::fill(&mut out).map_err(Error::Rng)?;
+    Ok(out)
+}
+
+pub(crate) fn random_key() -> Result<SecretKey> {
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    getrandom::fill(key.as_mut_slice()).map_err(Error::Rng)?;
+    Ok(key)
+}
+
+/// `nonce (24) || ciphertext || tag (16)` of `plain` under `key`.
+pub(crate) fn seal(key: &[u8; KEY_LEN], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let nonce = random::<NONCE_LEN>()?;
+    let mut out = Vec::with_capacity(NONCE_LEN + plain.len() + TAG_LEN);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(plain);
+    let Ok(tag) =
+        cipher.encrypt_inout_detached(&nonce.into(), aad, out[NONCE_LEN..].as_mut().into())
+    else {
+        zeroize::Zeroize::zeroize(&mut out);
+        return Err(Error::corrupt("message too long to encrypt"));
+    };
+    out.extend_from_slice(&tag);
+    Ok(out)
+}
+
+/// Inverse of [`seal`]; `None` if authentication fails.
+pub(crate) fn open(key: &[u8; KEY_LEN], aad: &[u8], sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    if sealed.len() < NONCE_LEN + TAG_LEN {
+        return None;
+    }
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let (nonce, rest) = sealed.split_at(NONCE_LEN);
+    let (ciphertext, tag) = rest.split_at(rest.len() - TAG_LEN);
+    let nonce: [u8; NONCE_LEN] = nonce.try_into().ok()?;
+    let tag: [u8; TAG_LEN] = tag.try_into().ok()?;
+    let mut buf = Zeroizing::new(ciphertext.to_vec());
+    cipher
+        .decrypt_inout_detached(&nonce.into(), aad, buf.as_mut_slice().into(), &tag.into())
+        .ok()?;
+    Some(buf)
+}
+
+/// A 32-byte key out of an opened slot.
+pub(crate) fn key_of(plain: &[u8]) -> Option<SecretKey> {
+    let bytes: [u8; KEY_LEN] = plain.try_into().ok()?;
+    Some(Zeroizing::new(bytes))
 }

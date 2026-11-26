@@ -94,7 +94,7 @@ type BiometricUnsealHook = Arc<
 pub struct Daemon {
     paths: Paths,
     local_net: bool,
-    kdf: deadbolt_store::KdfParams,
+    kdf: crate::disk::KdfParams,
     session: Mutex<Option<Session>>,
     /// The membership gate: members of any vault this device holds.
     members: Arc<RwLock<HashSet<PeerId>>>,
@@ -109,7 +109,7 @@ pub struct Daemon {
     /// breach check) stops and writes nothing.
     interrupts: watch::Sender<u64>,
     /// In-memory metadata of `"biometric.token"`, loaded once at startup and
-    /// updated on enrollment/clear/wipe so `status()` never opens `store.redb`.
+    /// updated on enrollment/clear/wipe so `status()` never opens the sealed store.
     biometric_slot: Mutex<Option<biometric::TokenMeta>>,
     /// True once Touch ID has been enrolled for this store (`initial_slot.is_some()`
     /// or enrolled during this daemon's lifetime) and not explicitly turned off,
@@ -155,7 +155,7 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    fn new(paths: Paths, local_net: bool, kdf: deadbolt_store::KdfParams) -> Arc<Daemon> {
+    fn new(paths: Paths, local_net: bool, kdf: crate::disk::KdfParams) -> Arc<Daemon> {
         let initial_slot = biometric::read_token_meta(&paths.data);
         biometric::spawn_background_refresh();
         Arc::new(Daemon {
@@ -250,8 +250,8 @@ struct Idle {
 fn wrong_passphrase(error: &anyhow::Error) -> bool {
     error.chain().any(|e| {
         matches!(
-            e.downcast_ref::<deadbolt_store::Error>(),
-            Some(deadbolt_store::Error::WrongPassphrase)
+            e.downcast_ref::<crate::disk::Error>(),
+            Some(crate::disk::Error::WrongPassphrase)
         )
     })
 }
@@ -293,7 +293,7 @@ impl Daemon {
             .biometric_cooldown_until
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        if deadbolt_store::is_initialized(&self.paths.data) {
+        if crate::disk::is_initialized(&self.paths.data) {
             bail!("this device is already set up");
         }
         let device_name = clean_name(&device_name);
@@ -331,7 +331,7 @@ impl Daemon {
             .biometric_cooldown_until
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        if deadbolt_store::is_initialized(&self.paths.data) {
+        if crate::disk::is_initialized(&self.paths.data) {
             bail!("this device was set up meanwhile; nothing from the join was saved");
         }
         if passphrase.expose().is_empty() {
@@ -386,11 +386,11 @@ impl Daemon {
                 tokio::task::spawn_blocking(move || check.matches(passphrase.as_bytes())).await?;
             turn.settle(right);
             if !right {
-                return Err(deadbolt_store::Error::WrongPassphrase.into());
+                return Err(crate::disk::Error::WrongPassphrase.into());
             }
             return self.with(|_| self.set_timeout(timeout_secs));
         }
-        if !deadbolt_store::is_initialized(&self.paths.data) {
+        if !crate::disk::is_initialized(&self.paths.data) {
             return Err(fail(
                 ErrorCode::NotInitialized,
                 "this device is not set up; run `deadbolt init` or `deadbolt join`",
@@ -460,7 +460,7 @@ impl Daemon {
         if unlocked && self.with(|_| self.tighten_timeout(timeout_secs))? {
             return Ok(false);
         }
-        if !unlocked && !deadbolt_store::is_initialized(&self.paths.data) {
+        if !unlocked && !crate::disk::is_initialized(&self.paths.data) {
             return Err(fail(
                 ErrorCode::NotInitialized,
                 "this device is not set up; run `deadbolt init` or `deadbolt join`",
@@ -604,8 +604,7 @@ impl Daemon {
             } else {
                 let dir = self.paths.data.clone();
                 let raw =
-                    tokio::task::spawn_blocking(move || deadbolt_store::biometric_token(&dir))
-                        .await?;
+                    tokio::task::spawn_blocking(move || crate::disk::biometric_token(&dir)).await?;
                 let token = match raw {
                     Ok(Some(token)) => token,
                     Ok(None) => {
@@ -619,10 +618,8 @@ impl Daemon {
                         let msg = err.to_string();
                         let dir = self.paths.data.clone();
                         drop(
-                            tokio::task::spawn_blocking(move || {
-                                deadbolt_store::clear_biometric(&dir)
-                            })
-                            .await,
+                            tokio::task::spawn_blocking(move || crate::disk::clear_biometric(&dir))
+                                .await,
                         );
                         self.biometric_was_enrolled.store(true, Ordering::SeqCst);
                         *self
@@ -654,7 +651,7 @@ impl Daemon {
         };
 
         // Run the interactive Touch ID unseal WITHOUT holding `self.transition`
-        // or keeping `store.redb` open, so a concurrent passphrase Unlock or
+        // or keeping the sealed store open, so a concurrent passphrase Unlock or
         // Lock can cancel the prompt immediately and never hits `Error::InUse`.
         let prompt_reason = reason.to_string();
         let unsealed = {
@@ -761,8 +758,8 @@ impl Daemon {
 
         let dir = self.paths.data.clone();
         let expected_token = token;
-        let opened = tokio::task::spawn_blocking(move || {
-            match deadbolt_store::unlock_biometric(&dir, &key) {
+        let opened =
+            tokio::task::spawn_blocking(move || match crate::disk::unlock_biometric(&dir, &key) {
                 Ok(store) => {
                     let meta =
                         biometric::token_meta(store.biometric_token().ok().flatten().as_deref());
@@ -780,9 +777,8 @@ impl Daemon {
                     ))
                 }
                 Err(err) => Err((biometric::UnlockError::Store(err), false)),
-            }
-        })
-        .await?;
+            })
+            .await?;
 
         let (loaded, meta) = match opened {
             Ok(pair) => pair,
@@ -827,7 +823,7 @@ impl Daemon {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_none()
             {
-                return Err(if deadbolt_store::is_initialized(&self.paths.data) {
+                return Err(if crate::disk::is_initialized(&self.paths.data) {
                     fail(ErrorCode::Locked, "locked: run `deadbolt unlock`")
                 } else {
                     fail(
@@ -867,9 +863,9 @@ impl Daemon {
                 Some(res) => {
                     res.context("clearing Touch ID key slot")?;
                 }
-                None if deadbolt_store::is_initialized(&self.paths.data) => {
+                None if crate::disk::is_initialized(&self.paths.data) => {
                     let dir = self.paths.data.clone();
-                    tokio::task::spawn_blocking(move || deadbolt_store::clear_biometric(&dir))
+                    tokio::task::spawn_blocking(move || crate::disk::clear_biometric(&dir))
                         .await?
                         .context("clearing Touch ID key slot")?;
                 }
@@ -881,7 +877,7 @@ impl Daemon {
 
     async fn start(self: &Arc<Self>, loaded: Loaded, timeout_secs: Option<u64>) -> Result<()> {
         loaded.ensure_usable()?;
-        let secret = *loaded.secret().to_bytes();
+        let secret = loaded.node_key();
         let config = if self.local_net {
             NodeConfig::local_only(secret)
         } else {

@@ -11,10 +11,10 @@ use std::{
 };
 
 use data_encoding::HEXLOWER;
-use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, Heads, Log, MissingLog, Signature, Vault, VaultId, VaultWrite,
-    valid_name,
+use deadbolt_core::v2::{
+    DeviceKeys, EpochGraph, EpochKeyring, Frame, FrameId, KemPublic, LogKind, NetPublic,
 };
+use deadbolt_core::{Author, DeviceId, Heads, Signature, Vault, VaultId, VaultWrite, valid_name};
 use n0_future::time::Instant;
 use n0_future::{FuturesUnorderedBounded, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,8 @@ pub enum Error {
     Core(#[from] deadbolt_core::Error),
     #[error(transparent)]
     Decode(#[from] deadbolt_core::DecodeError),
+    #[error(transparent)]
+    Frame(#[from] deadbolt_core::v2::FrameError),
     #[error("invalid hex encoding")]
     Hex,
     #[error("{0}")]
@@ -129,6 +131,10 @@ pub struct Offer {
 pub struct JoinBlob {
     pub v: u32,
     pub consent: String,
+    /// The joiner's KEM public key, which epoch keys are wrapped to.
+    pub kem: String,
+    /// The joiner's transport key, for its `DeviceCard`.
+    pub net: String,
     pub name: String,
     pub addr: Option<Addr>,
 }
@@ -140,7 +146,7 @@ pub struct WelcomeMeta {
 }
 
 /// The only application I/O seam. `update` must validate privately, commit its
-/// new entries durably, then publish them. A precommit error leaves the vault
+/// new frames durably, then publish them. A precommit error leaves the vault
 /// unchanged; an uncertain commit must invalidate the live view until replay.
 /// Enforce membership even if a later vault or address-book write fails: an
 /// earlier vault may already have committed.
@@ -154,7 +160,7 @@ pub trait State {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T, Error>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &Author) -> Result<T, Error>,
     ) -> Result<T, Self::Error>;
     /// Learn and persist the peer's direct metadata and indirect hints.
     fn learn(
@@ -191,12 +197,39 @@ pub fn hello(s: &impl State, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<
     })?)
 }
 
+/// The frames one log of a vault owes a peer, chosen when the exchange
+/// starts and sent in stream order. Frames are never taken out of a vault
+/// once committed, so each id is still there when its turn comes.
+pub struct Missing(VecDeque<FrameId>);
+
+impl Missing {
+    fn of(vault: &Vault, heads: &Heads, log: LogKind) -> Self {
+        Self(
+            vault
+                .missing(heads, log)
+                .into_iter()
+                .map(Frame::id)
+                .collect(),
+        )
+    }
+
+    fn next(&mut self, vault: &Vault) -> Result<Option<Blob>, Error> {
+        let Some(id) = self.0.pop_front() else {
+            return Ok(None);
+        };
+        let frame = vault
+            .frame(&id)
+            .ok_or(Error::Protocol("a selected frame is gone"))?;
+        Ok(Some(Blob::new(frame.encode())))
+    }
+}
+
 /// Snapshot selection is made under the state lock. A pull reacquires that
 /// lock only long enough to check current authority and encode one frame.
 pub struct OutgoingHistory {
     peer: DeviceId,
     meta: Option<Blob>,
-    logs: VecDeque<(VaultId, MissingLog)>,
+    logs: VecDeque<(VaultId, Missing)>,
     scope: HistoryScope,
 }
 
@@ -228,8 +261,8 @@ impl OutgoingHistory {
             if let Some(meta) = self.meta.take() {
                 return Ok(Some(meta));
             }
-            if let Some(entry) = cursor.next(v)? {
-                return Ok(Some(entry.encode()));
+            if let Some(frame) = cursor.next(v)? {
+                return Ok(Some(frame));
             }
             self.logs.pop_front();
         }
@@ -238,8 +271,8 @@ impl OutgoingHistory {
 
     // Slow path under the same state lock as next(). Drop *both* phases of
     // each revoked vault, even if later membership resolution changes again.
-    // A missing vault, missing signed tip or unexplained loss of admission
-    // isn't proof of removal; leave those errors fatal.
+    // A missing vault or unexplained loss of admission isn't proof of
+    // removal; leave those errors fatal.
     fn omit_revoked(&mut self, s: &impl State) -> Result<(), Error> {
         let denied = || Error::Protocol("history transfer no longer authorized");
         let HistoryScope::Sync { negotiated, .. } = &mut self.scope else {
@@ -253,7 +286,7 @@ impl OutgoingHistory {
                 if !v.was_removed(&self.peer) {
                     return Err(denied());
                 }
-                removed.insert(v.id(), v);
+                removed.insert(v.id(), ());
             }
         }
         if held != negotiated.len() {
@@ -261,11 +294,6 @@ impl OutgoingHistory {
         }
         if held == removed.len() {
             return Err(denied()); // No other negotiated vault still admits the peer.
-        }
-        for (id, cursor) in &self.logs {
-            if let Some(vault) = removed.get(id) {
-                cursor.check_tips(vault)?;
-            }
         }
         self.logs.retain(|(id, _)| !removed.contains_key(id));
         negotiated.retain(|id| !removed.contains_key(id));
@@ -302,9 +330,9 @@ pub fn missing_for<S: State>(
         };
         let bytes = HEXLOWER.decode(heads.as_bytes()).map_err(|_| Error::Hex)?;
         let heads = Heads::decode(&bytes).map_err(Error::from)?;
-        logs.push_back((id, vault.missing_log(&heads, Log::Membership)));
+        logs.push_back((id, Missing::of(vault, &heads, LogKind::Member)));
         if ready {
-            data.push((id, vault.missing_log(&heads, Log::Data)));
+            data.push((id, Missing::of(vault, &heads, LogKind::Data)));
         }
     }
     let negotiated = logs.iter().map(|(id, _)| *id).collect();
@@ -320,9 +348,9 @@ pub fn missing_for<S: State>(
     })
 }
 
-/// One incoming entry stream's memory across its batches: the vaults whose
+/// One incoming frame stream's memory across its batches: the vaults whose
 /// removal of the peer this stream delivered. The sync protocol commits a
-/// stream in prefix batches (1, 2, 4, ... entries), so the removal and the
+/// stream in prefix batches (1, 2, 4, ... frames), so the removal and the
 /// data written before it usually arrive in different batches. Keep one per
 /// stream, never per peer or across streams.
 #[derive(Debug, Default)]
@@ -330,15 +358,15 @@ pub struct ReceiveStream {
     removed: BTreeSet<VaultId>,
 }
 
-/// Skip malformed/rejected entries, not the valid removals beside them. Check
-/// data against the evolving membership, and commit independently per vault.
+/// Skip malformed frames, not the valid removals beside them, and commit
+/// independently per vault.
 ///
-/// Data from a peer the vault no longer admits is dropped, with one exception:
-/// in the stream that delivers the peer's own removal, data written before that
-/// removal (the peer was a member in its causal past) is still applied, in that
-/// batch or a later one of the same stream. Only data that causally follows the
-/// removal, which the peer should never have held, and every later stream are
-/// refused.
+/// Data relayed by a peer the vault no longer admits is dropped, with one
+/// exception: the stream that delivers the peer's own removal may still bring
+/// data, in that batch or a later one of the same stream. Which of it counts
+/// is the fold's call (a removal names the last of the device's frames that
+/// does), so data the peer wrote after its removal never counts. Every later
+/// stream from it is refused.
 pub fn receive<S: State>(
     s: &mut S,
     peer: &DeviceId,
@@ -346,41 +374,53 @@ pub fn receive<S: State>(
     ready: bool,
     stream: &mut ReceiveStream,
 ) -> Result<usize, S::Error> {
-    let mut grouped: BTreeMap<VaultId, Vec<Entry>> = BTreeMap::new();
+    let mut grouped: BTreeMap<VaultId, Vec<Frame>> = BTreeMap::new();
     for bytes in entries {
-        let entry = match Entry::decode(&bytes) {
-            Ok(entry) => entry,
+        let frame = match Frame::decode(&bytes) {
+            Ok(frame) => frame,
             Err(error) => {
-                warn!(peer = %peer, "undecodable entry: {error}");
+                warn!(peer = %peer, "undecodable frame: {error}");
                 continue;
             }
         };
-        if !s.vaults().any(|v| v.id() == entry.vault()) || (entry.log() == Log::Data && !ready) {
+        let h = frame.header();
+        let data = h.kind.log_kind() == LogKind::Data;
+        if !s.vaults().any(|v| v.id() == h.vault) || (data && !ready) {
             continue;
         }
-        grouped.entry(entry.vault()).or_default().push(entry);
+        grouped.entry(h.vault).or_default().push(frame);
     }
     let mut added = 0;
-    for (id, entries) in grouped {
+    for (id, frames) in grouped {
         let removed_here = stream.removed.contains(&id);
-        let (count, removed) = s.update(id, |vault, _| {
+        let (count, removed) = s.update(id, |vault, author| {
+            let kem = author.keys().kem_key();
             let before = vault.is_member(peer);
-            let admitted = before || removed_here;
-            let mut added = 0;
-            for entry in entries {
-                if entry.log() == Log::Data
-                    && !vault.is_member(peer)
-                    && !(admitted && vault.was_member_before(&entry, peer) == Some(true))
-                {
-                    continue;
+            let (members, data): (Vec<Frame>, Vec<Frame>) = frames
+                .into_iter()
+                .partition(|f| f.header().kind.log_kind() == LogKind::Member);
+            let mut added = match vault.apply(kem, members) {
+                Ok(n) => n,
+                Err(error) => {
+                    debug!(peer = %peer, "rejected frames: {error}");
+                    0
                 }
-                match vault.apply(entry) {
-                    Ok(true) => added += 1,
-                    Ok(false) => {}
-                    Err(error) => debug!(peer = %peer, "rejected entry: {error}"),
+            };
+            let removed = before && !vault.is_member(peer);
+            if vault.is_member(peer) || removed || removed_here {
+                match vault.apply(kem, data) {
+                    Ok(n) => added += n,
+                    Err(error) => debug!(peer = %peer, "rejected frames: {error}"),
                 }
             }
-            Ok((added, before && !vault.is_member(peer)))
+            // What arrived may leave a member without a key it needs (rule
+            // E6): rewrap it in the same commit.
+            if added > 0
+                && let Err(error) = vault.fulfill_reader_duty(author)
+            {
+                debug!(peer = %peer, "reader duty: {error}");
+            }
+            Ok((added, removed))
         })?;
         added += count;
         if removed {
@@ -389,7 +429,7 @@ pub fn receive<S: State>(
     }
     s.received(peer)?;
     if added > 0 {
-        info!(peer = %peer, entries = added, "received");
+        info!(peer = %peer, frames = added, "received");
     }
     Ok(added)
 }
@@ -427,15 +467,19 @@ pub fn read_offer(bytes: &[u8]) -> Result<(Offer, VaultId), Error> {
 }
 
 pub fn join_blob(
-    secret: &DeviceSecret,
+    keys: &DeviceKeys,
     name: &str,
     inviter: DeviceId,
     vault: &VaultId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>, Error> {
+    let consent =
+        deadbolt_core::v2::sign_join_consent(keys.sign_key(), vault, &inviter, &keys.kem_public());
     Ok(serde_json::to_vec(&JoinBlob {
-        v: 2,
-        consent: HEXLOWER.encode(secret.join_consent(vault, &inviter).as_bytes()),
+        v: 3,
+        consent: HEXLOWER.encode(consent.as_bytes()),
+        kem: HEXLOWER.encode(keys.kem_public().as_bytes()),
+        net: HEXLOWER.encode(keys.net_public().as_bytes()),
         name: name.into(),
         addr,
     })?)
@@ -454,7 +498,9 @@ pub fn can_invite(vault: &Vault, inviter: &DeviceId, device: &DeviceId) -> Resul
 }
 
 /// Durably admit before sending secrets. Retrying an interrupted join returns
-/// the same vault without another Add; a removed device can never rejoin.
+/// the same vault without another Add, writing only what the interrupted
+/// attempt didn't (its `DeviceCard`, after a crash between the two frames);
+/// a removed device can never rejoin.
 pub fn welcome<S: State>(
     s: &mut S,
     vault: VaultId,
@@ -463,20 +509,34 @@ pub fn welcome<S: State>(
     fallback_addr: Option<Addr>,
 ) -> Result<OutgoingHistory, S::Error> {
     let join: JoinBlob = serde_json::from_slice(bytes).map_err(Error::from)?;
-    if join.v != 2 {
+    if join.v != 3 {
         return Err(Error::Protocol("unsupported pairing envelope").into());
     }
     let consent = Signature::from_bytes(unhex(&join.consent)?);
-    let add = {
+    let kem = KemPublic::from_bytes(unhex(&join.kem)?);
+    let net = NetPublic::from_bytes(unhex(&join.net)?);
+    let label = clean_name(&join.name);
+    let (add, card) = {
         let held = s
             .vaults()
             .find(|v| v.id() == vault)
             .ok_or(Error::VaultNotHeld)?;
         can_invite(held, &s.device_id(), &device)?;
-        !held.is_member(&device)
+        (
+            !held.is_member(&device),
+            held.device_card(&device).is_none(),
+        )
     };
-    if add {
-        s.update(vault, |v, secret| Ok(v.add(secret, device, consent)?))?;
+    if add || card {
+        s.update(vault, |v, author| {
+            if add {
+                v.add(author, device, kem, consent)?;
+            }
+            if card {
+                v.card(author, device, net, &label)?;
+            }
+            Ok(())
+        })?;
     }
     s.learn(
         &device,
@@ -495,9 +555,9 @@ pub fn welcome<S: State>(
         .vaults()
         .find(|v| v.id() == vault)
         .ok_or(Error::VaultNotHeld)?;
-    let logs = [Log::Membership, Log::Data]
+    let logs = [LogKind::Member, LogKind::Data]
         .into_iter()
-        .map(|log| (vault, held.missing_log(&Heads::default(), log)))
+        .map(|log| (vault, Missing::of(held, &Heads::default(), log)))
         .collect();
     Ok(OutgoingHistory {
         peer: device,
@@ -521,7 +581,7 @@ pub struct Welcomed {
 #[derive(Default)]
 pub struct WelcomeReplay {
     meta: Option<WelcomeMeta>,
-    vault: Option<Vault>,
+    frames: Vec<Frame>,
 }
 
 impl crate::WelcomeSink for WelcomeReplay {
@@ -533,30 +593,42 @@ impl crate::WelcomeSink for WelcomeReplay {
             }
             self.meta = Some(meta);
         } else {
-            let entry = Entry::decode(&blob)?;
-            if let Some(vault) = &mut self.vault {
-                vault.apply(entry)?;
-            } else {
-                self.vault = Some(Vault::from_genesis(entry)?);
+            if self.frames.len() >= deadbolt_core::MAX_FRAMES {
+                return Err(deadbolt_core::Error::TooManyFrames.into());
             }
+            self.frames.push(Frame::decode(&blob).map_err(Error::from)?);
         }
         Ok(())
     }
 }
 
 pub fn verify_welcome(
-    device: &DeviceId,
+    keys: &DeviceKeys,
     inviter: DeviceId,
     offer: Offer,
     welcome: WelcomeReplay,
 ) -> Result<Welcomed, Error> {
     let meta = welcome.meta.ok_or(Error::Protocol("empty welcome"))?;
-    let vault = welcome.vault.ok_or(deadbolt_core::Error::InvalidGenesis)?;
+    let device = &keys.device_id();
+    let vault = Vault::open(keys, welcome.frames)?;
     if vault.id().to_string() != offer.vault {
         return Err(Error::Protocol("the welcome is for another vault"));
     }
     if !vault.is_member(device) || !vault.is_member(&inviter) {
         return Err(Error::Protocol("the welcome does not admit this device"));
+    }
+    // A store this device can't read can't be repaired by this device:
+    // refuse it before it's stored rather than keep a vault of sealed frames.
+    let graph = EpochGraph::build(vault.id(), vault.frames(), vault.membership());
+    let mut keyring = EpochKeyring::new();
+    let report = graph.unlock(device, keys.kem_key(), &mut keyring);
+    if keyring.is_empty() {
+        return Err(Error::Protocol("the welcome gives this device no key"));
+    }
+    if !report.bad_epochs().is_empty() {
+        return Err(Error::Protocol(
+            "the welcome holds a key this device can't open",
+        ));
     }
     Ok(Welcomed {
         vault,

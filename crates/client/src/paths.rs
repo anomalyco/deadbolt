@@ -1,7 +1,7 @@
 //! Where deadbolt keeps its files.
 //!
 //! ```text
-//! $DEADBOLT_HOME or $XDG_DATA_HOME/deadbolt       the encrypted store (store.redb)
+//! $DEADBOLT_HOME or $XDG_DATA_HOME/deadbolt       the sealed store (device/, v/<vault>/)
 //! $XDG_CONFIG_HOME/deadbolt/config.toml           settings (see config.rs)
 //! $XDG_STATE_HOME/deadbolt<suffix>/daemon.log     daemon log
 //! $XDG_RUNTIME_DIR/deadbolt<suffix>/daemon.sock   control socket (0600, dir 0700)

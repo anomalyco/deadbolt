@@ -1,14 +1,14 @@
 //! The Activity list (`docs/design.md`, "Callers"): an entry for each
 //! caller request and for the app's own reveals and copies,
-//! naming items and fields, never values. Entries are sealed in `store.redb`
+//! naming items and fields, never values. Entries are sealed in the sealed store
 //! on this device; those made while locked wait in memory until an unlock.
 //! [`ledger`] keeps all of it in budget.
 
 use std::sync::Arc;
 
+use crate::disk::{Budget, Dropped};
 use anyhow::Result;
 use deadbolt_client::peer::Peer;
-use deadbolt_store::{Budget, Dropped};
 use tracing::warn;
 
 pub use deadbolt_engine::activity::{KEEP_SECS, Ledger, draft, ledger, reported};
@@ -117,7 +117,7 @@ impl Daemon {
 
     fn keep(
         &self,
-        store: Option<&deadbolt_store::Unlocked>,
+        store: Option<&crate::disk::Unlocked>,
         ledger: &mut Ledger,
         due: Vec<ActivityEntry>,
     ) {
@@ -302,7 +302,7 @@ mod tests {
     }
 
     async fn set_up(dir: &std::path::Path) -> Arc<Daemon> {
-        let daemon = Daemon::new(test_paths(dir), true, deadbolt_store::KdfParams::DEFAULT);
+        let daemon = Daemon::new(test_paths(dir), true, crate::disk::KdfParams::DEFAULT);
         daemon
             .setup(Zeroizing::new("test".into()), "laptop".into())
             .await

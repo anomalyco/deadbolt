@@ -156,11 +156,14 @@ impl Daemon {
                 before,
             } => self.activity_list(since, limit, before),
             Command::VaultCreate { name } => {
-                let vault = self.with(|s| {
-                    let id = s.create_vault(&name)?;
-                    Ok(s.vault_info(&id))
+                let (vault, words) = self.with(|s| {
+                    let (id, words) = s.create_vault_with_kit(&name)?;
+                    Ok((s.vault_info(&id), words))
                 })?;
-                Ok(Reply::Vault { vault })
+                Ok(Reply::VaultCreated {
+                    vault,
+                    recovery_kit: crate::protocol::Secret::new(words.as_str()),
+                })
             }
             Command::VaultList => Ok(Reply::Vaults {
                 vaults: self.with(|s| Ok(s.vault_infos()))?,

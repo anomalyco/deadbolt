@@ -303,6 +303,47 @@ fn is_torn(seq: u64, file: &[u8]) -> bool {
     full_len.is_none_or(|len| file.len() < len)
 }
 
+/// The key slots of the newest complete local state, read without any key:
+/// what a passphrase or platform key unwraps the root from before [`open`].
+/// Torn files (a commit cut short) are skipped, so `None` means no commit
+/// ever finished; a file that isn't torn but won't parse is
+/// [`Error::CorruptLocal`], never mistaken for no state.
+pub fn peek_slots<B: Blocks>(blocks: &B) -> Result<Option<Vec<u8>>> {
+    for seq in numbered(blocks, LOCAL_PREFIX, LOCAL_SUFFIX)?
+        .into_iter()
+        .rev()
+    {
+        let name = local_sealed(seq);
+        let bytes = match blocks.read_all(&name) {
+            Ok(bytes) => bytes,
+            Err(err) if err.is_not_found() => continue,
+            Err(err) => return Err(err),
+        };
+        if is_torn(seq, &bytes) {
+            continue;
+        }
+        let mut cursor = Cursor { bytes: &bytes };
+        if cursor.take::<8>() != Some(LOCAL_MAGIC) {
+            return Err(Error::corrupt_local(&name, "bad magic"));
+        }
+        if cursor.take().map(u64::from_be_bytes) != Some(seq) {
+            return Err(Error::corrupt_local(
+                &name,
+                "sequence does not match the name",
+            ));
+        }
+        let slots = (|| {
+            let len = u32::from_be_bytes(bytes.get(HEADER_LEN - 4..HEADER_LEN)?.try_into().ok()?);
+            bytes.get(HEADER_LEN..HEADER_LEN.checked_add(usize::try_from(len).ok()?)?)
+        })();
+        return match slots {
+            Some(slots) => Ok(Some(slots.to_vec())),
+            None => Err(Error::corrupt_local(&name, "short key slots")),
+        };
+    }
+    Ok(None)
+}
+
 /// Opens the newest local state and checks it against the anchor. The caller
 /// is the single writer: once a state is accepted, torn or unreadable files
 /// above it and superseded files below it are deleted.

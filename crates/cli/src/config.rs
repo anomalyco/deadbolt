@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 /// tests and development only ([`test_env`]).
 pub struct Environment {
     pub local_net: bool,
-    pub kdf: deadbolt_store::KdfParams,
+    pub kdf: crate::disk::KdfParams,
 }
 
 impl Environment {
@@ -45,13 +45,13 @@ impl Environment {
         Self {
             local_net: test_env("DEADBOLT_NET").as_deref() == Some("local"),
             kdf: if test_env("DEADBOLT_KDF").as_deref() == Some("fast") {
-                deadbolt_store::KdfParams {
+                crate::disk::KdfParams {
                     m_cost_kib: 64,
                     t_cost: 1,
                     p_cost: 1,
                 }
             } else {
-                deadbolt_store::KdfParams::DEFAULT
+                crate::disk::KdfParams::DEFAULT
             },
         }
     }
@@ -104,8 +104,19 @@ pub struct SystemClock;
 
 impl deadbolt_engine::Clock for SystemClock {
     fn now(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(now) = TEST_NOW.get() {
+            return now;
+        }
         wall_clock()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A fixed now for the engines this thread opens: the simulator's, so
+    /// the frames it signs replay byte for byte.
+    pub static TEST_NOW: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

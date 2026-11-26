@@ -732,7 +732,7 @@ pub(super) async fn restart_daemon(paths: &Paths, program: PathBuf, quiet: bool)
     let launch = deadbolt_client::Launch { program };
     match deadbolt_client::start(paths, &launch).await {
         Ok(_) if quiet => {}
-        Ok(_) if deadbolt_store::is_initialized(&paths.data) => {
+        Ok(_) if crate::disk::is_initialized(&paths.data) => {
             println!("Restarted the daemon; the vault is locked until you unlock it.");
         }
         Ok(_) => println!("Restarted the daemon."),

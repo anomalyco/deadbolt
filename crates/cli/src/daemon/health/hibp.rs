@@ -1,5 +1,5 @@
 //! Opt-in Have I Been Pwned range queries (`Add-Padding: true`) and encrypted
-//! `store.redb` caching.
+//! the sealed store caching.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

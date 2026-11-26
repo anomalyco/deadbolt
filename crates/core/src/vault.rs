@@ -1,756 +1,441 @@
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+//! A vault as one device holds it: every signed v2 [`Frame`] it has, the
+//! epoch keys it can reach, and the fold of the data frames that count.
+//!
+//! Membership is the plaintext member log, resolved with no key
+//! ([`v2::resolve`]). Data frames are sealed under epoch keys; this device
+//! opens the ones whose epoch it can reach through a wrap to its KEM key or a
+//! back-link, and folds every opened frame the membership counts. A frame it
+//! can't open yet waits; a later wrap or back-link opens it.
+//!
+//! Writes happen in a transaction ([`Vault::transact`]): each one signs its
+//! frames as this device, applies them, and hands them to a commit step that
+//! makes them durable before anyone sees them. If the change or the commit
+//! fails, the frames are taken back out.
 
-use crate::data::{self, Deleted, Item, ItemState, Version};
-use crate::encoding::{Reader, Writer};
-use crate::entry::{
-    DataOp, Entry, Log, LogId, MembershipOp, Payload, consent_message, data_entry_len, valid_name,
+mod duty;
+mod remove;
+mod sync;
+mod view;
+mod write;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::error::Error;
+use crate::id::{DeviceId, ItemId, VaultId};
+use crate::v2::{
+    self, DataFrame, DeviceKeys, EpochGraph, EpochId, EpochKeyring, FoldContext, FoldedState,
+    Frame, FrameId, FrameKind, FraudProof, KemSecret, LogKind, MemberOp, NetPublic, ParkingReason,
+    ResolvedMembership, check_parking,
 };
-use crate::error::{DecodeError, Error};
-use crate::id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
-use crate::item::{Field, ItemError};
-use crate::membership::{self, Membership};
 
-/// Encoded ops per entry written by [`Vault::create_items`] (a single op may
-/// exceed it), well under [`MAX_ENTRY_LEN`].
-pub const CREATE_BATCH_BYTES: usize = 1024 * 1024;
+pub use sync::Heads;
+pub use view::{Deleted, Item};
+pub use write::{Author, MAX_FRAME_LEN, VaultWrite};
 
-/// The largest encoded entry [`Vault::commit`] accepts: one sync frame
-/// (deadbolt-net's 16 MiB `DEFAULT_MAX_FRAME_LEN`, which covers a tag byte
-/// and the body) minus its tag. A larger entry could be stored but never
-/// sent to another device.
-pub const MAX_ENTRY_LEN: usize = 16 * 1024 * 1024 - 1;
+/// The most frames one vault accepts: a bound on what a member can make
+/// every device hold.
+pub const MAX_FRAMES: usize = 1 << 20;
 
-/// Maximum non-removal membership entries per author per vault, including the
-/// creator's genesis. Removes remain available after this budget is exhausted.
-/// Membership is re-resolved on every insert; this bounds each author's
-/// non-removal contribution, not the total history or Sybil growth.
-/// Data entries have a separate sequence and do not consume this budget.
-pub const MAX_MEMBERSHIP_ENTRIES: u64 = 1000;
+/// What a frame changed, for telling watchers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Touch {
+    pub items: bool,
+    pub name: bool,
+    pub devices: bool,
+}
 
-const _: () = assert!(CREATE_BATCH_BYTES * 8 < MAX_ENTRY_LEN);
-
-/// Per log, the highest seq in an entry's causal past (inclusive).
-pub(crate) type Clock = BTreeMap<LogId, u64>;
-
-/// A stored entry plus derived causal metadata.
+/// A vault on this device. See the module docs.
 #[derive(Clone)]
-pub(crate) struct Node {
-    pub(crate) entry: Entry,
-    /// Longest dependency path from the genesis.
-    pub(crate) depth: u64,
-    pub(crate) clock: Clock,
-}
-
-impl Node {
-    /// Whether `other` is in this entry's strict causal past.
-    pub(crate) fn saw(&self, other: &Node) -> bool {
-        self.entry.hash() != other.entry.hash()
-            && self
-                .clock
-                .get(&other.entry.log_id())
-                .is_some_and(|&seq| seq >= other.entry.seq())
-    }
-}
-
-/// The merged clock and depth of an entry whose dependencies are `deps`.
-fn causal_past<'a>(deps: impl IntoIterator<Item = &'a Node>) -> (Clock, u64) {
-    let mut clock = Clock::new();
-    let mut depth = 0;
-    for dep in deps {
-        for (log, &seq) in &dep.clock {
-            let max = clock.entry(*log).or_insert(seq);
-            *max = (*max).max(seq);
-        }
-        depth = depth.max(dep.depth + 1);
-    }
-    (clock, depth)
-}
-
-/// The latest seq per log a device holds; the sync frontier.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Heads(BTreeMap<LogId, u64>);
-
-impl Heads {
-    /// Latest seq held for `log`.
-    pub fn get(&self, log: &LogId) -> Option<u64> {
-        self.0.get(log).copied()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (LogId, u64)> + '_ {
-        self.0.iter().map(|(log, seq)| (*log, *seq))
-    }
-
-    /// Canonical encoding: count, then (author, log tag, seq) in ascending order.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::new(Vec::new());
-        w.len(self.0.len());
-        for (log, seq) in &self.0 {
-            w.bytes(log.author.as_bytes());
-            w.u8(match log.log {
-                Log::Membership => 0,
-                Log::Data => 1,
-            });
-            w.u64(*seq);
-        }
-        w.finish()
-    }
-
-    /// Strictly decodes [`Heads::encode`] output.
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut r = Reader::new(bytes);
-        let mut heads = BTreeMap::new();
-        let mut last: Option<LogId> = None;
-        for _ in 0..r.u32()? {
-            let author = DeviceId(r.array()?);
-            let log = match r.u8()? {
-                0 => Log::Membership,
-                1 => Log::Data,
-                tag => return Err(DecodeError::InvalidTag(tag)),
-            };
-            let log = LogId { author, log };
-            if last.is_some_and(|last| last >= log) {
-                return Err(DecodeError::NotCanonical);
-            }
-            last = Some(log);
-            heads.insert(log, r.u64()?);
-        }
-        r.finish()?;
-        Ok(Self(heads))
-    }
-}
-
-impl FromIterator<(LogId, u64)> for Heads {
-    fn from_iter<I: IntoIterator<Item = (LogId, u64)>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
-
-/// A bounded snapshot of the missing suffix of each author in one log. No
-/// entry payloads or per-entry references are retained. Depth strictly
-/// increases on every dependency edge, so merging author chains by depth
-/// preserves causal order even across a reload with a different arrival order.
-#[derive(Debug, Default)]
-pub struct MissingLog(BinaryHeap<Reverse<Pending>>);
-
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct Pending {
-    depth: u64,
-    log: LogId,
-    seq: usize,
-    /// Signed last entry: pins the entire contiguous, fork-rejecting chain.
-    end: Hash,
-}
-
-impl MissingLog {
-    /// Check even a cursor that will be discarded: a missing signed tip is a
-    /// different failure from losing membership in a still-intact vault.
-    pub fn check_tips(&self, vault: &Vault) -> Result<(), Error> {
-        if self
-            .0
-            .iter()
-            .all(|Reverse(p)| vault.nodes.contains_key(&p.end))
-        {
-            Ok(())
-        } else {
-            Err(Error::HistoryChanged)
-        }
-    }
-
-    pub fn next<'a>(&mut self, vault: &'a Vault) -> Result<Option<&'a Entry>, Error> {
-        let Some(Reverse(mut pending)) = self.0.pop() else {
-            return Ok(None);
-        };
-        let end = vault.nodes.get(&pending.end).ok_or(Error::HistoryChanged)?;
-        let node = vault.at_seq(pending.log, pending.seq);
-        if node.entry.hash() != end.entry.hash() {
-            pending.seq += 1;
-            pending.depth = vault.at_seq(pending.log, pending.seq).depth;
-            self.0.push(Reverse(pending));
-        }
-        Ok(Some(&node.entry))
-    }
-}
-
-/// A vault's entries and the state derived from them.
-pub type Vault = VaultState<()>;
-
-/// Candidate changes in a durable transaction. The prefix is borrowed, never
-/// modified, and the suffix cannot be published against another vault.
-pub type VaultWrite<'a> = VaultState<&'a Vault>;
-
-// Static dispatch keeps the normal owned/replay path free of overlay lookups.
-pub trait Prefix {
-    fn base(&self) -> Option<&Vault>;
-}
-impl Prefix for () {
-    fn base(&self) -> Option<&Vault> {
-        None
-    }
-}
-impl Prefix for &Vault {
-    fn base(&self) -> Option<&Vault> {
-        Some(self)
-    }
-}
-
-#[derive(Clone)]
-pub struct VaultState<P> {
-    prefix: P,
-    // Only compound local edits need item projections during staging. A
-    // single write or incoming batch can project once, after persistence.
-    projected: usize,
-    rebuild_projection: bool,
-    inherit_items: bool,
+pub struct Vault {
     id: VaultId,
-    nodes: HashMap<Hash, Node>,
-    /// Per-author sequence → offset in the corresponding causal arrival order.
-    logs: BTreeMap<LogId, Vec<usize>>,
-    /// Arrival order, which is always causal.
-    membership_order: Vec<Hash>,
-    /// Non-removal entries in each author's validated membership chain.
-    membership_writes: BTreeMap<DeviceId, u64>,
-    data_order: Vec<Hash>,
-    /// Membership entries no membership entry depends on.
-    membership_tips: BTreeSet<Hash>,
-    /// Entries no entry depends on.
-    tips: BTreeSet<Hash>,
-    membership: Membership,
-    /// Memberships of causal pasts behind the current membership heads, keyed by
-    /// the membership heads they contain. Cleared on every membership insert.
-    past_memberships: HashMap<Frontier, Membership>,
-    items: BTreeMap<ItemId, ItemState>,
-}
-
-/// The latest membership seq per author in a causal past.
-type Frontier = Vec<(DeviceId, u64)>;
-
-fn frontier(clock: &Clock) -> Frontier {
-    clock
-        .iter()
-        .filter(|(log, _)| log.log == Log::Membership)
-        .map(|(log, seq)| (log.author, *seq))
-        .collect()
+    me: DeviceId,
+    members: BTreeMap<FrameId, Frame>,
+    data: BTreeMap<FrameId, Frame>,
+    opened: BTreeMap<FrameId, DataFrame>,
+    /// Header-only stand-ins for frames sealed under an epoch the membership
+    /// placed but doesn't authorize, which this device can't open: they count
+    /// for no one, and folding them keeps their author's later frames chained.
+    unreadable: BTreeMap<FrameId, DataFrame>,
+    proofs: Vec<FraudProof>,
+    keyring: EpochKeyring,
+    bad_epochs: BTreeSet<EpochId>,
+    resolved: ResolvedMembership,
+    graph: Option<EpochGraph>,
+    adders: BTreeMap<DeviceId, DeviceId>,
+    state: FoldedState,
+    /// Devices this device has seen removed: the parking rule's memory.
+    previously_removed: BTreeSet<DeviceId>,
+    parked: Vec<ParkingReason>,
+    /// Frames the open transaction added.
+    staged: Vec<FrameId>,
 }
 
 impl Vault {
-    /// Creates a new vault with `secret`'s device as its only member.
-    /// Returns the vault and its genesis entry.
-    pub fn create(secret: &DeviceSecret, name: impl Into<String>) -> Result<(Self, Entry), Error> {
-        let name = name.into();
-        if !valid_name(&name) {
-            return Err(Error::InvalidName);
-        }
-        let nonce = crate::id::random();
-        let device = secret.device_id();
-        let vault = VaultId::derive(&device, &nonce);
-        let op = MembershipOp::Create {
-            device,
-            nonce,
-            name,
-        };
-        let genesis = Entry::sign(secret, vault, 0, [], Payload::Membership(op));
-        let vault = Self::from_genesis(genesis.clone())?;
-        Ok((vault, genesis))
-    }
-
-    /// Starts a vault from its genesis entry.
-    pub fn from_genesis(genesis: Entry) -> Result<Self, Error> {
-        let Payload::Membership(MembershipOp::Create {
-            device,
-            nonce,
-            name,
-        }) = genesis.payload()
-        else {
-            return Err(Error::InvalidGenesis);
-        };
-        if !valid_name(name) {
-            return Err(Error::InvalidName);
-        }
-        let valid = *device == genesis.author()
-            && genesis.seq() == 0
-            && genesis.deps().is_empty()
-            && VaultId::derive(device, nonce) == genesis.vault();
-        if !valid {
-            return Err(Error::InvalidGenesis);
-        }
-        genesis.verify()?;
-        let mut vault = Self::empty(genesis.vault(), ());
-        let clock = Clock::from([(genesis.log_id(), 0)]);
-        vault.insert(Node {
-            entry: genesis,
-            depth: 0,
-            clock,
-        });
-        Ok(vault)
-    }
-
-    /// Rebuilds a vault from stored entries in causal order, genesis first
-    /// (e.g. the output of [`Vault::entries`]).
-    pub fn load(entries: impl IntoIterator<Item = Entry>) -> Result<Self, Error> {
-        let mut entries = entries.into_iter();
-        let mut vault = Self::from_genesis(entries.next().ok_or(Error::InvalidGenesis)?)?;
-        for entry in entries {
-            vault.apply(entry)?;
-        }
-        Ok(vault)
-    }
-
-    /// Persist exactly the validated delta (membership before data), then
-    /// publish its already verified nodes. On either error the base has not
-    /// been touched. The adapter must quarantine it on an uncertain commit.
-    pub fn transact<T, E>(
-        &mut self,
-        change: impl FnOnce(&mut VaultWrite<'_>) -> Result<T, E>,
-        persist: impl FnOnce(&[&Entry]) -> Result<(), E>,
-    ) -> Result<T, E> {
-        let mut write = VaultWrite::empty(self.id, &*self);
-        write.inherit_items = true;
-        write.membership = self.membership.clone();
-        write.membership_tips = self.membership_tips.clone();
-        write.tips = self.tips.clone();
-        write.membership_writes = self.membership_writes.clone();
-        // Include prefix log IDs so frontier iteration sees all authors. Do
-        // not copy their (potentially very large) sequence-offset arrays.
-        write.logs = self.logs.keys().map(|id| (*id, Vec::new())).collect();
-        let result = change(&mut write)?;
-        // Compound reads may have needed temporary item projections. They are
-        // not part of the durable delta or of the publication recipe.
-        drop(write.items);
-        if write.nodes.is_empty() {
-            return Ok(result);
-        }
-        let entries: Vec<_> = write
-            .membership_order
-            .iter()
-            .chain(&write.data_order)
-            .map(|hash| &write.nodes[hash].entry)
-            .collect();
-        persist(&entries)?;
-
-        // No fallible validation after the commit. Move verified nodes and
-        // their resolved membership; offsets were relative to the suffix.
-        let VaultState {
-            nodes,
-            logs,
-            membership_order,
-            data_order,
-            membership_tips,
-            tips,
-            membership_writes,
-            membership,
-            past_memberships,
-            ..
-        } = write;
-        // Only the committed prefix has been projected here. The suffix will
-        // be projected below under the final membership either way.
-        let rebuild = !membership_order.is_empty() && self.needs_reprojection(&membership);
-        let start = self.data_order.len();
-        for (id, offsets) in logs.into_iter().filter(|(_, v)| !v.is_empty()) {
-            let prefix = self.order(id.log).len();
-            self.logs
-                .entry(id)
-                .or_default()
-                .extend(offsets.into_iter().map(|pos| prefix + pos));
-        }
-        self.nodes.extend(nodes);
-        self.tips = tips;
-        if !membership_order.is_empty() {
-            self.membership_order.extend(membership_order);
-            self.membership = membership;
-            self.membership_tips = membership_tips;
-            self.membership_writes = membership_writes;
-            self.past_memberships.clear();
-        }
-        self.past_memberships.extend(past_memberships);
-        self.data_order.extend(data_order);
-        if rebuild {
-            self.items.clear();
-        }
-        self.project_suffix(if rebuild { 0 } else { start });
-        Ok(result)
-    }
-}
-
-impl VaultWrite<'_> {
-    /// Read your own prior appends during a compound local operation (e.g. an
-    /// import linking two newly created items). Not needed to receive sync.
-    pub fn item(&mut self, id: &ItemId) -> Option<Item> {
-        self.project_pending();
-        self.items
-            .get(id)
-            .or_else(|| self.inherited_items()?.get(id))
-            .map(|state| state.item(*id))
-    }
-}
-
-impl<P: Prefix> VaultState<P> {
-    fn empty(id: VaultId, prefix: P) -> Self {
+    fn empty(id: VaultId, me: DeviceId) -> Self {
         Self {
-            prefix,
-            projected: 0,
-            rebuild_projection: false,
-            inherit_items: false,
             id,
-            nodes: HashMap::new(),
-            logs: BTreeMap::new(),
-            membership_order: Vec::new(),
-            membership_writes: BTreeMap::new(),
-            data_order: Vec::new(),
-            membership_tips: BTreeSet::new(),
-            tips: BTreeSet::new(),
-            membership: Membership::default(),
-            past_memberships: HashMap::new(),
-            items: BTreeMap::new(),
+            me,
+            members: BTreeMap::new(),
+            data: BTreeMap::new(),
+            opened: BTreeMap::new(),
+            unreadable: BTreeMap::new(),
+            proofs: Vec::new(),
+            keyring: EpochKeyring::new(),
+            bad_epochs: BTreeSet::new(),
+            resolved: ResolvedMembership::default(),
+            graph: None,
+            adders: BTreeMap::new(),
+            state: FoldedState::default(),
+            previously_removed: BTreeSet::new(),
+            parked: Vec::new(),
+            staged: Vec::new(),
         }
+    }
+
+    /// Rebuilds a vault from its frames, as the device `me`.
+    pub fn open(me: &DeviceKeys, frames: impl IntoIterator<Item = Frame>) -> Result<Self, Error> {
+        Self::open_as(me.device_id(), me.kem_key(), frames)
+    }
+
+    /// Rebuilds a vault as any principal holding `kem`: a device, or the
+    /// recovery root during recovery.
+    pub fn open_as(
+        me: DeviceId,
+        kem: &KemSecret,
+        frames: impl IntoIterator<Item = Frame>,
+    ) -> Result<Self, Error> {
+        let frames: Vec<Frame> = frames.into_iter().collect();
+        let genesis = frames
+            .iter()
+            .find(|f| {
+                f.header().kind == FrameKind::Member
+                    && f.header().seq == 0
+                    && matches!(
+                        f.member_body().and_then(|b| b.op.as_ref()),
+                        Some(MemberOp::Create { .. })
+                    )
+            })
+            .ok_or(Error::InvalidGenesis)?;
+        let mut vault = Self::empty(genesis.header().vault, me);
+        vault.insert(frames)?;
+        vault.refresh(Some(kem));
+        if vault.resolved.recovery_lineage.is_empty() {
+            return Err(Error::InvalidGenesis);
+        }
+        Ok(vault)
+    }
+
+    /// Adds frames without refreshing. Returns the ids that were new.
+    fn insert(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<Vec<FrameId>, Error> {
+        let mut new = Vec::new();
+        for frame in frames {
+            let h = frame.header();
+            if h.vault != self.id {
+                return Err(Error::WrongVault {
+                    expected: self.id,
+                    found: h.vault,
+                });
+            }
+            let id = frame.id();
+            let log = match h.kind.log_kind() {
+                LogKind::Member => &mut self.members,
+                LogKind::Data => &mut self.data,
+            };
+            if log.contains_key(&id) {
+                continue;
+            }
+            if self.members.len() + self.data.len() >= MAX_FRAMES {
+                return Err(Error::TooManyFrames);
+            }
+            let twin = match h.kind.log_kind() {
+                LogKind::Member => &self.members,
+                LogKind::Data => &self.data,
+            }
+            .values()
+            .find(|f| f.header().author == h.author && f.header().seq == h.seq);
+            if let Some(twin) = twin
+                && let Ok(proof) = FraudProof::from_frames(twin, &frame)
+            {
+                self.proofs.push(proof);
+            }
+            match h.kind.log_kind() {
+                LogKind::Member => self.members.insert(id, frame),
+                LogKind::Data => self.data.insert(id, frame),
+            };
+            new.push(id);
+        }
+        Ok(new)
+    }
+
+    /// Takes frames back out (a failed transaction), restores the keys held
+    /// before it, and refreshes.
+    fn remove_frames(&mut self, ids: &[FrameId], keyring: EpochKeyring) {
+        for id in ids {
+            self.members.remove(id);
+            self.data.remove(id);
+            self.opened.remove(id);
+        }
+        self.keyring = keyring;
+        self.refresh(None);
+    }
+
+    /// Re-resolves membership, unlocks every epoch this device can reach,
+    /// opens what it can and refolds. Without `kem` (this device's own
+    /// writes, which wrap nothing new to it) only back-links are walked; the
+    /// KEM secret is never kept between calls.
+    fn refresh(&mut self, kem: Option<&KemSecret>) {
+        let frames = self.members.values().chain(self.data.values());
+        self.resolved = v2::resolve(&self.id, frames, &self.proofs);
+        let graph = EpochGraph::build(self.id, self.members.values(), &self.resolved);
+        match kem {
+            Some(kem) => {
+                let report = graph.unlock(&self.me, kem, &mut self.keyring);
+                self.bad_epochs = report.bad_epochs();
+            }
+            None => {
+                let report = graph.unlock_back_links(&mut self.keyring);
+                self.bad_epochs.extend(report.bad_epochs());
+            }
+        }
+        let unopened: Vec<_> = self
+            .data
+            .iter()
+            .filter(|(id, _)| !self.opened.contains_key(id))
+            .filter_map(|(id, f)| Some((*id, f, self.keyring.get(&f.header().epoch)?)))
+            .collect();
+        let opened = crate::par::map(&unopened, |(id, f, key)| {
+            DataFrame::open(f, key).ok().map(|opened| (*id, opened))
+        });
+        self.opened.extend(opened.into_iter().flatten());
+        self.unreadable = self
+            .data
+            .iter()
+            .filter(|(id, _)| !self.opened.contains_key(id))
+            .filter(|(_, f)| self.void_epoch(&f.header().epoch))
+            .filter_map(|(id, f)| Some((*id, DataFrame::unreadable(f).ok()?)))
+            .collect();
+        self.graph = Some(graph);
+        self.adders = v2::adders_from_frames(&self.resolved, self.members.values());
+        let ctx = FoldContext {
+            membership: &self.resolved,
+            adders: &self.adders,
+        };
+        self.state = v2::fold_from_scratch(&ctx, self.fold_inputs());
+        self.note_removed();
+    }
+
+    /// True iff `epoch`'s `Rotate` is placed in the membership DAG but not
+    /// authorized: a losing or voided epoch, which never will count. One
+    /// merely not placed yet may still, so its frames wait instead.
+    fn void_epoch(&self, epoch: &EpochId) -> bool {
+        self.resolved.dag_frames.contains(&epoch.as_frame_id())
+            && !self.resolved.is_authorized_epoch(epoch)
+    }
+
+    /// What the fold sees: every opened frame, and a stand-in for each
+    /// unreadable one under a void epoch.
+    fn fold_inputs(&self) -> impl Iterator<Item = &DataFrame> {
+        self.opened.values().chain(self.unreadable.values())
+    }
+
+    /// Parking-rule bookkeeping after a refresh. This device's own removal
+    /// is never a reason to park: being reinstated (by the recovery root) is
+    /// what it wants.
+    fn note_removed(&mut self) {
+        self.previously_removed.remove(&self.me);
+        self.parked = check_parking(&self.previously_removed, &self.resolved).reasons;
+        let me = self.me;
+        self.previously_removed
+            .extend(self.resolved.removed.keys().copied().filter(|d| *d != me));
+    }
+
+    fn graph(&self) -> &EpochGraph {
+        #[expect(clippy::expect_used, reason = "every constructor refreshes")]
+        self.graph.as_ref().expect("refreshed")
     }
 
     pub fn id(&self) -> VaultId {
         self.id
     }
 
-    /// The vault's current name.
+    /// Who this vault was opened as.
+    pub fn me(&self) -> DeviceId {
+        self.me
+    }
+
+    /// The vault's name: its latest `VaultMeta`, or its id while none
+    /// has been read.
     pub fn name(&self) -> &str {
-        self.membership.name()
+        match self.state.vault_name() {
+            Some(name) if crate::ops::valid_name(name) => name,
+            _ => "vault",
+        }
     }
 
-    /// The security-critical membership check. Apply it to every connection,
-    /// accepted or dialed.
     pub fn is_member(&self, device: &DeviceId) -> bool {
-        self.membership.is_member(device)
+        self.resolved.is_active_device(device)
     }
 
-    /// Whether `device` was removed from this vault. Removed keys can never rejoin.
     pub fn was_removed(&self, device: &DeviceId) -> bool {
-        self.membership.was_removed(device)
+        self.resolved.removed.contains_key(device)
     }
 
-    /// Current members.
+    /// Current member devices, in id order. The recovery root is not one.
     pub fn members(&self) -> impl Iterator<Item = DeviceId> + '_ {
-        self.membership.members().copied()
+        self.resolved.devices.iter().copied()
     }
 
-    /// Validates and stores an entry. Returns `Ok(false)` if it was already present.
-    ///
-    /// Entries must arrive in causal order. Acceptance depends only on the
-    /// entry and its ancestors: an author must be an active member in the entry's
-    /// causal past. Entries that are valid but no longer count (a removed
-    /// device's writes past its cutoff) are stored but have no effect.
-    pub fn apply(&mut self, entry: Entry) -> Result<bool, Error> {
-        if entry.vault() != self.id {
-            return Err(Error::WrongVault {
-                expected: self.id,
-                found: entry.vault(),
-            });
-        }
-        if self.node(&entry.hash()).is_some() {
-            return Ok(false);
-        }
-        let log_id = entry.log_id();
-        let next = self.next_seq(log_id);
-        if entry.seq() > next {
-            return Err(Error::SeqGap {
-                expected: next,
-                got: entry.seq(),
-            });
-        }
-        if entry.seq() < next {
-            return Err(Error::Fork { seq: entry.seq() });
-        }
-        // With a contiguous, fork-rejecting chain, this count covers exactly
-        // the author's predecessors, independent of other authors' arrival.
-        self.check_membership_budget(entry.author(), entry.payload())?;
-        let mut deps = Vec::with_capacity(entry.deps().len());
-        let mut missing = Vec::new();
-        for dep in entry.deps() {
-            match self.node(dep) {
-                Some(node) => deps.push(node),
-                None => missing.push(*dep),
-            }
-        }
-        if !missing.is_empty() {
-            return Err(Error::MissingDeps(missing));
-        }
-        if entry.log() == Log::Membership
-            && deps.iter().any(|dep| dep.entry.log() != Log::Membership)
-        {
-            return Err(Error::InvalidDeps);
-        }
-        if self
-            .previous(log_id)
-            .is_some_and(|prev| !entry.deps().contains(prev))
-        {
-            return Err(Error::InvalidDeps);
-        }
-        entry.verify()?;
-        match entry.payload() {
-            Payload::Membership(MembershipOp::Create { .. }) => return Err(Error::InvalidGenesis),
-            Payload::Membership(MembershipOp::Rename { name }) if !valid_name(name) => {
-                return Err(Error::InvalidName);
-            }
-            Payload::Membership(MembershipOp::Add { device, consent })
-                if !device.verify(&consent_message(&self.id, &entry.author(), device), consent) =>
-            {
-                return Err(Error::InvalidConsent);
-            }
-            _ => {}
-        }
-        let (mut clock, depth) = causal_past(deps);
-        let past = self.past_membership(&clock);
-        if !past.is_member(&entry.author()) {
-            return Err(Error::NotMember);
-        }
-        match entry.payload() {
-            Payload::Membership(MembershipOp::Add { device, .. }) if past.was_removed(device) => {
-                return Err(Error::AddRemovedDevice);
-            }
-            Payload::Membership(MembershipOp::Remove { device, .. }) if !past.is_member(device) => {
-                return Err(Error::RemoveNonMember);
-            }
-            _ => {}
-        }
-        clock.insert(log_id, entry.seq());
-        self.insert(Node {
-            entry,
-            depth,
-            clock,
-        });
-        Ok(true)
+    /// The active recovery root, if the lineage isn't frozen.
+    pub fn recovery_root(&self) -> Option<DeviceId> {
+        self.resolved.active_recovery
     }
 
-    /// Whether `device` was an active member in `entry`'s causal past: the
-    /// membership its author saw. `None` if a dependency isn't stored yet.
-    pub fn was_member_before(&mut self, entry: &Entry, device: &DeviceId) -> Option<bool> {
-        let deps = entry
-            .deps()
-            .iter()
-            .map(|dep| self.node(dep))
-            .collect::<Option<Vec<_>>>()?;
-        let (clock, _) = causal_past(deps);
-        Some(self.past_membership(&clock).is_member(device))
+    pub fn membership(&self) -> &ResolvedMembership {
+        &self.resolved
     }
 
-    /// Signs `payload` as the next entry in `secret`'s log, applies it, and
-    /// returns it for sending to peers.
-    pub fn commit(&mut self, secret: &DeviceSecret, payload: Payload) -> Result<Entry, Error> {
-        let author = secret.device_id();
-        if !self.is_member(&author) {
-            return Err(Error::NotMember);
-        }
-        let log_id = LogId {
-            author,
-            log: payload.log(),
-        };
-        self.check_membership_budget(author, &payload)?;
-        if let Payload::Data(ops) = &payload {
-            if self.prefix.base().is_some()
-                && ops.iter().any(|op| matches!(op, DataOp::Edit { .. }))
-            {
-                self.project_pending();
-            }
-            let items = |id: &ItemId| {
-                self.items
-                    .get(id)
-                    .or_else(|| self.inherited_items()?.get(id))
-            };
-            for op in ops {
-                data::check(items, op)?;
-            }
-            data::check_files(items, ops)?;
-            data::check_tags(items, ops)?;
-        }
-        let tips = match log_id.log {
-            Log::Membership => &self.membership_tips,
-            Log::Data => &self.tips,
-        };
-        let prev = self.previous(log_id);
-        let deps: Vec<Hash> = tips.iter().chain(prev).copied().collect();
-        let entry = Entry::sign(secret, self.id, self.next_seq(log_id), deps, payload);
-        let len = entry.encoded_len();
-        if len > MAX_ENTRY_LEN {
-            return Err(Error::TooLarge {
-                len,
-                max: MAX_ENTRY_LEN,
-            });
-        }
-        self.apply(entry.clone())?;
-        Ok(entry)
+    /// Why this device won't adopt the current membership's epochs, if it won't.
+    pub fn parked(&self) -> &[ParkingReason] {
+        &self.parked
     }
 
-    /// Adds `device`, given its [`DeviceSecret::join_consent`] for this vault and
-    /// `secret`'s device.
-    pub fn add(
-        &mut self,
-        secret: &DeviceSecret,
-        device: DeviceId,
-        consent: Signature,
-    ) -> Result<Entry, Error> {
-        if self.was_removed(&device) {
-            return Err(Error::AddRemovedDevice);
-        }
-        self.commit(
-            secret,
-            Payload::Membership(MembershipOp::Add { device, consent }),
-        )
+    /// Devices this device has seen removed.
+    pub fn previously_removed(&self) -> &BTreeSet<DeviceId> {
+        &self.previously_removed
     }
 
-    /// Removes `device`. Its data entries this vault already holds keep counting.
-    pub fn remove(&mut self, secret: &DeviceSecret, device: DeviceId) -> Result<Entry, Error> {
-        let last_seen_seq = self
-            .next_seq(LogId {
-                author: device,
-                log: Log::Data,
-            })
-            .checked_sub(1);
-        self.commit(
-            secret,
-            Payload::Membership(MembershipOp::Remove {
-                device,
-                last_seen_seq,
-            }),
-        )
+    /// Restores the parking rule's memory, saved from an earlier session.
+    pub fn remember_removed(&mut self, devices: impl IntoIterator<Item = DeviceId>) {
+        self.previously_removed.extend(devices);
+        self.note_removed();
     }
 
-    /// Renames the vault.
-    pub fn rename(
-        &mut self,
-        secret: &DeviceSecret,
-        name: impl Into<String>,
-    ) -> Result<Entry, Error> {
-        let name = name.into();
-        if !valid_name(&name) {
-            return Err(Error::InvalidName);
-        }
-        self.commit(secret, Payload::Membership(MembershipOp::Rename { name }))
+    /// Accepts that `device` is back: the human confirmed a reinstatement.
+    pub fn confirm_reinstated(&mut self, device: &DeviceId) {
+        self.previously_removed.remove(device);
+        self.parked = check_parking(&self.previously_removed, &self.resolved).reasons;
     }
 
-    /// Writes data ops as one entry. Fails if any op breaks the item rules
-    /// (see [`crate::item`]).
-    pub fn write(&mut self, secret: &DeviceSecret, ops: Vec<DataOp>) -> Result<Entry, Error> {
-        self.commit(secret, Payload::Data(ops))
+    /// A device's transport key and label, from its `DeviceCard`.
+    pub fn device_card(&self, device: &DeviceId) -> Option<(NetPublic, &str)> {
+        let card = &self.state.device_cards.get(device)?.winner()?.value;
+        Some((card.net_pk, card.label.as_str()))
     }
 
-    /// Creates an item and returns its id.
-    pub fn create_item(
-        &mut self,
-        secret: &DeviceSecret,
-        kind: impl Into<String>,
-        name: Option<String>,
-        fields: impl IntoIterator<Item = (String, Field)>,
-    ) -> Result<(ItemId, Entry), Error> {
-        let entry = self.write(secret, vec![DataOp::create(kind, name, fields)])?;
-        Ok((ItemId::of_create(&entry.hash(), 0), entry))
+    /// The member whose `DeviceCard` names `net` as its transport key.
+    pub fn device_for_net(&self, net: &[u8; 32]) -> Option<DeviceId> {
+        self.members().find(|d| {
+            self.device_card(d)
+                .is_some_and(|(pk, _)| pk.as_bytes() == net)
+        })
     }
 
-    /// Creates an item with initial `favorite` and `tags`, returning its id.
-    pub fn create_item_with(
-        &mut self,
-        secret: &DeviceSecret,
-        kind: impl Into<String>,
-        name: Option<String>,
-        fields: impl IntoIterator<Item = (String, Field)>,
-        favorite: bool,
-        tags: impl IntoIterator<Item = String>,
-    ) -> Result<(ItemId, Entry), Error> {
-        let op = DataOp::create_with(kind, name, fields, None, favorite, tags);
-        let entry = self.write(secret, vec![op])?;
-        Ok((ItemId::of_create(&entry.hash(), 0), entry))
+    /// Every frame, membership first.
+    pub fn frames(&self) -> impl Iterator<Item = &Frame> {
+        self.members.values().chain(self.data.values())
     }
 
-    /// Creates many items (an import) in as few entries as fit
-    /// [`CREATE_BATCH_BYTES`] of encoded ops each. Every op must be a
-    /// [`DataOp::Create`] (an edit fails as [`ItemError::NoSuchItem`]). Every
-    /// item is checked before anything is written, so either all are
-    /// created or none; one too large to sync even in an entry of its own
-    /// fails as [`Error::TooLarge`].
-    pub fn create_items(
-        &mut self,
-        secret: &DeviceSecret,
-        items: impl IntoIterator<Item = DataOp>,
-    ) -> Result<(Vec<ItemId>, Vec<Entry>), Error> {
-        if !self.is_member(&secret.device_id()) {
-            return Err(Error::NotMember);
-        }
-        // The first entry depends on every tip and this device's previous
-        // entry; later ones only on the entry before.
-        let deps = self.tips.len() + 1;
-        let mut batches: Vec<Vec<DataOp>> = Vec::new();
-        let mut size = 0;
-        for op in items {
-            if !matches!(op, DataOp::Create { .. }) {
-                return Err(ItemError::NoSuchItem.into());
-            }
-            let bytes = op.encoded_len();
-            let len = data_entry_len(deps, bytes);
-            if len > MAX_ENTRY_LEN {
-                return Err(Error::TooLarge {
-                    len,
-                    max: MAX_ENTRY_LEN,
-                });
-            }
-            data::check(|id| self.items.get(id), &op)?;
-            match batches.last_mut() {
-                Some(batch) if size + bytes <= CREATE_BATCH_BYTES => batch.push(op),
-                _ => {
-                    batches.push(vec![op]);
-                    size = 0;
+    pub fn frame(&self, id: &FrameId) -> Option<&Frame> {
+        self.members.get(id).or_else(|| self.data.get(id))
+    }
+
+    pub fn proofs(&self) -> &[FraudProof] {
+        &self.proofs
+    }
+
+    /// Data frames held but not opened: their epoch isn't reachable yet.
+    pub fn sealed_count(&self) -> usize {
+        self.data.len() - self.opened.len()
+    }
+
+    /// What `frame` changed.
+    pub fn touched(&self, frame: &Frame) -> Touch {
+        match frame.header().kind {
+            FrameKind::Member => Touch {
+                items: matches!(
+                    frame.member_body().and_then(|b| b.op.as_ref()),
+                    Some(MemberOp::Remove { .. })
+                ),
+                name: false,
+                devices: true,
+            },
+            FrameKind::Checkpoint => Touch::default(),
+            FrameKind::Data => {
+                let Some(opened) = self.opened.get(&frame.id()) else {
+                    return Touch::default();
+                };
+                let v2::DataBody::Data(p) = &opened.body else {
+                    return Touch::default();
+                };
+                let mut touch = Touch::default();
+                for op in &p.ops {
+                    match op {
+                        v2::DataOp::VaultMeta { .. } => touch.name = true,
+                        v2::DataOp::DeviceCard { .. } => touch.devices = true,
+                        v2::DataOp::Dispute { .. } => {}
+                        _ => touch.items = true,
+                    }
                 }
+                touch
             }
-            size += bytes;
         }
-        let mut ids = Vec::new();
-        let mut entries = Vec::new();
-        for ops in batches {
-            let count = ops.len();
-            let entry = self.write(secret, ops)?;
-            ids.extend((0..count).map(|i| ItemId::of_create(&entry.hash(), i)));
-            entries.push(entry);
-        }
-        Ok((ids, entries))
     }
-}
 
-impl Vault {
     /// An item, including deleted ones.
     pub fn item(&self, id: &ItemId) -> Option<Item> {
-        self.items.get(id).map(|state| state.item(*id))
+        let state = self.state.items.get(id).filter(|s| view::known(s))?;
+        Some(view::item(*id, state))
     }
 
-    /// Closest live item ids on either side of `id`, for unique display
-    /// prefixes. Tombstones do not compete with live items for a prefix.
+    /// Closest live item ids on either side of `id`, for unique display prefixes.
     pub fn live_neighbors(&self, id: ItemId) -> [Option<ItemId>; 2] {
         use std::ops::Bound::{Excluded, Unbounded};
+        let live = |(_, s): &(&ItemId, &v2::ItemState)| view::known(s) && !s.deleted();
         [
-            self.items
+            self.state
+                .items
                 .range(..id)
                 .rev()
-                .find(|(_, state)| !state.deleted())
+                .find(live)
                 .map(|(id, _)| *id),
-            self.items
+            self.state
+                .items
                 .range((Excluded(id), Unbounded))
-                .find(|(_, state)| !state.deleted())
+                .find(live)
                 .map(|(id, _)| *id),
         ]
     }
 
     /// Live items in id order, materialized one at a time.
     pub fn iter_items(&self) -> impl Iterator<Item = Item> + '_ {
-        self.items
+        self.state
+            .items
             .iter()
-            .map(|(id, state)| state.item(*id))
-            .filter(|item| !item.deleted)
+            .filter(|(_, s)| view::known(s) && !s.deleted())
+            .map(|(id, s)| view::item(*id, s))
     }
 
-    /// Live logins for a page's registrable domain, in item-id order. Check
-    /// the winning URL fields before materializing any of an item's values.
+    /// Live logins for a page's registrable domain, in item-id order. Checks
+    /// the URL fields before materializing anything else.
     pub fn site_logins<'a>(
         &'a self,
         site: &'a crate::site::Site,
     ) -> impl Iterator<Item = Item> + 'a {
-        self.items
+        self.state
+            .items
             .iter()
-            .filter(|(_, state)| state.login_on(site))
-            .map(|(id, state)| state.item(*id))
+            .filter(|(_, s)| {
+                view::known(s)
+                    && !s.deleted()
+                    && s.kind.winner().is_some_and(|w| w.value == "login")
+                    && site.matches(crate::autofill::field_urls(
+                        view::fields(s)
+                            .map(|(_, v)| view::field(v))
+                            .collect::<Vec<_>>()
+                            .iter(),
+                    ))
+            })
+            .map(|(id, s)| view::item(*id, s))
     }
 
     /// All items that are not deleted, ordered by id.
@@ -758,343 +443,122 @@ impl Vault {
         self.iter_items().collect()
     }
 
-    /// Deleted items, newest first: by when they were deleted, then those
-    /// that don't say when, by id.
+    /// Deleted items, newest first, then by id.
     pub fn deleted(&self) -> Vec<Deleted> {
         let mut deleted: Vec<Deleted> = self
+            .state
             .items
             .iter()
-            .map(|(id, state)| (state.item(*id), state))
-            .filter(|(item, _)| item.deleted)
-            .map(|(item, state)| Deleted {
-                at: state.deleted_at(),
-                item,
+            .filter(|(_, s)| view::known(s) && s.deleted())
+            .map(|(id, s)| Deleted {
+                item: view::item(*id, s),
+                at: view::deleted_at(s),
             })
             .collect();
         deleted.sort_by(|a, b| b.at.cmp(&a.at).then(a.item.id.cmp(&b.item.id)));
         deleted
     }
 
-    /// Every change to an item in causal order, with whether it is current.
-    pub fn history(&self, id: &ItemId) -> Vec<Version> {
-        self.items
-            .get(id)
-            .map(ItemState::history)
-            .unwrap_or_default()
-    }
-
-    /// The latest seq held per log.
-    pub fn heads(&self) -> Heads {
-        self.logs
-            .iter()
-            .map(|(log, offsets)| (*log, offsets.len() as u64 - 1))
-            .collect()
-    }
-
-    /// Entries a peer holding `peer` heads lacks, in an order it can apply:
-    /// all membership entries before any data entry.
-    pub fn missing_for(&self, peer: &Heads) -> Vec<&Entry> {
-        if peer.0.is_empty() {
-            return self.entries();
-        }
-        // A log's sequence is contiguous and its offsets are increasing. The
-        // earliest first-missing offset is the start of the only suffix that
-        // could contain a delta. Still filter interleaved, already-known logs.
-        let mut membership = self.membership_order.len();
-        let mut data = self.data_order.len();
-        for (id, offsets) in &self.logs {
-            let next = peer.get(id).map_or(0, |seq| seq.saturating_add(1));
-            let Some(&pos) = usize::try_from(next).ok().and_then(|n| offsets.get(n)) else {
-                continue;
-            };
-            let start = match id.log {
-                Log::Membership => &mut membership,
-                Log::Data => &mut data,
-            };
-            *start = (*start).min(pos);
-        }
-        self.membership_order[membership..]
-            .iter()
-            .chain(&self.data_order[data..])
-            .map(|hash| &self.nodes[hash].entry)
-            .filter(|entry| {
-                peer.get(&entry.log_id())
-                    .is_none_or(|seq| entry.seq() > seq)
-            })
-            .collect()
-    }
-
-    fn at_seq(&self, id: LogId, seq: usize) -> &Node {
-        &self.nodes[&self.order(id.log)[self.logs[&id][seq]]]
-    }
-
-    /// Capture a fixed upper bound for each missing author chain, not the
-    /// entries themselves. Later appends cannot enter this transfer.
-    pub fn missing_log(&self, heads: &Heads, log: Log) -> MissingLog {
-        MissingLog(
-            self.logs
-                .iter()
-                .filter_map(|(&id, offsets)| {
-                    if id.log != log {
-                        return None;
-                    }
-                    let next = heads.get(&id).map_or(0, |s| s.saturating_add(1));
-                    let seq = usize::try_from(next).ok()?;
-                    if seq >= offsets.len() {
-                        return None;
-                    }
-                    Some(Reverse(Pending {
-                        depth: self.at_seq(id, seq).depth,
-                        log: id,
-                        seq,
-                        end: self.at_seq(id, offsets.len() - 1).entry.hash(),
-                    }))
-                })
-                .collect(),
-        )
-    }
-
-    pub fn iter_entries(&self) -> impl Iterator<Item = &Entry> {
-        self.membership_order
-            .iter()
-            .chain(&self.data_order)
-            .map(|h| &self.nodes[h].entry)
-    }
-
-    /// Every stored entry, in an order [`Vault::load`] accepts.
-    pub fn entries(&self) -> Vec<&Entry> {
-        self.iter_entries().collect()
-    }
-}
-
-impl<P: Prefix> VaultState<P> {
-    fn node(&self, hash: &Hash) -> Option<&Node> {
-        self.nodes
-            .get(hash)
-            .or_else(|| self.prefix.base()?.nodes.get(hash))
-    }
-
-    fn previous(&self, log: LogId) -> Option<&Hash> {
-        self.logs
-            .get(&log)
-            .and_then(|offsets| offsets.last())
-            .map(|&i| &self.order(log.log)[i])
-            .or_else(|| {
-                let base = self.prefix.base()?;
-                let &i = base.logs.get(&log)?.last()?;
-                Some(&base.order(log.log)[i])
-            })
-    }
-
-    fn order(&self, log: Log) -> &[Hash] {
-        match log {
-            Log::Membership => &self.membership_order,
-            Log::Data => &self.data_order,
-        }
-    }
-
-    fn check_membership_budget(&self, author: DeviceId, payload: &Payload) -> Result<(), Error> {
-        if matches!(payload, Payload::Membership(op) if !matches!(op, MembershipOp::Remove { .. }))
-            && self.membership_writes.get(&author).copied().unwrap_or(0) >= MAX_MEMBERSHIP_ENTRIES
-        {
-            return Err(Error::MembershipLimit {
-                max: MAX_MEMBERSHIP_ENTRIES,
-            });
-        }
-        Ok(())
-    }
-
-    fn next_seq(&self, log: LogId) -> u64 {
-        self.log_len(log, self.logs.get(&log).map_or(0, Vec::len))
-    }
-
-    fn log_len(&self, log: LogId, suffix: usize) -> u64 {
-        (suffix
-            + self
-                .prefix
-                .base()
-                .and_then(|v| v.logs.get(&log))
-                .map_or(0, Vec::len)) as u64
-    }
-
-    /// Resolves the membership of the causal past `clock` covers, excluding the
-    /// entry being applied.
-    fn past_membership(&mut self, clock: &Clock) -> &Membership {
-        let frontier = frontier(clock);
-        let current = self
-            .logs
-            .iter()
-            .filter(|(log, _)| log.log == Log::Membership)
-            .map(|(log, offsets)| (log.author, self.log_len(*log, offsets.len()) - 1));
-        if frontier.iter().copied().eq(current) {
-            return &self.membership;
-        }
-        let nodes = &self.nodes;
-        let ops = &self.membership_order;
-        let base = self.prefix.base();
-        // A cached frontier names only immutable, fork-checked prefix nodes.
-        if let Some(past) = base.and_then(|v| v.past_memberships.get(&frontier)) {
-            return past;
-        }
-        let id = &self.id;
-        self.past_memberships
-            .entry(frontier)
-            .or_insert_with_key(|frontier| {
-                let covered: BTreeMap<_, _> = frontier.iter().copied().collect();
-                let past = membership_nodes(base, ops, nodes)
-                    .filter(|node| {
-                        covered
-                            .get(&node.entry.author())
-                            .is_some_and(|&seq| seq >= node.entry.seq())
-                    })
-                    .collect();
-                membership::resolve(id, past)
-            })
-    }
-
-    fn insert(&mut self, node: Node) {
-        let entry = &node.entry;
-        let hash = entry.hash();
-        let offset = self.order(entry.log()).len();
-        self.logs.entry(entry.log_id()).or_default().push(offset);
-        for dep in entry.deps() {
-            self.tips.remove(dep);
-        }
-        self.tips.insert(hash);
-        let log = entry.log();
-        if log == Log::Membership {
-            if !matches!(
-                entry.payload(),
-                Payload::Membership(MembershipOp::Remove { .. })
-            ) {
-                *self.membership_writes.entry(entry.author()).or_default() += 1;
-            }
-            for dep in entry.deps() {
-                self.membership_tips.remove(dep);
-            }
-            self.membership_tips.insert(hash);
-            self.membership_order.push(hash);
-        } else {
-            self.data_order.push(hash);
-        }
-        self.nodes.insert(hash, node);
-        match log {
-            Log::Membership => {
-                let ops = membership_nodes(self.prefix.base(), &self.membership_order, &self.nodes)
-                    .collect();
-                let membership = membership::resolve(&self.id, ops);
-                self.past_memberships.clear();
-                let rebuild = self.needs_reprojection(&membership);
-                self.membership = membership;
-                if rebuild && self.prefix.base().is_some() {
-                    self.rebuild_projection = true;
-                } else if rebuild {
-                    self.items.clear();
-                    self.project_suffix(0);
+    /// Runs `change` against this vault, then `commit`s the frames it made.
+    /// On an error from either, the vault is as it was.
+    pub fn transact<T, E: From<Error>>(
+        &mut self,
+        change: impl FnOnce(&mut VaultWrite<'_>) -> Result<T, E>,
+        commit: impl FnOnce(&Vault, &[&Frame]) -> Result<(), E>,
+    ) -> Result<T, E> {
+        self.staged.clear();
+        let keyring = self.keyring.clone();
+        let result = change(&mut VaultWrite::new(self));
+        let staged = std::mem::take(&mut self.staged);
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                if !staged.is_empty() {
+                    self.remove_frames(&staged, keyring);
                 }
+                return Err(error);
             }
-            Log::Data if self.prefix.base().is_some() => {} // projected lazily for subsequent local edits
-            Log::Data => {
-                let node = &self.nodes[&hash];
-                if self
-                    .membership
-                    .counts(&node.entry.author(), node.entry.seq())
-                {
-                    data::apply(&mut self.items, None, node);
-                }
-            }
-        }
-    }
-
-    /// Compare effective cutoffs only for data already visited by the projection.
-    /// A fresh Add has no such data, but an author whose earlier admission was
-    /// cut can have stored, ignored entries without appearing in `removed`.
-    fn needs_reprojection(&self, next: &Membership) -> bool {
-        self.logs.iter().any(|(log, offsets)| {
-            if log.log != Log::Data {
-                return false;
-            }
-            let suffix = if self.prefix.base().is_some() {
-                offsets.partition_point(|&i| i < self.projected)
-            } else {
-                offsets.len()
-            };
-            self.log_len(*log, suffix)
-                .checked_sub(1)
-                .is_some_and(|last| {
-                    self.membership.counted_through(&log.author, last)
-                        != next.counted_through(&log.author, last)
-                })
-        })
-    }
-
-    fn inherited_items(&self) -> Option<&BTreeMap<ItemId, ItemState>> {
-        self.prefix
-            .base()
-            .filter(|_| self.inherit_items)
-            .map(|v| &v.items)
-    }
-
-    fn project_pending(&mut self) {
-        let Some(base) = self.prefix.base() else {
-            return;
         };
-        if self.rebuild_projection {
-            // An effective cutoff can hide or restore older data. Only local
-            // reads and edits need this intermediate projection.
-            self.items.clear();
-            self.inherit_items = false;
-            project(
-                &mut self.items,
-                None,
-                &self.membership,
-                base.data_order.iter().map(|h| &base.nodes[h]),
-            );
-            self.projected = 0;
-            self.rebuild_projection = false;
+        if staged.is_empty() {
+            return Ok(value);
         }
-        // Split the immutable prefix borrow from the mutable projection.
-        let inherited = self.inherit_items.then_some(&base.items);
-        project(
-            &mut self.items,
-            inherited,
-            &self.membership,
-            self.data_order[self.projected..]
-                .iter()
-                .map(|h| &self.nodes[h]),
-        );
-        self.projected = self.data_order.len();
-    }
-
-    fn project_suffix(&mut self, start: usize) {
-        project(
-            &mut self.items,
-            None,
-            &self.membership,
-            self.data_order[start..].iter().map(|h| &self.nodes[h]),
-        );
-    }
-}
-
-fn project<'a>(
-    items: &mut BTreeMap<ItemId, ItemState>,
-    inherited: Option<&BTreeMap<ItemId, ItemState>>,
-    membership: &Membership,
-    nodes: impl Iterator<Item = &'a Node>,
-) {
-    for node in nodes {
-        if membership.counts(&node.entry.author(), node.entry.seq()) {
-            data::apply(items, inherited, node);
+        let frames: Vec<&Frame> = staged.iter().filter_map(|id| self.frame(id)).collect();
+        match commit(self, &frames) {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                self.remove_frames(&staged, keyring);
+                Err(error)
+            }
         }
     }
 }
 
-fn membership_nodes<'a>(
-    base: Option<&'a Vault>,
-    order: &'a [Hash],
-    nodes: &'a HashMap<Hash, Node>,
-) -> impl Iterator<Item = &'a Node> {
-    base.into_iter()
-        .flat_map(|v| v.membership_order.iter().map(|h| &v.nodes[h]))
-        .chain(order.iter().map(|h| &nodes[h]))
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::v2::RecoverySecret;
+
+    /// 2023-11-14, a fixed now for tests.
+    pub const NOW_MS: u64 = 1_700_000_000_000;
+
+    pub fn author(seed: u8) -> Author {
+        Author::new(DeviceKeys::from_seed(&[seed; 32]), NOW_MS)
+    }
+
+    pub fn recovery() -> RecoverySecret {
+        RecoverySecret::from_bytes([0xee; 32])
+    }
+
+    pub fn vault(author: &Author, name: &str) -> (Vault, Vec<Frame>) {
+        Vault::create(&recovery(), author, name, "test").unwrap()
+    }
+
+    /// Writes outside a host transaction, for tests.
+    impl Vault {
+        /// The epoch graph, membership and keys, for checking epoch rules.
+        pub(crate) fn epoch_parts(&self) -> (&EpochGraph, &ResolvedMembership, &EpochKeyring) {
+            (self.graph(), &self.resolved, &self.keyring)
+        }
+
+        pub(crate) fn create_item(
+            &mut self,
+            a: &Author,
+            kind: &str,
+            name: Option<String>,
+            fields: impl IntoIterator<Item = (String, crate::Field)>,
+        ) -> Result<(ItemId, FrameId), Error> {
+            self.transact(|v| v.create_item(a, kind, name, fields), |_, _| Ok(()))
+        }
+
+        pub(crate) fn create_item_with(
+            &mut self,
+            a: &Author,
+            kind: &str,
+            name: Option<String>,
+            fields: impl IntoIterator<Item = (String, crate::Field)>,
+            favorite: bool,
+            tags: impl IntoIterator<Item = String>,
+        ) -> Result<(ItemId, FrameId), Error> {
+            self.transact(
+                |v| v.create_item_with(a, kind, name, fields, favorite, tags),
+                |_, _| Ok(()),
+            )
+        }
+
+        pub(crate) fn create_items(
+            &mut self,
+            a: &Author,
+            ops: impl IntoIterator<Item = crate::DataOp>,
+        ) -> Result<(Vec<ItemId>, Vec<FrameId>), Error> {
+            self.transact(|v| v.create_items(a, ops), |_, _| Ok(()))
+        }
+
+        pub(crate) fn write(
+            &mut self,
+            a: &Author,
+            ops: Vec<crate::DataOp>,
+        ) -> Result<FrameId, Error> {
+            self.transact(|v| v.write(a, ops), |_, _| Ok(()))
+        }
+    }
 }

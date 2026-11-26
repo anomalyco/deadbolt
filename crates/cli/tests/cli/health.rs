@@ -183,7 +183,7 @@ fn hibp_range_checks_are_opt_in_padded_deduplicated_and_cached() {
     assert_eq!(rep.counts.breached, 2);
     assert_eq!(range_hits.load(Ordering::SeqCst), 1);
 
-    // Lock, unlock, and `--online` again: cached in encrypted `store.redb` -> 0 extra range hits!
+    // Lock, unlock, and `--online` again: cached in the sealed store -> 0 extra range hits!
     d.run(&["lock"]);
     d.run(&["unlock"]);
     let cached = human_health(&d, &["health", "--online", "--json"]);

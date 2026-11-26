@@ -89,22 +89,25 @@ pub fn drive<A, B>(
     let result = {
         let (ar, aw) = tokio::io::split(a_wire);
         let (br, bw) = tokio::io::split(b_wire);
-        let mut a = std::pin::pin!(a);
-        let mut b = std::pin::pin!(b);
-        let mut ab_pump = std::pin::pin!(relay(
+        // Polled from inside a Tokio task that never yields to the runtime,
+        // so the task's cooperative budget would run out and stall every
+        // stream for good; this scheduler does its own fairness instead.
+        let mut a = std::pin::pin!(tokio::task::unconstrained(a));
+        let mut b = std::pin::pin!(tokio::task::unconstrained(b));
+        let mut ab_pump = std::pin::pin!(tokio::task::unconstrained(relay(
             ar,
             bw,
             &mut ab,
             &moved,
             1 + (rng.next() % 113) as usize,
-        ));
-        let mut ba_pump = std::pin::pin!(relay(
+        )));
+        let mut ba_pump = std::pin::pin!(tokio::task::unconstrained(relay(
             br,
             aw,
             &mut ba,
             &moved,
             1 + (rng.next() % 113) as usize,
-        ));
+        )));
         let mut a_done = None;
         let mut b_done = None;
         let mut ab_done = false;

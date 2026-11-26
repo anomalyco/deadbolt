@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use deadbolt_core::{DeviceSecret, Field, FieldType, VaultId};
+use deadbolt_core::{Field, FieldType, VaultId};
 use deadbolt_net::SyncHandler;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixStream;
@@ -20,7 +20,7 @@ use super::tests::test_paths;
 use super::{Daemon, MAX_LINE, items, sync, watchers};
 use crate::protocol::{Change, Command, FieldInput, Message, PROTOCOL_VERSION, Reply, Request};
 
-const KDF: deadbolt_store::KdfParams = deadbolt_store::KdfParams {
+const KDF: crate::disk::KdfParams = crate::disk::KdfParams {
     m_cost_kib: 64,
     t_cost: 1,
     p_cost: 1,
@@ -147,15 +147,13 @@ async fn a_watcher_sees_lock_state_local_writes_and_one_change_per_sync_batch() 
     quiet(&mut lines).await;
 
     // Another member writes three items; they arrive in one sync batch.
-    let other = DeviceSecret::from_bytes(&[52; 32]);
+    let other = super::session::tests::author(52);
     daemon
         .with(|s| {
-            s.update(vault, |v, key| {
-                Ok(v.add(
-                    key,
-                    other.device_id(),
-                    other.join_consent(&vault, &key.device_id()),
-                )?)
+            let me = s.id;
+            s.update(vault, |v, a| {
+                let (keys, consent) = super::session::tests::peer(52, &vault, &me);
+                Ok(v.add(a, keys.device_id(), keys.kem_public(), consent)?)
             })
         })
         .unwrap();
@@ -167,20 +165,15 @@ async fn a_watcher_sees_lock_state_local_writes_and_one_change_per_sync_batch() 
     let batch: Vec<deadbolt_net::Blob> = (0..3)
         .map(|n| {
             let field = Field::new(FieldType::Secret, format!("theirs-{n}"));
-            let (_, entry) = theirs
-                .create_item(&other, "login", None, [("password".into(), field)])
-                .unwrap();
-            entry.encode()
+            let (_, frame) = super::session::tests::local(&mut theirs, |w| {
+                w.create_item(&other, "login", None, [("password".into(), field)])
+            });
+            super::session::tests::blob(&theirs, frame)
         })
         .collect();
     daemon.ready.send_replace(true);
     sync::Handler(daemon.clone())
-        .receive(
-            *other.device_id().as_bytes(),
-            batch,
-            &mut Default::default(),
-            true,
-        )
+        .receive(*other.id().as_bytes(), batch, &mut Default::default(), true)
         .await
         .unwrap();
     assert_eq!(

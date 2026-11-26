@@ -15,7 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+argon2 = { version = "0.6", default-features = false, features = ["zeroize"] }
 blake3 = { version = "1.8", features = ["zeroize"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+thiserror = "2.0"
 clap = { version = "4.6.7", features = ["derive"] }
 data-encoding = "2.11.1"
 getrandom = "0.4"
@@ -27,10 +30,10 @@ deadbolt-enclave = { path = "../enclave" }
 deadbolt-engine = { path = "../engine" }
 deadbolt-net = { path = "../net", features = ["application"] }
 deadbolt-os = { path = "../os" }
+deadbolt-pack = { path = "../pack" }
 # `deadbolt broker` re-signs AWS requests with its pure SigV4.
 deadbolt-remote = { path = "../remote", default-features = false }
 deadbolt-send = { path = "../send" }
-deadbolt-store = { path = "../store" }
 # `deadbolt broker`'s HTTP/1 server; all three are already in the tree through reqwest.
 http-body-util = "0.1.5"
 hyper = { version = "1.12", features = ["http1", "server"] }
@@ -60,7 +63,7 @@ zip = { version = "9.1", default-features = false, features = ["deflate-flate2-z
 
 [dev-dependencies]
 p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
-redb = "4"
+deadbolt-core = { path = "../core", features = ["sim"] }
 deadbolt-net = { path = "../net", features = ["sim"] }
 tokio = { version = "1.53.3", features = ["test-util"] }
 memchr = "2.8"

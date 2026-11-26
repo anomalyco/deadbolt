@@ -8,6 +8,8 @@
 //!   deleting an old generation, and names are never reused (W6).
 //! - `LOCK` holds an advisory exclusive lock for the single writer only. Its
 //!   bytes are never written; readers never touch it.
+//! - On Unix every file this creates is `0600` and every directory `0700`:
+//!   a vault's frames and sealed state are for this user alone.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -29,7 +31,7 @@ impl FsBlocks {
     /// The vault directory at `root`, created if missing.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(io_error(&root.to_string_lossy()))?;
+        create_dirs(&root).map_err(io_error(&root.to_string_lossy()))?;
         Ok(Self {
             root,
             #[cfg(test)]
@@ -78,7 +80,7 @@ impl FsBlocks {
             .parent()
             .map_or_else(|| self.root.clone(), Path::to_path_buf);
         if dir != self.root && !dir.is_dir() {
-            fs::create_dir_all(&dir).map_err(io_error(name))?;
+            create_dirs(&dir).map_err(io_error(name))?;
             sync_dir(&self.root, name)?;
         }
         Ok(dir)
@@ -92,7 +94,7 @@ impl Blocks for FsBlocks {
     fn create_new(&self, name: &str, bytes: &[u8]) -> Result<()> {
         let path = self.path(name)?;
         let dir = self.parent_of(&path, name)?;
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        let mut file = match new_file().write(true).create_new(true).open(&path) {
             Ok(file) => file,
             Err(err) if err.kind() == ErrorKind::AlreadyExists => {
                 return Err(Error::AlreadyExists {
@@ -118,7 +120,7 @@ impl Blocks for FsBlocks {
             Ok(file) => (file, false),
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 self.parent_of(&path, name)?;
-                let file = OpenOptions::new().append(true).create(true).open(&path);
+                let file = new_file().append(true).create(true).open(&path);
                 (file.map_err(io_error(name))?, true)
             }
             Err(err) => return Err(io_error(name)(err)),
@@ -217,13 +219,23 @@ impl Blocks for FsBlocks {
     }
 
     fn try_lock_writer(&self) -> Result<FsLock> {
-        let file = OpenOptions::new()
+        let file = new_file()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(self.root.join(LOCK))
             .map_err(io_error(LOCK))?;
+        // A lock stays held for a moment after its writer drops it while a
+        // child process spawned elsewhere in this process still has the
+        // inherited handle, until its exec closes it. Wait that out briefly.
+        for _ in 0..LOCK_TRIES - 1 {
+            match file.try_lock() {
+                Ok(()) => return Ok(FsLock { _file: file }),
+                Err(TryLockError::WouldBlock) => std::thread::sleep(LOCK_WAIT),
+                Err(TryLockError::Error(err)) => return Err(io_error(LOCK)(err)),
+            }
+        }
         match file.try_lock() {
             Ok(()) => Ok(FsLock { _file: file }),
             Err(TryLockError::WouldBlock) => Err(Error::Locked),
@@ -231,6 +243,10 @@ impl Blocks for FsBlocks {
         }
     }
 }
+
+/// Attempts at `LOCK` before reporting [`Error::Locked`], `LOCK_WAIT` apart.
+const LOCK_TRIES: u32 = 10;
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// The writer's exclusive lock on `LOCK`; the OS releases it when this drops
 /// (or the process dies).
@@ -285,6 +301,23 @@ fn io_error(name: &str) -> impl FnOnce(io::Error) -> Error + '_ {
             }
         }
     }
+}
+
+/// Options for opening a file that may be created: `0600` on Unix.
+fn new_file() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+}
+
+/// Creates `dir` and any missing parents: `0700` on Unix.
+fn create_dirs(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
 /// Makes a directory entry (a create or a delete) durable.

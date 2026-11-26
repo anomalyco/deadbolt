@@ -4,7 +4,7 @@
 //! names the page's origin, which the browser (not the page) reported, and
 //! the daemon builds the client data from it (see docs/autofill.md).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use deadbolt_core::{Item, ItemId, VaultId, passkeys as shared};
 use deadbolt_proto::daemon::{ErrorCode, LoginRef, SitePasskey};
 
@@ -138,8 +138,14 @@ pub fn create_passkey(
     let made = shared::register(new, verified, &created).map_err(shared_error)?;
 
     let vault = s.resolve(None)?;
-    let entry = s.update(vault, |v, secret| Ok(v.write(secret, vec![made.create])?))?;
-    let passkey = passkey_ref(&vault, &ItemId::of_create(&entry.hash(), 0));
+    let (ids, _) = s.update(vault, |v, author| {
+        Ok(v.create_items(author, vec![made.create])?)
+    })?;
+    let id = ids
+        .first()
+        .copied()
+        .context("the passkey was not created")?;
+    let passkey = passkey_ref(&vault, &id);
     Ok(Created {
         passkey,
         credential_id: made.credential_id,

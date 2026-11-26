@@ -5,7 +5,7 @@
 //! hardware-bound P-256 key inside the Secure Enclave
 //! (`CryptoKit.SecureEnclave.P256.KeyAgreement.PrivateKey`) and seals a random
 //! 256-bit `biometric_key` with ECDH + HKDF-SHA256 + AES-256-GCM. The resulting
-//! envelope and the AEAD-wrapped key set live in `store.redb`.
+//! envelope and the AEAD-wrapped key set live in the sealed store.
 
 use std::fmt;
 use std::path::Path;
@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::disk::Zeroizing;
 use anyhow::{Result, bail};
-use deadbolt_store::Zeroizing;
 
 /// Re-confirm the vault passphrase at least once every 14 days so the user
 /// does not forget their passphrase while relying on Touch ID.
@@ -77,7 +77,7 @@ impl BiometricStatus {
 }
 
 /// Metadata parsed from a `"biometric.token"` header (`"DBSE"`), kept in
-/// daemon memory so `status()` never opens `store.redb`.
+/// daemon memory so `status()` never opens the sealed store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenMeta {
     pub flags: u8,
@@ -94,7 +94,7 @@ impl TokenMeta {
     }
 }
 
-/// Sealed biometric key + token ready to be written into `store.redb`.
+/// Sealed biometric key + token ready to be written into the sealed store.
 pub struct SealedBiometric {
     pub key: Zeroizing<[u8; 32]>,
     pub token: Vec<u8>,
@@ -134,7 +134,7 @@ pub enum UnlockError {
     Unavailable(String),
     Expired(String),
     Invalidated(String),
-    Store(deadbolt_store::Error),
+    Store(crate::disk::Error),
     Other(anyhow::Error),
 }
 
@@ -160,8 +160,8 @@ impl fmt::Display for UnlockError {
 
 impl std::error::Error for UnlockError {}
 
-impl From<deadbolt_store::Error> for UnlockError {
-    fn from(err: deadbolt_store::Error) -> Self {
+impl From<crate::disk::Error> for UnlockError {
+    fn from(err: crate::disk::Error) -> Self {
         Self::Store(err)
     }
 }
@@ -223,20 +223,20 @@ pub fn token_meta(token: Option<&[u8]>) -> Option<TokenMeta> {
 
 /// Reads [`TokenMeta`] once from `data_dir` at daemon startup.
 pub fn read_token_meta(data_dir: &Path) -> Option<TokenMeta> {
-    if !deadbolt_store::is_initialized(data_dir) {
+    if !crate::disk::is_initialized(data_dir) {
         return None;
     }
-    let token = deadbolt_store::biometric_token(data_dir).ok().flatten()?;
+    let token = crate::disk::biometric_token(data_dir).ok().flatten()?;
     token_meta(Some(&token))
 }
 
 /// Returns true only when `err` indicates that the biometric header entries
 /// (`"biometric.token"` / `"keyset.biometric"`) are invalid or incomplete, not
 /// when `open_db` or `Header::read` reports general database corruption.
-pub fn is_biometric_slot_error(err: &deadbolt_store::Error) -> bool {
+pub fn is_biometric_slot_error(err: &crate::disk::Error) -> bool {
     match err {
-        deadbolt_store::Error::InvalidBiometric => true,
-        deadbolt_store::Error::Corrupt(msg) => msg.contains("biometric"),
+        crate::disk::Error::InvalidBiometric => true,
+        crate::disk::Error::Corrupt(msg) => msg.contains("biometric"),
         _ => false,
     }
 }
@@ -245,12 +245,12 @@ pub fn is_biometric_slot_error(err: &deadbolt_store::Error) -> bool {
 /// matches `expected_token` (or if the biometric header entry itself is
 /// incomplete). Returns whether the slot was cleared.
 pub fn clear_biometric_if_matches(data_dir: &Path, expected_token: &[u8]) -> bool {
-    match deadbolt_store::biometric_token(data_dir) {
+    match crate::disk::biometric_token(data_dir) {
         Ok(Some(current)) if current == expected_token => {
-            deadbolt_store::clear_biometric(data_dir).unwrap_or(false)
+            crate::disk::clear_biometric(data_dir).unwrap_or(false)
         }
         Err(ref err) if is_biometric_slot_error(err) => {
-            deadbolt_store::clear_biometric(data_dir).unwrap_or(false)
+            crate::disk::clear_biometric(data_dir).unwrap_or(false)
         }
         _ => false,
     }
@@ -349,14 +349,14 @@ pub fn group_container(group: &str) -> anyhow::Result<Option<std::path::PathBuf>
 }
 
 /// Generates a fresh `.biometryCurrentSet` Secure Enclave key and seals a new
-/// 256-bit `biometric_key` without touching `store.redb`.
+/// 256-bit `biometric_key` without touching the sealed store.
 pub fn seal_new(now_secs: u64) -> Result<SealedBiometric, UnlockError> {
     seal_inner(true, now_secs)
 }
 
 /// Enrolls a fresh `.biometryCurrentSet` Secure Enclave key and writes the
 /// biometric slot into `store`.
-pub fn enroll(store: &deadbolt_store::Unlocked, now_secs: u64) -> Result<TokenMeta, UnlockError> {
+pub fn enroll(store: &crate::disk::Unlocked, now_secs: u64) -> Result<TokenMeta, UnlockError> {
     let sealed = seal_new(now_secs)?;
     store.set_biometric(&sealed.key, &sealed.token)?;
     Ok(sealed.meta)
@@ -364,7 +364,7 @@ pub fn enroll(store: &deadbolt_store::Unlocked, now_secs: u64) -> Result<TokenMe
 
 #[cfg(all(test, target_os = "macos"))]
 pub fn enroll_with_policy(
-    store: &deadbolt_store::Unlocked,
+    store: &crate::disk::Unlocked,
     policy: SealPolicy,
     now_secs: u64,
 ) -> Result<TokenMeta, UnlockError> {
@@ -383,7 +383,7 @@ fn seal_inner(require_biometry: bool, now_secs: u64) -> Result<SealedBiometric, 
     }
     #[cfg(target_os = "macos")]
     {
-        let key = deadbolt_store::generate_biometric_key()?;
+        let key = crate::disk::generate_biometric_key()?;
         let header = encode_header(require_biometry, now_secs);
         let enclave_blob = macos::seal(&key, &header, require_biometry)?;
         let mut token = Vec::with_capacity(header.len() + enclave_blob.len());
@@ -427,7 +427,7 @@ pub fn validate_token(
 }
 
 /// Unseals the 32-byte `biometric_key` from `token` via `deadbolt-enclave`
-/// without holding `store.redb` open while the Touch ID prompt is on screen.
+/// without holding the sealed store open while the Touch ID prompt is on screen.
 pub fn unseal_token(
     token: &[u8],
     now_secs: u64,
@@ -497,12 +497,12 @@ pub fn unlock_with_policy(
     reason: &str,
     cancel: &CancelHandle,
     timeout: Duration,
-) -> Result<deadbolt_store::Unlocked, UnlockError> {
-    let token = match deadbolt_store::biometric_token(data_dir) {
+) -> Result<crate::disk::Unlocked, UnlockError> {
+    let token = match crate::disk::biometric_token(data_dir) {
         Ok(Some(token)) => token,
         Ok(None) => return Err(UnlockError::NotEnrolled),
         Err(ref err) if is_biometric_slot_error(err) => {
-            drop(deadbolt_store::clear_biometric(data_dir));
+            drop(crate::disk::clear_biometric(data_dir));
             return Err(UnlockError::Invalidated(err.to_string()));
         }
         Err(err) => return Err(UnlockError::Store(err)),
@@ -528,7 +528,7 @@ pub fn unlock_with_policy(
         Err(err) => return Err(err),
     };
 
-    match deadbolt_store::unlock_biometric(data_dir, &key) {
+    match crate::disk::unlock_biometric(data_dir, &key) {
         Ok(unlocked) => Ok(unlocked),
         Err(ref err) if is_biometric_slot_error(err) => {
             if !cancel.is_cancelled() {
@@ -550,8 +550,8 @@ mod macos {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use crate::disk::Zeroizing;
     use anyhow::{Context, Result, anyhow, bail};
-    use deadbolt_store::Zeroizing;
 
     use super::{BiometricStatus, CancelHandle, PROBE_TIMEOUT, UnlockError};
 
