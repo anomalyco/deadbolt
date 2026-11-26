@@ -10,7 +10,7 @@
     "check:proto": "bun run gen:proto && git diff --exit-code extension/src/gen/proto.ts",
     "check:extension": "cd extension && bun install --frozen-lockfile && bun run check && bun run build",
     "check:wasm": "cargo +stable clippy -p deadbolt-pack -p deadbolt-engine -p deadbolt-proto -p deadbolt-core -p deadbolt-send -p deadbolt-send-web --target wasm32-unknown-unknown --locked -- -D warnings && cargo +stable clippy -p deadbolt-remote --no-default-features --target wasm32-unknown-unknown --locked -- -D warnings",
-    "check": "bun run check:extension && bash scripts/file-size.sh && cargo +stable fmt --all -- --check && cargo +stable clippy --workspace --all-targets --locked -j 2 -- -D warnings && bun run check:wasm && cargo +stable test --workspace --locked -j 2 && cargo +stable deny check"
+    "check": "bun run check:extension && bash scripts/file-size.sh && cargo +stable fmt --all -- --check && cargo +stable clippy --workspace --all-targets --locked -j 2 -- -D warnings && bun run check:wasm && cargo +stable test --workspace --locked -j 2 && cargo +stable deny check && cargo machete"
   },
   "engines": {
     "bun": ">=1.4.0"

@@ -20,9 +20,12 @@ internal APIs directly and update their callers.
 ## Commands
 
 `bun run check` runs the extension's typecheck, tests and build, then formatting,
-Clippy (warnings are errors), workspace tests and `cargo deny check`. Install
-stable Rust with rustfmt/Clippy and cargo-deny first. CI runs the same steps, with
-cargo-deny and the extension in their own jobs and Rust on Linux and macOS.
+Clippy (warnings are errors), workspace tests, `cargo deny check` and
+`cargo machete` (unused dependencies; a false positive goes in that crate's
+`[package.metadata.cargo-machete]` ignored list). Install stable Rust with
+rustfmt/Clippy, cargo-deny and cargo-machete first. CI runs the same steps, with
+cargo-deny, cargo-machete and the extension in their own jobs and Rust on Linux
+and macOS.
 
 For code shape and file sizes, `bash scripts/file-size.sh` checks tracked
 `.rs` and `.swift` files under `crates/`, `.ts` files under `extension/src`,
