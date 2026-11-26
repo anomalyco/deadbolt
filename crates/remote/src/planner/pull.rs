@@ -1,13 +1,16 @@
 //! Pull: list `m/`, then `d/`, then `x/` (the membership-before-data
 //! barrier), compare with the anchor, and name the objects to fetch.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use deadbolt_core::v2::LogKind;
+use deadbolt_core::v2::{Frame, FrameId, FraudProof, LogKind};
 use deadbolt_core::{DeviceId, VaultId};
 
 use super::index::first_hole;
-use super::{Observed, RemoteAnomaly, RemoteIndex, StreamKey, SyncAnchor, confirm_missing};
+use super::{
+    Observed, RemoteAnomaly, RemoteIndex, StreamKey, SyncAnchor, Twin, check_fetched,
+    check_fetched_as, check_fetched_fraud, confirm_missing, resolve_twin,
+};
 use crate::error::RemoteError;
 use crate::path::{Area, RemotePath, area_prefix, stream_cursor, stream_prefix};
 use crate::store::ObjStore;
@@ -39,7 +42,73 @@ pub struct PullPlan {
     pub deferred: Vec<RemoteAnomaly>,
 }
 
+/// What a pull's fetched objects turned out to be ([`PullPlan::judge`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Judged {
+    /// Frames that verify under their names, to apply in this order: every
+    /// Member frame, then each data stream ascending.
+    pub frames: Vec<Frame>,
+    /// Fetched fraud proofs, and each twin's whose frames both verify.
+    pub proofs: Vec<FraudProof>,
+    pub anomalies: Vec<RemoteAnomaly>,
+}
+
 impl PullPlan {
+    /// Judges what was fetched for this plan by `me` (`fetched`, by name;
+    /// what the store no longer had is skipped): each twin folds to one
+    /// frame or a fraud proof ([`resolve_twin`]), every other frame passes
+    /// [`check_fetched_as`] (`local` as there), every proof
+    /// [`check_fetched_fraud`], and every anchored tip in `verify`
+    /// [`check_fetched`].
+    pub fn judge(
+        &self,
+        vault: &VaultId,
+        anchor: &SyncAnchor,
+        me: &DeviceId,
+        local: impl Fn(LogKind, u64) -> Option<FrameId>,
+        fetched: &BTreeMap<RemotePath, Vec<u8>>,
+    ) -> Judged {
+        let mut out = Judged::default();
+        let twinned: BTreeSet<RemotePath> = self.twins.iter().flat_map(|(a, b)| [*a, *b]).collect();
+        for (bare, checkpoint) in &self.twins {
+            let (Some(a), Some(b)) = (fetched.get(bare), fetched.get(checkpoint)) else {
+                continue;
+            };
+            match resolve_twin((bare, a), (checkpoint, b)) {
+                Ok(Twin::Fraud(proof)) => out.proofs.push(*proof),
+                Ok(Twin::One(frame)) => out.frames.push(*frame),
+                Err(anomaly) => out.anomalies.push(anomaly),
+            }
+        }
+        for path in self.fetch.iter().filter(|p| !twinned.contains(p)) {
+            let Some(bytes) = fetched.get(path) else {
+                continue;
+            };
+            let judged = match path {
+                RemotePath::Fraud { .. } => {
+                    check_fetched_fraud(vault, path, bytes).map(|proof| out.proofs.push(proof))
+                }
+                _ => check_fetched_as(anchor, me, &local, path, bytes)
+                    .map(|frame| out.frames.push(frame)),
+            };
+            if let Err(anomaly) = judged {
+                out.anomalies.push(anomaly);
+            }
+        }
+        for path in self.verify.iter().filter(|p| !twinned.contains(p)) {
+            if let Some(bytes) = fetched.get(path)
+                && let Err(anomaly) = check_fetched(anchor, path, bytes)
+            {
+                out.anomalies.push(anomaly);
+            }
+        }
+        out.frames.sort_by_key(|f| {
+            let h = f.header();
+            (h.kind.log_kind(), h.author, h.seq)
+        });
+        out
+    }
+
     /// The deferred regressions no adopted checkpoint explains.
     pub fn confirm_deferred(&self, anchor: &SyncAnchor) -> Vec<RemoteAnomaly> {
         self.deferred
