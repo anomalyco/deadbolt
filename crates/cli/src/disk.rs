@@ -419,26 +419,26 @@ impl Unlocked {
 
     /// The vault's directory, opened (and created) on first use.
     fn held<'a>(&self, inner: &'a mut Inner, vault: VaultId) -> Result<&'a mut Held> {
-        if !inner.vaults.contains_key(&vault) {
-            let path = self.vault_dir(&vault);
-            create_private_dir(&path)?;
-            let (dir, _) = VaultDir::open(FsBlocks::open(path)?)?;
-            let local = local::open(
-                dir.blocks(),
-                &NoopAnchor,
-                vault.as_bytes(),
-                &self.device_root(),
-            )?;
-            let meta = match &local {
-                Some(state) => decode_meta(&state.body)?,
-                None => Meta::new(),
-            };
-            inner.vaults.insert(vault, Held { dir, local, meta });
-        }
-        inner
-            .vaults
-            .get_mut(&vault)
-            .ok_or_else(|| Error::corrupt("vault directory vanished"))
+        use std::collections::btree_map::Entry;
+        Ok(match inner.vaults.entry(vault) {
+            Entry::Occupied(held) => held.into_mut(),
+            Entry::Vacant(slot) => {
+                let path = self.vault_dir(&vault);
+                create_private_dir(&path)?;
+                let (dir, _) = VaultDir::open(FsBlocks::open(path)?)?;
+                let local = local::open(
+                    dir.blocks(),
+                    &NoopAnchor,
+                    vault.as_bytes(),
+                    &self.device_root(),
+                )?;
+                let meta = match &local {
+                    Some(state) => decode_meta(&state.body)?,
+                    None => Meta::new(),
+                };
+                slot.insert(Held { dir, local, meta })
+            }
+        })
     }
 
     /// Calls `each` with every stored frame, vault by vault, membership

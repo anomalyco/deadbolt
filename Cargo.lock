@@ -1467,7 +1467,9 @@ name = "deadbolt-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "blake3",
+ "chacha20poly1305",
  "clap",
  "csv",
  "data-encoding",
@@ -1477,10 +1479,10 @@ dependencies = [
  "deadbolt-engine",
  "deadbolt-net",
  "deadbolt-os",
+ "deadbolt-pack",
  "deadbolt-proto",
  "deadbolt-remote",
  "deadbolt-send",
- "deadbolt-store",
  "flate2",
  "getrandom 0.4.3",
  "http-body-util",
@@ -1490,7 +1492,6 @@ dependencies = [
  "memchr",
  "p256",
  "procwatch",
- "redb",
  "reqwest",
  "rpassword",
  "rustix 1.1.6",
@@ -1501,6 +1502,7 @@ dependencies = [
  "sigpipe",
  "subtle",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "toml",
  "tracing",
@@ -1708,21 +1710,6 @@ dependencies = [
  "serde-wasm-bindgen",
  "wasm-bindgen",
  "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "deadbolt-store"
-version = "0.0.0"
-dependencies = [
- "argon2",
- "blake3",
- "chacha20poly1305",
- "deadbolt-os",
- "getrandom 0.4.3",
- "redb",
- "tempfile",
- "thiserror 2.0.21",
- "zeroize",
 ]
 
 [[package]]
@@ -5224,15 +5211,6 @@ dependencies = [
  "bytemuck",
  "font-types",
  "once_cell",
-]
-
-[[package]]
-name = "redb"
-version = "4.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39178e0a867f9e3eaa6292a4ab1dd3613f2519c5b564341e1e7b29b270736cc4"
-dependencies = [
- "libc",
 ]
 
 [[package]]

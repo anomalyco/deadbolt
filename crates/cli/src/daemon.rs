@@ -109,7 +109,7 @@ pub struct Daemon {
     /// breach check) stops and writes nothing.
     interrupts: watch::Sender<u64>,
     /// In-memory metadata of `"biometric.token"`, loaded once at startup and
-    /// updated on enrollment/clear/wipe so `status()` never opens `store.redb`.
+    /// updated on enrollment/clear/wipe so `status()` never opens the sealed store.
     biometric_slot: Mutex<Option<biometric::TokenMeta>>,
     /// True once Touch ID has been enrolled for this store (`initial_slot.is_some()`
     /// or enrolled during this daemon's lifetime) and not explicitly turned off,
@@ -651,7 +651,7 @@ impl Daemon {
         };
 
         // Run the interactive Touch ID unseal WITHOUT holding `self.transition`
-        // or keeping `store.redb` open, so a concurrent passphrase Unlock or
+        // or keeping the sealed store open, so a concurrent passphrase Unlock or
         // Lock can cancel the prompt immediately and never hits `Error::InUse`.
         let prompt_reason = reason.to_string();
         let unsealed = {

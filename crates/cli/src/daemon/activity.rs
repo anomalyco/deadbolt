@@ -1,6 +1,6 @@
 //! The Activity list (`docs/design.md`, "Callers"): an entry for each
 //! caller request and for the app's own reveals and copies,
-//! naming items and fields, never values. Entries are sealed in `store.redb`
+//! naming items and fields, never values. Entries are sealed in the sealed store
 //! on this device; those made while locked wait in memory until an unlock.
 //! [`ledger`] keeps all of it in budget.
 

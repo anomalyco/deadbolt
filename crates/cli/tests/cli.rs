@@ -541,7 +541,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
         assert_eq!(joined["event"]["inviter"]["name"], "alpha");
         assert_eq!(joined["event"]["passphrase"], true);
         assert_eq!(b.state(), "not set up");
-        assert!(!b.path("home").join("store.redb").exists());
+        assert!(!b.path("home").join("device").exists());
         if answer {
             socket
                 .write_all(b"{\"answer\":true,\"passphrase\":\"chosen late\"}\n")
@@ -567,7 +567,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
             wait(&mut bridge, Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(500));
             assert_eq!(b.state(), "not set up");
-            assert!(!b.path("home").join("store.redb").exists());
+            assert!(!b.path("home").join("device").exists());
             let devices = a.run(&["devices"]);
             assert!(
                 devices.contains("beta\t") && devices.contains("never seen"),

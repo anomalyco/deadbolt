@@ -636,7 +636,7 @@ async fn touch_id_set_off_clears_slot_and_updates_status() {
     *daemon.touch_id_available_override.lock().unwrap() = Some(true);
     crate::config::set_touch_id(&daemon.paths.config, true).unwrap();
 
-    // While another handle holds `store.redb` open, `daemon.status()` still
+    // While another handle holds the sealed store open, `daemon.status()` still
     // reports `touch_id_ready = true` from in-memory metadata without
     // opening the store or hitting `Error::InUse`.
     let held = crate::disk::unlock(dir.path(), b"test").unwrap();

@@ -3,7 +3,7 @@
 //! Serves `DeadboltAutoFill.appex` (`anomaly.deadbolt.autofill`) over a
 //! dedicated Unix socket (`s`, mode 0600) in the shared Team-ID App Group
 //! container (`~/Library/Group Containers/<TEAM_ID>.anomaly.deadbolt`). The daemon
-//! remains the only process that opens `store.redb` or holds vault keys.
+//! remains the only process that opens the sealed store or holds vault keys.
 
 mod identities;
 mod picker;

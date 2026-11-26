@@ -382,7 +382,7 @@ fn offline_unlock_keeps_local_items_available_and_failed_dials_finish_startup() 
 
 /// Cut identical short sessions before DONE. Each retry must advance the signed
 /// frontier if a complete usable entry fits; confirm the prefix survives a
-/// native redb reopen (the private relay harness separately uses OPFS).
+/// native store reopen (the private relay harness separately uses OPFS).
 #[test]
 fn short_sessions_commit_a_reopenable_prefix_before_done() {
     let mut w = World::new().unwrap();

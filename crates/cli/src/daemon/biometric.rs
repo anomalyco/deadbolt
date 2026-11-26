@@ -5,7 +5,7 @@
 //! hardware-bound P-256 key inside the Secure Enclave
 //! (`CryptoKit.SecureEnclave.P256.KeyAgreement.PrivateKey`) and seals a random
 //! 256-bit `biometric_key` with ECDH + HKDF-SHA256 + AES-256-GCM. The resulting
-//! envelope and the AEAD-wrapped key set live in `store.redb`.
+//! envelope and the AEAD-wrapped key set live in the sealed store.
 
 use std::fmt;
 use std::path::Path;
@@ -77,7 +77,7 @@ impl BiometricStatus {
 }
 
 /// Metadata parsed from a `"biometric.token"` header (`"DBSE"`), kept in
-/// daemon memory so `status()` never opens `store.redb`.
+/// daemon memory so `status()` never opens the sealed store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenMeta {
     pub flags: u8,
@@ -94,7 +94,7 @@ impl TokenMeta {
     }
 }
 
-/// Sealed biometric key + token ready to be written into `store.redb`.
+/// Sealed biometric key + token ready to be written into the sealed store.
 pub struct SealedBiometric {
     pub key: Zeroizing<[u8; 32]>,
     pub token: Vec<u8>,
@@ -349,7 +349,7 @@ pub fn group_container(group: &str) -> anyhow::Result<Option<std::path::PathBuf>
 }
 
 /// Generates a fresh `.biometryCurrentSet` Secure Enclave key and seals a new
-/// 256-bit `biometric_key` without touching `store.redb`.
+/// 256-bit `biometric_key` without touching the sealed store.
 pub fn seal_new(now_secs: u64) -> Result<SealedBiometric, UnlockError> {
     seal_inner(true, now_secs)
 }
@@ -427,7 +427,7 @@ pub fn validate_token(
 }
 
 /// Unseals the 32-byte `biometric_key` from `token` via `deadbolt-enclave`
-/// without holding `store.redb` open while the Touch ID prompt is on screen.
+/// without holding the sealed store open while the Touch ID prompt is on screen.
 pub fn unseal_token(
     token: &[u8],
     now_secs: u64,

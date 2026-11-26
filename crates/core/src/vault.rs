@@ -475,7 +475,6 @@ pub(crate) mod testing {
     }
 
     pub fn vault(author: &Author, name: &str) -> (Vault, Vec<Frame>) {
-        #[expect(clippy::unwrap_used, reason = "test")]
         Vault::create(&recovery(), author, name, "test").unwrap()
     }
 

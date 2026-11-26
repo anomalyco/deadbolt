@@ -257,21 +257,17 @@ pub(crate) fn translate(op: &DataOp, new_id: ItemId, out: &mut Vec<v2::DataOp>) 
     }
 }
 
+/// An edited item as a batch leaves it: file sizes by field, folded tags,
+/// whether the tag set grew, and the last file field set.
+type Edited = (BTreeMap<String, usize>, BTreeSet<String>, bool, Option<String>);
+
 /// Checks a batch of ops written now against the items they touch: every
 /// op on its own, the files cap and the tag cap on the batch as a whole.
 pub(crate) fn check<'a>(
     items: impl Fn(&ItemId) -> Option<&'a ItemState>,
     ops: &[DataOp],
 ) -> Result<(), ItemError> {
-    let mut after: BTreeMap<
-        ItemId,
-        (
-            BTreeMap<String, usize>,
-            BTreeSet<String>,
-            bool,
-            Option<String>,
-        ),
-    > = BTreeMap::new();
+    let mut after: BTreeMap<ItemId, Edited> = BTreeMap::new();
     for op in ops {
         match op {
             DataOp::Create {
