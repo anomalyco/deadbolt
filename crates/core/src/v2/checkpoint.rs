@@ -22,6 +22,8 @@ use super::wire::{PayloadError, Reader, Writer, ascending};
 pub enum CheckpointError {
     #[error("membership no longer counts frames of {0} that the checkpoint covers")]
     Invalidated(DeviceId),
+    #[error("epoch {0}, which sealed frames the checkpoint covers, is no longer authorized")]
+    Deauthorized(EpochId),
     #[error("the adder of {0} changed since the checkpoint judged its device card")]
     AdderChanged(DeviceId),
     #[error("payload error: {0}")]

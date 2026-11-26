@@ -123,6 +123,13 @@ fn member_causal_ancestors(frames: &[Frame]) -> BTreeMap<FrameId, BTreeSet<Frame
     memo
 }
 
+/// A data frame the membership counts: its author at its seq, sealed under an authorized epoch.
+pub(super) fn counted(resolved: &ResolvedMembership, frame: &Frame) -> bool {
+    let h = frame.header();
+    resolved.counted_through(&h.author, h.seq) == Some(h.seq)
+        && resolved.is_authorized_epoch(&h.epoch)
+}
+
 // ============================================================================
 // Named tests for I1, I2, I3
 // ============================================================================
@@ -441,7 +448,7 @@ proptest! {
         let res_q2 = resolve(&vault, &m_frames, &[]);
         let counted_epochs: BTreeSet<EpochId> = data_frames
             .iter()
-            .filter(|(df, _)| res_q2.counted_through(&df.header().author, df.header().seq) == Some(df.header().seq))
+            .filter(|(df, _)| counted(&res_q2, df))
             .map(|(df, _)| df.header().epoch)
             .collect();
 
@@ -530,7 +537,7 @@ proptest! {
 
             // I2: Every counted Data frame is decryptable to its exact plaintext.
             for (df, expected_pt) in &data_frames {
-                if res_final.counted_through(&df.header().author, df.header().seq) == Some(df.header().seq) {
+                if counted(&res_final, df) {
                     let ep = df.header().epoch;
                     let key = ring.get(&ep);
                     prop_assert!(key.is_some(), "I2: active member missing key for counted epoch {ep}");

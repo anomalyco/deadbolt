@@ -9,8 +9,8 @@ use super::fixture::{data_chain, data_frame, device, fraud, genesis};
 use crate::path::{Area, RemotePath, area_prefix};
 use crate::planner::check_fetched;
 use crate::{
-    Call, FaultyObjStore, ObjStore, Observed, Outbox, PushStop, RemoteAnomaly, RemoteError,
-    SelfRollback, SyncAnchor, check_self_rollback, plan_pull, plan_push, push,
+    Call, FaultyObjStore, ObjStore, Observed, Outbox, RemoteAnomaly, RemoteError, SelfRollback,
+    SyncAnchor, check_self_rollback, plan_pull, plan_push, push,
 };
 
 fn area_of(call: &Call) -> Option<Area> {
@@ -160,7 +160,7 @@ async fn own_name_holding_another_frame_is_a_self_rollback() {
     assert_eq!(report.created, 1);
     assert_eq!(
         report.stopped,
-        Some(PushStop::SelfRollback(SelfRollback {
+        Some(RemoteAnomaly::SelfRollback(SelfRollback {
             log: LogKind::Data,
             remote_ahead: Vec::new(),
             conflicting: Some(RemotePath::frame(vault, FrameKind::Data, a.device_id(), 1)),
@@ -192,10 +192,10 @@ async fn own_name_holding_garbage_is_an_anomaly_not_a_fork() {
     let report = push(&store, &plan).await.unwrap();
     assert!(matches!(
         report.stopped,
-        Some(PushStop::Anomaly(RemoteAnomaly::Mismatched {
+        Some(RemoteAnomaly::Mismatched {
             reason: "does not verify as a frame",
             ..
-        }))
+        })
     ));
 }
 
@@ -235,21 +235,20 @@ async fn own_stream_ahead_of_the_acknowledged_tip_is_found_before_pushing() {
         check_self_rollback(&store, &vault, &me, &acknowledged(3))
             .await
             .unwrap(),
-        [SelfRollback {
+        [RemoteAnomaly::SelfRollback(SelfRollback {
             log: LogKind::Data,
             remote_ahead: vec![path(3, false), path(4, true), path(5, false)],
             conflicting: None
-        }]
+        })]
     );
     let fresh = SyncAnchor::default();
-    assert_eq!(
-        check_self_rollback(&store, &vault, &me, &fresh)
-            .await
-            .unwrap()[0]
-            .remote_ahead
-            .len(),
-        6
-    );
+    let [RemoteAnomaly::SelfRollback(all)] = &check_self_rollback(&store, &vault, &me, &fresh)
+        .await
+        .unwrap()[..]
+    else {
+        panic!("a fresh device finds its whole stream ahead");
+    };
+    assert_eq!(all.remote_ahead.len(), 6);
     assert!(
         check_self_rollback(&store, &vault, &me, &acknowledged(6))
             .await

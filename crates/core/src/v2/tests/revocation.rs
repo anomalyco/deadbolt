@@ -8,15 +8,15 @@ use super::super::*;
 use super::epochs::{kem_map, pool};
 use super::model::assert_matches_ref;
 
-struct Vault {
-    vault: crate::id::VaultId,
-    e0: EpochId,
-    k0: EpochKey,
-    frames: Vec<Frame>,
+pub(super) struct Vault {
+    pub(super) vault: crate::id::VaultId,
+    pub(super) e0: EpochId,
+    pub(super) k0: EpochKey,
+    pub(super) frames: Vec<Frame>,
 }
 
 /// Genesis plus root-added devices `a`, `b`, `c` (each wrapped `e0` inline).
-fn vault_with(devices: &[&DeviceKeys]) -> Vault {
+pub(super) fn vault_with(devices: &[&DeviceKeys]) -> Vault {
     let p = pool();
     let r0 = &p.roots[0];
     let k0 = EpochKey::from_bytes([0x71; 32]);

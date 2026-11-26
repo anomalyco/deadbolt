@@ -46,11 +46,11 @@ pub use faulty::{Call, FaultyObjStore};
 pub use mem::{MemObjStore, MemSnapshot};
 pub use path::{Area, PathError, RemotePath, validate_name, validate_prefix};
 pub use planner::{
-    CitedCounts, Observed, Outbox, PullPlan, PushPlan, PushReport, PushStep, PushStop,
-    RecoveryPlan, Regressions, RemoteAnomaly, RemoteIndex, SelfRollback, Spellings, StreamKey,
-    SyncAnchor, Tail, Twin, check_fetched, check_fetched_fraud, check_regressions,
-    check_self_rollback, check_withholding, plan_pull, plan_push, plan_recovery_bootstrap, push,
-    resolve_twin,
+    CitedCounts, Observed, Outbox, PullPlan, PushPlan, PushReport, PushStep, RecoveryPlan,
+    Regressions, RemoteAnomaly, RemoteIndex, SelfRollback, Spellings, StreamKey, SyncAnchor, Tail,
+    Twin, check_fetched, check_fetched_as, check_fetched_fraud, check_regressions,
+    check_self_rollback, check_withholding, confirm_missing, plan_pull, plan_push,
+    plan_recovery_bootstrap, push, resolve_twin,
 };
 #[cfg(feature = "http")]
 pub use s3::S3ObjStore;

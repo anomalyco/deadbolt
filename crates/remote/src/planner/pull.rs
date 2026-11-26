@@ -7,7 +7,7 @@ use deadbolt_core::v2::LogKind;
 use deadbolt_core::{DeviceId, VaultId};
 
 use super::index::first_hole;
-use super::{Observed, RemoteAnomaly, RemoteIndex, StreamKey, SyncAnchor};
+use super::{Observed, RemoteAnomaly, RemoteIndex, StreamKey, SyncAnchor, confirm_missing};
 use crate::error::RemoteError;
 use crate::path::{Area, RemotePath, area_prefix, stream_cursor, stream_prefix};
 use crate::store::ObjStore;
@@ -30,7 +30,8 @@ pub struct PullPlan {
     /// `fetch` or `verify`; judge each pair with
     /// [`resolve_twin`](super::resolve_twin) instead of applying both.
     pub twins: Vec<(RemotePath, RemotePath)>,
-    /// What the LISTs already prove.
+    /// What the LISTs already prove, an anchored frame missing from them only
+    /// once a direct GET agrees ([`confirm_missing`]).
     pub anomalies: Vec<RemoteAnomaly>,
     /// Missing anchored data frames that a checkpoint in `fetch` may have
     /// let the store collect. Adopt the checkpoints that verify, then call
@@ -67,7 +68,9 @@ pub struct Regressions {
 }
 
 /// Compares listed streams with the anchor: every anchored frame must
-/// still be listed, unless an accepted checkpoint let it be collected.
+/// still be listed, unless an accepted checkpoint let it be collected. A LIST
+/// can lag a PUT the store acknowledged, so pass both halves through
+/// [`confirm_missing`] before alarming ([`plan_pull`] does).
 /// A missing data frame is deferred, not alarmed, while the index lists a
 /// checkpoint this device has not seen yet, since that checkpoint may
 /// legitimately cover it. `listed` says which streams the LISTs covered.
@@ -156,9 +159,24 @@ pub async fn plan_pull<S: ObjStore>(
     // Every stream the anchor knows was listed: Member and fraud areas
     // whole, and each anchored data stream from its anchored seq.
     let Regressions {
-        mut anomalies,
+        anomalies,
         deferred,
     } = check_regressions(anchor, &index, |_| true);
+    let mut anomalies = confirm_missing(store, vault, anomalies).await?;
+    // A GET that finds another frame is a swap no checkpoint explains.
+    let (swapped, deferred): (Vec<_>, Vec<_>) = confirm_missing(store, vault, deferred)
+        .await?
+        .into_iter()
+        .partition(|a| {
+            matches!(
+                a,
+                RemoteAnomaly::RemoteRegressed {
+                    observed: Observed::Different(_),
+                    ..
+                }
+            )
+        });
+    anomalies.extend(swapped);
     for (&(log, author), seqs) in &index.streams {
         if log != LogKind::Member {
             continue;

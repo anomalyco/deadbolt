@@ -24,11 +24,13 @@ fn checkpoint(id: u8, first_seen_ms: u64, frontier: &[(usize, u64)]) -> GcCheckp
         author: dev(0),
         seq: 9,
         first_seen_ms,
-        frontier: frontier
-            .iter()
-            .map(|&(d, s)| (dev(d), (s, FrameId::ZERO)))
-            .collect(),
-        tombstones: BTreeMap::new(),
+        meta: PackMeta {
+            frontier: frontier
+                .iter()
+                .map(|&(d, s)| (dev(d), (s, FrameId::ZERO)))
+                .collect(),
+            ..PackMeta::default()
+        },
     }
 }
 
@@ -38,28 +40,32 @@ fn checkpoint(id: u8, first_seen_ms: u64, frontier: &[(usize, u64)]) -> GcCheckp
 #[test]
 fn gc_never_trusts_wire_timestamps_or_an_empty_membership() {
     let now = 1_000 * DAY_MS;
-    let members: BTreeSet<_> = [dev(0), dev(1)].into();
+    let current = membership(2, None);
+    let members = &current.devices;
     let none = BTreeSet::new();
+    let collected = BTreeMap::new();
     let uncovered: BTreeMap<_, _> = members.iter().map(|m| (*m, VectorClock::new())).collect();
 
     // Seen just now (its author may have claimed timestamp_ms = 0): not eligible.
     let fresh = checkpoint(1, now, &[(0, 3)]);
     let plan = plan_gc(
         now,
-        &members,
+        &current,
         &uncovered,
         std::slice::from_ref(&fresh),
         &none,
         &[],
+        &collected,
     );
     assert!(plan.eligible.is_empty() && plan.base.is_none());
     let plan = plan_gc(
         now + GC_GRACE_MS,
-        &members,
+        &current,
         &uncovered,
         &[fresh],
         &none,
         &[],
+        &collected,
     );
     assert_eq!(plan.base, Some(FrameId::from_bytes([1; 32])));
 
@@ -70,22 +76,24 @@ fn gc_never_trusts_wire_timestamps_or_an_empty_membership() {
     let big = checkpoint(3, 0, &[(0, 5), (1, 2)]);
     let plan = plan_gc(
         now,
-        &members,
+        &current,
         &covered,
         &[small.clone(), big.clone()],
         &none,
         &[],
+        &collected,
     );
     assert_eq!(plan.base, Some(big.id));
 
     // No current members: nothing is ever eligible.
     let plan = plan_gc(
         u64::MAX,
-        &BTreeSet::new(),
+        &ResolvedMembership::default(),
         &covered,
         &[small, big],
         &none,
         &[],
+        &collected,
     );
     assert!(plan.eligible.is_empty() && plan.base.is_none());
 
@@ -99,17 +107,26 @@ fn gc_never_trusts_wire_timestamps_or_an_empty_membership() {
         },
         at_ms: 0,
     };
-    tomb_base.tombstones.insert(item(0), tomb);
-    let plan = plan_gc(now, &members, &covered, &[tomb_base.clone()], &none, &[]);
+    tomb_base.meta.tombstones.insert(item(0), tomb);
+    let plan = plan_gc(
+        now,
+        &current,
+        &covered,
+        &[tomb_base.clone()],
+        &none,
+        &[],
+        &collected,
+    );
     assert_eq!(plan.base, Some(tomb_base.id));
     assert!(plan.expired_tombstones.is_empty());
     let plan = plan_gc(
         now + GC_GRACE_MS,
-        &members,
+        &current,
         &covered,
         &[tomb_base],
         &none,
         &[],
+        &collected,
     );
     assert_eq!(plan.expired_tombstones[&item(0)], tomb);
 }

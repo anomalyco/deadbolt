@@ -60,8 +60,8 @@ pub use epoch::{
     WriteEpochDecision,
 };
 pub use fold::{
-    FoldContext, adders_from_frames, check_still_valid, compact, fold_from_checkpoint,
-    fold_from_scratch,
+    FoldContext, adders_from_frames, check_counts, check_still_valid, compact,
+    fold_from_checkpoint, fold_from_scratch, uncounted_own_frames,
 };
 pub use frame::{
     Frame, FrameError, FrameHeader, FrameKind, FrameWitness, HEADER_LEN, LogKind, MAGIC,
@@ -72,7 +72,7 @@ pub use frame::{
 pub use fraud::{FRAUD_PROOF_LEN, FraudError, FraudProof, VerifiedFraud, detect_fraud_in_frames};
 pub use gc::{
     CHECKPOINT_TRIGGER_BYTES, CHECKPOINT_TRIGGER_FRAMES, Eligibility, GC_GRACE_MS, GcCheckpoint,
-    GcFrame, GcPlan, plan_gc, should_checkpoint,
+    GcFrame, GcPlan, plan_gc, removal_last_seen, should_checkpoint,
 };
 pub use membership::{ParkingReason, ParkingStatus, ResolvedMembership, check_parking, resolve};
 pub use pack::{Pack, PackMeta};
