@@ -74,7 +74,7 @@ fn frames_and_vault_state_persist_per_vault() {
     let reopened = Vault::open(author.keys(), read).unwrap();
     assert_eq!(reopened.name(), "personal");
     assert_eq!(&**store.meta_get(&name).unwrap().unwrap(), b"[]");
-    assert!(store.meta_get("vault/x/removed").unwrap().is_none());
+    assert!(store.meta_get("vault/x/removed").is_err());
     assert!(
         dir.path()
             .join("v")
@@ -82,6 +82,23 @@ fn frames_and_vault_state_persist_per_vault() {
             .join("members.log")
             .is_file()
     );
+}
+
+/// A `vault/` name without a vault id is refused, never written to (or
+/// read from) the device's own metadata.
+#[test]
+fn a_malformed_vault_name_never_falls_back_to_device_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = init_with_params(dir.path(), b"pass", &[7; 32], FAST).unwrap();
+    for name in ["vault/bad/anchor", "vault/anchor", "vault/"] {
+        assert!(store.meta_set(name, b"x").is_err(), "{name}");
+        assert!(store.meta_get(name).is_err(), "{name}");
+    }
+    store.meta_set("cli/device-name", b"\"laptop\"").unwrap();
+    drop(store);
+    let store = unlock(dir.path(), b"pass").unwrap();
+    assert!(store.meta_get("vault/bad/anchor").is_err());
+    assert!(store.meta_get("cli/device-name").unwrap().is_some());
 }
 
 #[test]

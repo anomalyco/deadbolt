@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use deadbolt_core::v2::{DeviceKeys, Frame, RecoverySecret};
+use deadbolt_core::v2::{DeviceKeys, Frame, NetPublic, RecoverySecret};
 use deadbolt_core::{Author, DeviceId, Vault, VaultId, VaultWrite, recovery, valid_name};
 use deadbolt_proto::daemon::{DeviceInfo, ErrorCode, VaultInfo};
 use deadbolt_proto::peer::{Addr, Hint, clean_name};
@@ -17,9 +17,6 @@ use crate::cap::{CapAudit, CapCheck, CapError, CapId, CapTable};
 use crate::clock::{Clock, utc_date};
 use crate::store::{VaultStore, get_json, set_json};
 use crate::{fail, unhex};
-
-/// A device id as a set member: its public key bytes.
-pub type PeerId = [u8; 32];
 
 const META_DEVICE_NAME: &str = "cli/device-name";
 const META_DEFAULT_VAULT: &str = "cli/default-vault";
@@ -98,10 +95,9 @@ impl Changes {
 }
 
 /// A history retained on disk but excluded from reads, writes and sync.
+/// Its name is signed into frames that don't open, so it goes by its id.
 pub struct UnavailableVault {
     name: String,
-    /// Reserve every recorded name, including renames beyond the valid prefix.
-    names: BTreeSet<String>,
     error: String,
 }
 
@@ -193,7 +189,6 @@ impl Engine {
                         id,
                         UnavailableVault {
                             name: id.to_string(),
-                            names: BTreeSet::new(),
                             error: error.to_string(),
                         },
                     );
@@ -382,43 +377,42 @@ impl Engine {
     }
 
     /// Every other device that is a member of a vault this device holds.
-    pub fn peer_set(&self) -> HashSet<PeerId> {
+    pub fn peer_set(&self) -> HashSet<DeviceId> {
         self.vaults
             .values()
             .flat_map(|vault| vault.members())
             .filter(|id| *id != self.id)
-            .map(|id| *id.as_bytes())
             .collect()
     }
 
     /// The transport key (`D_net`) `device` signed into its `Add` in a held
     /// vault: the iroh id it is dialed and admitted by.
-    pub fn net_of(&self, device: &DeviceId) -> Option<PeerId> {
-        self.vaults
-            .values()
-            .find_map(|v| v.device_net(device).map(|net| *net.as_bytes()))
+    pub fn net_of(&self, device: &DeviceId) -> Option<NetPublic> {
+        self.vaults.values().find_map(|v| v.device_net(device))
     }
 
     /// The device, member or removed, whose transport key is `net`, if
     /// every held vault that knows the key agrees. A key is bound only by
     /// its holder's signature, so this holds unless one holder speaks for
     /// two devices.
-    pub fn device_for_net(&self, net: &PeerId) -> Option<DeviceId> {
-        let mut found = self.vaults.values().filter_map(|v| v.device_with_net(net));
+    pub fn device_for_net(&self, net: &NetPublic) -> Option<DeviceId> {
+        let mut found = self
+            .vaults
+            .values()
+            .filter_map(|v| v.device_with_net(net.as_bytes()));
         let first = found.next()?;
         found.all(|d| d == first).then_some(first)
     }
 
     /// The transport keys of every other member, from every held vault:
     /// who this device dials.
-    pub fn peer_nets(&self) -> HashSet<PeerId> {
+    pub fn peer_nets(&self) -> HashSet<NetPublic> {
         self.vaults
             .values()
             .flat_map(|v| {
                 v.members()
                     .filter(|d| *d != self.id)
                     .filter_map(|d| v.device_net(&d))
-                    .map(|net| *net.as_bytes())
             })
             .collect()
     }
@@ -427,13 +421,12 @@ impl Engine {
     /// a held vault removed, which may still push membership frames only
     /// (`deadbolt_net::application::receive`), so a removal that lost to its
     /// target's concurrent one can be undone without a third device.
-    pub fn admitted_nets(&self) -> HashSet<PeerId> {
+    pub fn admitted_nets(&self) -> HashSet<NetPublic> {
         let mut nets = self.peer_nets();
         nets.extend(self.vaults.values().flat_map(|v| {
             v.removed_devices()
                 .filter(|d| *d != self.id)
                 .filter_map(|d| v.device_net(&d))
-                .map(|net| *net.as_bytes())
         }));
         nets
     }
@@ -553,13 +546,11 @@ impl Engine {
             self.vaults
                 .iter()
                 .map(|(id, vault)| (*id, Some(vault.name())))
-                .chain(self.unavailable.iter().flat_map(|(id, vault)| {
-                    vault
-                        .names
+                .chain(
+                    self.unavailable
                         .iter()
-                        .map(move |name| (*id, Some(name.as_str())))
-                        .chain(std::iter::once((*id, Some(vault.name.as_str()))))
-                })),
+                        .map(|(id, vault)| (*id, Some(vault.name.as_str()))),
+                ),
             query,
         );
         match matches.as_slice() {
@@ -578,17 +569,18 @@ impl Engine {
         self.vaults.get(id)
     }
 
+    /// Whether a held vault other than `except` is named `name`. An
+    /// unavailable one goes by its id, which is never a valid name.
     pub fn name_taken(&self, name: &str, except: Option<VaultId>) -> bool {
         self.vaults
             .iter()
             .any(|(id, vault)| Some(*id) != except && vault.name() == name)
-            || self
-                .unavailable
-                .iter()
-                .any(|(id, vault)| Some(*id) != except && vault.names.contains(name))
     }
 
-    /// Adds a vault this device just created or joined.
+    /// Adds a vault this device just created or joined. Once its frames
+    /// are stored the vault is held, whatever follows: the bookkeeping after
+    /// (the parking rule's memory, the default vault) only warns when it
+    /// fails, so a caller never loses what it made (a new vault's kit).
     pub fn add_vault(&mut self, vault: Vault) -> Result<()> {
         let id = vault.id();
         self.available(id)?;
@@ -598,14 +590,19 @@ impl Engine {
         let result = self.store.append(id, &mut vault.frames());
         self.check_append(result)?;
         self.vaults.insert(id, vault);
-        self.save_removed(&id)?;
         self.changes.vaults = true;
         self.changes.items.insert(id);
         self.changes.devices.insert(id);
+        if let Err(error) = self.save_removed(&id) {
+            tracing::warn!(vault = %id, %error, "saving the removed devices failed");
+        }
         if self.meta.default_vault.is_none() && self.unavailable.is_empty() {
             self.meta.default_vault = Some(id);
+            if let Err(error) = self.save_meta() {
+                tracing::warn!(vault = %id, %error, "saving the default vault failed");
+            }
         }
-        self.save_meta()
+        Ok(())
     }
 
     /// [`Engine::create_vault_with_kit`], dropping (and wiping) the kit.
@@ -661,7 +658,7 @@ impl Engine {
             .collect()
     }
 
-    pub fn device_info(&self, id: &DeviceId, connected: &HashSet<PeerId>) -> DeviceInfo {
+    pub fn device_info(&self, id: &DeviceId, connected: &HashSet<DeviceId>) -> DeviceInfo {
         if *id == self.id {
             return DeviceInfo {
                 id: id.to_string(),
@@ -678,15 +675,15 @@ impl Engine {
                 .and_then(|p| p.name.clone())
                 .or_else(|| self.card_label(id).map(str::to_owned)),
             this: false,
-            connected: connected.contains(id.as_bytes()),
+            connected: connected.contains(id),
             last_seen: peer.and_then(|p| p.last_seen),
         }
     }
 
-    pub fn online(&self, id: &PeerId, connected: &HashSet<PeerId>) -> bool {
+    pub fn online(&self, id: &DeviceId, connected: &HashSet<DeviceId>) -> bool {
         connected.contains(id)
             || self
-                .peer(&DeviceId::from_bytes(*id))
+                .peer(id)
                 .and_then(|p| p.last_seen)
                 .is_some_and(|seen| self.now().saturating_sub(seen) <= ONLINE_WINDOW_SECS)
     }

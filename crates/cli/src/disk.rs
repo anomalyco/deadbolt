@@ -432,12 +432,21 @@ impl std::fmt::Debug for Unlocked {
     }
 }
 
-/// A vault's per-device metadata name: `vault/<id>/<rest>`.
-fn vault_meta(name: &str) -> Option<(VaultId, &str)> {
-    let rest = name.strip_prefix("vault/")?;
-    let (id, rest) = rest.split_once('/')?;
-    let bytes = data_encoding::HEXLOWER.decode(id.as_bytes()).ok()?;
-    Some((VaultId::from_bytes(bytes.try_into().ok()?), rest))
+/// A vault's per-device metadata name: `vault/<id>/<rest>`; `None` for
+/// a device-wide name. A `vault/` name without a vault id is refused,
+/// never kept with the device's own metadata.
+fn vault_meta(name: &str) -> Result<Option<(VaultId, &str)>> {
+    let Some(rest) = name.strip_prefix("vault/") else {
+        return Ok(None);
+    };
+    let parsed = rest.split_once('/').and_then(|(id, rest)| {
+        let bytes = data_encoding::HEXLOWER.decode(id.as_bytes()).ok()?;
+        Some((VaultId::from_bytes(bytes.try_into().ok()?), rest))
+    });
+    match parsed {
+        Some(parsed) => Ok(Some(parsed)),
+        None => Err(Error::corrupt(format!("{name} names no vault"))),
+    }
 }
 
 impl Unlocked {
@@ -603,7 +612,7 @@ impl Unlocked {
     /// Reads a metadata value.
     pub fn meta_get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let mut inner = self.inner();
-        let meta = match vault_meta(name) {
+        let meta = match vault_meta(name)? {
             Some((vault, rest)) => self.held(&mut inner, vault)?.meta.get(rest),
             None => inner.meta.get(name),
         };
@@ -614,7 +623,7 @@ impl Unlocked {
     pub fn meta_set(&self, name: &str, value: &[u8]) -> Result<()> {
         let mut inner = self.inner();
         let root = self.device_root();
-        match vault_meta(name) {
+        match vault_meta(name)? {
             Some((vault, rest)) => {
                 // Open the vault first: that may record its anchor.
                 self.held(&mut inner, vault)?;

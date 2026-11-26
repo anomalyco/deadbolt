@@ -285,7 +285,7 @@ fn generate_round_trips() {
     ));
     let reply = serde_json::to_string(&Message::Ok {
         reply: Reply::Password {
-            password: Zeroizing::new("hunter2hunter2".into()),
+            password: Secret::new("hunter2hunter2"),
         },
     })
     .unwrap();
@@ -296,9 +296,67 @@ fn generate_round_trips() {
     match serde_json::from_str::<Message>(&reply).unwrap() {
         Message::Ok {
             reply: Reply::Password { password },
-        } => assert_eq!(*password, "hunter2hunter2"),
+        } => assert_eq!(password.expose(), "hunter2hunter2"),
         other => panic!("expected a password, got {other:?}"),
     }
+    let password = Reply::Password {
+        password: Secret::new("hunter2hunter2"),
+    };
+    assert!(!format!("{password:?}").contains("hunter2"));
+}
+
+#[test]
+fn a_form_fill_names_its_kind_as_before() {
+    for (kind, name) in [(FormKind::Identity, "identity"), (FormKind::Card, "card")] {
+        let reply = serde_json::to_value(Reply::FormFill {
+            kind,
+            title: "t".into(),
+            values: BTreeMap::new(),
+            verified: false,
+        })
+        .unwrap();
+        assert_eq!(reply["kind"], name);
+        assert_eq!(FormKind::of(name), Some(kind));
+        let back: Reply = serde_json::from_value(reply).unwrap();
+        assert!(matches!(back, Reply::FormFill { kind: k, .. } if k == kind));
+    }
+    assert_eq!(FormKind::of("login"), None);
+}
+
+/// Secrets of the client's go only to a checked daemon; a code, a page
+/// look-up or a send is no use, and waiting on someone else isn't busy.
+#[test]
+fn every_command_has_a_policy() {
+    let import = Command::Import {
+        vault: None,
+        export: Zeroizing::new("csv".into()),
+        files: Vec::new(),
+        apply: false,
+    };
+    let inspect = Command::SshInspect {
+        private_key: Secret::new("key"),
+        passphrase: None,
+        comment: None,
+    };
+    assert!(import.carries_client_secret() && inspect.carries_client_secret());
+    assert!(!inspect.policy().keepalive);
+    let code = Command::ItemCode {
+        vault: None,
+        query: Vec::new(),
+    };
+    assert_eq!(
+        code.policy(),
+        Policy {
+            keepalive: false,
+            busy: true,
+            client_secret: false
+        }
+    );
+    let wait = Command::SendWait { id: "x".into() };
+    assert!(!wait.policy().busy && !wait.policy().keepalive);
+    assert!(!Command::Status.policy().busy);
+    assert!(Command::VaultList.policy().keepalive);
+    assert!(!Command::VaultList.carries_client_secret());
 }
 
 /// Names in logs and traces are the wire's own.

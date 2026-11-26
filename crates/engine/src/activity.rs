@@ -8,7 +8,7 @@ pub mod ledger;
 use anyhow::Result;
 use deadbolt_proto::daemon::{
     ActivityEntry, ActivityItem, AppAction, CallerClass, CallerInfo, Command, ErrorCode, Fill,
-    Outcome, Purpose, Reference, Reply, Tier,
+    FormKind, Outcome, Purpose, Reference, Reply, Tier,
 };
 
 pub use ledger::Ledger;
@@ -16,92 +16,100 @@ pub use ledger::Ledger;
 /// How long entries are kept.
 pub const KEEP_SECS: u64 = 90 * 24 * 60 * 60;
 
-/// The tier and protocol name of every command, so a new one doesn't
-/// compile until it has both.
-pub fn describe(command: &Command) -> (Tier, &'static str) {
+/// The tier of every command, so a new one doesn't compile until it has one.
+pub fn tier(command: &Command) -> Tier {
     use Command as C;
-    use Tier as T;
     match command {
-        C::Status => (T::Always, "status"),
-        C::Stop => (T::Always, "stop"),
-        C::Setup { .. } => (T::Never, "setup"),
-        C::Unlock { .. } => (T::Never, "unlock"),
-        C::UnlockBiometric { .. } => (T::Never, "unlock-biometric"),
-        C::TouchIdSet { .. } => (T::Never, "touch-id-set"),
-        C::Lock => (T::Always, "lock"),
-        C::Watch { .. } => (T::Look, "watch"),
-        C::AppActivate { .. } => (T::Always, "app-activate"),
-        C::VaultCreate { .. } => (T::Never, "vault-create"),
-        C::VaultList => (T::Look, "vault-list"),
-        C::VaultRename { .. } => (T::Never, "vault-rename"),
-        C::VaultDefault { .. } => (T::Never, "vault-default"),
-        C::Devices { .. } => (T::Look, "devices"),
-        C::DeviceRemove { .. } => (T::Never, "device-remove"),
-        C::DeviceRemoveStolen { .. } => (T::Never, "device-remove-stolen"),
-        C::VaultConfirmReinstated { .. } => (T::Never, "vault-confirm-reinstated"),
-        C::VaultStatus { .. } => (T::Look, "vault-status"),
-        C::RecoveryRotate { .. } => (T::Never, "recovery-rotate"),
-        C::RemoteSet { .. } => (T::Never, "remote-set"),
-        C::RemoteShow { .. } => (T::Look, "remote-show"),
-        C::RemoteSync { .. } => (T::Always, "remote-sync"),
-        C::RemoteRemove { .. } => (T::Never, "remote-remove"),
-        C::Recover { .. } => (T::Never, "recover"),
-        C::Sync { .. } => (T::Always, "sync"),
-        C::Join { .. } => (T::Never, "join"),
-        C::Pair { .. } => (T::Never, "pair"),
-        C::ItemNew { .. } => (T::Add, "item-new"),
-        C::ItemGet { .. } => (T::Read, "item-get"),
-        C::ItemCode { .. } => (T::Read, "item-code"),
-        C::ItemList { .. } => (T::Look, "item-list"),
-        C::TagList { .. } => (T::Look, "tag-list"),
-        // Adding a field or editing a plain one will be Add (build order 6).
-        C::ItemSet { .. } => (T::Write, "item-set"),
-        C::ItemUnset { .. } => (T::Write, "item-unset"),
-        C::ItemRemove { .. } => (T::Never, "item-remove"),
-        // A restored login fills on its sites again.
-        C::ItemRestore { .. } => (T::Write, "item-restore"),
-        C::Import { .. } => (T::Never, "import"),
-        C::Generate { .. } => (T::Always, "generate"),
-        C::SiteLogins { .. } => (T::Browser, "site-logins"),
-        C::SiteFill { .. } => (T::Browser, "site-fill"),
-        C::SiteGenerateCheck { .. } => (T::Browser, "site-generate-check"),
-        C::SiteGenerate { .. } => (T::Browser, "site-generate"),
-        C::SiteGenerateKeep { .. } => (T::Browser, "site-generate-keep"),
-        C::SiteGenerateDrop { .. } => (T::Browser, "site-generate-drop"),
-        C::SiteCheck { .. } => (T::Browser, "site-check"),
-        C::SiteSave { .. } => (T::Browser, "site-save"),
-        C::SiteLink { .. } => (T::Browser, "site-link"),
-        C::FormItems { .. } => (T::Browser, "form-items"),
-        C::FormFill { .. } => (T::Browser, "form-fill"),
-        C::PasskeyList { .. } => (T::Browser, "passkey-list"),
-        C::PasskeyCreate { .. } => (T::Browser, "passkey-create"),
-        C::PasskeyGet { .. } => (T::Browser, "passkey-get"),
+        C::Status
+        | C::Stop
+        | C::Lock
+        | C::AppActivate { .. }
+        | C::RemoteSync { .. }
+        | C::Sync { .. }
+        | C::Generate { .. }
         // Sends never touch the vault: the client sealed what it shares.
-        C::SendCreate { .. } => (T::Always, "send-create"),
-        C::SendList => (T::Always, "send-list"),
-        C::SendShow { .. } => (T::Always, "send-show"),
-        C::SendRevoke { .. } => (T::Always, "send-revoke"),
-        C::SendWait { .. } => (T::Always, "send-wait"),
-        C::ActivityList { .. } => (T::Look, "activity-list"),
-        C::ActivityReport { .. } => (T::Always, "activity-report"),
+        | C::SendCreate { .. }
+        | C::SendList
+        | C::SendShow { .. }
+        | C::SendRevoke { .. }
+        | C::SendWait { .. }
+        | C::ActivityReport { .. }
+        | C::SshGenerate { .. }
+        | C::SshInspect { .. }
+        | C::RunTaint
+        | C::RunUntaint { .. } => Tier::Always,
+        C::Setup { .. }
+        | C::Unlock { .. }
+        | C::UnlockBiometric { .. }
+        | C::TouchIdSet { .. }
+        | C::VaultCreate { .. }
+        | C::VaultRename { .. }
+        | C::VaultDefault { .. }
+        | C::DeviceRemove { .. }
+        | C::DeviceRemoveStolen { .. }
+        | C::VaultConfirmReinstated { .. }
+        | C::RecoveryRotate { .. }
+        | C::RemoteSet { .. }
+        | C::RemoteRemove { .. }
+        | C::Recover { .. }
+        | C::Join { .. }
+        | C::Pair { .. }
+        | C::ItemRemove { .. }
+        | C::Import { .. }
+        | C::BreachChecksSet { .. } => Tier::Never,
+        C::Watch { .. }
+        | C::VaultList
+        | C::Devices { .. }
+        | C::VaultStatus { .. }
+        | C::RemoteShow { .. }
+        | C::ItemList { .. }
+        | C::TagList { .. }
+        | C::ActivityList { .. }
+        | C::Health { .. } => Tier::Look,
+        C::ItemNew { .. } => Tier::Add,
+        C::ItemGet { .. } | C::ItemCode { .. } => Tier::Read,
+        // Adding a field or editing a plain one will be Add (build order 6).
+        C::ItemSet { .. }
+        | C::ItemUnset { .. }
+        // A restored login fills on its sites again.
+        | C::ItemRestore { .. }
+        | C::HealthIgnore { .. } => Tier::Write,
+        C::SiteLogins { .. }
+        | C::SiteFill { .. }
+        | C::SiteGenerateCheck { .. }
+        | C::SiteGenerate { .. }
+        | C::SiteGenerateKeep { .. }
+        | C::SiteGenerateDrop { .. }
+        | C::SiteCheck { .. }
+        | C::SiteSave { .. }
+        | C::SiteLink { .. }
+        | C::FormItems { .. }
+        | C::FormFill { .. }
+        | C::PasskeyList { .. }
+        | C::PasskeyCreate { .. }
+        | C::PasskeyGet { .. }
+        | C::AutofillStatus
+        | C::AutofillIdentities
+        | C::AutofillList { .. }
+        | C::AutofillFill { .. }
+        | C::AutofillPasskeyGet { .. }
+        | C::AutofillPasskeyCreate { .. } => Tier::Browser,
         C::Resolve { purpose, .. } => match purpose {
-            Purpose::Run => (T::Use, "resolve-run"),
-            Purpose::Inject => (T::Use, "resolve-inject"),
-            Purpose::Read => (T::Read, "resolve-read"),
+            Purpose::Run | Purpose::Inject => Tier::Use,
+            Purpose::Read => Tier::Read,
         },
-        C::AutofillStatus => (T::Browser, "autofill-status"),
-        C::AutofillIdentities => (T::Browser, "autofill-identities"),
-        C::AutofillList { .. } => (T::Browser, "autofill-list"),
-        C::AutofillFill { .. } => (T::Browser, "autofill-fill"),
-        C::AutofillPasskeyGet { .. } => (T::Browser, "autofill-passkey-get"),
-        C::AutofillPasskeyCreate { .. } => (T::Browser, "autofill-passkey-create"),
-        C::Health { .. } => (T::Look, "health"),
-        C::HealthIgnore { .. } => (T::Write, "health-ignore"),
-        C::BreachChecksSet { .. } => (T::Never, "breach-checks-set"),
-        C::SshGenerate { .. } => (T::Always, "ssh-generate"),
-        C::SshInspect { .. } => (T::Always, "ssh-inspect"),
-        C::RunTaint => (T::Always, "run-taint"),
-        C::RunUntaint { .. } => (T::Always, "run-untaint"),
+    }
+}
+
+/// The command an entry names: its wire name, a resolve's with its purpose.
+pub fn entry_name(command: &Command) -> &'static str {
+    match command {
+        Command::Resolve { purpose, .. } => match purpose {
+            Purpose::Run => "resolve-run",
+            Purpose::Inject => "resolve-inject",
+            Purpose::Read => "resolve-read",
+        },
+        command => command.name(),
     }
 }
 
@@ -210,7 +218,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
     if quiet && !daemon {
         return None;
     }
-    let (tier, name) = describe(command);
+    let (tier, name) = (tier(command), entry_name(command));
     let (items, fields) = match command {
         Command::ItemNew {
             vault,
@@ -362,7 +370,8 @@ impl Draft {
     /// Whether the request, answered with `result`, is an entry: all are
     /// but the browser's form fills from an identity.
     pub fn recorded(&self, result: &Result<Reply>) -> bool {
-        !(self.cards_only && matches!(result, Ok(Reply::FormFill { kind, .. }) if kind != "card"))
+        !(self.cards_only
+            && matches!(result, Ok(Reply::FormFill { kind, .. }) if *kind != FormKind::Card))
     }
 
     /// The entry, with what the reply says about the item it found.

@@ -1,5 +1,5 @@
-//! Deadbolt v2 remote storage, landed dark: nothing in the engine or the CLI
-//! uses it yet. A remote is a blind object store with four verbs and no
+//! Deadbolt v2 remote storage: the daemon's `remote-sync` and `recover`
+//! run on it. A remote is a blind object store with four verbs and no
 //! compare-and-swap (Fable §3.3):
 //!
 //! ```text
@@ -46,11 +46,11 @@ pub use faulty::{Call, FaultyObjStore};
 pub use mem::{MemObjStore, MemSnapshot};
 pub use path::{Area, PathError, RemotePath, validate_name, validate_prefix};
 pub use planner::{
-    CitedCounts, Observed, Outbox, PullPlan, PushPlan, PushReport, PushStep, RecoveryPlan,
+    CitedCounts, Judged, Observed, Outbox, PullPlan, PushPlan, PushReport, PushStep, RecoveryPlan,
     Regressions, RemoteAnomaly, RemoteIndex, SelfRollback, Spellings, StreamKey, SyncAnchor, Tail,
     Twin, check_fetched, check_fetched_as, check_fetched_fraud, check_regressions,
     check_self_rollback, check_withholding, confirm_missing, plan_pull, plan_push,
-    plan_recovery_bootstrap, push, resolve_twin,
+    plan_recovery_bootstrap, push, resolve_twin, withheld,
 };
 #[cfg(feature = "http")]
 pub use s3::S3ObjStore;

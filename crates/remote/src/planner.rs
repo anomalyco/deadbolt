@@ -28,14 +28,14 @@ mod verify;
 pub use anchor::SyncAnchor;
 pub use index::{RemoteIndex, Spellings};
 pub use probe::confirm_missing;
-pub use pull::{PullPlan, Regressions, check_regressions, plan_pull};
+pub use pull::{Judged, PullPlan, Regressions, check_regressions, plan_pull};
 pub use push::{
     Outbox, PushPlan, PushReport, PushStep, SelfRollback, check_self_rollback, plan_push, push,
 };
 pub use recovery::{RecoveryPlan, Tail, plan_recovery_bootstrap};
 pub use verify::{
     CitedCounts, Twin, check_fetched, check_fetched_as, check_fetched_fraud, check_withholding,
-    resolve_twin,
+    resolve_twin, withheld,
 };
 
 use deadbolt_core::DeviceId;

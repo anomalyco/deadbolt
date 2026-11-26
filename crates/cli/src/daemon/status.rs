@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use deadbolt_net::PeerId;
+use deadbolt_core::DeviceId;
 use tokio::time::Instant;
 use tracing::info;
 
@@ -88,7 +88,11 @@ impl Daemon {
     /// and removed devices, which may only push membership) and closes open
     /// sync connections to devices no held vault knows any more.
     pub(super) fn refresh(&self, session: &Session) {
-        *self.members.write().unwrap_or_else(|e| e.into_inner()) = session.admitted_nets();
+        *self.members.write().unwrap_or_else(|e| e.into_inner()) = session
+            .admitted_nets()
+            .iter()
+            .map(|net| *net.as_bytes())
+            .collect();
         let closed = session.node.enforce_membership();
         if closed > 0 {
             info!(closed, "closed sync connections to removed devices");
@@ -151,7 +155,7 @@ impl Daemon {
 
         let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let session = guard.as_ref().filter(|s| !s.append_uncertain);
-        let connected: HashSet<PeerId> = session
+        let connected: HashSet<DeviceId> = session
             .map(|s| s.connected_devices(s.node.connected_peers()))
             .unwrap_or_default();
         let peers = session.map(|s| s.peer_set()).unwrap_or_default();

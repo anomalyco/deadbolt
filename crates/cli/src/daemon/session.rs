@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::disk::{KdfParams, Unlocked};
 use anyhow::Result;
-use deadbolt_core::v2::{DeviceKeys, EpochId, EpochKey, Frame, Pack};
+use deadbolt_core::v2::{DeviceKeys, EpochId, EpochKey, Frame, NetPublic, Pack};
 use deadbolt_core::{Author, DeviceId, PackSite, Vault, VaultId, VaultWrite};
 use deadbolt_engine::{Engine, VaultStore};
 use deadbolt_net::application;
@@ -174,13 +174,13 @@ impl Loaded {
             .peer(id)
             .and_then(|p| p.addr.clone())
             .unwrap_or_default();
-        Some(PeerAddr::of(net, &addr))
+        Some(PeerAddr::of(*net.as_bytes(), &addr))
     }
 
     /// The device on the other end of a sync connection from transport key
     /// `peer`, member or removed.
     pub fn device_of(&self, peer: &deadbolt_net::PeerId) -> Result<DeviceId> {
-        self.device_for_net(peer)
+        self.device_for_net(&NetPublic::from_bytes(*peer))
             .ok_or_else(|| anyhow::anyhow!("no held vault has a card for that transport key"))
     }
 
@@ -188,10 +188,9 @@ impl Loaded {
     pub fn connected_devices(
         &self,
         nets: impl IntoIterator<Item = deadbolt_net::PeerId>,
-    ) -> std::collections::HashSet<deadbolt_net::PeerId> {
+    ) -> std::collections::HashSet<DeviceId> {
         nets.into_iter()
-            .filter_map(|net| self.device_for_net(&net))
-            .map(|d| *d.as_bytes())
+            .filter_map(|net| self.device_for_net(&NetPublic::from_bytes(net)))
             .collect()
     }
 }

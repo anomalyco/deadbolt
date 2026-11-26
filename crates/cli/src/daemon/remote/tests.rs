@@ -139,6 +139,134 @@ async fn a_lost_vault_comes_back_from_its_kit_and_store_alone() {
     assert_eq!(reopened.vaults[&vault].items(), items);
 }
 
+/// A device that wrote 21 logins over a checkpoint, synced to the store
+/// `name` (collecting behind the checkpoint), and was lost: its vault,
+/// kit, remote and items.
+async fn lost(
+    dir: &Path,
+    seed: u8,
+    name: &str,
+) -> (
+    VaultId,
+    zeroize::Zeroizing<String>,
+    RemoteInput,
+    Vec<deadbolt_core::Item>,
+) {
+    let a = device(dir, seed).await;
+    let (vault, words) = a.with(|s| s.create_vault_with_kit("personal")).unwrap();
+    for i in 0..20 {
+        login(&a, vault, i);
+    }
+    a.with(|s| s.checkpoint(vault)).unwrap();
+    login(&a, vault, 20);
+    let remote = webdav(name);
+    let set = Command::RemoteSet {
+        vault: None,
+        remote: remote.clone(),
+    };
+    a.remote_command(set).await.unwrap();
+    let Reply::RemoteSynced { report } = a
+        .remote_command(Command::RemoteSync { vault: None })
+        .await
+        .unwrap()
+    else {
+        panic!("not a sync report");
+    };
+    assert!(report.collected > 0, "{report:?}");
+    let items = a.with(|s| Ok(s.vaults[&vault].items())).unwrap();
+    a.lock().await;
+    (vault, words, remote, items)
+}
+
+/// The root's frames go to the store before anything is stored here: a
+/// push that fails installs nothing, and running it again recovers,
+/// building on what the failed push left.
+#[tokio::test]
+async fn a_failed_recovery_push_installs_nothing_and_a_retry_recovers() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (vault, words, remote, items) = lost(da.path(), 81, "failed-recovery-push").await;
+    let b = device(db.path(), 82).await;
+    let recover = || Command::Recover {
+        vault: vault.to_string(),
+        words: Secret::new(words.as_str()),
+        remote: remote.clone(),
+    };
+    // The first PUT lands, but its answer is lost.
+    let store = super::store::tests::faulty("failed-recovery-push");
+    store.lose_put_responses(1);
+    assert!(b.remote_command(recover()).await.is_err());
+    b.with(|s| {
+        assert!(!s.contains_vault(&vault), "nothing installed");
+        assert!(super::load(s, &vault)?.is_none(), "no remote saved");
+        Ok(())
+    })
+    .unwrap();
+
+    store.heal();
+    let Reply::Vault { vault: info } = b.remote_command(recover()).await.unwrap() else {
+        panic!("not a vault");
+    };
+    assert_eq!(info.id, vault.to_string());
+    b.with(|s| {
+        let v = &s.vaults[&vault];
+        assert_eq!(v.items(), items);
+        assert!(v.is_member(&s.id) && v.members().count() == 1);
+        assert!(super::load(s, &vault)?.is_some());
+        Ok(())
+    })
+    .unwrap();
+    let Reply::RemoteSynced { report } = b
+        .remote_command(Command::RemoteSync { vault: None })
+        .await
+        .unwrap()
+    else {
+        panic!("not a sync report");
+    };
+    assert!(report.anomalies.is_empty(), "{:?}", report.anomalies);
+}
+
+/// A recovery anchors every frame it rebuilt from, the base's frontier
+/// and the root's own: a pull straight after it has nothing to fetch.
+#[tokio::test]
+async fn a_recovery_anchors_what_it_rebuilt_so_its_first_sync_fetches_nothing_again() {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (vault, words, remote, items) = lost(da.path(), 83, "anchored-recovery").await;
+    let b = device(db.path(), 84).await;
+    let id = b
+        .install_recovered(
+            &vault.to_string(),
+            &Secret::new(words.as_str()),
+            remote.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(id, vault);
+    let anchor = b.with(|s| super::load_anchor(s, &vault)).unwrap();
+    assert!(!anchor.compacted.is_empty(), "the base's frontier");
+    let store = super::Remote::open(&remote).unwrap();
+    let plan = deadbolt_remote::plan_pull(&store, &vault, &anchor, None)
+        .await
+        .unwrap();
+    assert!(plan.anomalies.is_empty(), "{:?}", plan.anomalies);
+    assert!(plan.deferred.is_empty(), "{:?}", plan.deferred);
+    assert_eq!(plan.fetch, [], "nothing fetched twice");
+
+    let Reply::RemoteSynced { report } = b
+        .remote_command(Command::RemoteSync { vault: None })
+        .await
+        .unwrap()
+    else {
+        panic!("not a sync report");
+    };
+    assert!(report.anomalies.is_empty(), "{:?}", report.anomalies);
+    assert_eq!(report.pulled, 0, "{report:?}");
+    b.with(|s| {
+        assert_eq!(s.vaults[&vault].items(), items);
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[tokio::test]
 async fn a_checkpoint_compacts_to_a_pack_the_viewer_fills_from() {
     let dir = tempfile::tempdir().unwrap();

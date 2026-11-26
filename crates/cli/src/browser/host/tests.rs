@@ -619,7 +619,7 @@ async fn forms_and_fill_form_have_the_documented_shapes() {
     };
     let filled = Message::Ok {
         reply: Reply::FormFill {
-            kind: "card".into(),
+            kind: deadbolt_proto::daemon::FormKind::Card,
             title: "Visa •••• 4242".into(),
             values: [("number".to_string(), Secret::new("4242424242424242"))].into(),
             verified: true,

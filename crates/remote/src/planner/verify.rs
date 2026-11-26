@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use deadbolt_core::v2::{DeltaClock, Frame, FrameId, FraudProof, LogKind, VectorClock};
 use deadbolt_core::{DeviceId, VaultId};
 
-use super::{Observed, RemoteAnomaly, SelfRollback, SyncAnchor};
+use super::{Observed, RemoteAnomaly, RemoteIndex, SelfRollback, SyncAnchor};
 use crate::path::RemotePath;
 
 /// Checks a fetched object against its name and the anchor: it must be a
@@ -207,4 +207,29 @@ pub fn check_withholding(
             })
         })
         .collect()
+}
+
+/// [`check_withholding`] for every member's decrypted `clocks` against the
+/// data streams `index` lists: each withheld frame once, by author and
+/// `seq`. Frames at or below `compacted` may have been collected.
+pub fn withheld<'a, C: CitedCounts + 'a>(
+    clocks: impl IntoIterator<Item = &'a C>,
+    index: &RemoteIndex,
+    compacted: &BTreeMap<DeviceId, u64>,
+) -> Vec<RemoteAnomaly> {
+    let tips = index.tips(LogKind::Data);
+    let mut out: Vec<RemoteAnomaly> = clocks
+        .into_iter()
+        .flat_map(|clock| check_withholding(clock, &tips, compacted))
+        .collect();
+    out.sort_by_key(|anomaly| match anomaly {
+        RemoteAnomaly::Withheld {
+            author,
+            required_seq,
+            ..
+        } => Some((*author, *required_seq)),
+        _ => None,
+    });
+    out.dedup();
+    out
 }

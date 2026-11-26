@@ -224,6 +224,7 @@ pub async fn remote(
     client::ensure_running(paths).await?;
     match command {
         RemoteCommand::Set(set) => {
+            one_stdin(from_stdin, &[("--credentials-stdin", set.reads_stdin())])?;
             let command = Command::RemoteSet {
                 vault,
                 remote: input(set)?,
@@ -265,7 +266,47 @@ pub async fn remote(
     Ok(())
 }
 
+impl SetCommand {
+    /// Whether the credentials come from stdin.
+    fn reads_stdin(&self) -> bool {
+        match self {
+            Self::S3(a) => a.credentials_stdin,
+            Self::Webdav(a) => a.credentials_stdin,
+        }
+    }
+}
+
+/// Refuses two things on one stdin: `--passphrase-stdin` (`passphrase`)
+/// with any of `flags` that is set. clap can't see them together: the
+/// passphrase flag is global, the store's `--credentials-stdin` belongs to
+/// a subcommand.
+fn one_stdin(passphrase: bool, flags: &[(&str, bool)]) -> Result<()> {
+    let mut reading = flags.iter().filter(|(_, on)| *on).map(|(name, _)| *name);
+    if let (Some(first), Some(second)) = (
+        reading.next(),
+        passphrase
+            .then_some("--passphrase-stdin")
+            .or_else(|| reading.next()),
+    ) {
+        bail!("{first} and {second} both read stdin: pass one of them in the environment instead");
+    }
+    Ok(())
+}
+
+impl RecoverArgs {
+    fn check(&self, passphrase: bool) -> Result<()> {
+        one_stdin(
+            passphrase,
+            &[
+                ("--words-stdin", self.words_stdin),
+                ("--credentials-stdin", self.remote.reads_stdin()),
+            ],
+        )
+    }
+}
+
 pub async fn recover(paths: &Paths, args: RecoverArgs, from_stdin: bool) -> Result<()> {
+    args.check(from_stdin)?;
     let remote = input(args.remote)?;
     let words = words(args.words_stdin, "Recovery kit (24 words)")?;
     client::ensure_running(paths).await?;
@@ -289,6 +330,7 @@ pub async fn recovery(
     from_stdin: bool,
 ) -> Result<()> {
     let RecoveryCommand::Rotate { words_stdin, json } = command;
+    one_stdin(from_stdin, &[("--words-stdin", words_stdin)])?;
     let words = words(words_stdin, "Current recovery kit (24 words)")?;
     client::ensure_running(paths).await?;
     let Reply::RecoveryRotated {
@@ -378,4 +420,88 @@ pub async fn status(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::RecoverArgs;
+
+    #[derive(Parser)]
+    struct Recover {
+        #[command(flatten)]
+        args: RecoverArgs,
+    }
+
+    fn parse(argv: &[&str]) -> RecoverArgs {
+        Recover::try_parse_from(["recover"].iter().chain(argv))
+            .unwrap()
+            .args
+    }
+
+    #[test]
+    fn the_words_and_the_credentials_never_share_stdin() {
+        let both = parse(&[
+            "abcd",
+            "--words-stdin",
+            "webdav",
+            "--url",
+            "https://dav/",
+            "--credentials-stdin",
+        ]);
+        let error = both.check(false).unwrap_err().to_string();
+        assert!(
+            error.contains("--words-stdin and --credentials-stdin"),
+            "{error}"
+        );
+        let s3 = parse(&[
+            "abcd",
+            "--words-stdin",
+            "s3",
+            "--endpoint",
+            "https://s3",
+            "--bucket",
+            "b",
+            "--credentials-stdin",
+        ]);
+        assert!(s3.check(false).is_err());
+        assert!(
+            parse(&["abcd", "--words-stdin", "webdav", "--url", "https://dav/"])
+                .check(false)
+                .is_ok()
+        );
+        assert!(
+            parse(&[
+                "abcd",
+                "webdav",
+                "--url",
+                "https://dav/",
+                "--credentials-stdin"
+            ])
+            .check(false)
+            .is_ok()
+        );
+        // Nor does the passphrase share it with either.
+        let words = parse(&["abcd", "--words-stdin", "webdav", "--url", "https://dav/"]);
+        let error = words.check(true).unwrap_err().to_string();
+        assert!(
+            error.contains("--words-stdin and --passphrase-stdin"),
+            "{error}"
+        );
+        let creds = parse(&[
+            "abcd",
+            "webdav",
+            "--url",
+            "https://dav/",
+            "--credentials-stdin",
+        ]);
+        assert!(creds.check(true).is_err());
+        assert!(
+            parse(&["abcd", "webdav", "--url", "https://dav/"])
+                .check(true)
+                .is_ok()
+        );
+        assert!(super::one_stdin(true, &[]).is_ok());
+    }
 }

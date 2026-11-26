@@ -1,5 +1,5 @@
 //! The configured store: S3 or WebDAV over HTTPS (and, in tests, an
-//! in-memory store named by a `mem.test` URL).
+//! in-memory store named by a `mem.test` URL, faults on cue).
 
 use anyhow::{Result, bail};
 use deadbolt_proto::daemon::RemoteInput;
@@ -13,7 +13,7 @@ pub(in crate::daemon) enum Remote {
     S3(S3ObjStore),
     Dav(WebDavObjStore),
     #[cfg(test)]
-    Mem(deadbolt_remote::MemObjStore),
+    Mem(deadbolt_remote::FaultyObjStore),
 }
 
 impl Remote {
@@ -121,9 +121,9 @@ pub(in crate::daemon) mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    use deadbolt_remote::MemObjStore;
+    use deadbolt_remote::FaultyObjStore;
 
-    static STORES: Mutex<BTreeMap<String, MemObjStore>> = Mutex::new(BTreeMap::new());
+    static STORES: Mutex<BTreeMap<String, FaultyObjStore>> = Mutex::new(BTreeMap::new());
 
     /// A WebDAV URL `http://mem.test/<name>/` that opens a shared
     /// in-memory store.
@@ -131,7 +131,12 @@ pub(in crate::daemon) mod tests {
         format!("http://mem.test/{name}/")
     }
 
-    pub(super) fn named(url: &str) -> Option<MemObjStore> {
+    /// The store `url(name)` opens, to set its faults.
+    pub fn faulty(name: &str) -> FaultyObjStore {
+        named(&url(name)).expect("a mem.test URL")
+    }
+
+    pub(super) fn named(url: &str) -> Option<FaultyObjStore> {
         url.strip_prefix("http://mem.test/")?;
         let mut stores = STORES.lock().unwrap_or_else(|e| e.into_inner());
         Some(stores.entry(url.to_owned()).or_default().clone())

@@ -3,29 +3,19 @@ use std::fmt;
 
 use deadbolt_core::listing::{KINDS, noun, sign_in_name};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+
+use super::Secret;
 
 /// A one-time code and when it stops being valid.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Code {
-    pub code: Zeroizing<String>,
+    pub code: Secret,
     /// Seconds each code lasts.
     pub period: u64,
     /// Unix seconds when the next code takes over.
     pub valid_until: u64,
     /// Milliseconds until then, from the daemon's clock; at least 1.
     pub remaining_ms: u64,
-}
-
-impl fmt::Debug for Code {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Code")
-            .field("code", &"<redacted>")
-            .field("period", &self.period)
-            .field("valid_until", &self.valid_until)
-            .field("remaining_ms", &self.remaining_ms)
-            .finish()
-    }
 }
 
 /// What an import did, or would do. Counts only, never values.

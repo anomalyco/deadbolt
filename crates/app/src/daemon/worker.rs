@@ -342,7 +342,7 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 url,
             };
             let result = call(paths, command, |r| match r {
-                Reply::Password { password } => Some(password),
+                Reply::Password { password } => Some(password.into_inner()),
                 _ => None,
             })
             .await;

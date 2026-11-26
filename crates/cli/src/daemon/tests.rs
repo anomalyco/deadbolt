@@ -94,8 +94,8 @@ async fn a_locked_daemon_generates_passwords() {
         Message::Ok {
             reply: Reply::Password { password },
         } => {
-            assert_eq!(password.len(), 12);
-            assert!(password.bytes().all(|b| b.is_ascii_alphanumeric()));
+            assert_eq!(password.expose().len(), 12);
+            assert!(password.expose().bytes().all(|b| b.is_ascii_alphanumeric()));
         }
         other => panic!("expected a password, got {other:?}"),
     }

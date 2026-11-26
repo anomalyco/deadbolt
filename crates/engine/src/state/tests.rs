@@ -154,3 +154,62 @@ fn unlock_takes_at_most_5_ms_at_5000_items() {
         "unlock took {best:?}"
     );
 }
+
+/// A store whose metadata writes fail once `broken` is set.
+struct BrokenMeta {
+    inner: crate::store::MemoryStore,
+    broken: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl VaultStore for BrokenMeta {
+    fn device_seed(&self) -> &[u8; 32] {
+        self.inner.device_seed()
+    }
+
+    fn for_each_frame(&self, each: &mut dyn FnMut(VaultId, &[u8]) -> Result<()>) -> Result<()> {
+        self.inner.for_each_frame(each)
+    }
+
+    fn append(&self, vault: VaultId, frames: &mut dyn Iterator<Item = &Frame>) -> Result<()> {
+        self.inner.append(vault, frames)
+    }
+
+    fn meta_get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.inner.meta_get(name)
+    }
+
+    fn meta_set(&self, name: &str, value: &[u8]) -> Result<()> {
+        if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+            bail!("injected: metadata write failed");
+        }
+        self.inner.meta_set(name, value)
+    }
+
+    fn uncertain(&self, _: &anyhow::Error) -> Option<String> {
+        None
+    }
+}
+
+/// The frames are durable before any metadata is written: a failure after
+/// them still hands back the 24 words, and the vault is held and usable.
+#[test]
+fn a_metadata_failure_after_the_frames_keeps_the_kit_and_the_vault() {
+    let broken = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = BrokenMeta {
+        inner: crate::store::MemoryStore::new([9; 32]),
+        broken: broken.clone(),
+    };
+    let clock = Box::new(crate::clock::FixedClock(testing::NOW));
+    let mut engine = Engine::create(Box::new(store), clock, "test").unwrap();
+    broken.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (id, words) = engine.create_vault_with_kit("work").unwrap();
+    let root = recovery::decode(&words).unwrap();
+    assert_eq!(engine.vault(&id).recovery_root(), Some(root.recovery_id()));
+    assert_eq!(engine.resolve(Some("work")).unwrap(), id);
+    assert!(!engine.append_uncertain);
+    broken.store(false, std::sync::atomic::Ordering::SeqCst);
+    engine
+        .update(id, |v, a| Ok(v.rename(a, "renamed")?))
+        .unwrap();
+    assert_eq!(engine.vault(&id).name(), "renamed");
+}

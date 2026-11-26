@@ -3,8 +3,9 @@
 //! ```text
 //! check_self_rollback      own streams moved without us? then pull only
 //! plan_pull                LIST m/, d/, x/ against the anchor
-//!   GET + check_fetched_as every frame; resolve_twin each <seq>/<seq>.c pair
-//!   check_fetched_fraud    every new x/<proof_hash>
+//!   judge                  GET everything planned: check_fetched_as every frame,
+//!                          resolve_twin each <seq>/<seq>.c pair, check_fetched_fraud
+//!                          every new x/<proof_hash>
 //!   apply                  frames and proofs, then judge their checkpoints
 //!   adopt                  each undisputed checkpoint's frontier into the anchor;
 //!                          its pack too when this device lacks the covered frames
@@ -23,9 +24,8 @@ use deadbolt_core::{DeviceId, PackSite, VaultId};
 use deadbolt_proto::daemon::RemoteReport;
 use deadbolt_remote::path::area_prefix;
 use deadbolt_remote::{
-    Area, ObjStore, Outbox, RemoteAnomaly, RemotePath, SyncAnchor, Twin, check_fetched,
-    check_fetched_as, check_fetched_fraud, check_self_rollback, plan_pull, plan_push, push,
-    resolve_twin,
+    Area, ObjStore, Outbox, RemoteAnomaly, RemotePath, SyncAnchor, check_fetched_as,
+    check_self_rollback, plan_pull, plan_push, push, withheld,
 };
 
 use super::{Daemon, Remote, load, load_anchor, save, save_anchor};
@@ -127,56 +127,10 @@ impl Daemon {
                 fetched.insert(*path, bytes);
             }
         }
-        let mut frames = Vec::new();
-        let mut proofs: Vec<FraudProof> = Vec::new();
-        let twinned: BTreeSet<RemotePath> = plan.twins.iter().flat_map(|(a, b)| [*a, *b]).collect();
-        for (bare, checkpoint) in &plan.twins {
-            let (Some(a), Some(b)) = (fetched.get(bare), fetched.get(checkpoint)) else {
-                continue;
-            };
-            match resolve_twin((bare, a), (checkpoint, b)) {
-                Ok(Twin::Fraud(proof)) => proofs.push(*proof),
-                Ok(Twin::One(frame)) => frames.push(*frame),
-                Err(anomaly) => anomalies.push(anomaly),
-            }
-        }
-        for path in &plan.fetch {
-            let Some(bytes) = fetched.get(path) else {
-                continue;
-            };
-            if twinned.contains(path) {
-                continue;
-            }
-            match path {
-                RemotePath::Fraud { .. } => match check_fetched_fraud(&vault, path, bytes) {
-                    Ok(proof) => proofs.push(proof),
-                    Err(anomaly) => anomalies.push(anomaly),
-                },
-                _ => match check_fetched_as(
-                    anchor,
-                    &me,
-                    |log, seq| own.get(&(log, seq)).copied(),
-                    path,
-                    bytes,
-                ) {
-                    Ok(frame) => frames.push(frame),
-                    Err(anomaly) => anomalies.push(anomaly),
-                },
-            }
-        }
-        for path in &plan.verify {
-            if let Some(bytes) = fetched.get(path)
-                && !twinned.contains(path)
-                && let Err(anomaly) = check_fetched(anchor, path, bytes)
-            {
-                anomalies.push(anomaly);
-            }
-        }
-        // Member frames first, then each data stream ascending, as listed.
-        frames.sort_by_key(|f| {
-            let h = f.header();
-            (h.kind.log_kind(), h.author, h.seq)
-        });
+        let local = |log, seq| own.get(&(log, seq)).copied();
+        let judged = plan.judge(&vault, anchor, &me, local, &fetched);
+        anomalies.extend(judged.anomalies);
+        let (frames, proofs) = (judged.frames, judged.proofs);
         report.proofs = proofs.len();
 
         let checkpoints: Vec<FrameId> = frames
@@ -299,7 +253,10 @@ impl Daemon {
             // What the store holds now, the push included.
             let names = store.list(&area_prefix(&vault, Area::Data), None).await?;
             let index = deadbolt_remote::RemoteIndex::from_names(&vault, &names);
-            anomalies.extend(self.with(|s| Ok(withheld(&s.vaults[&vault], &index, anchor)))?);
+            anomalies.extend(self.with(|s| {
+                let clocks = s.vaults[&vault].member_clocks();
+                Ok(withheld(clocks.values(), &index, &anchor.compacted))
+            })?);
             report.collected = self.collect(store, vault, anchor, &index).await?;
         }
         report.anomalies = anomalies.iter().map(describe).collect();
@@ -594,24 +551,6 @@ fn base_pack_hash(v: &deadbolt_core::Vault) -> Option<[u8; 32]> {
     v.checkpoints()
         .find(|(f, _)| f.id == id)
         .map(|(_, p)| p.pack_hash)
-}
-
-/// Data frames a current member's clock cites that the store, listed after
-/// this device's push, neither holds nor may have collected.
-fn withheld(
-    v: &deadbolt_core::Vault,
-    index: &deadbolt_remote::RemoteIndex,
-    anchor: &SyncAnchor,
-) -> Vec<RemoteAnomaly> {
-    let tips = index.tips(LogKind::Data);
-    let mut out: Vec<RemoteAnomaly> = v
-        .member_clocks()
-        .values()
-        .flat_map(|clock| deadbolt_remote::check_withholding(clock, &tips, &anchor.compacted))
-        .collect();
-    out.sort_by_key(|a| format!("{a:?}"));
-    out.dedup();
-    out
 }
 
 /// Whether every own frame the store holds above the anchor is this

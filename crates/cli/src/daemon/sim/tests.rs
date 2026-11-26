@@ -161,7 +161,7 @@ fn exploration() {
 async fn pairing_offer_rejects_a_removed_inviter() {
     let mut world = World::new().unwrap();
     world.pair(1).unwrap();
-    let peer = DeviceId::from_bytes(world.devices[1].id);
+    let peer = world.devices[1].id;
     let removal = world.devices[0]
         .with(|s| {
             let id = s.update(world.vault, |v, a| Ok(v.remove(a, peer)?))?;
@@ -581,8 +581,8 @@ async fn outgoing_catchup_is_a_snapshot_and_rechecks_revocation() {
 #[test]
 fn outgoing_welcome_stops_after_removal() {
     let mut world = World::new().unwrap();
-    let device = DeviceId::from_bytes(world.devices[1].id);
-    let inviter = DeviceId::from_bytes(world.devices[0].id);
+    let device = world.devices[1].id;
+    let inviter = world.devices[0].id;
     let join = world.devices[1]
         .with(|s| pairing::join_blob(&s.keys(), "beta", inviter, &world.vault, None))
         .unwrap();
@@ -682,7 +682,7 @@ async fn a_bad_frame_does_not_block_removal_or_other_members() {
         let mut world = World::new().unwrap();
         world.step(&Action::Pair(1)).unwrap();
         world.step(&Action::Pair(2)).unwrap();
-        let removed = DeviceId::from_bytes(world.devices[2].id);
+        let removed = world.devices[2].id;
         let (forged, removal) = world.devices[0]
             .with(|s| {
                 let id = s.update(world.vault, |v, a| Ok(v.remove(a, removed)?))?;

@@ -17,6 +17,15 @@ pub enum FormKind {
 }
 
 impl FormKind {
+    /// The form kind of an item of type `kind`, if forms fill from it.
+    pub fn of(kind: &str) -> Option<Self> {
+        match kind {
+            "identity" => Some(Self::Identity),
+            "card" => Some(Self::Card),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Identity => "identity",

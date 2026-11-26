@@ -146,9 +146,9 @@ pub(super) enum Attempt {
     Interrupted,
 }
 
-pub(super) fn barrier_complete(
-    members: &HashSet<PeerId>,
-    attempts: &BTreeMap<PeerId, Attempt>,
+pub(super) fn barrier_complete<Id: Eq + std::hash::Hash + Ord>(
+    members: &HashSet<Id>,
+    attempts: &BTreeMap<Id, Attempt>,
 ) -> bool {
     members.iter().all(|peer| {
         matches!(
@@ -217,21 +217,17 @@ pub async fn sync_all(daemon: &Arc<Daemon>, only: Option<VaultId>) -> Result<Vec
 async fn sync_round(
     daemon: &Arc<Daemon>,
     only: Option<VaultId>,
-) -> Result<(Vec<PeerSync>, BTreeMap<PeerId, Attempt>)> {
+) -> Result<(Vec<PeerSync>, BTreeMap<DeviceId, Attempt>)> {
     let (node, targets) = daemon.with(|s| {
         let peers = match only {
             Some(id) => s
                 .vault(&id)
                 .members()
                 .filter(|member| *member != s.id)
-                .map(|member| *member.as_bytes())
                 .collect(),
             None => s.peer_set(),
         };
-        let targets: Vec<_> = peers
-            .into_iter()
-            .map(|id| (id, s.addr_of(&DeviceId::from_bytes(id))))
-            .collect();
+        let targets: Vec<_> = peers.into_iter().map(|id| (id, s.addr_of(&id))).collect();
         Ok((s.node.clone(), targets))
     })?;
     let mut tasks = JoinSet::new();
@@ -265,10 +261,10 @@ async fn sync_round(
         let mut peers: Vec<PeerSync> = results
             .into_iter()
             .map(|(id, _, result)| {
-                let device = s.device_info(&DeviceId::from_bytes(id), &connected);
+                let device = s.device_info(&id, &connected);
                 // A removed device is told its removal and sent nothing
                 // else: say so, unless another vault is still shared.
-                let peer = DeviceId::from_bytes(id);
+                let peer = id;
                 let removed: Vec<&str> = s
                     .vaults
                     .values()

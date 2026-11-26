@@ -3,7 +3,6 @@
 
 use super::{FILE_MARKER, SECRET_MARKER, World};
 use anyhow::{Result, ensure};
-use deadbolt_core::DeviceId;
 use deadbolt_core::v2::{EpochId, Frame, FrameKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
@@ -177,7 +176,7 @@ impl World {
             ))
         })?;
         for (i, d) in self.devices.iter().enumerate() {
-            if self.removed(i) || !members.contains(&DeviceId::from_bytes(d.id)) {
+            if self.removed(i) || !members.contains(&d.id) {
                 continue;
             }
             if !d.ready.load(Ordering::SeqCst) {
