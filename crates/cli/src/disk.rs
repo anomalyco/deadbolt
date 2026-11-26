@@ -1,6 +1,8 @@
 //! This device's storage: sealed local state and each vault's frame logs, in
 //! `deadbolt-pack` directories.
 //!
+//! Directories are `0700` and files `0600`.
+//!
 //! ```text
 //! <data>/                       mode 0700
 //!   device/                     the device's own directory (a pseudo-vault, id 0)
@@ -204,12 +206,17 @@ fn split_biometric(file: &[u8]) -> Result<(&[u8], &[u8])> {
         .ok_or_else(corrupt)
 }
 
+/// Creates `dir` (and missing parents) `0700`, and makes an existing `dir`
+/// `0700` too.
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)
+    builder.create(dir)?;
+    #[cfg(unix)]
+    fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(())
 }
 
 fn device_blocks(dir: &Path) -> Result<FsBlocks> {

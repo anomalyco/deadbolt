@@ -248,3 +248,43 @@ fn a_damaged_device_state_is_still_a_device() {
         Err(Error::Corrupt(_))
     ));
 }
+
+/// Every file under the data directory is the user's alone.
+#[cfg(unix)]
+#[test]
+fn the_store_is_private_to_its_user() {
+    use std::os::unix::fs::PermissionsExt;
+    fn walk(path: &Path, seen: &mut usize) {
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        *seen += 1;
+        if path.is_dir() {
+            assert_eq!(mode, 0o700, "{}", path.display());
+            for entry in fs::read_dir(path).unwrap() {
+                walk(&entry.unwrap().path(), seen);
+            }
+        } else {
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+    let store = init_with_params(&data, b"pass", &[7; 32], FAST).unwrap();
+    let author = Author::new(deadbolt_core::v2::DeviceKeys::from_seed(&[7; 32]), 1);
+    let root = RecoverySecret::from_bytes([3; 32]);
+    let (vault, frames) = Vault::create(&root, &author, "personal", "laptop").unwrap();
+    store.append_frames(vault.id(), &mut frames.iter()).unwrap();
+    store
+        .meta_set(&format!("vault/{}/removed", vault.id()), b"[]")
+        .unwrap();
+    store
+        .set_biometric(&generate_biometric_key().unwrap(), b"token")
+        .unwrap();
+    row(&store, 1, 0, ROOMY);
+    let mut seen = 0;
+    walk(&data, &mut seen);
+    // data, device/{local, biometric, activity, LOCK}, v, v/<id>/{members,
+    // wal, local, LOCK}
+    assert!(seen >= 11, "{seen} entries");
+}
