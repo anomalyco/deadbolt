@@ -496,7 +496,9 @@ pub fn can_invite(vault: &Vault, inviter: &DeviceId, device: &DeviceId) -> Resul
 }
 
 /// Durably admit before sending secrets. Retrying an interrupted join returns
-/// the same vault without another Add; a removed device can never rejoin.
+/// the same vault without another Add, writing only what the interrupted
+/// attempt didn't (its `DeviceCard`, after a crash between the two frames);
+/// a removed device can never rejoin.
 pub fn welcome<S: State>(
     s: &mut S,
     vault: VaultId,
@@ -512,18 +514,26 @@ pub fn welcome<S: State>(
     let kem = KemPublic::from_bytes(unhex(&join.kem)?);
     let net = NetPublic::from_bytes(unhex(&join.net)?);
     let label = clean_name(&join.name);
-    let add = {
+    let (add, card) = {
         let held = s
             .vaults()
             .find(|v| v.id() == vault)
             .ok_or(Error::VaultNotHeld)?;
         can_invite(held, &s.device_id(), &device)?;
-        !held.is_member(&device)
+        (
+            !held.is_member(&device),
+            held.device_card(&device).is_none(),
+        )
     };
-    if add {
+    if add || card {
         s.update(vault, |v, author| {
-            v.add(author, device, kem, consent)?;
-            Ok(v.card(author, device, net, &label)?)
+            if add {
+                v.add(author, device, kem, consent)?;
+            }
+            if card {
+                v.card(author, device, net, &label)?;
+            }
+            Ok(())
         })?;
     }
     s.learn(

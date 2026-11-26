@@ -820,6 +820,62 @@ mod tests {
         other.lock().await;
     }
 
+    /// The inviter writes a joiner's `Add` and then its `DeviceCard`. A
+    /// crash between the two leaves a member with no card; the retried
+    /// welcome writes the card instead of skipping it with the `Add`.
+    #[tokio::test]
+    async fn a_retried_welcome_writes_the_card_an_interrupted_one_missed() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = test_daemon(a_dir.path(), "alpha").await;
+        let b = test_daemon(b_dir.path(), "beta").await;
+        let vault = a.with(|s| s.create_vault("personal")).unwrap();
+        let a_dev = DeviceId::from_bytes(id(&a));
+        let b_dev = DeviceId::from_bytes(id(&b));
+        let (kem, net, consent, join) = b
+            .with(|s| {
+                let keys = s.keys();
+                let consent = deadbolt_core::v2::sign_join_consent(
+                    keys.sign_key(),
+                    &vault,
+                    &a_dev,
+                    &keys.kem_public(),
+                );
+                let join = join_blob(&keys, "beta", a_dev, &vault, None)?;
+                Ok((keys.kem_public(), keys.net_public(), consent, join))
+            })
+            .unwrap();
+        // Only the Add landed.
+        a.with(|s| s.update(vault, |v, key| Ok(v.add(key, b_dev, kem, consent)?)))
+            .unwrap();
+        let card = |a: &Daemon| {
+            a.with(|s| {
+                Ok(s.vault(&vault)
+                    .device_card(&b_dev)
+                    .map(|(net, label)| (*net.as_bytes(), label.to_owned())))
+            })
+            .unwrap()
+        };
+        assert_eq!(card(&a), None);
+        let frames = a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap();
+
+        a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
+        assert_eq!(card(&a), Some((*net.as_bytes(), "beta".to_owned())));
+        // The card, and no second Add.
+        assert_eq!(
+            a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap(),
+            frames + 1
+        );
+        // Complete now: another retry writes nothing.
+        a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
+        assert_eq!(
+            a.with(|s| Ok(s.vault(&vault).frames().count())).unwrap(),
+            frames + 1
+        );
+        a.lock().await;
+        b.lock().await;
+    }
+
     #[tokio::test]
     async fn bad_offers_are_refused_before_consent() {
         struct BadInviter(Vec<u8>);
