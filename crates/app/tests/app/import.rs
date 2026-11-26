@@ -592,6 +592,39 @@ fn import_passwords_leaves_security() {
     assert!(rt.state.import_showing() && rt.find("drop-zone").is_some());
 }
 
+/// Settings opened over the import view takes its notice and preview with
+/// it: Esc closes Settings to the item, with nothing of the import left.
+#[test]
+fn settings_over_the_import_view_leaves_nothing_of_it() {
+    let settings = KeyEvent {
+        key: Key::Command(','),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    };
+    for scene_name in ["import", "import-nothing-new"] {
+        let mut rt = scene(scene_name);
+        if scene_name == "import" {
+            rt.state
+                .drop_rejected(&[PathBuf::from("/fixture/notes.txt")]);
+            rt.frame(1.0 / 60.0);
+            assert!(rt.state.import.error.is_some());
+        }
+        assert!(rt.state.import_showing());
+        rt.key(settings.clone());
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.settings_open(), "{scene_name}");
+        assert!(!rt.state.import_showing(), "{scene_name}");
+        rt.key(key(Key::Escape));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.pane, VaultPane::Item, "{scene_name}");
+        assert_eq!(rt.state.import.phase, Phase::Idle, "{scene_name}");
+        assert!(rt.state.import.error.is_none(), "{scene_name}");
+        assert!(rt.find("drop-zone").is_none(), "{scene_name}");
+    }
+}
+
 /// A dialog answering after its import was cancelled is ignored; a Choose
 /// File… while it's still up takes it over rather than asking for another.
 #[test]

@@ -224,16 +224,26 @@ impl App {
     /// Closes the import view, dropping the preview or a file still being
     /// read. An import already confirmed runs to its end.
     pub fn cancel_import(&mut self) {
+        if !self.drop_import() {
+            return;
+        }
+        self.close_pane(VaultPane::Import);
+        // A search typed while it showed now picks the item that shows.
+        self.keep_selection_visible();
+    }
+
+    /// Drops the preview, a file still being read and the notice, along
+    /// with their replies; false while an import already confirmed runs, which
+    /// it leaves to its end.
+    pub(crate) fn drop_import(&mut self) -> bool {
         self.import.hover = false;
         if matches!(self.import.phase, Phase::Importing(_)) {
-            return;
+            return false;
         }
         self.import.seq += 1;
         self.import.phase = Phase::Idle;
         self.import.error = None;
-        self.close_pane(VaultPane::Import);
-        // A search typed while it showed now picks the item that shows.
-        self.keep_selection_visible();
+        true
     }
 
     /// Forgets the import wherever it was, and drops replies still on their way.
@@ -300,6 +310,10 @@ impl App {
             Err(failure) => {
                 self.import.phase = Phase::Idle;
                 self.import.error = Some(problem(failure, &file, applied));
+                // An import that ran on behind the item says why in its view.
+                if self.pane == VaultPane::Item {
+                    self.enter_import();
+                }
             }
         }
         // A search typed while the import ran now picks the item that shows.

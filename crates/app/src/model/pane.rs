@@ -45,7 +45,12 @@ impl App {
             return;
         }
         match std::mem::replace(&mut self.pane, pane) {
-            VaultPane::Item | VaultPane::Import => {}
+            VaultPane::Item => {}
+            // Its file, preview and notice go with it, so nothing of it stays
+            // behind the next pane; an import already confirmed runs on.
+            VaultPane::Import => {
+                self.drop_import();
+            }
             VaultPane::Settings => {
                 self.nav.row = 0;
                 self.hotkey.recorder.cancel();
