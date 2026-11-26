@@ -1,7 +1,7 @@
 //! Drawing the Security view, the sidebar's risk badge and row dots, the item
 //! page's finding callout, and formatted password dates.
 
-use deadbolt_client::protocol::{Finding, FindingKind, RiskLevel};
+use deadbolt_proto::daemon::{Finding, FindingKind, RiskLevel};
 use rune::{Anim, Color, El, Shadow, Transition, col, el, icon, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Keybind, Kit};
 

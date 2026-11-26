@@ -17,7 +17,7 @@ use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
 use deadbolt_client::Paths;
-use deadbolt_client::protocol::{
+use deadbolt_proto::daemon::{
     Command as DaemonCommand, FieldInput, Message, PROTOCOL_VERSION, Request,
 };
 

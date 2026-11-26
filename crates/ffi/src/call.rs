@@ -14,8 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use deadbolt_client::export::append;
-use deadbolt_client::peer;
+use deadbolt_client::{append, peer};
 use deadbolt_proto::daemon::{MAX_AUTOFILL_LINE, Message, PROTOCOL_VERSION, Request};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::Errno;

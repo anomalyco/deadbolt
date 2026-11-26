@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use super::super::Lineage;
 use super::*;
-use crate::daemon::taint::Facts;
+use deadbolt_client::peer::ancestry::{Facts, Hidden, Start};
 
 /// A path-scoped S3 route can't be made to read another bucket's object
 /// through CopyObject's (or RenameObject's) source header.
@@ -270,4 +270,97 @@ fn a_connections_owner_must_still_be_the_runs_after_the_check() {
     // The run is gone.
     let gone = Procs::new(&[(1, 0, 1), (20, 1, 21), (40, 20, 40)]);
     assert!(!allowed(&gone, 40, &|_| true));
+}
+
+/// A cycle in the parent table stops immediately instead of spinning through
+/// the hop limit, and refuses the connection.
+#[test]
+fn broker_lineage_guards_against_parent_cycles() {
+    struct CountingProcs {
+        procs: Procs,
+        lookups: std::cell::Cell<usize>,
+    }
+
+    impl ProcessFacts for CountingProcs {
+        fn facts(&self, pid: u32) -> Option<Facts> {
+            self.lookups.set(self.lookups.get() + 1);
+            self.procs.facts(pid)
+        }
+    }
+
+    let lineage = Lineage {
+        root_pid: 20,
+        root_start: Some((20, 0)),
+    };
+    let cyclic = CountingProcs {
+        procs: Procs::new(&[(20, 1, 20), (30, 40, 10), (40, 30, 10)]),
+        lookups: std::cell::Cell::new(0),
+    };
+    assert!(!lineage.descends(&cyclic, 40, (10, 0)));
+    assert!(
+        cyclic.lookups.get() <= 4,
+        "cycle should stop immediately, took {} lookups",
+        cyclic.lookups.get()
+    );
+}
+
+/// Under Linux `hidepid`, a hidden intermediate process whose visible parent
+/// is the run's tree still lets its descendant through, while a system
+/// boundary, an unproven missing parent, or a younger visible grandparent is
+/// refused.
+#[test]
+fn broker_lineage_walks_through_hidepid_visible_parent() {
+    struct HidingProcs {
+        procs: Procs,
+        hidden: Option<Hidden>,
+    }
+
+    impl ProcessFacts for HidingProcs {
+        fn facts(&self, pid: u32) -> Option<Facts> {
+            self.procs.facts(pid)
+        }
+
+        fn hidden(&self, parent: u32, child: u32, child_start: Start) -> Option<Hidden> {
+            (parent == 30 && child == 40 && child_start == (40, 0)).then_some(self.hidden?)
+        }
+    }
+
+    let lineage = Lineage {
+        root_pid: 20,
+        root_start: Some((20, 0)),
+    };
+    let rows = || Procs::new(&[(1, 0, 1), (20, 1, 20), (40, 30, 40)]);
+
+    let through = HidingProcs {
+        procs: rows(),
+        hidden: Some(Hidden::VisibleParent(20)),
+    };
+    assert!(lineage.allows_with(&through, |_, confirm| confirm(40).then_some(40)));
+
+    let system = HidingProcs {
+        procs: rows(),
+        hidden: Some(Hidden::SystemBoundary),
+    };
+    assert!(!lineage.allows_with(&system, |_, confirm| confirm(40).then_some(40)));
+
+    let unproven = HidingProcs {
+        procs: rows(),
+        hidden: None,
+    };
+    assert!(!lineage.allows_with(&unproven, |_, confirm| confirm(40).then_some(40)));
+
+    // Grandparent started after the visible child: pid reuse, refused.
+    let younger_grandparent = HidingProcs {
+        procs: Procs::new(&[(1, 0, 1), (20, 1, 99), (40, 30, 40)]),
+        hidden: Some(Hidden::VisibleParent(20)),
+    };
+    let reused_lineage = Lineage {
+        root_pid: 20,
+        root_start: Some((99, 0)),
+    };
+    assert!(
+        !reused_lineage.allows_with(&younger_grandparent, |_, confirm| {
+            confirm(40).then_some(40)
+        })
+    );
 }

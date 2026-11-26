@@ -3,7 +3,7 @@
 //! (`keys`), and the one they're on fills; the foot says what the keys do.
 //! The import view, the form and the notices take the same place.
 
-use deadbolt_client::protocol::{FieldInfo, ItemInfo};
+use deadbolt_proto::daemon::{FieldInfo, ItemInfo};
 use rune::{Anim, Color, Edge, El, TextStyle, Transition, col, el, row, spacer, text};
 use rune_kit::{IconButton, IconButtonVariant, Keybind, Kit, RollingText};
 

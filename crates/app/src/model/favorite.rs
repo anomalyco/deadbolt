@@ -1,7 +1,7 @@
 //! Starring items (`⌘D`), keeping favorites first in the list, and `#tag`
 //! search filtering from chips and `⌘K`.
 
-use deadbolt_client::protocol::ItemInfo;
+use deadbolt_proto::daemon::ItemInfo;
 use rune::Tx;
 
 use super::App;

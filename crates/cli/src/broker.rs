@@ -27,11 +27,13 @@ mod tests;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
+use std::ops::ControlFlow;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use deadbolt_client::peer::ancestry::{self, AncestorStep, OsProcesses, ProcessFacts, Start};
 use deadbolt_os::mem::{HardeningOptions, harden_process};
 use deadbolt_os::net::{LoopbackConnection, owner_in_subtree_confirmed};
 use tokio::net::TcpListener;
@@ -40,8 +42,6 @@ use zeroize::Zeroizing;
 
 use config::BrokerConfig;
 use proxy::Broker;
-
-use crate::daemon::taint::{OsProcesses, ProcessFacts, Start};
 
 /// `deadbolt broker`, which `main` hands over before anything else runs.
 pub const COMMAND: &str = "broker";
@@ -107,28 +107,24 @@ impl Lineage {
     }
 
     /// Whether `(pid, start)` is the run's process or descends from it, each
-    /// parent started no later than its child.
-    fn descends(&self, facts: &impl ProcessFacts, mut pid: u32, mut start: Start) -> bool {
-        for _ in 0..deadbolt_os::net::MAX_SUBTREE {
-            if pid == self.root_pid {
-                return self.root_start.is_none_or(|root| root == start);
-            }
-            let Some(me) = facts.facts(pid).filter(|f| f.start == start) else {
-                return false;
-            };
-            if me.ppid <= 1 || me.ppid == pid {
-                return false;
-            }
-            let Some(parent) = facts.facts(me.ppid) else {
-                return false;
-            };
-            if parent.start > start {
-                return false;
-            }
-            pid = me.ppid;
-            start = parent.start;
-        }
-        false
+    /// parent started no later than its child (with cycle protection and Linux
+    /// `hidepid` handling from the canonical ancestry walker).
+    fn descends(&self, facts: &impl ProcessFacts, pid: u32, start: Start) -> bool {
+        matches!(
+            ancestry::walk_from(
+                facts,
+                pid,
+                start,
+                deadbolt_os::net::MAX_SUBTREE,
+                |step| match step {
+                    AncestorStep::Visible { pid, start } if pid == self.root_pid => {
+                        ControlFlow::Break(self.root_start.is_none_or(|root| root == start))
+                    }
+                    _ => ControlFlow::Continue(()),
+                },
+            ),
+            ControlFlow::Break(true)
+        )
     }
 }
 

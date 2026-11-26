@@ -21,12 +21,12 @@ default = ["client"]
 client = ["dep:deadbolt-client", "dep:deadbolt-proto", "dep:rustix", "dep:serde_json", "dep:zeroize"]
 
 [dependencies]
-deadbolt-client = { path = "../client", optional = true }
+deadbolt-client = { path = "../client", default-features = false, optional = true }
 deadbolt-proto = { path = "../proto", optional = true }
 rustix = { version = "1.1.5", default-features = false, features = ["event", "net", "std"], optional = true }
 serde_json = { version = "1.0.151", optional = true }
 # Exactly the version `bindgen/` generates the Swift bindings with.
-uniffi = "=0.32.2"
+uniffi = { version = "=0.32.2", default-features = false }
 zeroize = { version = "1.9", optional = true }
 
 [dev-dependencies]

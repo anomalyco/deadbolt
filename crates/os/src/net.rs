@@ -31,11 +31,114 @@
 //! over its placeholder just as well.
 
 #![cfg_attr(
-    target_os = "macos",
-    expect(unsafe_code, reason = "libproc calls nothing wraps safely")
+    any(target_os = "macos", target_os = "linux"),
+    expect(
+        unsafe_code,
+        reason = "libproc and peer-credential getsockopt calls nothing wraps safely"
+    )
 )]
 
 use std::collections::{HashSet, VecDeque};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::io;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::os::fd::{AsRawFd, BorrowedFd};
+
+/// The peer's audit token (`getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)`) on a
+/// connected Unix socket: euid at 1, pid at 5, pid version at 7.
+#[cfg(target_os = "macos")]
+pub fn local_peer_token(fd: BorrowedFd<'_>) -> io::Result<[u32; 8]> {
+    let mut token = [0u32; 8];
+    let mut len = size_of::<[u32; 8]>() as libc::socklen_t;
+    // SAFETY: `fd` is a valid open descriptor for the duration of the call, and
+    // `token` is writable for `len` bytes, matching `audit_token_t` (`[c_uint; 8]`).
+    let status = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERTOKEN,
+            (&raw mut token).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(len).ok() != Some(size_of::<[u32; 8]>()) {
+        return Err(io::Error::other("unexpected LOCAL_PEERTOKEN length"));
+    }
+    Ok(token)
+}
+
+/// The peer's effective uid (`getsockopt(SOL_LOCAL, LOCAL_PEERCRED)`) on a
+/// connected Unix socket. Unlike [`local_peer_token`], the kernel keeps it
+/// after the peer closes its end.
+#[cfg(target_os = "macos")]
+pub fn local_peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
+    // SAFETY: `libc::xucred` is plain integers, for which all zeroes is valid.
+    let mut cred: libc::xucred = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::xucred>() as libc::socklen_t;
+    // SAFETY: `fd` is a valid open descriptor for the duration of the call, and
+    // `cred` is writable for `len` bytes, matching `struct xucred`.
+    let status = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERCRED,
+            (&raw mut cred).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(len).ok() != Some(size_of::<libc::xucred>()) {
+        return Err(io::Error::other("unexpected LOCAL_PEERCRED length"));
+    }
+    Ok(cred.cr_uid)
+}
+
+/// The peer's pid and effective uid (`getsockopt(SOL_SOCKET, SO_PEERCRED)`)
+/// on a connected Unix socket.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCredentials {
+    pub pid: i32,
+    pub uid: u32,
+}
+
+/// The peer's credentials (`getsockopt(SOL_SOCKET, SO_PEERCRED)`) on a
+/// connected Unix socket.
+#[cfg(target_os = "linux")]
+pub fn peer_credentials(fd: BorrowedFd<'_>) -> io::Result<PeerCredentials> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `fd` is a valid open descriptor for the duration of the call, and
+    // `cred` is writable for `len` bytes, matching `struct ucred`.
+    let status = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(len).ok() != Some(size_of::<libc::ucred>()) {
+        return Err(io::Error::other("unexpected SO_PEERCRED length"));
+    }
+    Ok(PeerCredentials {
+        pid: cred.pid,
+        uid: cred.uid,
+    })
+}
 
 /// A connection to a server on `127.0.0.1`, as the server's `accept()` saw
 /// it: the client's port and the server's.
@@ -719,5 +822,32 @@ mod tests {
         assert!(child.wait().unwrap().success());
         outsider.kill().unwrap();
         outsider.wait().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unix_socket_reports_peer_token_and_uid() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let token = local_peer_token(ours.as_fd()).unwrap();
+        let uid = local_peer_uid(ours.as_fd()).unwrap();
+        assert_eq!(token[5], std::process::id());
+        assert_eq!(token[1], uid);
+        // LOCAL_PEERCRED stays readable after the peer closes its end.
+        drop(theirs);
+        assert_eq!(local_peer_uid(ours.as_fd()).unwrap(), uid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_socket_reports_peer_credentials() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let creds = peer_credentials(ours.as_fd()).unwrap();
+        assert_eq!(creds.pid, i32::try_from(std::process::id()).unwrap());
     }
 }

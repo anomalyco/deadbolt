@@ -16,11 +16,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use deadbolt_client::export::ExportError;
-use deadbolt_client::protocol::{
+use deadbolt_client::{Error, Launch, Paths};
+use deadbolt_proto::daemon::{
     ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, FindingKind, HealthReport,
     ImportReport, ItemInfo, SshKeyKind, Status,
 };
-use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};

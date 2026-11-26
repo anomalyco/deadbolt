@@ -1,6 +1,6 @@
 //! Synthetic vault, item and loopback-daemon fixtures shared across scenes.
 
-use deadbolt_client::protocol::{
+use deadbolt_proto::daemon::{
     Code, DeviceInfo, FieldInfo, Finding, HealthCounts, HealthPeer, HealthReport, ImportReport,
     ImportSource, ItemHealth, ItemInfo, RiskLevel, Status, Tally, VaultInfo, WeakReason,
 };
@@ -195,13 +195,13 @@ pub(super) fn status(unlocked: bool) -> Status {
     Status {
         pid: 1,
         version: "fixture".into(),
-        protocol: deadbolt_client::protocol::PROTOCOL_VERSION,
+        protocol: deadbolt_proto::daemon::PROTOCOL_VERSION,
         program: None,
         home: String::new(),
         initialized: true,
         unlocked,
         locks_in_secs: None,
-        caller: deadbolt_client::protocol::CallerInfo::unverified("fixture"),
+        caller: deadbolt_proto::daemon::CallerInfo::unverified("fixture"),
         device: Some(DeviceInfo {
             id: "d1".into(),
             name: Some("studio".into()),

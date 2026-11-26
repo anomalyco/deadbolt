@@ -8,10 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use deadbolt_client::export;
-use deadbolt_client::protocol::{
-    Change, Code, Command, ItemInfo, Reply, Secret, Status, code_field,
-};
 use deadbolt_client::{Error, Launch, Paths};
+use deadbolt_proto::daemon::{Change, Code, Command, ItemInfo, Reply, Secret, Status, code_field};
 use rune::Waker;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;

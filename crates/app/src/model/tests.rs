@@ -1,4 +1,4 @@
-use deadbolt_client::protocol::Change;
+use deadbolt_proto::daemon::Change;
 use rune::{Env, Runtime};
 
 use super::unlock::unlock_message;
@@ -7,7 +7,7 @@ use crate::daemon::{Done, Values};
 
 #[test]
 fn a_backed_off_unlock_says_when_to_try_again() {
-    use deadbolt_client::protocol::ErrorCode;
+    use deadbolt_proto::daemon::ErrorCode;
     let backed_off = Failure {
         code: Some(ErrorCode::RateLimited),
         message: "Too many wrong passphrases. Try again in 30 s.".into(),
@@ -482,7 +482,7 @@ fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
 fn ssh_key_generator_fills_the_new_item() {
     use crate::daemon::{Daemon, Job};
     use crate::ssh::SshGeneratedKey;
-    use deadbolt_client::protocol::SshKeyKind;
+    use deadbolt_proto::daemon::SshKeyKind;
     use zeroize::Zeroizing;
 
     let mut rt = main("vault");
@@ -541,7 +541,7 @@ fn ssh_key_generator_fills_the_new_item() {
 
 #[test]
 fn leaving_locked_clears_a_stale_unlock_error_and_ignores_late_failures() {
-    use deadbolt_client::protocol::ErrorCode;
+    use deadbolt_proto::daemon::ErrorCode;
 
     let mut rt = main("locked-error");
     assert!(rt.state.unlock_error.is_some());
@@ -653,7 +653,7 @@ fn a_pre_refresh_item_reply_never_repopulates_the_cleared_cache() {
 #[test]
 fn reveal_on_a_cached_page_reports_only_once_its_values_land() {
     use crate::daemon::{Daemon, Job};
-    use deadbolt_client::protocol::AppAction;
+    use deadbolt_proto::daemon::AppAction;
 
     let mut rt = vault();
     let (daemon, jobs, _) = Daemon::scripted();

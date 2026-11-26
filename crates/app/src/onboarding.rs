@@ -15,7 +15,7 @@ pub use recovery::{KitCopy, Recovery};
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::VaultInfo;
+use deadbolt_proto::daemon::VaultInfo;
 use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::Zeroizing;
 
@@ -306,11 +306,11 @@ impl Onboarding {
     }
 }
 
-/// Passphrase strength via `zxcvbn` (`deadbolt_client::protocol`), catching
+/// Passphrase strength via `zxcvbn` (`deadbolt_proto::daemon`), catching
 /// dictionary words, keyboard walks, repeats, and predictable patterns.
 pub fn strength(passphrase: &str) -> Strength {
-    use deadbolt_client::protocol::PassphraseStrength as P;
-    match deadbolt_client::protocol::passphrase_strength(passphrase) {
+    use deadbolt_proto::daemon::PassphraseStrength as P;
+    match deadbolt_proto::daemon::passphrase_strength(passphrase) {
         P::TooShort => Strength::TooShort,
         P::Weak => Strength::Weak,
         P::Fair => Strength::Fair,

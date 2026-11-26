@@ -4,7 +4,7 @@ mod fixtures;
 
 pub use fixtures::{LOOPBACK_COST, MANY};
 
-use deadbolt_client::protocol::{ImportReport, Status};
+use deadbolt_proto::daemon::{ImportReport, Status};
 use rune::{SecretCopy, Tx};
 
 use crate::daemon;

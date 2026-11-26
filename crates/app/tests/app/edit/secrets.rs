@@ -3,7 +3,7 @@
 
 use deadbolt_app::daemon::{Done, Job};
 use deadbolt_app::model::Screen;
-use deadbolt_client::protocol::AppAction;
+use deadbolt_proto::daemon::AppAction;
 use rune::{Key, KeyEvent, Mods};
 use zeroize::Zeroizing;
 

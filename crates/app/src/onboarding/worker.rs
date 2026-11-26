@@ -7,8 +7,8 @@
 use std::fmt;
 use std::thread::JoinHandle;
 
-use deadbolt_client::protocol::{Answer, Command, DeviceInfo, Event, Reply, Status, VaultInfo};
 use deadbolt_client::{Launch, Paths};
+use deadbolt_proto::daemon::{Answer, Command, DeviceInfo, Event, Reply, Status, VaultInfo};
 use rune::Waker;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;

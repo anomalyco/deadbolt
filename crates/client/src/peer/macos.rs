@@ -14,7 +14,6 @@
 //! and the code directory's signature), and the code directory's signature
 //! alone for a file.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use core_foundation::{base::TCFType, data::CFData};
@@ -24,6 +23,7 @@ use security_framework::os::macos::code_signing::{
     Flags, GuestAttributes, SecCode, SecRequirement,
 };
 
+use super::ancestry::{Facts, collect_ancestry};
 use super::{APP_GROUP_SUFFIX, Ancestor, CodeSignature, Process};
 
 /// The code running as `token`'s process, from the kernel: `None` once
@@ -210,36 +210,33 @@ fn process(pid: u32) -> Process {
 }
 
 /// The parents of `pid` (whose parent is `next`, born at `birth`), nearest
-/// first, up to launchd, and whether they reached it. A parent born after
-/// its child isn't its parent: the child was orphaned and the pid reused.
+/// first, up to launchd, and whether they reached it, via the canonical
+/// [`collect_ancestry`] walk.
 fn walk(
     pid: u32,
-    mut next: u32,
-    mut birth: (u64, u64),
+    next: u32,
+    birth: (u64, u64),
     mut parent: impl FnMut(u32) -> Option<(u32, String, (u64, u64))>,
     mut path: impl FnMut(u32) -> Option<String>,
 ) -> (Vec<Ancestor>, bool) {
-    let mut ancestry = Vec::new();
-    let mut visited = HashSet::from([pid]);
-    while next > 0 && ancestry.len() < 1024 && visited.insert(next) {
-        let Some((ppid, name, born)) = parent(next) else {
-            break;
-        };
-        if born > birth {
-            break;
-        }
-        ancestry.push(Ancestor {
-            pid: next,
-            name,
-            path: path(next),
-        });
-        if next == 1 {
-            return (ancestry, true);
-        }
-        next = ppid;
-        birth = born;
-    }
-    (ancestry, pid == 1)
+    collect_ancestry(
+        pid,
+        next,
+        birth,
+        1024,
+        |p| {
+            let (ppid, name, start) = parent(p)?;
+            Some((
+                Ancestor {
+                    pid: p,
+                    name,
+                    path: path(p),
+                },
+                Facts { ppid, start },
+            ))
+        },
+        |_, _, _| None,
+    )
 }
 
 /// The arguments in `KERN_PROCARGS2`'s `raw`: argc, the exec path and its

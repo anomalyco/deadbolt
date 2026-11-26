@@ -29,6 +29,7 @@ blake3 = "1.8"
 deadbolt-client = { path = "../client" }
 deadbolt-core = { path = "../core" }
 deadbolt-enclave = { path = "../enclave" }
+deadbolt-proto = { path = "../proto" }
 # Rune is pinned to a rev and bumped deliberately; procwatch comes from the same rev.
 procwatch = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
 # `tooling` stays on so release scripts (`snap.sh`, `bundle.sh`, `verify-macos-release.sh`) can run `--snap` / `--list-scenes`.

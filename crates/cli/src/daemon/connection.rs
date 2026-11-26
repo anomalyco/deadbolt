@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use deadbolt_client::export;
+
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
@@ -39,7 +39,7 @@ pub(super) async fn request_line(
             line = Zeroizing::new(Vec::new());
         }
         if !too_large {
-            export::append(&mut line, &bytes[..end], max + 1);
+            deadbolt_client::append(&mut line, &bytes[..end], max + 1);
         }
         read.consume(newline.map_or(end, |i| i + 1));
         if newline.is_some() {

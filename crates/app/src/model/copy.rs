@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::AppAction;
+use deadbolt_proto::daemon::AppAction;
 use rune::{SecretCopy, SecretState, Tx};
 use zeroize::Zeroize;
 

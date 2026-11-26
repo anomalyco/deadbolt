@@ -10,7 +10,7 @@
 use deadbolt_app::daemon::{Daemon, Done, Job, Values, Window};
 use deadbolt_app::model::{App, CODE_SLACK, Screen};
 use deadbolt_app::panel::{self, Phase};
-use deadbolt_client::protocol::{Change, Code, FieldInfo};
+use deadbolt_proto::daemon::{Change, Code, FieldInfo};
 use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use std::sync::mpsc::{Receiver, Sender};

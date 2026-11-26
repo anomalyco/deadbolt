@@ -1,7 +1,7 @@
 //! Password-health Fix flow on the item edit form (`App::open_fix_form`),
 //! `Copy current password` (`⇧⌘C`), and site-url-aware password generation.
 
-use deadbolt_client::protocol::FindingKind;
+use deadbolt_proto::daemon::FindingKind;
 use rune::{KeyEvent, Tx};
 
 use super::{Form, editable};
@@ -10,7 +10,7 @@ use crate::model::App;
 impl Form {
     /// Audited password or passphrase field for `self.kind`, when fixing or generating.
     pub fn fixable_password_field(&self) -> Option<usize> {
-        let want = deadbolt_client::protocol::audited_password_field(&self.kind)?;
+        let want = deadbolt_proto::daemon::audited_password_field(&self.kind)?;
         self.fields.iter().position(|f| f.name == want)
     }
 
@@ -27,7 +27,7 @@ impl Form {
     /// Saved password on `base` before this edit started, if non-empty.
     pub fn base_password(&self) -> Option<(&str, &str)> {
         let base = self.base.as_ref()?;
-        let field = deadbolt_client::protocol::audited_password_field(&self.kind)?;
+        let field = deadbolt_proto::daemon::audited_password_field(&self.kind)?;
         let val = base.value(field).filter(|v| !v.is_empty())?;
         Some((field, val))
     }

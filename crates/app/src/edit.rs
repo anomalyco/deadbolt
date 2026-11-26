@@ -19,7 +19,7 @@ pub mod view;
 pub use form::{Conflict, Form, Input, Problem, editable};
 pub use types::{Types, matches as type_matches};
 
-use deadbolt_client::protocol::{AppAction, ItemInfo};
+use deadbolt_proto::daemon::{AppAction, ItemInfo};
 use rune::{Key, KeyEvent, TextEdit, Tx};
 use zeroize::Zeroizing;
 

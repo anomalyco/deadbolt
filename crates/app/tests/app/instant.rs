@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use deadbolt_app::MANY;
 use deadbolt_app::daemon::{Done, Job, next_jobs};
 use deadbolt_app::model::{App, is_secret};
-use deadbolt_client::protocol::Change;
+use deadbolt_proto::daemon::Change;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const FRAME: f64 = 1.0 / 60.0;

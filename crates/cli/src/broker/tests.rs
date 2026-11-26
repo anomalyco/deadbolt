@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use super::bind;
 use super::config::{BrokerAuth, BrokerConfig, BrokerRoute};
 use super::hygiene;
-use crate::daemon::taint::{OsProcesses, ProcessFacts};
+use deadbolt_client::peer::ancestry::{OsProcesses, ProcessFacts};
 
 mod hardening;
 

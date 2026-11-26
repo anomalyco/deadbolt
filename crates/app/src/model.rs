@@ -16,7 +16,7 @@ pub use favorite::{sort_items, tag_token};
 pub use otp::{CODE_BAR, CODE_SLACK, Otp, group_code, has_code};
 pub use selection::HOLD;
 
-use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status, code_field};
+use deadbolt_proto::daemon::{Change, FieldInfo, ItemInfo, Status, code_field};
 use rune::{TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 

@@ -61,7 +61,7 @@ fn offline_health_flags_risks_skips_pins_syncs_and_ignores() {
 
     let json_out = human_health(&a, &["health", "--all", "--json"]);
     assert!(!json_out.contains(shared));
-    let report: deadbolt_client::protocol::HealthReport = serde_json::from_str(&json_out).unwrap();
+    let report: deadbolt_proto::daemon::HealthReport = serde_json::from_str(&json_out).unwrap();
     assert_eq!(report.counts.risk_items, 3);
     assert_eq!(report.counts.weak, 1);
     assert_eq!(report.counts.reused, 2);
@@ -76,13 +76,13 @@ fn offline_health_flags_risks_skips_pins_syncs_and_ignores() {
     eventually("b to receive synced health ignore", || {
         b.run(&["sync"]);
         let out = human_health(&b, &["health", "--json"]);
-        let r: deadbolt_client::protocol::HealthReport = serde_json::from_str(&out).unwrap();
+        let r: deadbolt_proto::daemon::HealthReport = serde_json::from_str(&out).unwrap();
         r.counts.weak == 0 && r.counts.ignored == 1
     });
 
     b.run(&["set", "GitHub", "password=monkey123"]);
     let after = human_health(&b, &["health", "--json"]);
-    let r: deadbolt_client::protocol::HealthReport = serde_json::from_str(&after).unwrap();
+    let r: deadbolt_proto::daemon::HealthReport = serde_json::from_str(&after).unwrap();
     assert_eq!(r.counts.weak, 1, "ignore lapsed on password change");
 }
 
@@ -173,13 +173,13 @@ fn hibp_range_checks_are_opt_in_padded_deduplicated_and_cached() {
 
     // Default (`breach_checks = false`): zero HTTP requests!
     let offline = human_health(&d, &["health", "--json"]);
-    let rep: deadbolt_client::protocol::HealthReport = serde_json::from_str(&offline).unwrap();
+    let rep: deadbolt_proto::daemon::HealthReport = serde_json::from_str(&offline).unwrap();
     assert_eq!(rep.counts.breached, 0);
     assert_eq!(range_hits.load(Ordering::SeqCst), 0);
 
     // Explicit `--online`: 1 deduplicated range request, both items flagged Breached (98,765).
     let online = human_health(&d, &["health", "--online", "--json"]);
-    let rep: deadbolt_client::protocol::HealthReport = serde_json::from_str(&online).unwrap();
+    let rep: deadbolt_proto::daemon::HealthReport = serde_json::from_str(&online).unwrap();
     assert_eq!(rep.counts.breached, 2);
     assert_eq!(range_hits.load(Ordering::SeqCst), 1);
 
@@ -187,7 +187,7 @@ fn hibp_range_checks_are_opt_in_padded_deduplicated_and_cached() {
     d.run(&["lock"]);
     d.run(&["unlock"]);
     let cached = human_health(&d, &["health", "--online", "--json"]);
-    let rep2: deadbolt_client::protocol::HealthReport = serde_json::from_str(&cached).unwrap();
+    let rep2: deadbolt_proto::daemon::HealthReport = serde_json::from_str(&cached).unwrap();
     assert_eq!(rep2.counts.breached, 2);
     assert_eq!(range_hits.load(Ordering::SeqCst), 1);
 

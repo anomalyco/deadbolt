@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::{AppAction, Code, ItemInfo, code_field, noun, primary_field};
+use deadbolt_proto::daemon::{AppAction, Code, ItemInfo, code_field, noun, primary_field};
 use rune::Tx;
 
 use crate::daemon::{Failure, Job, Values};
