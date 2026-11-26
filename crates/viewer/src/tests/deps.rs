@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const LOCK: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"));
 
-const BANNED: [&str; 10] = [
+const BANNED: [&str; 9] = [
     "argon2",
     "tokio",
     "iroh",
@@ -16,7 +16,6 @@ const BANNED: [&str; 10] = [
     "redb",
     "rune",
     "wgpu",
-    "deadbolt-store",
     "deadbolt-net",
 ];
 

@@ -1,6 +1,5 @@
 // Settings' Appearance: whether login rows show their site's icon, in the
-// inline menu and in the vault. Shared by the standalone Settings and the
-// native popup's settings.
+// inline menu and in the vault.
 
 import { h } from "./dom"
 import { setIconSetting, type IconSettings } from "./icon-store"

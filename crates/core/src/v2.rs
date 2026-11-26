@@ -1,8 +1,7 @@
 //! Deadbolt v2 core: cryptography, canonical frames, epochs, recovery-lineage resolver, fraud
 //! proofs, delta clocks, the data-plane fold, checkpoints and the GC planner.
 //!
-//! Dark module (PRs 7a and 7b): pure, deterministic, `unsafe_code = "forbid"`, and
-//! `wasm32`-clean. Not yet wired into the v1 engine or CLI.
+//! Pure, deterministic, `unsafe_code = "forbid"`, and `wasm32`-clean.
 
 pub mod builder;
 pub mod causal;

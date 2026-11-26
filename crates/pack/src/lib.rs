@@ -1,5 +1,4 @@
-//! Deadbolt v2 storage, landed dark: nothing in the engine or the CLI uses it
-//! yet. One directory per vault:
+//! Deadbolt v2 on-disk storage. One directory per vault:
 //!
 //! ```text
 //! <base>/v/<vault>/

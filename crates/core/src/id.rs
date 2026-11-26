@@ -77,18 +77,6 @@ bytes_type!(
     16
 );
 
-impl VaultId {
-    const CONTEXT: &str = "deadbolt 2026-10-15 vault id v1";
-
-    /// Derives a vault id from its creator and genesis nonce.
-    pub fn derive(creator: &DeviceId, nonce: &[u8; 32]) -> Self {
-        let mut material = [0; 64];
-        material[..32].copy_from_slice(&creator.0);
-        material[32..].copy_from_slice(nonce);
-        Self(blake3::derive_key(Self::CONTEXT, &material))
-    }
-}
-
 impl ItemId {
     /// A fresh random item id: what a new item is created under.
     pub fn random() -> Self {

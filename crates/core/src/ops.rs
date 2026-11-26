@@ -26,7 +26,7 @@ pub fn valid_name(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataOp {
     /// Creates an item of type `kind` with all its required fields. The new
-    /// item's id is [`ItemId::of_create`] of the entry hash and op index.
+    /// item gets a fresh [`ItemId::random`] when committed.
     Create {
         kind: String,
         name: Option<String>,
@@ -77,7 +77,7 @@ pub enum Change {
     TagRemove(String),
     /// Marks or clears an ignored health finding (`kind`, such as `"weak"`).
     /// `Some(hash)` ignores it (`Hash::from_bytes([0; 32])` for item-wide
-    /// findings; a `password` write's entry hash for password findings);
+    /// findings; a `password` write's frame hash for password findings);
     /// `None` restores the warning.
     Ignore { kind: String, at: Option<Hash> },
     /// Records or clears the UTC date (`YYYY-MM-DD`) the item's password
@@ -96,23 +96,6 @@ impl DataOp {
             name,
             fields: fields.into_iter().collect(),
             source: None,
-            favorite: false,
-            tags: BTreeSet::new(),
-        }
-    }
-
-    /// A `Create` that mirrors an item held elsewhere.
-    pub fn create_mirror(
-        kind: impl Into<String>,
-        name: Option<String>,
-        fields: impl IntoIterator<Item = (String, Field)>,
-        source: Source,
-    ) -> Self {
-        Self::Create {
-            kind: kind.into(),
-            name,
-            fields: fields.into_iter().collect(),
-            source: Some(source),
             favorite: false,
             tags: BTreeSet::new(),
         }
