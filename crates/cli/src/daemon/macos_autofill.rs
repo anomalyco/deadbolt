@@ -1,4 +1,4 @@
-//! macOS AutoFill Credential Provider backend (`docs/macos-autofill.md`).
+//! macOS AutoFill Credential Provider backend (`docs/autofill.md`).
 //!
 //! Serves `DeadboltAutoFill.appex` (`anomaly.deadbolt.autofill`) over a
 //! dedicated Unix socket (`s`, mode 0600) in the shared Team-ID App Group

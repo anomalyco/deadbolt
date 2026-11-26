@@ -1,5 +1,5 @@
 // Synchronizes non-secret credential lookup metadata into macOS's
-// `ASCredentialIdentityStore` (`docs/macos-autofill.md`).
+// `ASCredentialIdentityStore` (`docs/autofill.md`).
 //
 // Passwords, OTP seeds/codes, passkey private keys, notes, and custom fields
 // never enter `ASCredentialIdentityStore`.

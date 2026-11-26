@@ -1,5 +1,5 @@
 //! Secret-free identity projection and BLAKE3 digest for macOS
-//! `ASCredentialIdentityStore` (`docs/macos-autofill.md`).
+//! `ASCredentialIdentityStore` (`docs/autofill.md`).
 
 use deadbolt_core::site as core_site;
 use serde::Serialize;

@@ -4,9 +4,10 @@ import { Carried, Frame, RefusalMark, edge, refusal } from "../../story/devices"
 import { clamp01, flashes, shade, span, rolling, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
-// Two keys on the desktop: the passphrase stretches through Argon2id (64 MiB, 3 passes) into the local unlock key,
-// which opens the sealed keyset holding the random data key (seals store.redb) and the Ed25519 device key (the
-// desktop's identity for signing entries and dialing over iroh). A wrong passphrase fails AEAD on the keyset.
+// Unlocking the desktop: the passphrase stretches through Argon2id (64 MiB, 3 passes) into the local unlock key,
+// which unwraps the device root and opens the sealed local state. From it come the vault's epoch key (sealing the
+// DBF2 data frames in its deadbolt-pack files) and the device keys derived from the seed (signing frames, receiving
+// epoch keys, dialing over iroh). A wrong passphrase fails AEAD on the local state.
 //
 // Composition: the derivation runs left to right along the top, the keyset sits under the unlock key, and the two
 // keys it holds come out beneath it. The keyset and the store print their ciphertext; the unseal wicks the
@@ -54,7 +55,7 @@ const SHOTS: readonly Shot[] = [sPass, sKey, sOpen, sSeal, sWrong, sWrongKey, sW
 const DESKTOP_IMPULSES = [REVEAL, SIGN_AT]
 
 export const keysScene: StoryScene = {
-  label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the sealed keyset holding the data key and the desktop's device key.",
+  label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the desktop's sealed local state: from it come the vault's epoch key and the desktop's device keys.",
   width: W, height: H, duration: REFUSED + 2.3,
   sounds: [
     ...soundOfSend(sPass, W, .8).cues,
@@ -81,22 +82,22 @@ export const keysScene: StoryScene = {
     {
       at: 5.0,
       focus: { unlock: .8, keyset: 1, data: 1, device: 1, toKeyset: 1, toData: 1, toDevice: 1 },
-      caption: { text: "it opens the keyset, which holds the data and device keys", anchor: edge.left(KEYSET), place: [344, 163], align: "end", delay: .25 },
+      caption: { text: "it opens the sealed local state: the epoch and device keys", anchor: edge.left(KEYSET), place: [344, 163], align: "end", delay: .25 },
     },
     {
       at: 8.0,
       focus: { data: 1, store: 1, dataToStore: 1, keyset: .5 },
-      caption: { text: "the data key seals every record and keyed hash in store.redb", width: 32, anchor: edge.top(STORE), place: [174, 220], align: "above", delay: .25 },
+      caption: { text: "the epoch key seals every data frame in the vault's pack files", width: 32, anchor: edge.top(STORE), place: [174, 220], align: "above", delay: .25 },
     },
     {
       at: 11.0,
       focus: { device: 1, data: .6, store: .6, keyset: .5 },
-      caption: { text: "the device key signs entries and is the iroh address", width: 28, anchor: [DEVICE[0] + DEVICE[2] - 30, DEVICE[1]], place: [806, 226], align: "above", delay: .2 },
+      caption: { text: "the device keys sign frames, take epoch keys and dial iroh", width: 28, anchor: [DEVICE[0] + DEVICE[2] - 30, DEVICE[1]], place: [806, 226], align: "above", delay: .2 },
     },
     {
       at: 13.8,
       focus: { pass: .8, kdf: .8, unlock: .8, keyset: 1, toKdf: .7, toUnlock: .7, toKeyset: .9, data: .2, device: .2, store: .3 },
-      caption: { text: "a wrong passphrase simply fails to open the keyset", anchor: [SOCKET[0] + 12, SOCKET[1] - 6], place: [700, 112], align: "start", delay: .4 },
+      caption: { text: "a wrong passphrase simply fails to open the local state", anchor: [SOCKET[0] + 12, SOCKET[1] - 6], place: [700, 112], align: "start", delay: .4 },
     },
   ],
   draw: (t, light, story) => {
@@ -163,13 +164,13 @@ function Keys({ t, light, story }: { t: number; light: Light; story: StoryApi })
     <Frame id="pass" box={PASS} t={t} story={story} light={light} label="passphrase" detail="secret" />
     <Frame id="kdf" box={KDF} t={t} story={story} light={light} label="argon2id" detail={kdfDetail} heat={kdfHeat} />
     <Frame id="unlock" box={UNLOCK} t={t} story={story} light={light} label="unlock key" detail="in memory" tone="red" heat={unlockHeat} />
-    <Frame id="keyset" box={KEYSET} t={t} story={story} light={light} label="keyset" detail={keysetDetail} headerY={KEYSET[1] + 22}
+    <Frame id="keyset" box={KEYSET} t={t} story={story} light={light} label="local state" detail={keysetDetail} headerY={KEYSET[1] + 22}
       tone="red" heat={keysetHeat} broken={t >= REFUSED ? clamp01((t - REFUSED) / .25) : 0} />
 
-    <Frame id="store" box={STORE} t={t} story={story} light={light} label="store.redb" heat={storeHeat} />
-    <Frame id="data" box={DATA} t={t} story={story} light={light} label="data key" detail="256-bit" tone="red" heat={dataHeat} appearAt={REVEAL} />
+    <Frame id="store" box={STORE} t={t} story={story} light={light} label="pack files" heat={storeHeat} />
+    <Frame id="data" box={DATA} t={t} story={story} light={light} label="epoch key" detail="256-bit" tone="red" heat={dataHeat} appearAt={REVEAL} />
     <Frame id="device" box={DEVICE} t={t} story={story} light={light} glyph="desktop" impulses={DESKTOP_IMPULSES}
-      label="device key" detail="ed25519 · iroh id" tone="red" heat={deviceHeat} appearAt={REVEAL + .06} />
+      label="device keys" detail="sign · kem · net" tone="red" heat={deviceHeat} appearAt={REVEAL + .06} />
 
     <RefusalMark x={SOCKET[0]} y={SOCKET[1]} t={t} at={REFUSED} />
 

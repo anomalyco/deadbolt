@@ -5,7 +5,7 @@ import { clamp01, flashes, shade, smoothstep, span, working, type Box, type Poin
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // On one device (the desktop), the `deadbolt` command is a thin client. It talks over a user-only Unix socket to
-// the background daemon, which alone opens store.redb, keeps the vault unlocked in memory, and runs the iroh node.
+// the background daemon, which alone writes the vault's pack files, keeps the vault unlocked in memory, and runs the iroh node.
 //
 // Composition: the request runs along one straight line (terminal, cli, socket, vault state). Inside the daemon
 // the store sits above the vault state and the iroh node below it, so every hop is a short vertical one and no
@@ -50,7 +50,7 @@ const DESKTOP_IMPULSES = [sAsk.at, sReq.at, sRead.at, sReply.at, sSync.at]
 const LAPTOP_IMPULSES = [timing(sSync).lands]
 
 export const daemonScene: StoryScene = {
-  label: "The cli sends one JSON line over a user-only Unix socket to the background daemon, which alone opens store.redb and runs the iroh node.",
+  label: "The cli sends one JSON line over a user-only Unix socket to the background daemon, which alone writes the vault's pack files and runs the iroh node.",
   width: W, height: H, duration: 15.6,
   sounds: [sAsk, sReq, sRead, sAnswer, sSync].flatMap(s => soundOfSend(s, W, .8).cues),
   flights: [sAsk, sReq, sReply, sSync].map(s => soundOfSend(s, W, .75).flight),
@@ -68,7 +68,7 @@ export const daemonScene: StoryScene = {
     {
       at: 5.5,
       focus: { core: 1, store: 1, toStore: 1, daemon: 1 },
-      caption: { text: "only the background daemon opens store.redb", anchor: edge.left(STORE), place: [448, 80], align: "end", delay: .2 },
+      caption: { text: "only the background daemon writes the pack files", anchor: edge.left(STORE), place: [448, 80], align: "end", delay: .2 },
     },
     {
       at: 8.7,
@@ -134,7 +134,7 @@ function Daemon({ t, light, story }: { t: number; light: Light; story: StoryApi 
     <text x={DAEMON[0] + 24} y={DAEMON[1] - 11.5} dominantBaseline="middle" className="story-note"
       fill={shade("#666666", ["#cfcac1", daemonLit])}>desktop · background daemon</text>
 
-    <Frame id="store" box={STORE} t={t} story={story} light={light} label="store.redb" detail="deadbolt-store" tone="red" heat={storeHeat} headerY={STORE[1] + 22} />
+    <Frame id="store" box={STORE} t={t} story={story} light={light} label="pack files" detail="deadbolt-pack" tone="red" heat={storeHeat} headerY={STORE[1] + 22} />
     <Frame id="core" box={CORE} t={t} story={story} light={light} label="vault state" detail="deadbolt-core" heat={coreHeat} />
     <Frame id="net" box={NET} t={t} story={story} light={light} label="iroh node" detail="deadbolt-net" heat={netHeat} />
 
