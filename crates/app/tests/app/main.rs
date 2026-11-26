@@ -32,3 +32,5 @@ mod panel;
 mod place;
 mod shortcut;
 mod tags;
+// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+mod upgrade;

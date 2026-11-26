@@ -224,6 +224,8 @@ impl App {
             Done::Connected(Err(failure)) => self.show(Screen::Failed(failure.message)),
             Done::Status(None) => self.fail("The daemon stopped.".into(), tx),
             Done::Unlocked(result) => self.on_unlocked(result, tx),
+            // DELETABLE(v1-migrate)
+            Done::Upgraded { status, migrated } => self.on_upgraded(*status, migrated, tx),
             Done::UnlockedBiometric(result) => self.on_unlocked_biometric(result, tx),
             Done::TouchIdSet { enabled, result } => self.on_touch_id_set(enabled, result, tx),
             Done::Locked(result) => match result {
@@ -442,6 +444,13 @@ impl App {
         let was = self.screen.clone();
         self.status = Some(status);
         if was == Screen::Onboarding && self.onboarding.busy() {
+            // Recovery words never outlive a lock.
+            if !self.status.as_ref().is_some_and(|s| s.unlocked)
+                && matches!(self.onboarding.step, crate::onboarding::Step::Recovery(_))
+            {
+                self.on_locked(tx);
+                return;
+            }
             // A create or join is running or its moment is showing; it moves on by itself.
             self.onboarding.device_ready |= ready;
             return;

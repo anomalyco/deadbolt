@@ -8,6 +8,8 @@
 
 mod ceremony;
 mod recovery;
+// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+pub(crate) mod upgrade;
 pub mod view;
 pub mod worker;
 
