@@ -830,3 +830,57 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
         other => panic!("expected Parked, got {other:?}"),
     }
 }
+
+#[test]
+fn membership_rejects_non_contributory_kem_keys() {
+    let p = model::pool();
+    let root = &p.roots[0];
+    let device = &p.devices[0];
+    let create = build_create_frame(root, p.nonce, &EpochKey::from_bytes([1; 32])).unwrap();
+    for bytes in LOW_ORDER_X25519_POINTS {
+        let kem = KemPublic::from_bytes(bytes);
+        let mut consent = sign_join_consent(device, &p.vault, &root.recovery_id());
+        consent.consent = sign(
+            device.sign_key(),
+            &join_consent_message(
+                &p.vault,
+                &root.recovery_id(),
+                &device.device_id(),
+                &kem,
+                &consent.net,
+            ),
+        );
+        assert!(consent.verify(&p.vault, &root.recovery_id(), &device.device_id(), &kem));
+        let body = MemberBody {
+            deps: vec![create.id()],
+            op: Some(MemberOp::Add {
+                device: device.device_id(),
+                kem,
+                consent,
+                rewrap: None,
+            }),
+            rotate: None,
+        };
+        assert!(Frame::sign_member(&p.root_sks[0], p.vault, 1, create.id(), body).is_err());
+        let mut body = create.member_body().unwrap().clone();
+        if let Some(MemberOp::Create { recovery_kem, .. }) = &mut body.op {
+            *recovery_kem = kem;
+        }
+        assert!(Frame::sign_member(&p.root_sks[0], p.vault, 0, FrameId::ZERO, body).is_err());
+        let body = MemberBody {
+            deps: vec![create.id()],
+            op: Some(MemberOp::RotateRecovery {
+                new: p.roots[1].recovery_id(),
+                new_kem: kem,
+                consent: sign_rotate_recovery_consent(
+                    &p.root_sks[1],
+                    &p.vault,
+                    &root.recovery_id(),
+                    &kem,
+                ),
+            }),
+            rotate: Some(model::dummy_rotate(vec![], p.roots[1].recovery_id(), 2)),
+        };
+        assert!(Frame::sign_member(&p.root_sks[0], p.vault, 1, create.id(), body).is_err());
+    }
+}
