@@ -25,7 +25,7 @@ const BYTES_PER_FRAME: usize = 1024 * 1024;
 const MAX_OP_LEN: usize = 14 * 1024 * 1024;
 /// The largest frame a vault writes, encoded: what one sync message and one
 /// log record hold.
-pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub const MAX_FRAME_LEN: usize = v2::HEADER_LEN + v2::MAX_BODY_LEN + v2::SIGNATURE_LEN;
 
 /// Who signs a write, and when (Unix milliseconds on this device's clock).
 pub struct Author {

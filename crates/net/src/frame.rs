@@ -39,8 +39,8 @@ pub(crate) async fn read<R: AsyncRead + Unpin>(r: &mut R, max: usize) -> Result<
     if len == 0 {
         return Err(Error::Protocol("empty frame".into()));
     }
-    if len > max {
-        return Err(Error::FrameTooLarge { len, max });
+    if len - 1 > max {
+        return Err(Error::FrameTooLarge { len: len - 1, max });
     }
     let mut tag = [0u8; 1];
     r.read_exact(&mut tag).await?;
@@ -173,7 +173,7 @@ mod tests {
         );
         assert!(matches!(
             read(&mut b, 64).await,
-            Err(Error::FrameTooLarge { len: 101, max: 64 })
+            Err(Error::FrameTooLarge { len: 100, max: 64 })
         ));
     }
 
@@ -235,5 +235,26 @@ mod tests {
                 vec![7],
             ]
         );
+    }
+}
+
+#[cfg(all(test, feature = "application"))]
+mod boundary_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn maximum_core_frame_round_trips_with_its_transport_tag() {
+        let body = vec![0x5a; deadbolt_core::MAX_FRAME_LEN];
+        let mut wire = Vec::new();
+        write(&mut wire, tag::ENTRY, &body).await.unwrap();
+        let (kind, received) = read(&mut wire.as_slice(), DEFAULT_MAX_FRAME_LEN)
+            .await
+            .unwrap();
+        assert_eq!(kind, tag::ENTRY);
+        assert_eq!(*received, body);
+        assert!(matches!(
+            read(&mut wire.as_slice(), DEFAULT_MAX_FRAME_LEN - 1).await,
+            Err(Error::FrameTooLarge { .. })
+        ));
     }
 }
