@@ -245,6 +245,9 @@ impl Daemon {
             Ok(())
         }
         .await;
+        if delivered_kits && sent.is_err() {
+            self.lock().await;
+        }
         if sent.is_ok() && delivered_kits {
             self.with(|s| {
                 super::session::set_json(

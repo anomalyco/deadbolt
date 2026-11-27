@@ -375,6 +375,15 @@ impl Daemon {
         passphrase: zeroize::Zeroizing<String>,
         timeout_secs: Option<u64>,
     ) -> Result<Vec<crate::protocol::MigratedVault>> {
+        self.unlock_for(passphrase, timeout_secs, true).await
+    }
+
+    async fn unlock_for(
+        self: &Arc<Self>,
+        passphrase: zeroize::Zeroizing<String>,
+        timeout_secs: Option<u64>,
+        can_show_kits: bool,
+    ) -> Result<Vec<crate::protocol::MigratedVault>> {
         let _transition = self.transition.lock().await;
         self.close_quarantined(&_transition).await;
         self.settle_activity(true);
@@ -393,6 +402,9 @@ impl Daemon {
             });
         if let Some(check) = open {
             let check = check?;
+            if !can_show_kits {
+                self.with(|s| upgrade::require_collected(s))?;
+            }
             if self.with(|s| Ok(upgrade::pending(s)?.is_empty()))?
                 && self.with(|_| self.tighten_timeout(timeout_secs))?
             {
@@ -428,12 +440,18 @@ impl Daemon {
             // DELETABLE(v1-migrate): a v1 store moves to v2 first.
             migrate_first(&dir, passphrase.as_bytes(), params)?;
             let loaded = Loaded::open(&dir, passphrase.as_bytes())?;
-            if enroll_touch_id && let Err(error) = biometric::enroll(&loaded.store, now) {
+            let migrated = upgrade::pending(&loaded)?;
+            if !can_show_kits {
+                upgrade::require_collected(&loaded)?;
+            }
+            if migrated.is_empty()
+                && enroll_touch_id
+                && let Err(error) = biometric::enroll(&loaded.store, now)
+            {
                 warn!("Touch ID enrollment on unlock failed: {error:#}");
             }
             let meta =
                 biometric::token_meta(loaded.store.biometric_token().ok().flatten().as_deref());
-            let migrated = upgrade::pending(&loaded)?;
             Ok::<_, anyhow::Error>((loaded, meta, migrated))
         })
         .await?;
@@ -480,6 +498,9 @@ impl Daemon {
             self.session
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|s| upgrade::require_collected(s))
+                .transpose()?
                 .is_some()
         };
         if unlocked && self.with(|_| self.tighten_timeout(timeout_secs))? {
@@ -545,6 +566,7 @@ impl Daemon {
                     Ok(()) => self
                         .with(|_| self.tighten_timeout(timeout_secs))
                         .map(|_| false),
+                    Err(msg) if msg == upgrade::COLLECT_KITS => Err(fail(ErrorCode::Locked, msg)),
                     Err(msg) => bail!("{msg}"),
                 };
             }
@@ -618,6 +640,7 @@ impl Daemon {
                 .as_ref()
                 .map(|s| {
                     s.ensure_usable()?;
+                    upgrade::require_collected(s)?;
                     Ok::<_, anyhow::Error>(s.store.biometric_token()?)
                 });
             if let Some(token) = open {
@@ -781,7 +804,10 @@ impl Daemon {
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
         {
-            self.with(|_| self.set_timeout(timeout_secs))?;
+            self.with(|s| {
+                upgrade::require_collected(s)?;
+                self.set_timeout(timeout_secs)
+            })?;
             return Ok(true);
         }
         if cancel.is_cancelled() {
@@ -826,6 +852,7 @@ impl Daemon {
             }
         };
 
+        upgrade::require_collected(&loaded)?;
         if meta.is_some() {
             self.biometric_was_enrolled.store(true, Ordering::SeqCst);
         }

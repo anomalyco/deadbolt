@@ -75,6 +75,13 @@ impl Daemon {
         let mut result = match screened {
             Some(result) => result,
             None => match command {
+                Command::Unlock {
+                    passphrase,
+                    timeout_secs,
+                } if caller.class == CallerClass::AutoFill => self
+                    .unlock_for(passphrase, timeout_secs, false)
+                    .await
+                    .map(|migrated| Reply::Unlocked { migrated }),
                 command @ Command::ActivityReport { .. } => self.report(&caller, command),
                 Command::Resolve { refs, purpose } => self.resolve(&caller, &refs, purpose),
                 command @ (Command::Health { .. }
@@ -90,16 +97,6 @@ impl Daemon {
                 command => self.clone().dispatch(command, conv).await,
             },
         };
-        // A failed migration start can leave kits pending on an already-v2
-        // device. AutoFill cannot display them and must not consume the reply.
-        if caller.class == CallerClass::AutoFill
-            && matches!(&result, Ok(Reply::Unlocked { migrated }) if !migrated.is_empty())
-        {
-            result = Err(fail(
-                ErrorCode::Locked,
-                "open Deadbolt and unlock it once to collect the new recovery kits",
-            ));
-        }
         ledger::bound_caller(&mut caller);
         if let Ok(Reply::Status(status)) = &mut result {
             status.caller = caller.clone();

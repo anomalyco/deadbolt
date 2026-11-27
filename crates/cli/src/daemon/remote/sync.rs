@@ -119,13 +119,23 @@ impl Daemon {
             rolled_back |= matches!(anomaly, RemoteAnomaly::SelfRollback(_));
             anomalies.push(anomaly);
         }
-        let plan = plan_pull(store, &vault, anchor, None).await?;
+        let mut plan = plan_pull(store, &vault, anchor, None).await?;
         anomalies.extend(plan.anomalies.iter().cloned());
         let mut fetched = BTreeMap::new();
         for path in plan.fetch.iter().chain(&plan.verify) {
             if let Some(bytes) = store.get(&path.to_name(), None).await? {
                 fetched.insert(*path, bytes);
             }
+        }
+        let mut missing = BTreeSet::new();
+        for path in plan
+            .fetch
+            .iter()
+            .chain(&plan.verify)
+            .filter(|p| !fetched.contains_key(p))
+        {
+            missing.insert(path.to_name());
+            plan.index.remove(path);
         }
         let local = |log, seq| own.get(&(log, seq)).copied();
         let judged = plan.judge(&vault, anchor, &me, local, &fetched);
@@ -252,13 +262,6 @@ impl Daemon {
             self.publish(store, vault, anchor, &mut report, &mut anomalies)
                 .await?;
             // What the store holds now, the push included.
-            let missing: BTreeSet<String> = plan
-                .fetch
-                .iter()
-                .chain(&plan.verify)
-                .filter(|path| !fetched.contains_key(path))
-                .map(RemotePath::to_name)
-                .collect();
             let names: Vec<String> = store
                 .list(&area_prefix(&vault, Area::Data), None)
                 .await?
@@ -577,7 +580,7 @@ async fn self_frames_match<S: ObjStore + Sync>(
 ) -> Result<bool> {
     for path in ahead {
         let Some(bytes) = store.get(&path.to_name(), None).await? else {
-            continue;
+            return Ok(false);
         };
         let local = |log, seq| own.get(&(log, seq)).copied();
         if check_fetched_as(anchor, me, local, path, &bytes).is_err() {

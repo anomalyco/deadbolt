@@ -159,6 +159,9 @@ fn fields_over(id: ItemId, item: &mut V1Item) -> Vec<(String, V1Item)> {
                 .insert(name, Field::new(field.kind.clone(), preview));
         }
     }
+    if !parts.is_empty() && item.name.is_none() && item.fields.is_empty() {
+        item.name = Some(format!("{} (moved)", item.kind));
+    }
     parts
 }
 
@@ -195,6 +198,14 @@ pub(super) fn operations(id: ItemId, item: &V1Item) -> (DataOp, Vec<DataOp>) {
         {
             edits.push(DataOp::set(id, name, value));
         }
+    }
+    if let DataOp::Create { name, fields, .. } = &mut create
+        && name.is_none()
+        && fields.is_empty()
+        && !edits.is_empty()
+    {
+        *name = Some("_".into());
+        edits.push(DataOp::name(id, None));
     }
     (create, edits)
 }
@@ -368,6 +379,54 @@ mod tests {
         let mut recovered = Vec::new();
         for i in 1..=2 {
             let part = &fitted.items[&part_id(&id, &format!("field/notes/{i}"))];
+            let (_, bytes) = item::file_parts(part.fields["file"].value.as_str());
+            recovered.extend(
+                data_encoding::BASE64
+                    .decode(bytes.unwrap().as_bytes())
+                    .unwrap(),
+            );
+        }
+        assert_eq!(recovered, text.as_bytes());
+        build_and_verify(&fitted);
+    }
+
+    #[test]
+    fn an_unnamed_item_can_move_its_only_field_to_an_edit() {
+        let id = ItemId::from_bytes([3; 16]);
+        let mut item = document(BTreeMap::new(), tag::MAX_TAGS);
+        item.kind = "login".into();
+        item.name = None;
+        let overhead = DataOp::set(id, "notes", Field::new(FieldType::Note, "")).encoded_len();
+        item.fields.insert(
+            "notes".into(),
+            Field::new(FieldType::Note, "x".repeat(MAX_OP_LEN - overhead)),
+        );
+        let fitted = vault(one(item.clone()));
+        assert_eq!(fitted.items[&id], item);
+        let (create, edits) = operations(id, &item);
+        assert!(
+            matches!(create, DataOp::Create { name: Some(_), ref fields, .. } if fields.is_empty())
+        );
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits.last(), Some(&DataOp::name(id, None)));
+        build_and_verify(&fitted);
+    }
+
+    #[test]
+    fn an_unnamed_oversized_url_keeps_its_bytes_and_a_nonempty_parent() {
+        let id = ItemId::from_bytes([3; 16]);
+        let text = format!("https://example.com/{}", "x".repeat(15 * 1024 * 1024));
+        let mut item = document(
+            BTreeMap::from([("url".into(), Field::new(FieldType::Url, &text))]),
+            0,
+        );
+        item.kind = "login".into();
+        item.name = None;
+        let fitted = vault(one(item));
+        assert!(fitted.items[&id].name.is_some());
+        let mut recovered = Vec::new();
+        for i in 1..=2 {
+            let part = &fitted.items[&part_id(&id, &format!("field/url/{i}"))];
             let (_, bytes) = item::file_parts(part.fields["file"].value.as_str());
             recovered.extend(
                 data_encoding::BASE64

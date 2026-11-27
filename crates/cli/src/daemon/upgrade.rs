@@ -8,6 +8,18 @@
 use anyhow::Result;
 
 pub(super) const PENDING_KITS: &str = "cli/migrated-kits";
+pub(super) const COLLECT_KITS: &str =
+    "open Deadbolt and unlock it once to collect the new recovery kits";
+
+pub(super) fn require_collected(loaded: &super::session::Loaded) -> Result<()> {
+    if !pending(loaded)?.is_empty() {
+        return Err(super::fail(
+            crate::protocol::ErrorCode::Locked,
+            COLLECT_KITS,
+        ));
+    }
+    Ok(())
+}
 
 /// Staged before cutover; retained through failed opens, starts and replies.
 pub(super) fn pending(

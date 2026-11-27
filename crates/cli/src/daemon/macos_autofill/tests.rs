@@ -265,6 +265,8 @@ async fn pending_migration_kits_require_a_caller_that_can_display_them() {
             )
         })
         .unwrap();
+    f.daemon.lock().await;
+    let changes = f.daemon.watchers.subscribe(false);
     let unlock = || Command::Unlock {
         passphrase: Zeroizing::new("test".into()),
         timeout_secs: None,
@@ -286,13 +288,15 @@ async fn pending_migration_kits_require_a_caller_that_can_display_them() {
         ),
         "{reply:?}"
     );
-    assert_eq!(
-        f.daemon
-            .with(|s| super::super::upgrade::pending(s))
-            .unwrap()
-            .len(),
-        1
+    assert!(!f.daemon.status().unlocked);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), changes.next())
+            .await
+            .is_err()
     );
+    let loaded = Loaded::open(&f.daemon.paths.data, b"test").unwrap();
+    assert_eq!(super::super::upgrade::pending(&loaded).unwrap().len(), 1);
+    drop(loaded);
     let reply = send_on(
         &f.daemon,
         SocketKind::Control,
