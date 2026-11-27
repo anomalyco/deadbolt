@@ -393,7 +393,9 @@ impl Daemon {
             });
         if let Some(check) = open {
             let check = check?;
-            if self.with(|_| self.tighten_timeout(timeout_secs))? {
+            if self.with(|s| Ok(upgrade::pending(s)?.is_empty()))?
+                && self.with(|_| self.tighten_timeout(timeout_secs))?
+            {
                 return Ok(Vec::new());
             }
             let turn = self.guesses.turn()?;
@@ -403,9 +405,10 @@ impl Daemon {
             if !right {
                 return Err(crate::disk::Error::WrongPassphrase.into());
             }
-            return self
-                .with(|_| self.set_timeout(timeout_secs))
-                .map(|()| Vec::new());
+            return self.with(|s| {
+                self.set_timeout(timeout_secs)?;
+                upgrade::pending(s)
+            });
         }
         if !set_up(&self.paths.data) {
             return Err(fail(
@@ -423,21 +426,14 @@ impl Daemon {
         let turn = self.guesses.turn()?;
         let opened = tokio::task::spawn_blocking(move || {
             // DELETABLE(v1-migrate): a v1 store moves to v2 first.
-            let moved = migrate_first(&dir, passphrase.as_bytes(), params)?;
+            migrate_first(&dir, passphrase.as_bytes(), params)?;
             let loaded = Loaded::open(&dir, passphrase.as_bytes())?;
             if enroll_touch_id && let Err(error) = biometric::enroll(&loaded.store, now) {
                 warn!("Touch ID enrollment on unlock failed: {error:#}");
             }
             let meta =
                 biometric::token_meta(loaded.store.biometric_token().ok().flatten().as_deref());
-            let migrated = moved
-                .into_iter()
-                .map(|(id, items, kit)| crate::protocol::MigratedVault {
-                    vault: loaded.vault_info(&id),
-                    items,
-                    recovery_kit: kit.into(),
-                })
-                .collect::<Vec<_>>();
+            let migrated = upgrade::pending(&loaded)?;
             Ok::<_, anyhow::Error>((loaded, meta, migrated))
         })
         .await?;

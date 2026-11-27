@@ -129,8 +129,8 @@ impl Daemon {
         }
         let local = |log, seq| own.get(&(log, seq)).copied();
         let judged = plan.judge(&vault, anchor, &me, local, &fetched);
-        anomalies.extend(judged.anomalies);
-        let (frames, proofs) = (judged.frames, judged.proofs);
+        anomalies.extend(judged.anomalies.iter().cloned());
+        let (frames, proofs) = (&judged.frames, &judged.proofs);
         report.proofs = proofs.len();
 
         let checkpoints: Vec<FrameId> = frames
@@ -242,16 +242,29 @@ impl Daemon {
                 anomalies.push(anomaly);
             }
         }
-        for proof in &proofs {
+        for proof in proofs {
             anchor.note_fraud(proof.proof_hash());
         }
         anomalies.extend(plan.confirm_deferred(anchor));
+        anomalies.extend(judged.confirm_deferred(anchor));
 
         if !rolled_back {
             self.publish(store, vault, anchor, &mut report, &mut anomalies)
                 .await?;
             // What the store holds now, the push included.
-            let names = store.list(&area_prefix(&vault, Area::Data), None).await?;
+            let missing: BTreeSet<String> = plan
+                .fetch
+                .iter()
+                .chain(&plan.verify)
+                .filter(|path| !fetched.contains_key(path))
+                .map(RemotePath::to_name)
+                .collect();
+            let names: Vec<String> = store
+                .list(&area_prefix(&vault, Area::Data), None)
+                .await?
+                .into_iter()
+                .filter(|name| !missing.contains(name))
+                .collect();
             let index = deadbolt_remote::RemoteIndex::from_names(&vault, &names);
             anomalies.extend(self.with(|s| {
                 let clocks = s.vaults[&vault].member_clocks();

@@ -2999,6 +2999,21 @@ fn send_ls_show_and_revoke_manage_links() {
 }
 
 #[test]
+fn recover_refuses_a_vault_selector() {
+    let a = Device::new();
+    let err = a.fail(&[
+        "--vault",
+        "personal",
+        "recover",
+        "id",
+        "webdav",
+        "--url",
+        "https://example.com/vault/",
+    ]);
+    assert!(err.contains("--vault does not apply"), "{err}");
+}
+
+#[test]
 fn a_waiting_send_reports_the_pickup() {
     let a = Device::new();
     let file = a.path("hello.txt");

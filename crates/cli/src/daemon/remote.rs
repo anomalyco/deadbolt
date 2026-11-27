@@ -69,9 +69,16 @@ pub(super) fn save_anchor(s: &Session, vault: &VaultId, anchor: &SyncAnchor) -> 
 fn target(
     vault: &VaultId,
     saved: &Saved,
-) -> (String, String, Option<String>, Option<String>, String) {
+) -> (String, String, Option<String>, Option<String>, String, bool) {
     let i = info(vault, saved, &SyncAnchor::default());
-    (i.kind, i.url, i.bucket, i.region, i.prefix)
+    let path_style = matches!(
+        &saved.remote,
+        RemoteInput::S3 {
+            path_style: true,
+            ..
+        }
+    );
+    (i.kind, i.url, i.bucket, i.region, i.prefix, path_style)
 }
 
 /// What `remote show` says: where, never the secrets.

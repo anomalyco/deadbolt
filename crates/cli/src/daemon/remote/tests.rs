@@ -49,6 +49,29 @@ fn webdav(name: &str) -> RemoteInput {
     }
 }
 
+#[test]
+fn changing_s3_addressing_changes_the_anchor_target() {
+    let vault = VaultId::from_bytes([1; 32]);
+    let mut saved = super::Saved {
+        remote: RemoteInput::S3 {
+            endpoint: "https://example.com".into(),
+            bucket: "vault".into(),
+            region: "us-east-1".into(),
+            prefix: String::new(),
+            path_style: false,
+            access_key_id: Secret::new("id"),
+            secret_access_key: Secret::new("secret"),
+            session_token: None,
+        },
+        last_sync: None,
+    };
+    let before = super::target(&vault, &saved);
+    if let RemoteInput::S3 { path_style, .. } = &mut saved.remote {
+        *path_style = true;
+    }
+    assert_ne!(before, super::target(&vault, &saved));
+}
+
 fn login(daemon: &Daemon, vault: VaultId, i: usize) {
     daemon
         .with(|s| {
@@ -473,6 +496,34 @@ async fn a_refused_frame_is_fetched_again_once_its_signer_is_admitted() {
         .unwrap();
     assert!(took, "fetched again once P is admitted");
     assert_eq!(tip, Some(written.len() as u64 - 1));
+
+    // A now cites P in its signed clock. The store keeps P in LIST while
+    // returning 404 on GET: that name must not mask the cited frame.
+    login(&a, vault, 999);
+    a.remote_command(sync()).await.unwrap();
+    let faulty = super::store::tests::faulty("refused-frame");
+    faulty.freeze_list();
+    let prefix = format!("{vault}/d/{}/", p.id());
+    faulty.wipe(|name| name.starts_with(&prefix));
+    let Reply::RemoteSynced { report } = a.remote_command(sync()).await.unwrap() else {
+        panic!("not a sync report");
+    };
+    assert!(
+        report
+            .anomalies
+            .iter()
+            .any(|a| a.contains("lost or swapped")),
+        "{:?}",
+        report.anomalies
+    );
+    assert!(
+        report
+            .anomalies
+            .iter()
+            .any(|a| a.contains(&format!("withholds {}'s data frame", p.id()))),
+        "{:?}",
+        report.anomalies
+    );
 }
 
 /// A compromised member uploads a checkpoint (`d/M/1.c`) and a poisoned pack

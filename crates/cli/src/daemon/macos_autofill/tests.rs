@@ -213,6 +213,8 @@ async fn autofill_extension_is_confined_to_its_narrow_command_set() {
         Command::Lock,
         Command::Stop,
         Command::VaultList,
+        Command::Watch { app: false },
+        Command::Watch { app: true },
         Command::Unlock {
             passphrase: Zeroizing::new("test".into()),
             timeout_secs: Some(0),
@@ -243,6 +245,70 @@ async fn autofill_extension_is_confined_to_its_narrow_command_set() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn pending_migration_kits_require_a_caller_that_can_display_them() {
+    let f = unlocked().await;
+    f.daemon
+        .with(|s| {
+            let (id, kit) = s.create_vault_with_kit("migrated")?;
+            let pending = vec![crate::protocol::MigratedVault {
+                vault: s.vault_info(&id),
+                items: 0,
+                recovery_kit: kit.into(),
+            }];
+            super::super::session::set_json(
+                s.store(),
+                super::super::upgrade::PENDING_KITS,
+                &pending,
+            )
+        })
+        .unwrap();
+    let unlock = || Command::Unlock {
+        passphrase: Zeroizing::new("test".into()),
+        timeout_secs: None,
+    };
+    let reply = send_on(
+        &f.daemon,
+        SocketKind::Control,
+        Some((CallerClass::AutoFill, "macOS AutoFill")),
+        unlock(),
+    )
+    .await;
+    assert!(
+        matches!(
+            reply,
+            Message::Error {
+                code: ErrorCode::Locked,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(
+        f.daemon
+            .with(|s| super::super::upgrade::pending(s))
+            .unwrap()
+            .len(),
+        1
+    );
+    let reply = send_on(
+        &f.daemon,
+        SocketKind::Control,
+        Some((CallerClass::Caller, "CLI")),
+        unlock(),
+    )
+    .await;
+    assert!(
+        matches!(reply, Message::Ok { reply: Reply::Unlocked { migrated } } if migrated.len() == 1)
+    );
+    assert!(
+        f.daemon
+            .with(|s| super::super::upgrade::pending(s))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

@@ -268,4 +268,47 @@ mod tests {
         Staging::fresh(data.path()).unwrap();
         assert!(!marker.exists());
     }
+
+    #[test]
+    fn kits_survive_cutover_and_a_failed_reopen() {
+        let data = tempfile::tempdir().unwrap();
+        fs::write(data.path().join(V1_FILE), b"v1").unwrap();
+        let staging = Staging::fresh(data.path()).unwrap();
+        let vaults = [replay::V1Vault {
+            id: [1; 32],
+            name: "personal".into(),
+            items: Default::default(),
+        }];
+        let plan = build::Plan {
+            device_name: "laptop",
+            default: None,
+            vaults: &vaults,
+        };
+        let fast = KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let moved = build::build(&staging.dir.join("store"), b"pass", fast, &plan).unwrap();
+        let kit = moved[0].recovery_kit.clone();
+        drop(moved);
+        staging.cut_over(data.path()).unwrap();
+        use crate::daemon::session::Loaded;
+        assert!(Loaded::open(data.path(), b"wrong").is_err());
+        // The failed post-cutover unlock has no in-memory copy to return.
+        let loaded = Loaded::open(data.path(), b"pass").unwrap();
+        let pending = super::super::upgrade::pending(&loaded).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].recovery_kit.expose(), kit.as_str());
+        drop(loaded);
+        // Dropping an open store before starting the network or replying
+        // likewise cannot consume the sealed kits.
+        let loaded = Loaded::open(data.path(), b"pass").unwrap();
+        assert_eq!(
+            super::super::upgrade::pending(&loaded).unwrap()[0]
+                .recovery_kit
+                .expose(),
+            kit.as_str()
+        );
+    }
 }

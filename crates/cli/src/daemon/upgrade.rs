@@ -7,6 +7,15 @@
 
 use anyhow::Result;
 
+pub(super) const PENDING_KITS: &str = "cli/migrated-kits";
+
+/// Staged before cutover; retained through failed opens, starts and replies.
+pub(super) fn pending(
+    loaded: &super::session::Loaded,
+) -> Result<Vec<crate::protocol::MigratedVault>> {
+    Ok(super::session::get_json(loaded.store(), PENDING_KITS)?.unwrap_or_default())
+}
+
 /// Whether `data` holds a v1 `store.redb` the next unlock moves to v2.
 pub(crate) fn v1_store(data: &std::path::Path) -> bool {
     #[cfg(feature = "v1-migrate")]
@@ -33,25 +42,19 @@ pub(super) fn refuse_v1_setup(data: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// A vault an unlock moved from v1: its new id, live items, and kit.
-pub(super) type Moved = (deadbolt_core::VaultId, usize, zeroize::Zeroizing<String>);
-
 /// Moves a v1 store in `dir` to v2 under `passphrase` if there is one.
 /// Blocking (Argon2).
 pub(super) fn migrate_first(
     dir: &std::path::Path,
     passphrase: &[u8],
     params: crate::disk::KdfParams,
-) -> Result<Vec<Moved>> {
+) -> Result<()> {
     #[cfg(feature = "v1-migrate")]
     if v1_store(dir) {
         let moved = super::migrate_v1::migrate(dir, passphrase, params)?;
         tracing::info!(vaults = moved.len(), "moved the v1 store to v2");
-        return Ok(moved
-            .into_iter()
-            .map(|m| (m.vault, m.items, m.recovery_kit))
-            .collect());
+        return Ok(());
     }
     let _ = (dir, passphrase, params);
-    Ok(Vec::new())
+    Ok(())
 }

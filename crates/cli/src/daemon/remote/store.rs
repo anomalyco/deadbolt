@@ -66,7 +66,10 @@ impl Remote {
                     (None, Some(token)) => {
                         DavAuth::Bearer(zeroize::Zeroizing::new(token.expose().to_owned()))
                     }
-                    (_, None) => DavAuth::None,
+                    (Some(_), None) => bail!(
+                        "WebDAV username requires a password (set DEADBOLT_WEBDAV_PASSWORD or use --credentials-stdin)"
+                    ),
+                    (None, None) => DavAuth::None,
                 };
                 let config = WebDavConfig::new(url, auth)?;
                 if config.is_plaintext() {
@@ -124,6 +127,21 @@ pub(in crate::daemon) mod tests {
     use deadbolt_remote::FaultyObjStore;
 
     static STORES: Mutex<BTreeMap<String, FaultyObjStore>> = Mutex::new(BTreeMap::new());
+
+    #[test]
+    fn a_webdav_username_requires_a_password() {
+        let input = deadbolt_proto::daemon::RemoteInput::Webdav {
+            url: "https://example.com/vault/".into(),
+            username: Some("alice".into()),
+            password: None,
+        };
+        let error = super::Remote::open(&input).err().expect("missing password");
+        assert!(
+            error
+                .to_string()
+                .contains("WebDAV username requires a password")
+        );
+    }
 
     /// A WebDAV URL `http://mem.test/<name>/` that opens a shared
     /// in-memory store.
