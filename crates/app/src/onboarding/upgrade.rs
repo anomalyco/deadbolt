@@ -26,16 +26,14 @@ pub(crate) async fn unlock(paths: &Paths, launch: &Launch, command: Command) -> 
     .map_err(Failure::from);
     match result {
         Err(failure) => Done::Unlocked(Err(failure)),
+        Ok((Reply::Unlocked { migrated }, status)) if !migrated.is_empty() => Done::Upgraded {
+            status: status.map(Box::new),
+            migrated,
+        },
         Ok((_, None)) => Done::Unlocked(Err(Failure {
             code: None,
             message: "The daemon stopped.".into(),
         })),
-        Ok((Reply::Unlocked { migrated }, Some(status))) if !migrated.is_empty() => {
-            Done::Upgraded {
-                status: Box::new(status),
-                migrated,
-            }
-        }
         Ok((_, Some(status))) => Done::Unlocked(Ok(status)),
     }
 }
@@ -64,7 +62,7 @@ impl App {
     /// opens. A lock or close drops them all, like a created vault's.
     pub(crate) fn on_upgraded(
         &mut self,
-        status: Status,
+        status: Option<Status>,
         migrated: Vec<MigratedVault>,
         tx: &mut Tx,
     ) {
@@ -78,12 +76,17 @@ impl App {
         });
         let Some(mut first) = kits.next() else {
             self.unlocking = false;
-            return self.on_status(status, tx);
+            if let Some(status) = status {
+                self.on_status(status, tx);
+            }
+            return;
         };
         first.then = kits.collect();
         self.unlocking = false;
         self.forget_onboarding();
-        self.status = Some(status);
+        if let Some(status) = status {
+            self.status = Some(status);
+        }
         self.show(Screen::Onboarding);
         let o = &mut self.onboarding;
         o.device_ready = true;

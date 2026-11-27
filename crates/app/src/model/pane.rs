@@ -44,6 +44,7 @@ impl App {
         if self.pane == pane {
             return;
         }
+        self.health.pending_fix = None;
         match std::mem::replace(&mut self.pane, pane) {
             VaultPane::Item => {}
             // Its file, preview and notice go with it, so nothing of it stays

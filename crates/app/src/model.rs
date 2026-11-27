@@ -225,7 +225,9 @@ impl App {
             Done::Status(None) => self.fail("The daemon stopped.".into(), tx),
             Done::Unlocked(result) => self.on_unlocked(result, tx),
             // DELETABLE(v1-migrate)
-            Done::Upgraded { status, migrated } => self.on_upgraded(*status, migrated, tx),
+            Done::Upgraded { status, migrated } => {
+                self.on_upgraded(status.map(|s| *s), migrated, tx);
+            }
             Done::UnlockedBiometric(result) => self.on_unlocked_biometric(result, tx),
             Done::TouchIdSet { enabled, result } => self.on_touch_id_set(enabled, result, tx),
             Done::Locked(result) => match result {
@@ -272,8 +274,9 @@ impl App {
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
             Done::SshGenerated { seq, result } => self.on_ssh_generated(seq, result),
             Done::FileSaved(result) => match result {
-                Ok(name) => self.notice = Some(format!("Saved {name}")),
                 Err(failure) if failure.locked() => self.on_locked(tx),
+                _ if !self.accepts_vault_replies() => {}
+                Ok(name) => self.notice = Some(format!("Saved {name}")),
                 Err(failure) => self.notice = Some(crate::onboarding::sentence(&failure.message)),
             },
             Done::Activity { seq, result } => self.on_activity(seq, result, tx),

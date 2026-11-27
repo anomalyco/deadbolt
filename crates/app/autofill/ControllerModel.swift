@@ -9,7 +9,7 @@ public protocol ExtensionContextCompleting: AnyObject {
     func completePassword(
         user: String,
         password: String,
-        afterDelivery: (@Sendable () async -> Void)?
+        beforeCompletion: (@Sendable () async -> Void)?
     )
     func completeExtensionConfiguration()
     func cancelRequest(code: ASExtensionError.Code)
@@ -110,7 +110,6 @@ public final class AutoFillControllerModel {
         fallbackUsername: String,
         service: AutofillService,
         client: any AutofillDaemonClient,
-        identitySyncer: IdentitySyncer?,
         completer: any ExtensionContextCompleting
     ) async {
         guard let rawRecord = recordIdentifier,
@@ -142,13 +141,10 @@ public final class AutoFillControllerModel {
                 return
             }
             let user = fill.values.username ?? fallbackUsername
-            let reportedHash = fill.identitiesHash
-            let syncer = identitySyncer
-            completer.completePassword(user: user, password: password) {
-                if let syncer {
-                    _ = await syncer.syncIfNeeded(client: client, reportedHash: reportedHash)
-                }
-            }
+            // Silent fills have a short system deadline. Re-index on the next
+            // interactive/configuration request, before completing that request:
+            // macOS may terminate the extension as soon as it delivers a password.
+            completer.completePassword(user: user, password: password, beforeCompletion: nil)
         } catch let callError as DaemonCallError {
             completer.cancelRequest(code: callError.extensionErrorCodeForSilentRequest)
         } catch {

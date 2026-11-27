@@ -4,7 +4,7 @@
 //! `url`-aware generation and `Copy current password` (`⇧⌘C`), and forgetting
 //! on lock.
 
-use deadbolt_app::daemon::{Done, Job};
+use deadbolt_app::daemon::{Done, Failure, Job, Values};
 use deadbolt_app::health::Tab;
 use deadbolt_app::model::App;
 use deadbolt_proto::daemon::{FindingKind, HealthReport};
@@ -172,4 +172,82 @@ fn security_view_navigates_tabs_opens_change_urls_ignores_and_runs_fix_flow() {
     );
     assert_eq!(clip().as_deref(), Some("correct-horse-battery-staple"));
     assert_eq!(r.value("password"), "NewStrongCandidate#2026!");
+}
+
+#[test]
+fn late_fix_read_preserves_a_new_item() {
+    let mut r = rig("vault-risk");
+    let item = r.rt.state.detail.clone().unwrap();
+    r.rt.update(|s, tx| {
+        s.select(None);
+        s.fix_finding(&item.id, Some(FindingKind::Breached), tx);
+    });
+    let seq = r.take_get(Some(&item.id));
+    assert!(r.rt.state.health.pending_fix.is_some());
+    r.new_item();
+    r.fill("username", "new-account");
+    let generating = r.take_generate();
+    assert!(r.rt.state.health.pending_fix.is_none());
+    r.reply(Done::Item {
+        seq,
+        result: Ok(Values::new(item)),
+    });
+    assert!(r.rt.state.edit.form.as_ref().unwrap().is_new());
+    assert_eq!(r.value("username"), "new-account");
+    assert_eq!(r.rt.state.generating(), Some(generating));
+    assert!(!r.sent().iter().any(|j| matches!(j, Job::Generate { .. })));
+}
+
+#[test]
+fn navigating_or_a_failed_read_cancels_a_pending_fix() {
+    for cancel in ["selection", "pane", "failure"] {
+        let mut r = rig("vault-risk");
+        let board = rune::clipboard::memory();
+        r.rt.use_clipboard(&board);
+        let item = r.rt.state.detail.clone().unwrap();
+        r.rt.update(|s, tx| {
+            s.select(None);
+            s.fix_finding(&item.id, Some(FindingKind::Breached), tx);
+        });
+        let seq = r.take_get(Some(&item.id));
+        assert!(r.rt.state.health.pending_fix.is_some());
+        let seq = match cancel {
+            "selection" => {
+                r.rt.update(|s, _| {
+                    s.select(None);
+                    s.select(Some(item.id.clone()));
+                });
+                r.take_get(Some(&item.id))
+            }
+            "pane" => {
+                r.rt.update(|s, _| s.open_security());
+                seq
+            }
+            _ => {
+                r.reply(Done::Item {
+                    seq,
+                    result: Err(Failure {
+                        code: None,
+                        message: "Read failed".into(),
+                    }),
+                });
+                seq
+            }
+        };
+        assert!(r.rt.state.health.pending_fix.is_none(), "{cancel}");
+        r.reply(Done::Item {
+            seq,
+            result: Ok(Values::new(item.clone())),
+        });
+        assert!(!r.rt.state.editing(), "{cancel} must not open a Fix form");
+        // Returning to the item and refreshing it must not revive the old intent.
+        r.rt.update(|s, _| s.close_security());
+        r.reply(Done::Item {
+            seq,
+            result: Ok(Values::new(item)),
+        });
+        assert!(!r.rt.state.editing());
+        assert!(!r.sent().iter().any(|j| matches!(j, Job::Generate { .. })));
+        assert!(board.text().is_none());
+    }
 }

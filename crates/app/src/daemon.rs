@@ -185,7 +185,7 @@ pub enum Done {
     /// DELETABLE(v1-migrate): an unlock that moved a v1 store to v2, with
     /// each moved vault's new recovery kit.
     Upgraded {
-        status: Box<Status>,
+        status: Option<Box<Status>>,
         migrated: Vec<deadbolt_proto::daemon::MigratedVault>,
     },
     /// The outcome of a Touch ID unlock attempt, plus the fresh status when it

@@ -1,9 +1,9 @@
 //! Secret form fields, concealed clipboard copies, kept multi-line keys,
 //! wrapping public keys and one-time passwords.
 
-use deadbolt_app::daemon::{Done, Job};
+use deadbolt_app::daemon::{Done, Failure, Job};
 use deadbolt_app::model::Screen;
-use deadbolt_proto::daemon::AppAction;
+use deadbolt_proto::daemon::{AppAction, ErrorCode};
 use rune::{Key, KeyEvent, Mods};
 use zeroize::Zeroizing;
 
@@ -11,6 +11,25 @@ use super::{FRAME, Rig, alt, cmd, ctrl, pairs, rig, shift};
 
 const NEW_KEY: &str =
     "-----BEGIN OPENSSH PRIVATE KEY-----\nnew\n-----END OPENSSH PRIVATE KEY-----\n";
+
+#[test]
+fn late_file_save_completion_after_lock_does_not_show_a_notice() {
+    let mut r = rig("vault");
+    r.reply(Done::FileSaved(Ok("document.pdf".into())));
+    assert_eq!(r.rt.state.notice.as_deref(), Some("Saved document.pdf"));
+    r.reply(Done::FileSaved(Err(Failure {
+        code: Some(ErrorCode::Locked),
+        message: "Locked".into(),
+    })));
+    assert_eq!(r.rt.state.screen, Screen::Locked);
+    r.reply(Done::FileSaved(Ok("document.pdf".into())));
+    assert!(r.rt.state.notice.is_none());
+    r.reply(Done::FileSaved(Err(Failure {
+        code: None,
+        message: "Couldn't write document.pdf".into(),
+    })));
+    assert!(r.rt.state.notice.is_none());
+}
 
 /// Verifies `⌘X` neither cuts nor copies on a focused secret `field`, and `⌘C`
 /// copies `expected` concealed and clears after the 1 s countdown.

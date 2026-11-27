@@ -37,16 +37,18 @@ private final class RecordingCompleter: ExtensionContextCompleting {
     var deliveredPasswords: [DeliveredPassword] = []
     var configurationCompletedCount = 0
     var cancelledCodes: [ASExtensionError.Code] = []
+    var beforeCompletionCount = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func completePassword(
         user: String,
         password: String,
-        afterDelivery: (@Sendable () async -> Void)?
+        beforeCompletion: (@Sendable () async -> Void)?
     ) {
         Task { @MainActor in
-            if let afterDelivery {
-                await afterDelivery()
+            if let beforeCompletion {
+                self.beforeCompletionCount += 1
+                await beforeCompletion()
             }
             self.deliveredPasswords.append(DeliveredPassword(user: user, password: password))
             self.wakeAll()
@@ -119,10 +121,12 @@ private struct NoopLauncher: DaemonLaunching {
 
 private actor CountingMockClient: AutofillDaemonClient {
     var snapshot: AutofillIdentitiesReply
+    var fill: AutofillFillReply?
     private(set) var calls: [AutofillCommand] = []
 
-    init(snapshot: AutofillIdentitiesReply) {
+    init(snapshot: AutofillIdentitiesReply, fill: AutofillFillReply? = nil) {
         self.snapshot = snapshot
+        self.fill = fill
     }
 
     func setSnapshot(_ next: AutofillIdentitiesReply) {
@@ -138,6 +142,10 @@ private actor CountingMockClient: AutofillDaemonClient {
         switch command {
         case .autofillIdentities:
             return .autofillIdentities(snapshot)
+        case .autofillStatus:
+            return .autofillStatus(AutofillStatusReply(initialized: true, unlocked: true, touchIdReady: false))
+        case .autofillFill where fill != nil:
+            return .autofillFill(fill!)
         default:
             throw DaemonCallError.daemonError(code: .forbidden, message: "unexpected mock call")
         }
@@ -248,6 +256,47 @@ private func testUnitAndWire() async throws {
 }
 
 // MARK: - Socket Cancellation Test
+
+@MainActor
+private func testSilentFillDefersIndexing() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let hashStore = FileIdentityHashStore(fileURL: dir.appendingPathComponent("identities.hash"))
+    hashStore.writeHash("old-hash")
+    let store = MockIdentityStore()
+    let syncer = IdentitySyncer(store: store, hashStore: hashStore)
+    let client = CountingMockClient(
+        snapshot: AutofillIdentitiesReply(identitiesHash: "edited-hash", passwords: []),
+        fill: AutofillFillReply(
+            values: SiteValues(username: "alex", password: "test-password"),
+            identitiesHash: "edited-hash"
+        )
+    )
+    let completer = RecordingCompleter()
+    await AutoFillControllerModel.performSilentPasswordFill(
+        recordIdentifier: String(repeating: "a", count: 64) + ":" + String(repeating: "b", count: 32),
+        fallbackUsername: "fallback",
+        service: AutofillService(identifier: "example.com", kind: .domain),
+        client: client,
+        completer: completer
+    )
+    try await completer.waitForCompletion()
+    try check(completer.deliveredPasswords == [.init(user: "alex", password: "test-password")])
+    try check(completer.beforeCompletionCount == 0, "silent delivery must not await indexing")
+    try check(await client.callCount() == 1, "silent fill must not fetch identities")
+    try check(hashStore.readHash() == "old-hash", "deferred indexing must remain pending")
+    try check(await store.batches().isEmpty)
+
+    // The next configuration request completes indexing before macOS can end it.
+    let configuration = RecordingCompleter()
+    let model = AutoFillControllerModel(client: client, launcher: NoopLauncher(), identitySyncer: syncer, completer: configuration)
+    model.beginExtensionConfiguration()
+    try await configuration.waitForCompletion()
+    try check(configuration.configurationCompletedCount == 1)
+    try check(hashStore.readHash() == "edited-hash")
+    try check(await store.batches().count == 1)
+}
 
 private func testSocketCancellation() throws {
     let dir = URL(fileURLWithPath: "/tmp")
@@ -552,7 +601,6 @@ private func testLiveDaemon(
         fallbackUsername: ghIdentity.username,
         service: AutofillService(identifier: "https://github.com/login", kind: .url),
         client: verifiedClient,
-        identitySyncer: syncer,
         completer: silentCompleter
     )
     try await silentCompleter.waitForCompletion()
@@ -569,7 +617,6 @@ private func testLiveDaemon(
         fallbackUsername: ghIdentity.username,
         service: AutofillService(identifier: "evil.example", kind: .domain),
         client: verifiedClient,
-        identitySyncer: syncer,
         completer: mismatchCompleter
     )
     try await mismatchCompleter.waitForCompletion()
@@ -583,7 +630,6 @@ private func testLiveDaemon(
         fallbackUsername: ghIdentity.username,
         service: AutofillService(identifier: "com.acme.desktop", kind: .app),
         client: verifiedClient,
-        identitySyncer: syncer,
         completer: appSilentCompleter
     )
     try await appSilentCompleter.waitForCompletion()
@@ -649,7 +695,6 @@ private func testLiveLockedDaemon(
         fallbackUsername: "alex@example.com",
         service: AutofillService(identifier: "github.com", kind: .domain),
         client: verifiedClient,
-        identitySyncer: nil,
         completer: silentCompleter
     )
     try await silentCompleter.waitForCompletion()
@@ -733,6 +778,7 @@ struct AutoFillTestRunner {
             }
 
             try await testUnitAndWire()
+            try await testSilentFillDefersIndexing()
             try testSocketCancellation()
             try await renderSnapshots(outputDir: snapDir)
 

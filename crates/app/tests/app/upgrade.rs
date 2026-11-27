@@ -76,7 +76,7 @@ fn upgraded(rt: &Runtime<App>) -> Done {
     status.unlocked = true;
     status.vaults = vec![personal.clone(), team.clone()];
     Done::Upgraded {
-        status: Box::new(status),
+        status: Some(Box::new(status)),
         migrated: vec![
             MigratedVault {
                 vault: personal,
@@ -129,6 +129,39 @@ fn an_upgrade_shows_each_moved_vaults_kit_then_opens_the_vault() {
     assert_eq!(rt.state.onboarding.step, Step::Welcome);
     assert!(!shows(&rt, "Save your recovery kit"));
     assert!(!shows(&rt, "zoo"));
+}
+
+#[test]
+fn an_upgrade_without_status_keeps_every_recovery_kit_until_confirmed() {
+    let mut rt = locked();
+    let Done::Upgraded { migrated, .. } = upgraded(&rt) else {
+        unreachable!();
+    };
+    rt.update(|s, tx| {
+        s.apply(
+            Done::Upgraded {
+                status: None,
+                migrated,
+            },
+            tx,
+        )
+    });
+    settle(&mut rt);
+
+    assert_eq!(rt.state.screen, Screen::Onboarding);
+    assert!(!rt.state.status.as_ref().unwrap().unlocked);
+    for (vault, words) in [("personal", PERSONAL), ("team", TEAM)] {
+        assert_eq!(showing(&rt), (vault.into(), words.into()));
+        assert!(shows(&rt, "Save your recovery kit"));
+        assert_eq!(words.split_whitespace().count(), 24);
+        for word in words.split_whitespace() {
+            assert!(shows(&rt, word), "missing recovery word {word}");
+        }
+        click(&mut rt, "save-recovery");
+    }
+    assert_eq!(rt.state.screen, Screen::Vault);
+    assert_eq!(rt.state.onboarding.step, Step::Welcome);
+    assert!(!shows(&rt, "Save your recovery kit"));
 }
 
 #[test]
