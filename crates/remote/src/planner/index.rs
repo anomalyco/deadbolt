@@ -61,6 +61,35 @@ pub struct RemoteIndex {
 }
 
 impl RemoteIndex {
+    /// Removes a listed object disproved by GET, preserving the other
+    /// spelling of a twin when only one of its objects is missing.
+    pub fn remove(&mut self, path: &RemotePath) {
+        match path {
+            RemotePath::Frame {
+                kind, author, seq, ..
+            } => {
+                let stream = (kind.log_kind(), *author);
+                if let Some(seqs) = self.streams.get_mut(&stream) {
+                    if let Some(spellings) = seqs.get_mut(seq) {
+                        if *kind == FrameKind::Checkpoint {
+                            spellings.checkpoint = false;
+                        } else {
+                            spellings.bare = false;
+                        }
+                        if !spellings.bare && !spellings.checkpoint {
+                            seqs.remove(seq);
+                        }
+                    }
+                    if seqs.is_empty() {
+                        self.streams.remove(&stream);
+                    }
+                }
+            }
+            RemotePath::Fraud { .. } => self.frauds.retain(|p| p != path),
+            _ => {}
+        }
+    }
+
     /// Sorts listed names by stream.
     pub fn from_names<'a>(vault: &VaultId, names: impl IntoIterator<Item = &'a String>) -> Self {
         let mut index = Self::default();

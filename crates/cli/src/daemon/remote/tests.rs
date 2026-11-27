@@ -49,6 +49,29 @@ fn webdav(name: &str) -> RemoteInput {
     }
 }
 
+#[test]
+fn changing_s3_addressing_changes_the_anchor_target() {
+    let vault = VaultId::from_bytes([1; 32]);
+    let mut saved = super::Saved {
+        remote: RemoteInput::S3 {
+            endpoint: "https://example.com".into(),
+            bucket: "vault".into(),
+            region: "us-east-1".into(),
+            prefix: String::new(),
+            path_style: false,
+            access_key_id: Secret::new("id"),
+            secret_access_key: Secret::new("secret"),
+            session_token: None,
+        },
+        last_sync: None,
+    };
+    let before = super::target(&vault, &saved);
+    if let RemoteInput::S3 { path_style, .. } = &mut saved.remote {
+        *path_style = true;
+    }
+    assert_ne!(before, super::target(&vault, &saved));
+}
+
 fn login(daemon: &Daemon, vault: VaultId, i: usize) {
     daemon
         .with(|s| {
@@ -473,6 +496,76 @@ async fn a_refused_frame_is_fetched_again_once_its_signer_is_admitted() {
         .unwrap();
     assert!(took, "fetched again once P is admitted");
     assert_eq!(tip, Some(written.len() as u64 - 1));
+
+    // A now cites P in its signed clock. The store keeps P in LIST while
+    // returning 404 on GET: that name must not mask the cited frame.
+    login(&a, vault, 999);
+    a.remote_command(sync()).await.unwrap();
+    let faulty = super::store::tests::faulty("refused-frame");
+    faulty.freeze_list();
+    let prefix = format!("{vault}/d/{}/", p.id());
+    faulty.wipe(|name| name.starts_with(&prefix));
+    let Reply::RemoteSynced { report } = a.remote_command(sync()).await.unwrap() else {
+        panic!("not a sync report");
+    };
+    assert!(
+        report
+            .anomalies
+            .iter()
+            .any(|a| a.contains("lost or swapped")),
+        "{:?}",
+        report.anomalies
+    );
+    assert!(
+        report
+            .anomalies
+            .iter()
+            .any(|a| a.contains(&format!("withholds {}'s data frame", p.id()))),
+        "{:?}",
+        report.anomalies
+    );
+}
+
+#[tokio::test]
+async fn listed_own_frames_returning_404_cannot_clear_self_rollback() {
+    use deadbolt_core::v2::LogKind;
+    use deadbolt_remote::{Outbox, SyncAnchor, plan_push, push};
+
+    let dir = tempfile::tempdir().unwrap();
+    let a = device(dir.path(), 80).await;
+    let vault = a
+        .with(|s| s.create_vault_with_kit("personal").map(|(id, _)| id))
+        .unwrap();
+    login(&a, vault, 0);
+    let (me, frames) = a
+        .with(|s| Ok((s.id, s.vaults[&vault].frames().cloned().collect())))
+        .unwrap();
+    let store = super::Remote::open(&webdav("missing-own-frame")).unwrap();
+    let plan = plan_push(
+        &vault,
+        Outbox {
+            frames,
+            ..Outbox::default()
+        },
+    )
+    .unwrap();
+    push(&store, &plan).await.unwrap();
+    let mut anchor = SyncAnchor::default();
+    let honest = a.sync_with(&store, vault, me, &mut anchor).await.unwrap();
+    assert!(!honest.anomalies.iter().any(|a| a.contains("not pushing")));
+    let faulty = super::store::tests::faulty("missing-own-frame");
+    faulty.freeze_list();
+    let prefix = format!("{vault}/d/{me}/");
+    faulty.wipe(|n| n.starts_with(&prefix));
+    let mut anchor = SyncAnchor::default();
+    let report = a.sync_with(&store, vault, me, &mut anchor).await.unwrap();
+    assert!(
+        report.anomalies.iter().any(|a| a.contains("not pushing")),
+        "{:?}",
+        report.anomalies
+    );
+    assert_eq!(report.pushed, 0);
+    assert!(anchor.tip(LogKind::Data, &me).is_none());
 }
 
 /// A compromised member uploads a checkpoint (`d/M/1.c`) and a poisoned pack
@@ -686,6 +779,15 @@ async fn recovery_settles_a_mutual_removal_no_one_is_left_to_choose() {
 /// history.
 #[tokio::test]
 async fn a_puppet_and_empty_heads_cannot_vouch_for_a_poisoned_checkpoint() {
+    poisoned_checkpoint(false).await;
+}
+
+#[tokio::test]
+async fn a_listed_but_missing_frame_cannot_vouch_for_a_checkpoint() {
+    poisoned_checkpoint(true).await;
+}
+
+async fn poisoned_checkpoint(phantom: bool) {
     use deadbolt_core::ops::{Change, DataOp};
     use deadbolt_core::v2::{DeviceKeys, Frame, LogKind, PackCommitment};
     use deadbolt_core::{Author, Vault, recovery};
@@ -695,7 +797,12 @@ async fn a_puppet_and_empty_heads_cannot_vouch_for_a_poisoned_checkpoint() {
     let a = device(dir.path(), 79).await;
     let (vault, words) = a.with(|s| s.create_vault_with_kit("personal")).unwrap();
     login(&a, vault, 0);
-    let remote = webdav("puppet-checkpoint");
+    let store_name = if phantom {
+        "phantom-checkpoint"
+    } else {
+        "puppet-checkpoint"
+    };
+    let remote = webdav(store_name);
     let set = Command::RemoteSet {
         vault: None,
         remote: remote.clone(),
@@ -815,8 +922,27 @@ async fn a_puppet_and_empty_heads_cannot_vouch_for_a_poisoned_checkpoint() {
     .unwrap();
     push(&store, &plan).await.unwrap();
 
-    let Reply::RemoteSynced { report } = a.remote_command(sync()).await.unwrap() else {
-        panic!("not a sync report");
+    let report = if phantom {
+        let faulty = super::store::tests::faulty(store_name);
+        faulty.freeze_list();
+        let h = written[1].header();
+        let name = deadbolt_remote::RemotePath::frame(vault, h.kind, h.author, h.seq).to_name();
+        faulty.wipe(|n| n == name);
+        let me = a.with(|s| Ok(s.id)).unwrap();
+        let mut anchor = deadbolt_remote::SyncAnchor::default();
+        let report = a.sync_with(&store, vault, me, &mut anchor).await.unwrap();
+        assert!(!anchor.compacted.contains_key(&m2.id()));
+        assert!(
+            report.anomalies.iter().any(|a| a.contains("withholds")),
+            "{:?}",
+            report.anomalies
+        );
+        report
+    } else {
+        let Reply::RemoteSynced { report } = a.remote_command(sync()).await.unwrap() else {
+            panic!("not a sync report");
+        };
+        report
     };
     assert!(
         report

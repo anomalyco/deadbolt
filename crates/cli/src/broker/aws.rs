@@ -120,11 +120,14 @@ pub fn decode_aws_chunked(body: &[u8]) -> Result<Unchunked, &'static str> {
             }
             return Ok((payload, trailers));
         }
-        if rest.len() < size + 2 || &rest[size..size + 2] != b"\r\n" {
+        let Some(end) = size.checked_add(2) else {
+            return Err("an aws-chunked chunk is cut short");
+        };
+        if rest.len() < end || &rest[size..end] != b"\r\n" {
             return Err("an aws-chunked chunk is cut short");
         }
         payload.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
+        rest = &rest[end..];
     }
 }
 
@@ -360,6 +363,11 @@ mod tests {
             assert!(decode_aws_chunked(bad).is_err(), "{bad:?}");
         }
         assert!(decode_aws_chunked(b"5\r\nhello\r\n0\r\n\r\n").is_ok());
+    }
+
+    #[test]
+    fn an_oversized_chunk_is_refused_without_overflow() {
+        assert!(decode_aws_chunked(b"ffffffffffffffff\r\nX").is_err());
     }
 
     #[test]

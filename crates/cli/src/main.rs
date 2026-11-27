@@ -568,6 +568,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             cli.command,
             Commands::Init { .. }
                 | Commands::Join { .. }
+                | Commands::Recover(_)
                 | Commands::Unlock { .. }
                 | Commands::Lock
                 | Commands::Debug(_)
@@ -883,7 +884,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             let migrated = unlock(&paths, timeout_secs, from_stdin).await?;
             // DELETABLE(v1-migrate)
-            migrate::print(&migrated, false);
+            migrate::print(&migrated, false)?;
             println!("unlocked");
         }
         Commands::Status { json } => remote::status(&paths, vault, json, from_stdin).await?,
@@ -1025,7 +1026,7 @@ async fn request_with(
         Err(error) if client::code(&error) == Some(ErrorCode::Locked) && prompt::interactive() => {
             let migrated = unlock(paths, None, from_stdin).await?;
             // DELETABLE(v1-migrate): on stderr, beside this command's output.
-            migrate::print(&migrated, true);
+            migrate::print(&migrated, true)?;
             client::call(paths, command, on_event).await
         }
         result => result,

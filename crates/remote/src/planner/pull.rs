@@ -28,6 +28,7 @@ pub struct PullPlan {
     /// The anchored tip of every listed stream, to GET and pass through
     /// [`check_fetched`](super::check_fetched) when the caller wants proof
     /// the store did not swap it.
+    /// Also includes known fraud proofs, which must remain retrievable.
     pub verify: Vec<RemotePath>,
     /// Positions listed as both `<seq>` and `<seq>.c`: both names are in
     /// `fetch` or `verify`; judge each pair with
@@ -51,11 +52,43 @@ pub struct Judged {
     /// Fetched fraud proofs, and each twin's whose frames both verify.
     pub proofs: Vec<FraudProof>,
     pub anomalies: Vec<RemoteAnomaly>,
+    /// Listed data objects missing on GET; an adopted checkpoint may cover them.
+    pub deferred: Vec<RemoteAnomaly>,
+}
+
+impl Judged {
+    /// Call after checkpoint adoption: listed data objects still missing
+    /// above the accepted compacted frontier are anomalies.
+    pub fn confirm_deferred(&self, anchor: &SyncAnchor) -> Vec<RemoteAnomaly> {
+        confirmed(&self.deferred, anchor)
+    }
+}
+
+fn confirmed(deferred: &[RemoteAnomaly], anchor: &SyncAnchor) -> Vec<RemoteAnomaly> {
+    deferred
+        .iter()
+        .filter(|anomaly| match anomaly {
+            RemoteAnomaly::RemoteRegressed {
+                log,
+                author,
+                expected_seq,
+                ..
+            } => !anchor.may_be_gone(*log, author, *expected_seq),
+            RemoteAnomaly::Withheld {
+                author,
+                required_seq,
+                ..
+            } => !anchor.may_be_gone(LogKind::Data, author, *required_seq),
+            _ => true,
+        })
+        .cloned()
+        .collect()
 }
 
 impl PullPlan {
     /// Judges what was fetched for this plan by `me` (`fetched`, by name;
-    /// what the store no longer had is skipped). Each twin folds to a fraud
+    /// missing objects are anomalies, deferred for data until checkpoint
+    /// adoption). Each twin folds to a fraud
     /// proof, or to the one of its objects that verifies under its name
     /// ([`resolve_twin`]); a twin the store kept only one half of is that
     /// half. Then every object of a position: a fraud proof passes
@@ -71,6 +104,51 @@ impl PullPlan {
         fetched: &BTreeMap<RemotePath, Vec<u8>>,
     ) -> Judged {
         let mut out = Judged::default();
+        for path in self
+            .fetch
+            .iter()
+            .chain(&self.verify)
+            .filter(|p| !fetched.contains_key(p))
+        {
+            let anomaly = match *path {
+                RemotePath::Frame {
+                    kind, author, seq, ..
+                } => {
+                    let log = kind.log_kind();
+                    let missing = match anchor.tip(log, &author) {
+                        Some((expected_seq, expected_id)) if expected_seq == seq => {
+                            RemoteAnomaly::RemoteRegressed {
+                                log,
+                                author,
+                                expected_seq,
+                                expected_id,
+                                observed: Observed::Missing { max_seq: None },
+                            }
+                        }
+                        _ if log == LogKind::Data => RemoteAnomaly::Withheld {
+                            author,
+                            required_seq: seq,
+                            remote_max_seq: None,
+                        },
+                        _ => RemoteAnomaly::Mismatched {
+                            name: path.to_name(),
+                            reason: "a listed member frame is missing on GET",
+                        },
+                    };
+                    if log == LogKind::Data {
+                        out.deferred.push(missing);
+                        continue;
+                    }
+                    missing
+                }
+                RemotePath::Fraud { hash, .. } => RemoteAnomaly::FraudWiped { hash },
+                _ => RemoteAnomaly::Mismatched {
+                    name: path.to_name(),
+                    reason: "a listed object is missing on GET",
+                },
+            };
+            out.anomalies.push(anomaly);
+        }
         let twinned: BTreeSet<RemotePath> = self.twins.iter().flat_map(|(a, b)| [*a, *b]).collect();
         let mut objects: Vec<(RemotePath, &[u8])> = Vec::new();
         for (bare, checkpoint) in &self.twins {
@@ -119,19 +197,7 @@ impl PullPlan {
 
     /// The deferred regressions no adopted checkpoint explains.
     pub fn confirm_deferred(&self, anchor: &SyncAnchor) -> Vec<RemoteAnomaly> {
-        self.deferred
-            .iter()
-            .filter(|anomaly| match anomaly {
-                RemoteAnomaly::RemoteRegressed {
-                    log,
-                    author,
-                    expected_seq,
-                    ..
-                } => !anchor.may_be_gone(*log, author, *expected_seq),
-                _ => true,
-            })
-            .cloned()
-            .collect()
+        confirmed(&self.deferred, anchor)
     }
 }
 
@@ -306,6 +372,10 @@ pub async fn plan_pull<S: ObjStore>(
     // already m/ then d/; new proofs go last.
     fetch.extend(index.frauds.iter().copied().filter(|p| match p {
         RemotePath::Fraud { hash, .. } => !anchor.frauds.contains(hash),
+        _ => false,
+    }));
+    verify.extend(index.frauds.iter().copied().filter(|p| match p {
+        RemotePath::Fraud { hash, .. } => anchor.frauds.contains(hash),
         _ => false,
     }));
     Ok(PullPlan {

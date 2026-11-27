@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use super::{AbortOnDrop, Daemon, ErrorCode, IO_TIMEOUT, fail, macos_autofill};
 use crate::client::{DaemonError, protocol};
-use crate::protocol::{Answer, Command, Event, Message, Request};
+use crate::protocol::{Answer, Command, Event, Message, Reply, Request};
 
 /// Limit each line before buffering it, preserving buffered answers for the next read.
 pub(super) async fn request_line(
@@ -194,7 +194,17 @@ impl Daemon {
                 command: Command::Watch { app },
                 ..
             }) if socket == macos_autofill::SocketKind::Control => {
-                match self.screen(peer.as_ref().ok(), &Command::Watch { app }) {
+                let kernel = peer.as_ref().ok().copied();
+                let daemon = self.clone();
+                let caller = tokio::task::spawn_blocking(move || daemon.callers.identify(peer))
+                    .await
+                    .unwrap_or_else(|_| super::caller::nobody());
+                let screened =
+                    match macos_autofill::check_access(socket, &caller, &Command::Watch { app }) {
+                        Err(error) => Some(Err(error)),
+                        Ok(()) => self.screen(kernel.as_ref(), &Command::Watch { app }),
+                    };
+                match screened {
                     Some(screened) => screened,
                     None => return self.watch(&conversation, app).await,
                 }
@@ -214,6 +224,8 @@ impl Daemon {
                 result
             }
         };
+        let delivered_kits =
+            matches!(&result, Ok(Reply::Unlocked { migrated }) if !migrated.is_empty());
         let message = match result {
             Ok(reply) => Message::Ok { reply },
             Err(error) => match error.downcast::<DaemonError>() {
@@ -233,6 +245,18 @@ impl Daemon {
             Ok(())
         }
         .await;
+        if delivered_kits && sent.is_err() {
+            self.lock().await;
+        }
+        if sent.is_ok() && delivered_kits {
+            self.with(|s| {
+                super::session::set_json(
+                    s.store(),
+                    super::upgrade::PENDING_KITS,
+                    &Vec::<crate::protocol::MigratedVault>::new(),
+                )
+            })?;
+        }
         if stop {
             self.shutdown.notify_one();
         }

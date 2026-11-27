@@ -5,8 +5,9 @@
 
 use std::io::Write;
 
+use anyhow::Result;
 #[cfg(feature = "v1-migrate")]
-use anyhow::{Result, bail};
+use anyhow::bail;
 use zeroize::Zeroizing;
 
 #[cfg(feature = "v1-migrate")]
@@ -39,9 +40,11 @@ pub async fn run(paths: &Paths, json: bool, from_stdin: bool) -> Result<()> {
         _ => bail!("unexpected reply"),
     };
     if json {
-        println!("{}", to_json(&migrated)?.as_str());
+        let mut text = to_json(&migrated)?;
+        text.push('\n');
+        std::io::stdout().write_all(text.as_bytes())?;
     } else {
-        print(&migrated, false);
+        print(&migrated, false)?;
     }
     Ok(())
 }
@@ -57,9 +60,17 @@ pub fn migrated(reply: Reply) -> Vec<MigratedVault> {
 /// Says what moved and shows each vault's kit, on stdout or (inside
 /// another command, whose stdout is its own) stderr. Says nothing when
 /// nothing moved.
-pub fn print(migrated: &[MigratedVault], stderr: bool) {
+pub fn print(migrated: &[MigratedVault], stderr: bool) -> Result<()> {
+    if stderr {
+        write(migrated, &mut std::io::stderr())
+    } else {
+        write(migrated, &mut std::io::stdout())
+    }
+}
+
+fn write(migrated: &[MigratedVault], out: &mut impl Write) -> Result<()> {
     if migrated.is_empty() {
-        return;
+        return Ok(());
     }
     let mut text = Zeroizing::new(String::new());
     let vaults = match migrated.len() {
@@ -92,14 +103,9 @@ pub fn print(migrated: &[MigratedVault], stderr: bool) {
         ));
     }
     text.push('\n');
-    let written = if stderr {
-        std::io::stderr().write_all(text.as_bytes())
-    } else {
-        std::io::stdout().write_all(text.as_bytes())
-    };
-    if let Err(error) = written {
-        tracing::warn!("showing the migrated vaults' kits: {error}");
-    }
+    out.write_all(text.as_bytes())?;
+    out.flush()?;
+    Ok(())
 }
 
 /// `{"migrated": [{vault, name, default, items, recovery_kit}], "backup"}`
@@ -138,4 +144,39 @@ fn to_json(migrated: &[MigratedVault]) -> serde_json::Result<Zeroizing<String>> 
     Ok(Zeroizing::new(String::from_utf8(text).unwrap_or_else(
         |e| String::from_utf8_lossy(e.as_bytes()).into_owned(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_output_pipe_is_an_error() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let moved = MigratedVault {
+            vault: crate::protocol::VaultInfo {
+                id: "id".into(),
+                name: "personal".into(),
+                default: true,
+                members: 1,
+                member: true,
+                error: None,
+            },
+            items: 0,
+            recovery_kit: crate::protocol::Secret::new("test kit"),
+        };
+        let error = write(&[moved], &mut Broken).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
 }

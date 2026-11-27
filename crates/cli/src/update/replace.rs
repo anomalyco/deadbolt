@@ -497,7 +497,7 @@ pub(super) async fn update_app(
 
     // Verified: stop the old app and its daemon, then swap.
     let app_ran = quit_app()?;
-    stop_daemon(paths).await;
+    let stopped = stop_daemon(paths).await;
     let old = stage.path().join("old.app");
     let swapped = std::fs::rename(bundle, &old)
         .with_context(|| format!("moving {} aside", bundle.display()))
@@ -507,8 +507,10 @@ pub(super) async fn update_app(
                 Err(error).with_context(|| format!("installing {}", bundle.display()))
             })
         });
-    // Whichever app is in place now, its daemon comes back.
-    restart_daemon(paths, bundle.join("Contents/Helpers/deadbolt"), quiet).await;
+    // Restart only if the old daemon stopped, as for a CLI update.
+    if stopped {
+        restart_daemon(paths, bundle.join("Contents/Helpers/deadbolt"), quiet).await;
+    }
     let reopen = || {
         if app_ran && let Err(error) = Command::new(OPEN).arg(bundle).status() {
             eprintln!("warning: couldn't reopen {}: {error}", bundle.display());

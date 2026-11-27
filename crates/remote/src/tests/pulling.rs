@@ -48,6 +48,116 @@ async fn fetch(store: &FaultyObjStore, plan: &PullPlan) -> BTreeMap<RemotePath, 
     fetched
 }
 
+#[tokio::test]
+async fn listed_objects_missing_on_get_cannot_hide_regressions() {
+    let (vault, _, members) = genesis(1);
+    let author = device(1);
+    let data = data_chain(&author, vault, 1, 1, &[]);
+    let mut frames = members.clone();
+    frames.extend(data.clone());
+    let (_, store) = seed(frames, true).await;
+    let mut anchor = SyncAnchor::default();
+    anchor.observe(&members[0]).unwrap();
+    anchor.observe(&data[0]).unwrap();
+    for name in store
+        .list(&area_prefix(&vault, Area::Fraud), None)
+        .await
+        .unwrap()
+    {
+        let RemotePath::Fraud { hash, .. } = RemotePath::parse(&name).unwrap() else {
+            panic!("proof path")
+        };
+        anchor.note_fraud(hash);
+    }
+    store.freeze_list();
+    store.wipe(|_| true);
+    let plan = plan_pull(&store, &vault, &anchor, None).await.unwrap();
+    assert!(
+        plan.anomalies.is_empty(),
+        "LIST alone cannot reveal the lie"
+    );
+    assert!(!plan.fetch.is_empty() && !plan.verify.is_empty());
+    for path in plan.fetch.iter().chain(&plan.verify) {
+        assert!(store.get(&path.to_name(), None).await.unwrap().is_none());
+    }
+    let judged = plan.judge(
+        &vault,
+        &anchor,
+        &device(9).device_id(),
+        |_, _| None,
+        &BTreeMap::new(),
+    );
+    assert!(judged.anomalies.iter().any(|a| matches!(
+        a,
+        RemoteAnomaly::RemoteRegressed {
+            log: LogKind::Member,
+            ..
+        }
+    )));
+    assert!(
+        judged
+            .anomalies
+            .iter()
+            .any(|a| matches!(a, RemoteAnomaly::Mismatched { .. }))
+    );
+    assert!(
+        judged
+            .anomalies
+            .iter()
+            .any(|a| matches!(a, RemoteAnomaly::FraudWiped { .. }))
+    );
+    assert!(matches!(
+        &judged.confirm_deferred(&anchor)[..],
+        [RemoteAnomaly::RemoteRegressed {
+            log: LogKind::Data,
+            ..
+        }]
+    ));
+    anchor
+        .adopt_checkpoint(&BTreeMap::from([(author.device_id(), (0, data[0].id()))]))
+        .unwrap();
+    assert!(judged.confirm_deferred(&anchor).is_empty());
+}
+
+#[tokio::test]
+async fn a_new_listed_data_frame_missing_on_get_is_deferred() {
+    let (vault, _, members) = genesis(0);
+    let author = device(1);
+    let data = data_chain(&author, vault, 1, 1, &[]);
+    let mut frames = members;
+    frames.extend(data.clone());
+    let (_, store) = seed(frames, false).await;
+    store.freeze_list();
+    store.wipe(|n| n.contains("/d/"));
+    let mut anchor = SyncAnchor::default();
+    let plan = plan_pull(&store, &vault, &anchor, None).await.unwrap();
+    let mut fetched = BTreeMap::new();
+    for path in &plan.fetch {
+        if let Some(bytes) = store.get(&path.to_name(), None).await.unwrap() {
+            fetched.insert(*path, bytes);
+        }
+    }
+    let judged = plan.judge(
+        &vault,
+        &anchor,
+        &device(9).device_id(),
+        |_, _| None,
+        &fetched,
+    );
+    assert!(judged.anomalies.is_empty());
+    assert!(matches!(
+        &judged.confirm_deferred(&anchor)[..],
+        [RemoteAnomaly::Withheld {
+            required_seq: 0,
+            ..
+        }]
+    ));
+    anchor
+        .adopt_checkpoint(&BTreeMap::from([(author.device_id(), (0, data[0].id()))]))
+        .unwrap();
+    assert!(judged.confirm_deferred(&anchor).is_empty());
+}
+
 /// Fetches, judges (as a device with no frames of its own) and accepts
 /// every frame and proof a plan names.
 async fn apply(store: &FaultyObjStore, vault: &VaultId, anchor: &mut SyncAnchor, plan: &PullPlan) {

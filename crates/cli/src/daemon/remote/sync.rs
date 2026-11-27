@@ -119,7 +119,7 @@ impl Daemon {
             rolled_back |= matches!(anomaly, RemoteAnomaly::SelfRollback(_));
             anomalies.push(anomaly);
         }
-        let plan = plan_pull(store, &vault, anchor, None).await?;
+        let mut plan = plan_pull(store, &vault, anchor, None).await?;
         anomalies.extend(plan.anomalies.iter().cloned());
         let mut fetched = BTreeMap::new();
         for path in plan.fetch.iter().chain(&plan.verify) {
@@ -127,10 +127,20 @@ impl Daemon {
                 fetched.insert(*path, bytes);
             }
         }
+        let mut missing = BTreeSet::new();
+        for path in plan
+            .fetch
+            .iter()
+            .chain(&plan.verify)
+            .filter(|p| !fetched.contains_key(p))
+        {
+            missing.insert(path.to_name());
+            plan.index.remove(path);
+        }
         let local = |log, seq| own.get(&(log, seq)).copied();
         let judged = plan.judge(&vault, anchor, &me, local, &fetched);
-        anomalies.extend(judged.anomalies);
-        let (frames, proofs) = (judged.frames, judged.proofs);
+        anomalies.extend(judged.anomalies.iter().cloned());
+        let (frames, proofs) = (&judged.frames, &judged.proofs);
         report.proofs = proofs.len();
 
         let checkpoints: Vec<FrameId> = frames
@@ -242,16 +252,22 @@ impl Daemon {
                 anomalies.push(anomaly);
             }
         }
-        for proof in &proofs {
+        for proof in proofs {
             anchor.note_fraud(proof.proof_hash());
         }
         anomalies.extend(plan.confirm_deferred(anchor));
+        anomalies.extend(judged.confirm_deferred(anchor));
 
         if !rolled_back {
             self.publish(store, vault, anchor, &mut report, &mut anomalies)
                 .await?;
             // What the store holds now, the push included.
-            let names = store.list(&area_prefix(&vault, Area::Data), None).await?;
+            let names: Vec<String> = store
+                .list(&area_prefix(&vault, Area::Data), None)
+                .await?
+                .into_iter()
+                .filter(|name| !missing.contains(name))
+                .collect();
             let index = deadbolt_remote::RemoteIndex::from_names(&vault, &names);
             anomalies.extend(self.with(|s| {
                 let clocks = s.vaults[&vault].member_clocks();
@@ -564,7 +580,7 @@ async fn self_frames_match<S: ObjStore + Sync>(
 ) -> Result<bool> {
     for path in ahead {
         let Some(bytes) = store.get(&path.to_name(), None).await? else {
-            continue;
+            return Ok(false);
         };
         let local = |log, seq| own.get(&(log, seq)).copied();
         if check_fetched_as(anchor, me, local, path, &bytes).is_err() {

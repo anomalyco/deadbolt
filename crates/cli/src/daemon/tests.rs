@@ -577,10 +577,13 @@ async fn local_item_commands_work_immediately_after_unlock_with_offline_peers() 
         },
     ];
     for command in commands {
-        tokio::time::timeout(Duration::from_secs(2), daemon.clone().run(command, &conv))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            daemon.clone().run(command, &conv, true),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(!*daemon.ready.borrow());
     }
     assert!(
@@ -614,6 +617,104 @@ fn make_valid_biometric_token(now_secs: u64) -> Vec<u8> {
     token.extend_from_slice(&now_secs.to_le_bytes());
     token.extend_from_slice(b"payload");
     token
+}
+
+fn pending_kits(loaded: &mut Loaded) {
+    let (id, kit) = loaded.create_vault_with_kit("migrated").unwrap();
+    let kits = vec![crate::protocol::MigratedVault {
+        vault: loaded.vault_info(&id),
+        items: 0,
+        recovery_kit: kit.into(),
+    }];
+    session::set_json(loaded.store(), upgrade::PENDING_KITS, &kits).unwrap();
+}
+
+#[tokio::test]
+async fn touch_id_cannot_unlock_or_extend_a_session_with_pending_kits() {
+    let dir = tempfile::tempdir().unwrap();
+    let fast = crate::disk::KdfParams {
+        m_cost_kib: 64,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let mut loaded = Loaded::setup(dir.path(), b"test", "device", fast).unwrap();
+    pending_kits(&mut loaded);
+    let bio_key = crate::disk::generate_biometric_key().unwrap();
+    loaded
+        .store
+        .set_biometric(&bio_key, &make_valid_biometric_token(session::now()))
+        .unwrap();
+    drop(loaded);
+    let daemon = Daemon::new(test_paths(dir.path()), true, fast);
+    crate::config::set_touch_id(&daemon.paths.config, true).unwrap();
+    *daemon.touch_id_available_override.lock().unwrap() = Some(true);
+    let key_copy = *bio_key;
+    *daemon.biometric_hook.lock().unwrap() = Some(Arc::new(move |_| Ok(Zeroizing::new(key_copy))));
+    let changes = daemon.watchers.subscribe(false);
+    let error = daemon.unlock_biometric(None).await.unwrap_err();
+    assert_eq!(crate::client::code(&error), Some(ErrorCode::Locked));
+    assert!(!daemon.status().unlocked);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), changes.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        daemon
+            .unlock(Zeroizing::new("test".into()), None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let error = daemon.unlock_biometric(None).await.unwrap_err();
+    assert_eq!(crate::client::code(&error), Some(ErrorCode::Locked));
+    let error = daemon
+        .run_biometric_leader(None, "test", biometric::CancelHandle::new())
+        .await
+        .unwrap_err();
+    assert_eq!(crate::client::code(&error), Some(ErrorCode::Locked));
+    daemon.lock().await;
+}
+
+#[tokio::test]
+async fn a_failed_kit_reply_relocks_and_keeps_the_kits_for_the_next_unlock() {
+    let dir = tempfile::tempdir().unwrap();
+    let fast = crate::disk::KdfParams {
+        m_cost_kib: 64,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let mut loaded = Loaded::setup(dir.path(), b"test", "device", fast).unwrap();
+    pending_kits(&mut loaded);
+    drop(loaded);
+    let daemon = Daemon::new(test_paths(dir.path()), true, fast);
+    let (server, mut client) = UnixStream::pair().unwrap();
+    let mut request = serde_json::to_vec(&Request {
+        v: PROTOCOL_VERSION,
+        command: Command::Unlock {
+            passphrase: Zeroizing::new("test".into()),
+            timeout_secs: None,
+        },
+    })
+    .unwrap();
+    request.push(b'\n');
+    client.write_all(&request).await.unwrap();
+    drop(client);
+    assert!(daemon.clone().handle(server, MAX_LINE).await.is_err());
+    assert!(!daemon.status().unlocked);
+    let loaded = Loaded::open(dir.path(), b"test").unwrap();
+    assert_eq!(upgrade::pending(&loaded).unwrap().len(), 1);
+    drop(loaded);
+    assert_eq!(
+        daemon
+            .unlock(Zeroizing::new("test".into()), None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    daemon.lock().await;
 }
 
 #[tokio::test]

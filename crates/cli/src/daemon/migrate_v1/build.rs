@@ -9,12 +9,12 @@ use anyhow::{Context, Result, bail, ensure};
 use deadbolt_core::{Change, DataOp, ItemId, VaultId};
 use zeroize::Zeroizing;
 
-use super::replay::{V1Item, V1Vault};
+use super::replay::V1Vault;
 use crate::daemon::session::Loaded;
 use crate::disk::KdfParams;
 
 /// A vault as it was moved: its new id, how many items it holds, and the
-/// 24-word kit of its new recovery root, never stored.
+/// 24-word kit of its new recovery root, sealed until the unlock reply succeeds.
 pub(crate) struct Moved {
     pub vault: VaultId,
     pub items: usize,
@@ -61,6 +61,19 @@ pub(super) fn build(
     let default = default.or(loaded.meta.default_vault);
     loaded.meta.default_vault = default;
     loaded.save_meta()?;
+    let pending: Vec<_> = moved
+        .iter()
+        .map(|m| crate::protocol::MigratedVault {
+            vault: loaded.vault_info(&m.vault),
+            items: m.items,
+            recovery_kit: m.recovery_kit.clone().into(),
+        })
+        .collect();
+    crate::daemon::session::set_json(
+        loaded.store(),
+        super::super::upgrade::PENDING_KITS,
+        &pending,
+    )?;
     drop(loaded);
     verify(dir, passphrase, plan, &moved, default)?;
     Ok(moved)
@@ -86,12 +99,17 @@ fn write_items(loaded: &mut Loaded, id: VaultId, vault: &V1Vault) -> Result<()> 
         return Ok(());
     }
     loaded.update(id, |w, author| {
-        let creates = vault
-            .items
-            .iter()
-            .map(|(id, item)| (*id, create(item)))
-            .collect();
+        let mut creates = Vec::new();
+        let mut fields = Vec::new();
+        for (id, item) in &vault.items {
+            let (create, edits) = super::fit::operations(*id, item);
+            creates.push((*id, create));
+            fields.extend(edits);
+        }
         w.create_items_as(author, creates)?;
+        if !fields.is_empty() {
+            w.write(author, fields)?;
+        }
         // What a create doesn't carry. A password finding ignored for the
         // v1 entry that wrote the current password follows it to the v2
         // frame that wrote it now.
@@ -131,17 +149,6 @@ fn write_items(loaded: &mut Loaded, id: VaultId, vault: &V1Vault) -> Result<()> 
         }
         Ok(())
     })
-}
-
-fn create(item: &V1Item) -> DataOp {
-    DataOp::create_with(
-        item.kind.clone(),
-        item.name.clone(),
-        item.fields.clone(),
-        item.source.clone(),
-        item.favorite,
-        item.tags.clone(),
-    )
 }
 
 /// Reopens `dir` as an unlock would and checks it holds exactly the plan.
