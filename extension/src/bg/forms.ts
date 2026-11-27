@@ -40,6 +40,7 @@ interface FormsToken {
   roles: FormRole[]
   createdAt: number
   menuDocumentId?: string
+  picked?: boolean
 }
 
 export interface FormsReport extends Placed {
@@ -225,7 +226,7 @@ export class Forms {
 
   async menuLoad(token: string, sender: chrome.runtime.MessageSender, parent: string): Promise<MenuLoadReply | null> {
     const t = await this.token(token, sender, parent)
-    if (!t) return null
+    if (!t || t.picked) return null
     if (this.host.status.state !== "ready") return { kind: "status", status: this.host.status }
     try {
       const reply = await this.list(t.source.origin)
@@ -258,11 +259,11 @@ export class Forms {
    */
   async menuPick(token: string, ref: string, sender: chrome.runtime.MessageSender): Promise<PickReply> {
     const t = await this.token(token, sender)
-    if (!t) return { ok: false, message: "This menu has expired." }
+    if (!t || t.picked) return { ok: false, message: "This menu has expired." }
+    t.picked = true
     const reply = await this.list(t.source.origin).catch(() => null)
     const item = reply ? usable(reply, t.kind, t.needs).find((i) => i.ref === ref) : undefined
     if (!item) return { ok: false, message: "That isn't here anymore." }
-    this.tokens.delete(token)
     const targets = this.targets(t)
     // Frames below (and, after a passphrase prompt, the top page) are measured with the pill put away (see db:hold).
     const framed = targets.some((x) => x.target.frameId !== 0)

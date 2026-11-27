@@ -16,14 +16,18 @@ private final class SystemExtensionCompleter: ExtensionContextCompleting {
     func completePassword(
         user: String,
         password: String,
-        afterDelivery: (@Sendable () async -> Void)?
+        beforeCompletion: (@Sendable () async -> Void)?
     ) {
         guard let ctx = controller?.extensionContext else { return }
         let credential = ASPasswordCredential(user: user, password: password)
+        // Completion can end the extension's lifetime. Interactive requests
+        // finish indexing first; silent fills pass no work and deliver now.
+        guard let beforeCompletion else {
+            ctx.completeRequest(withSelectedCredential: credential)
+            return
+        }
         Task { @MainActor in
-            if let afterDelivery {
-                await afterDelivery()
-            }
+            await beforeCompletion()
             ctx.completeRequest(withSelectedCredential: credential)
         }
     }
@@ -87,7 +91,6 @@ public final class CredentialProviderViewController: ASCredentialProviderViewCon
         let user = identity.user
         let service = AutofillService.from(identity.serviceIdentifier)
         let clientRef = client
-        let syncerRef = syncer
         let completerRef = completer
 
         Task { @MainActor in
@@ -96,7 +99,6 @@ public final class CredentialProviderViewController: ASCredentialProviderViewCon
                 fallbackUsername: user,
                 service: service,
                 client: clientRef,
-                identitySyncer: syncerRef,
                 completer: completerRef
             )
         }

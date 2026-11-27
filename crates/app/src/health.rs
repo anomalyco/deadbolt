@@ -398,11 +398,12 @@ impl App {
     }
 
     pub(crate) fn finish_pending_fix(&mut self, id: &str) {
-        if self
-            .health
-            .pending_fix
-            .as_ref()
-            .is_some_and(|(want, _)| want == id)
+        if self.pane == VaultPane::Item
+            && self
+                .health
+                .pending_fix
+                .as_ref()
+                .is_some_and(|(want, _)| want == id)
         {
             let (_, kind) = self.health.pending_fix.take().unwrap_or_default();
             self.open_fix_form(kind);

@@ -310,6 +310,7 @@ export function fakeHost(): FakeHost {
         case "forms":
           return { type: "forms", canVerify: true, identities: IDENTITIES, cards: CARDS }
         case "fill-form": {
+          await held
           const values = req.ref === HOME_REF ? HOME_VALUES : {}
           return { type: "fill-form", verified: false, values: Object.fromEntries(req.fields.filter((f) => f in values).map((f) => [f, values[f]])) }
         }

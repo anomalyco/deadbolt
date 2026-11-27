@@ -12,6 +12,17 @@ use super::{FRAME, Rig, alt, cmd, ctrl, pairs, rig, shift};
 const NEW_KEY: &str =
     "-----BEGIN OPENSSH PRIVATE KEY-----\nnew\n-----END OPENSSH PRIVATE KEY-----\n";
 
+#[test]
+fn file_save_completion_after_lock_does_not_show_a_notice() {
+    let mut r = rig("vault");
+    r.reply(Done::FileSaved(Ok("document.pdf".into())));
+    assert_eq!(r.rt.state.notice.as_deref(), Some("Saved document.pdf"));
+    r.reply(Done::Locked(Ok(())));
+    assert_eq!(r.rt.state.screen, Screen::Locked);
+    r.reply(Done::FileSaved(Ok("document.pdf".into())));
+    assert!(r.rt.state.notice.is_none());
+}
+
 /// Verifies `⌘X` neither cuts nor copies on a focused secret `field`, and `⌘C`
 /// copies `expected` concealed and clears after the 1 s countdown.
 fn assert_secret_copy_clears(r: &mut Rig, field: &str, expected: &str) {

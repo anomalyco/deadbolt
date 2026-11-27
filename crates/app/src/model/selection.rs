@@ -91,6 +91,8 @@ impl App {
                 }
             }
             Err(failure) => {
+                self.pending_copy = None;
+                self.health.pending_fix = None;
                 self.edit_item_failed();
                 self.on_failure(failure, tx);
             }
@@ -224,6 +226,7 @@ impl App {
         self.edit.delete = None;
         self.set_detail(None);
         self.pending_copy = None;
+        self.health.pending_fix = None;
         self.seq += 1;
         let Some(id) = id else {
             self.held = None;
