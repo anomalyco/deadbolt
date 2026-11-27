@@ -10,7 +10,10 @@ use iroh::{
     Endpoint, RelayMode, SecretKey,
     endpoint::{Connection, Incoming, PortmapperConfig, presets},
 };
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::{Semaphore, watch},
+    task::JoinHandle,
+};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -22,6 +25,8 @@ use crate::{
 
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CONNECTIONS: usize = 64;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
 /// How long a finished share stays listed after it expires.
 const KEEP_FINISHED: u64 = 24 * 60 * 60;
@@ -286,11 +291,26 @@ impl Inner {
 async fn accept_loop(inner: Arc<Inner>) {
     let mut sweep = tokio::time::interval(SWEEP_EVERY);
     let mut tasks = tokio::task::JoinSet::new();
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         tokio::select! {
             incoming = inner.endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
-                tasks.spawn(serve(inner.clone(), incoming));
+                if !incoming.remote_addr_validated() {
+                    if let Err(error) = incoming.retry() {
+                        error.into_incoming().refuse();
+                    }
+                    continue;
+                }
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    incoming.refuse();
+                    continue;
+                };
+                let inner = inner.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    serve(inner, incoming).await;
+                });
             }
             _ = sweep.tick() => inner.sweep(),
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -299,12 +319,13 @@ async fn accept_loop(inner: Arc<Inner>) {
 }
 
 async fn serve(inner: Arc<Inner>, incoming: Incoming) {
-    let conn = match incoming.await {
-        Ok(conn) => conn,
-        Err(error) => {
+    let conn = match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(error)) => {
             debug!(%error, "send connection failed");
             return;
         }
+        Err(_) => return,
     };
     if let Err(error) = exchange(&inner, &conn).await {
         debug!(%error, "send exchange failed");
@@ -352,8 +373,9 @@ async fn exchange(inner: &Inner, conn: &Connection) -> Result<()> {
                 Refusal::Used => status::USED,
                 Refusal::Revoked => status::REVOKED,
             };
-            send.write_all(&[code])
+            tokio::time::timeout(STEP_TIMEOUT, send.write_all(&[code]))
                 .await
+                .map_err(timeout("writing the refusal"))?
                 .map_err(|e| Error::Protocol(e.to_string()))?;
             send.finish().map_err(|e| Error::Protocol(e.to_string()))?;
             #[expect(
@@ -365,19 +387,24 @@ async fn exchange(inner: &Inner, conn: &Connection) -> Result<()> {
         }
     };
 
+    let mut transfer = Transfer {
+        inner,
+        id: &id,
+        finished: false,
+    };
     let mut head = Vec::with_capacity(9);
     head.push(status::OK);
     head.extend_from_slice(&(sealed.len() as u64).to_be_bytes());
-    let sent = async {
-        send.write_all(&head).await?;
-        send.write_all(&sealed).await?;
-        Ok::<_, iroh::endpoint::WriteError>(())
+    // Reset the deadline for each bounded chunk: a large bundle may take minutes,
+    // but a receiver that stops draining cannot reserve an open indefinitely.
+    for chunk in std::iter::once(head.as_slice()).chain(sealed.chunks(64 * 1024)) {
+        tokio::time::timeout(STEP_TIMEOUT, send.write_all(chunk))
+            .await
+            .map_err(timeout("writing the bundle"))?
+            .map_err(|e| Error::Protocol(e.to_string()))?;
     }
-    .await;
-    // Once the whole bundle went out the open counts, acknowledged or not: the
-    // receiver may have it.
-    finish(inner, &id, sent.is_ok());
-    sent.map_err(|e| Error::Protocol(e.to_string()))?;
+    // The receiver may have the whole bundle even without acknowledging it.
+    transfer.complete();
     send.finish().map_err(|e| Error::Protocol(e.to_string()))?;
     let mut ack = [0u8; 1];
     match tokio::time::timeout(STEP_TIMEOUT, recv.read_exact(&mut ack)).await {
@@ -396,4 +423,124 @@ fn finish(inner: &Inner, id: &str, delivered: bool) {
         }
     }
     inner.notify();
+}
+
+/// An acquired open belongs to the exchange future, including cancellation.
+struct Transfer<'a> {
+    inner: &'a Inner,
+    id: &'a str,
+    finished: bool,
+}
+
+impl Transfer<'_> {
+    fn complete(&mut self) {
+        finish(self.inner, self.id, true);
+        self.finished = true;
+    }
+}
+
+impl Drop for Transfer<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            finish(self.inner, self.id, false);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Bundle, Entry, Node, PolicyHeader, SendTicket};
+
+    #[tokio::test]
+    async fn cancelling_a_reserved_transfer_releases_a_single_open_link() {
+        let server = Server::spawn(Network::Local, Arc::new(|| 1000))
+            .await
+            .unwrap();
+        let secret = crate::random_secret().unwrap();
+        let key = crate::random_secret().unwrap();
+        let bundle = Bundle {
+            title: None,
+            note: None,
+            entries: vec![Node::Entry(Entry {
+                name: "large.bin".into(),
+                data: vec![0x5a; 16 * 1024 * 1024],
+                mime: None,
+                sensitive: false,
+            })],
+        };
+        let sealed = crate::seal(
+            &key,
+            &PolicyHeader {
+                expires_unix: 2000,
+                multi_open: false,
+            },
+            &bundle.encode(),
+        )
+        .unwrap();
+        let info = server
+            .add(ShareRequest {
+                secret: secret.clone(),
+                sealed,
+                policy: Policy {
+                    opens: 1,
+                    expires_at: 2000,
+                },
+                label: "test".into(),
+            })
+            .unwrap();
+        let ticket = SendTicket::new(server.addr().await, secret, key);
+        let receiver = receive::local(
+            Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .portmapper_config(PortmapperConfig::Disabled)
+                .transport_config(
+                    iroh::endpoint::QuicTransportConfig::builder()
+                        .stream_receive_window(1024u32.into())
+                        .receive_window(1024u32.into())
+                        .build(),
+                ),
+        )
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+        let conn = receiver
+            .connect(ticket.endpoint_addr().unwrap(), SEND_ALPN)
+            .await
+            .unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        let transcript = proof::transcript(&conn, &ticket.id, receiver.id().as_bytes()).unwrap();
+        send.write_all(&proof::prove(&ticket.secret, &transcript))
+            .await
+            .unwrap();
+        let mut header = [0u8; 9];
+        tokio::time::timeout(STEP_TIMEOUT, recv.read_exact(&mut header))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(header[0], status::OK);
+        assert_eq!(server.get(&info.id).unwrap().share.in_flight, 1);
+        // The receiver stops draining. Cancelling the server drops its real exchange future.
+        let mut changed = server.inner.changed.subscribe();
+        server._accept.0.abort();
+        tokio::time::timeout(STEP_TIMEOUT, async {
+            while server.get(&info.id).unwrap().share.in_flight != 0 {
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        conn.close(close::DONE, b"test complete");
+        receiver.close().await;
+        let _restarted = AbortOnDrop(tokio::spawn(accept_loop(server.inner.clone())));
+        let receiver = crate::receiver_endpoint(Network::Local).await.unwrap();
+        assert_eq!(
+            crate::receive(&receiver, &ticket, |_| {}).await.unwrap(),
+            bundle
+        );
+        assert_eq!(server.get(&info.id).unwrap().state, State::PickedUp);
+        receiver.close().await;
+        server.shutdown().await;
+    }
 }

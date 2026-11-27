@@ -72,7 +72,7 @@ const LOW_ORDER_X25519_POINTS: [[u8; 32]; 7] = [
 ];
 
 #[test]
-fn x25519_wrap_round_trip_and_non_determinism() {
+fn x25519_wrap_round_trip_and_context_bound_determinism() {
     let recipient = KemSecret::from_bytes(&[0x42; 32]);
     let key = EpochKey::from_bytes([0x99; 32]);
     let info = b"deadbolt/v2 wrap test";
@@ -81,7 +81,7 @@ fn x25519_wrap_round_trip_and_non_determinism() {
     let w1 = wrap_epoch_key(SUITE_X25519_WRAP, &recipient.public_key(), info, aad, &key).unwrap();
     let w2 = wrap_epoch_key(SUITE_X25519_WRAP, &recipient.public_key(), info, aad, &key).unwrap();
     assert_eq!(w1.len(), WRAP_LEN);
-    assert_ne!(w1, w2, "wraps must use fresh ephemeral keys");
+    assert_eq!(w1, w2, "wraps must be checkable by every epoch key holder");
 
     let opened1 = unwrap_epoch_key(SUITE_X25519_WRAP, &recipient, info, aad, &w1).unwrap();
     let opened2 = unwrap_epoch_key(SUITE_X25519_WRAP, &recipient, info, aad, &w2).unwrap();
@@ -828,5 +828,59 @@ fn keyless_482_byte_fraud_proof_and_parking_rule() {
             );
         }
         other => panic!("expected Parked, got {other:?}"),
+    }
+}
+
+#[test]
+fn membership_rejects_non_contributory_kem_keys() {
+    let p = model::pool();
+    let root = &p.roots[0];
+    let device = &p.devices[0];
+    let create = build_create_frame(root, p.nonce, &EpochKey::from_bytes([1; 32])).unwrap();
+    for bytes in LOW_ORDER_X25519_POINTS {
+        let kem = KemPublic::from_bytes(bytes);
+        let mut consent = sign_join_consent(device, &p.vault, &root.recovery_id());
+        consent.consent = sign(
+            device.sign_key(),
+            &join_consent_message(
+                &p.vault,
+                &root.recovery_id(),
+                &device.device_id(),
+                &kem,
+                &consent.net,
+            ),
+        );
+        assert!(consent.verify(&p.vault, &root.recovery_id(), &device.device_id(), &kem));
+        let body = MemberBody {
+            deps: vec![create.id()],
+            op: Some(MemberOp::Add {
+                device: device.device_id(),
+                kem,
+                consent,
+                rewrap: None,
+            }),
+            rotate: None,
+        };
+        assert!(Frame::sign_member(&p.root_sks[0], p.vault, 1, create.id(), body).is_err());
+        let mut body = create.member_body().unwrap().clone();
+        if let Some(MemberOp::Create { recovery_kem, .. }) = &mut body.op {
+            *recovery_kem = kem;
+        }
+        assert!(Frame::sign_member(&p.root_sks[0], p.vault, 0, FrameId::ZERO, body).is_err());
+        let body = MemberBody {
+            deps: vec![create.id()],
+            op: Some(MemberOp::RotateRecovery {
+                new: p.roots[1].recovery_id(),
+                new_kem: kem,
+                consent: sign_rotate_recovery_consent(
+                    &p.root_sks[1],
+                    &p.vault,
+                    &root.recovery_id(),
+                    &kem,
+                ),
+            }),
+            rotate: Some(model::dummy_rotate(vec![], p.roots[1].recovery_id(), 2)),
+        };
+        assert!(Frame::sign_member(&p.root_sks[0], p.vault, 1, create.id(), body).is_err());
     }
 }

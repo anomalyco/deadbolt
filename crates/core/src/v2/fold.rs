@@ -19,6 +19,7 @@ use crate::id::DeviceId;
 
 use super::causal::{Book, Closure, SeenBy};
 use super::checkpoint::CheckpointError;
+use super::clock::VectorClock;
 use super::crypto::FrameId;
 use super::data::{DataBody, DataFrame, DataOp};
 use super::frame::{Frame, FrameKind, MemberOp};
@@ -489,6 +490,16 @@ pub fn compact<'f>(
     base: Option<&Pack>,
     view: impl IntoIterator<Item = &'f DataFrame>,
 ) -> Result<Pack, CheckpointError> {
+    compact_at(ctx, base, view, None)
+}
+
+/// Compacts only the supplied frontier, retaining resolved tail frames as causal witnesses.
+pub(crate) fn compact_at<'f>(
+    ctx: &FoldContext<'_>,
+    base: Option<&Pack>,
+    view: impl IntoIterator<Item = &'f DataFrame>,
+    frontier: Option<&BTreeMap<DeviceId, (u64, FrameId)>>,
+) -> Result<Pack, CheckpointError> {
     let (mut state, mut meta) = match base {
         Some(pack) => {
             pack.meta.validate(&pack.state)?;
@@ -497,12 +508,33 @@ pub fn compact<'f>(
         }
         None => (FoldedState::default(), PackMeta::default()),
     };
+    // Recover causal witnesses clipped by the previous frontier before extending clocks.
+    for (&(target, target_seq), thresholds) in &meta.seen_by {
+        for (&by, &at) in thresholds {
+            if meta.frontier.get(&by).is_some_and(|(f, _)| *f >= at)
+                && let Some(clock) = meta.stream_clocks.get_mut(&by)
+            {
+                clock.observe(target, target_seq);
+            }
+        }
+        for (&(by, seq), clock) in &mut meta.dots {
+            if thresholds.get(&by).is_some_and(|&at| seq >= at) {
+                clock.observe(target, target_seq);
+            }
+        }
+    }
     let resolved = chains(ctx.membership, view, &starts_of(&meta));
     let mut chains = resolved.clone();
     for chain in chains.values_mut() {
         let keep = chain
             .iter()
-            .position(|(f, _)| !ctx.counts(f) || !ctx.decidable(f))
+            .position(|(f, _)| {
+                !ctx.counts(f)
+                    || !ctx.decidable(f)
+                    || frontier.is_some_and(|limit| {
+                        limit.get(&f.author).is_none_or(|(seq, _)| f.seq > *seq)
+                    })
+            })
             .unwrap_or(chain.len());
         chain.truncate(keep);
     }
@@ -576,6 +608,17 @@ pub fn compact<'f>(
             (!thresholds.is_empty()).then_some((*key, thresholds))
         })
         .collect();
+    // Tail causality lives in seen_by. Clocks may only vouch for compacted counts.
+    for clock in meta
+        .stream_clocks
+        .values_mut()
+        .chain(meta.dots.values_mut())
+    {
+        *clock = VectorClock::from_counts(clock.iter().filter_map(|(author, count)| {
+            let (seq, _) = meta.frontier.get(author)?;
+            Some((*author, (*count).min(seq.saturating_add(1))))
+        }));
+    }
     meta.tombstones = state.tombstones();
     let pack = Pack { state, meta };
     pack.meta.validate(&pack.state)?;

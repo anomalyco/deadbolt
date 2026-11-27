@@ -171,13 +171,30 @@ pub fn resolve<'a>(
     frames: impl IntoIterator<Item = &'a Frame>,
     fraud_proofs: impl IntoIterator<Item = &'a FraudProof>,
 ) -> ResolvedMembership {
+    resolve_checked(vault, frames, fraud_proofs, None, None)
+}
+
+type OuterForks<'a> = (&'a BTreeMap<DeviceId, u64>, &'a BTreeMap<DeviceId, u64>);
+
+// A causal sub-view reuses coverage decisions already made in topological order.
+fn resolve_checked<'a>(
+    vault: &VaultId,
+    frames: impl IntoIterator<Item = &'a Frame>,
+    fraud_proofs: impl IntoIterator<Item = &'a FraudProof>,
+    outer_forks: Option<OuterForks<'_>>,
+    checked: Option<&BTreeMap<FrameId, bool>>,
+) -> ResolvedMembership {
     let all_frames: Vec<&'a Frame> = frames
         .into_iter()
         .filter(|f| f.header().vault == *vault)
         .collect();
 
-    let mut member_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
-    let mut data_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
+    let mut member_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+        .map(|(member, _)| member.clone())
+        .unwrap_or_default();
+    let mut data_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+        .map(|(_, data)| data.clone())
+        .unwrap_or_default();
     let mut explicit_member_fork_ids: BTreeMap<DeviceId, BTreeSet<FrameId>> = BTreeMap::new();
 
     let implicit_proofs = detect_fraud_in_frames(all_frames.iter().copied());
@@ -242,8 +259,12 @@ pub fn resolve<'a>(
         }
     }
 
-    let structural_lineage = compute_recovery_lineage(vault, &nodes);
-    let structural = authorize(vault, &nodes, &[], &structural_lineage);
+    let rotation_ok = match checked {
+        Some(checked) => nodes.iter().map(|n| checked[&n.frame.id()]).collect(),
+        None => rotation_coverage(vault, &nodes, &member_fork_seq, &data_fork_seq),
+    };
+    let structural_lineage = compute_recovery_lineage(vault, &nodes, &rotation_ok);
+    let structural = authorize(vault, &nodes, &[], &structural_lineage, &rotation_ok);
     let genesis_creator_forked = nodes.iter().any(|n| {
         n.frame.header().seq == 0
             && matches!(
@@ -253,7 +274,8 @@ pub fn resolve<'a>(
             && member_fork_seq.get(&n.frame.header().author) == Some(&0)
     });
     let mutual_removals = find_mutual_removals(&nodes, &structural, &structural_lineage);
-    let (chosen, authority) = choose_removals(vault, &nodes, structural, &structural_lineage);
+    let (chosen, authority) =
+        choose_removals(vault, &nodes, structural, &structural_lineage, &rotation_ok);
 
     // A retired root's handoff is a non-void frame, so any later `Member` fork of that root is
     // above its retire seq and cannot undo it; recovery roots never write counted data either.
@@ -381,7 +403,95 @@ impl Authority {
     }
 }
 
-fn compute_recovery_lineage(vault: &VaultId, nodes: &[DagNode<'_>]) -> BTreeSet<DeviceId> {
+/// Coverage depends on the membership the author saw, never on removals chosen
+/// in the outer view. In particular, later equivocation cannot undo a removal
+/// that another author relied on when choosing its recipients.
+fn rotation_coverage(
+    vault: &VaultId,
+    nodes: &[DagNode<'_>],
+    member_forks: &BTreeMap<DeviceId, u64>,
+    data_forks: &BTreeMap<DeviceId, u64>,
+) -> Vec<bool> {
+    let mut checked = BTreeMap::new();
+    let mut ok = Vec::with_capacity(nodes.len());
+    for (idx, node) in nodes.iter().enumerate() {
+        let Some(body) = node.frame.member_body() else {
+            ok.push(false);
+            checked.insert(node.frame.id(), false);
+            continue;
+        };
+        let valid = match &body.rotate {
+            None => true,
+            Some(rot) => {
+                let author = node.frame.header().author;
+                let leaving = match &body.op {
+                    Some(MemberOp::Remove { device, .. }) => Some(*device),
+                    Some(MemberOp::RotateRecovery { .. }) => Some(author),
+                    _ => None,
+                };
+                let covered = |device: &DeviceId| {
+                    Some(*device) == leaving || rot.wraps.iter().any(|(id, _)| id == device)
+                };
+                let new_covered = match &body.op {
+                    Some(MemberOp::Create { .. }) => is_genesis(vault, node.frame),
+                    Some(MemberOp::RotateRecovery { new, .. }) => {
+                        rot.wraps.iter().any(|(id, _)| id == new)
+                    }
+                    _ => true,
+                };
+                // A superset of past recipients makes the usual complete-wrap case cheap.
+                let covers_all_admissions = (0..idx).filter(|&j| ok[j] && node.saw(j)).all(|j| {
+                    match nodes[j]
+                        .frame
+                        .member_body()
+                        .and_then(|body| body.op.as_ref())
+                    {
+                        Some(MemberOp::Create { .. }) => covered(&nodes[j].frame.header().author),
+                        Some(MemberOp::Add { device, .. }) => covered(device),
+                        Some(MemberOp::RotateRecovery { new, .. }) => covered(new),
+                        _ => true,
+                    }
+                });
+                new_covered
+                    && (covers_all_admissions || {
+                        // Keep rejected ancestors as chain links, but deny them authority.
+                        // Neither a past removal nor a fork-voided admission requires a wrap.
+                        let past: Vec<_> = (0..idx)
+                            .filter(|&j| node.saw(j))
+                            .map(|j| nodes[j].frame)
+                            .collect();
+                        let unforked =
+                            resolve_checked(vault, past.iter().copied(), [], None, Some(&checked))
+                                .eligible_recipients();
+                        let with_forks =
+                            (!member_forks.is_empty() || !data_forks.is_empty()).then(|| {
+                                resolve_checked(
+                                    vault,
+                                    past.iter().copied(),
+                                    [],
+                                    Some((member_forks, data_forks)),
+                                    Some(&checked),
+                                )
+                                .eligible_recipients()
+                            });
+                        unforked
+                            .iter()
+                            .filter(|id| with_forks.as_ref().is_none_or(|f| f.contains(id)))
+                            .all(covered)
+                    })
+            }
+        };
+        ok.push(valid);
+        checked.insert(node.frame.id(), valid);
+    }
+    ok
+}
+
+fn compute_recovery_lineage(
+    vault: &VaultId,
+    nodes: &[DagNode<'_>],
+    rotation_ok: &[bool],
+) -> BTreeSet<DeviceId> {
     let mut lineage = BTreeSet::new();
     let mut retired: BTreeMap<DeviceId, usize> = BTreeMap::new();
     let mut root_admitted: BTreeMap<DeviceId, usize> = BTreeMap::new();
@@ -395,7 +505,7 @@ fn compute_recovery_lineage(vault: &VaultId, nodes: &[DagNode<'_>]) -> BTreeSet<
     lineage.insert(genesis_author);
     root_admitted.insert(genesis_author, genesis_idx);
     for (idx, node) in nodes.iter().enumerate() {
-        if idx == genesis_idx || node.void {
+        if idx == genesis_idx || node.void || !rotation_ok[idx] {
             continue;
         }
         let author = node.frame.header().author;
@@ -430,6 +540,7 @@ fn authorize(
     nodes: &[DagNode<'_>],
     chosen: &[usize],
     known_lineage: &BTreeSet<DeviceId>,
+    rotation_ok: &[bool],
 ) -> Authority {
     let mut state = Authority::default();
     let mut cuts: BTreeMap<DeviceId, Vec<usize>> = BTreeMap::new();
@@ -458,7 +569,7 @@ fn authorize(
     state.non_removal_frames.insert(genesis.id());
 
     for (idx, node) in nodes.iter().enumerate() {
-        if idx == genesis_idx || node.void {
+        if idx == genesis_idx || node.void || !rotation_ok[idx] {
             continue;
         }
         let author = node.frame.header().author;
@@ -532,6 +643,7 @@ fn choose_removals(
     nodes: &[DagNode<'_>],
     structural: Authority,
     structural_lineage: &BTreeSet<DeviceId>,
+    rotation_ok: &[bool],
 ) -> (Vec<usize>, Authority) {
     let mut candidates: Vec<usize> = structural.removals.iter().copied().collect();
     candidates.sort_by_key(|&idx| {
@@ -576,7 +688,7 @@ fn choose_removals(
             continue;
         }
         chosen.push(candidate);
-        let trial = authorize(vault, nodes, &chosen, structural_lineage);
+        let trial = authorize(vault, nodes, &chosen, structural_lineage, rotation_ok);
         let valid = chosen.iter().all(|&winner| {
             let Some(w_victim) = remove_target(nodes[winner].frame) else {
                 return false;
@@ -671,9 +783,10 @@ fn is_genesis(vault: &VaultId, frame: &Frame) -> bool {
     };
     matches!(
         (&body.op, &body.rotate),
-        (Some(MemberOp::Create { nonce, .. }), Some(_))
+        (Some(MemberOp::Create { nonce, .. }), Some(rot))
             if h.seq == 0
                 && h.prev.is_zero()
+                && rot.wraps.iter().any(|(id, _)| *id == h.author)
                 && body.deps.is_empty()
                 && super::crypto::derive_vault_id(&h.author, nonce) == *vault
     )

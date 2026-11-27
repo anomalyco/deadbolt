@@ -59,9 +59,9 @@ fn recovery_wraps_are_deterministic_and_checkable_without_the_root_secret() {
     let opened = unwrap_epoch_key(SUITE_X25519_WRAP, &root.kem_secret(), info, aad, &w1).unwrap();
     assert_eq!(opened.as_bytes(), key.as_bytes());
     assert!(verify_recovery_wrap(&key, &pk, info, aad, &w1));
-    // A random wrap of the same key, another key, other context, or junk all fail the check.
+    // All wraps use the same checkable construction; other keys, contexts and junk fail.
     let random = wrap_epoch_key(SUITE_X25519_WRAP, &pk, info, aad, &key).unwrap();
-    assert!(!verify_recovery_wrap(&key, &pk, info, aad, &random));
+    assert!(verify_recovery_wrap(&key, &pk, info, aad, &random));
     let other = EpochKey::from_bytes([0x83; 32]);
     assert!(!verify_recovery_wrap(&other, &pk, info, aad, &w1));
     assert!(!verify_recovery_wrap(&key, &pk, b"other", aad, &w1));
@@ -329,4 +329,137 @@ fn a_fake_back_link_does_not_suppress_a_rewrap() {
     assert!(!report.verified_back.contains(&(e2, e1)));
     assert_eq!(report.bad_back_links.len(), 1);
     assert_eq!(report.bad_back_links[0].epoch, e1);
+}
+
+#[test]
+fn under_inclusive_rotation_never_authorizes_its_epoch() {
+    let p = pool();
+    let (m, a) = (&p.devices[0], &p.devices[1]);
+    for omitted in [a.device_id(), p.roots[0].recovery_id()] {
+        let (mut s, k0) = scene(&[m, a]);
+        let k1 = EpochKey::from_bytes([0x98; 32]);
+        let honest = rotate_by_a(&s, &k0, &k1, |_| {});
+        let mut body = honest.member_body().unwrap().clone();
+        body.rotate
+            .as_mut()
+            .unwrap()
+            .wraps
+            .retain(|(id, _)| *id != omitted);
+        let malicious = Frame::sign_member(m.sign_key(), s.vault, 0, FrameId::ZERO, body).unwrap();
+        let bad_epoch = EpochId::from_frame_id(malicious.id());
+        s.frames.push(malicious);
+        let res = resolve(&s.vault, &s.frames, &[]);
+        assert!(!res.is_authorized_epoch(&bad_epoch));
+        let graph = EpochGraph::build(s.vault, &s.frames, &res);
+        let mut ring = EpochKeyring::new();
+        graph.unlock(&a.device_id(), a.kem_key(), &mut ring);
+        assert_eq!(
+            graph.select_write_epoch(&res, &ring, &BTreeSet::new()),
+            WriteEpochDecision::Use(s.e0)
+        );
+        let payload = DataPayload {
+            mheads: vec![s.frames.last().unwrap().id()],
+            dclock: DeltaClock::default(),
+            timestamp_ms: 1,
+            ops: vec![],
+        };
+        let frame = payload
+            .seal(m.sign_key(), s.vault, 0, FrameId::ZERO, bad_epoch, &k1)
+            .unwrap();
+        let opened = DataFrame::open(&frame, &k1).unwrap();
+        let adders = std::collections::BTreeMap::new();
+        assert!(
+            !FoldContext {
+                membership: &res,
+                adders: &adders
+            }
+            .counts(&opened)
+        );
+    }
+}
+
+#[test]
+fn an_online_junk_wrap_is_repaired_after_the_recipient_rotates() {
+    let p = pool();
+    let (m, a, d) = (&p.devices[0], &p.devices[1], &p.devices[2]);
+    let (mut s, k0) = scene(&[m, a, d]);
+    let k1 = EpochKey::from_bytes([0x99; 32]);
+    let bad = rotate_by_a(&s, &k0, &k1, junk_wrap_to(d.device_id()));
+    let e1 = EpochId::from_frame_id(bad.id());
+    s.frames.push(bad);
+    let res = resolve(&s.vault, &s.frames, &[]);
+    let graph = EpochGraph::build(s.vault, &s.frames, &res);
+    let mut d_ring = EpochKeyring::new();
+    graph.unlock(&d.device_id(), d.kem_key(), &mut d_ring);
+    assert!(!d_ring.contains(&e1));
+    let k2 = EpochKey::from_bytes([0x9a; 32]);
+    let fresh = build_standalone_rotate_frame(
+        d.sign_key(),
+        s.vault,
+        &res,
+        0,
+        FrameId::ZERO,
+        vec![e1.as_frame_id()],
+        &k2,
+        vec![e1],
+        &d_ring,
+        &kem_map(&res),
+    )
+    .unwrap();
+    assert!(
+        fresh
+            .member_body()
+            .unwrap()
+            .rotate
+            .as_ref()
+            .unwrap()
+            .back
+            .is_empty()
+    );
+    s.frames.push(fresh);
+    let res = resolve(&s.vault, &s.frames, &[]);
+    let graph = EpochGraph::build(s.vault, &s.frames, &res);
+    let mut a_ring = EpochKeyring::new();
+    graph.unlock(&a.device_id(), a.kem_key(), &mut a_ring);
+    let plan = graph.needed_rewraps(&a_ring, &res, &[e1].into());
+    assert!(plan.contains(&(e1, vec![d.device_id()])), "{plan:?}");
+    let repair = build_rewrap_frame(
+        a.sign_key(),
+        s.vault,
+        &res,
+        0,
+        FrameId::ZERO,
+        vec![s.frames.last().unwrap().id()],
+        e1,
+        a_ring.get(&e1).unwrap(),
+        &[(d.device_id(), d.kem_public())].into(),
+    )
+    .unwrap();
+    let payload = DataPayload {
+        mheads: vec![e1.as_frame_id()],
+        dclock: DeltaClock::default(),
+        timestamp_ms: 1,
+        ops: vec![],
+    };
+    let data = payload
+        .seal(m.sign_key(), s.vault, 0, FrameId::ZERO, e1, &k1)
+        .unwrap();
+    let adders = std::collections::BTreeMap::new();
+    assert!(
+        FoldContext {
+            membership: &res,
+            adders: &adders
+        }
+        .counts(&DataFrame::open(&data, &k1).unwrap())
+    );
+    s.frames.push(repair);
+    let res = resolve(&s.vault, &s.frames, &[]);
+    let graph = EpochGraph::build(s.vault, &s.frames, &res);
+    graph.unlock(&d.device_id(), d.kem_key(), &mut d_ring);
+    assert_eq!(
+        DataFrame::open(&data, d_ring.get(&e1).unwrap())
+            .unwrap()
+            .body,
+        DataBody::Data(payload)
+    );
 }

@@ -461,7 +461,7 @@ impl Engine {
     }
 
     /// Records what `from` says about itself (authoritative) and about others
-    /// (fills gaps; newer addresses win).
+    /// (fills gaps; newer addresses win). Only current peers may supply hints.
     pub fn learn(
         &mut self,
         from: &DeviceId,
@@ -469,28 +469,47 @@ impl Engine {
         addr: Option<Addr>,
         hints: BTreeMap<String, Hint>,
     ) {
-        let me = self.id.to_string();
+        let allowed = self.peer_set();
+        if !allowed.contains(from) {
+            return;
+        }
+        let bounded = |mut addr: Addr| {
+            addr.relay = addr.relay.filter(|url| {
+                url.len() <= 512
+                    && (url.starts_with("https://") || url.starts_with("http://"))
+                    && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+                    && deadbolt_core::site::url_host(url).is_some()
+            });
+            addr.direct.truncate(16);
+            addr
+        };
         let now = self.now();
         let peer = self.peer_mut(from);
         if let Some(name) = name.map(clean_name).filter(|n| !n.is_empty()) {
             peer.name = Some(name);
         }
         if let Some(addr) = addr {
-            peer.addr = Some(addr);
+            peer.addr = Some(bounded(addr));
             peer.addr_seen = now;
         }
         let from = from.to_string();
         for (id, hint) in hints.into_iter().take(256) {
-            if id == me || id == from || unhex::<32>(&id).is_err() {
+            if id == from
+                || !unhex::<32>(&id)
+                    .ok()
+                    .map(DeviceId::from_bytes)
+                    .is_some_and(|id| allowed.contains(&id))
+            {
                 continue;
             }
             let peer = self.meta.peers.entry(id).or_default();
             if peer.name.is_none() {
                 peer.name = hint.name.map(|n| clean_name(&n)).filter(|n| !n.is_empty());
             }
-            if hint.addr.is_some() && hint.addr_seen > peer.addr_seen {
-                peer.addr = hint.addr;
-                peer.addr_seen = hint.addr_seen.min(now);
+            let seen = hint.addr_seen.min(now);
+            if hint.addr.is_some() && seen > peer.addr_seen {
+                peer.addr = hint.addr.map(bounded);
+                peer.addr_seen = seen;
             }
         }
     }

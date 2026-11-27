@@ -182,9 +182,25 @@ fn prove(sc: &Scenario) -> Result<(), TestCaseError> {
     // (b) Checkpoint pack (from its bytes) + post-frontier and late tail.
     let decoded1 = super::sim::round_trip(&pack1);
     check_pack(&sim, &ctx, &decoded1, &full, full_mac, sc.stale, sc.seed)?;
-    if let Some((pack2, _, _)) = &second {
+    if let Some((pack2, bytes2, ckpt2)) = &second {
         prop_assert_eq!(&super::sim::round_trip(pack2), pack2);
         check_pack(&sim, &ctx, pack2, &full, full_mac, sc.stale, sc.seed ^ 11)?;
+        let frame = &sim.frames[*ckpt2];
+        let DataBody::Checkpoint(payload) = &frame.body else {
+            unreachable!()
+        };
+        prop_assert_eq!(
+            verify_checkpoint(
+                &K_MAC,
+                &ckpt_ctx,
+                frame.id,
+                payload,
+                Some((pack2, PackCommitment::of(&sealed(bytes2)))),
+                sim.shuffled(sc.seed)
+            )
+            .unwrap(),
+            CheckpointVerdict::Agreed
+        );
     }
 
     // A full peer agrees with an honest checkpoint and disputes a tampered one.
@@ -225,4 +241,56 @@ proptest! {
     fn prop_state_mac_identical_with_and_without_compaction(sc in scenario()) {
         prove(&sc)?;
     }
+}
+
+#[test]
+fn incremental_checkpoint_restores_previously_uncompacted_causality() {
+    let mut sim = Sim::new(2);
+    let membership = membership(2, None);
+    let adders = adders(2);
+    let ctx = FoldContext {
+        membership: &membership,
+        adders: &adders,
+    };
+    sim.write(1, vec![op(1, 2, (4, 0, 0, 0, 0))]);
+    sim.sync(0, 1);
+    sim.write(0, vec![op(0, 2, (4, 1, 0, 0, 0))]);
+    let a0 = &sim.frames[1];
+    let frontier = [(a0.author, (a0.seq, a0.id))].into();
+    let first =
+        super::super::fold::compact_at(&ctx, None, sim.frames.iter(), Some(&frontier)).unwrap();
+    assert!(!first.meta.seen_by.is_empty());
+    let (second, bytes, index) = sim.checkpoint(0, &ctx, Some(&first));
+    let frame = &sim.frames[index];
+    let DataBody::Checkpoint(payload) = &frame.body else {
+        unreachable!()
+    };
+    assert_eq!(
+        verify_checkpoint(
+            &K_MAC,
+            &ctx,
+            frame.id,
+            payload,
+            Some((&second, PackCommitment::of(&sealed(&bytes)))),
+            sim.frames.iter()
+        )
+        .unwrap(),
+        CheckpointVerdict::Agreed
+    );
+    let from_genesis =
+        super::super::fold::compact_at(&ctx, None, sim.frames.iter(), Some(&second.meta.frontier))
+            .unwrap();
+    assert_eq!(second.meta, from_genesis.meta);
+    assert_eq!(
+        payload.meta_mac,
+        build_checkpoint(
+            &K_MAC,
+            &from_genesis,
+            payload.pack_commitment(),
+            vec![],
+            payload.timestamp_ms
+        )
+        .unwrap()
+        .meta_mac
+    );
 }

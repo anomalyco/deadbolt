@@ -57,6 +57,7 @@ struct RefGraph<'a> {
     past: Vec<BTreeSet<usize>>,
     depth: Vec<u64>,
     void: Vec<bool>,
+    rotation_ok: Vec<bool>,
     member_fork_seq: BTreeMap<DeviceId, u64>,
     data_fork_seq: BTreeMap<DeviceId, u64>,
     genesis: Option<usize>,
@@ -65,10 +66,32 @@ struct RefGraph<'a> {
     retired: BTreeMap<DeviceId, usize>,
 }
 
+type OuterForks<'a> = (&'a BTreeMap<DeviceId, u64>, &'a BTreeMap<DeviceId, u64>);
+
 impl<'a> RefGraph<'a> {
-    fn build(vault: VaultId, all_frames: &'a [Frame], proofs: &'a [FraudProof]) -> Self {
-        let mut member_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
-        let mut data_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
+    fn build(vault: VaultId, all_frames: &'a [Frame], proofs: &[FraudProof]) -> Self {
+        Self::build_checked(
+            vault,
+            &all_frames.iter().collect::<Vec<_>>(),
+            proofs,
+            None,
+            None,
+        )
+    }
+
+    fn build_checked(
+        vault: VaultId,
+        all_frames: &[&'a Frame],
+        proofs: &[FraudProof],
+        outer_forks: Option<OuterForks<'_>>,
+        checked: Option<&BTreeMap<FrameId, bool>>,
+    ) -> Self {
+        let mut member_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+            .map(|(member, _)| member.clone())
+            .unwrap_or_default();
+        let mut data_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+            .map(|(_, data)| data.clone())
+            .unwrap_or_default();
 
         // Scan explicit proofs + all frame pairs directly (no detect_fraud_in_frames call).
         for p in proofs {
@@ -195,11 +218,80 @@ impl<'a> RefGraph<'a> {
                         Some(MemberBody {
                             deps,
                             op: Some(MemberOp::Create { nonce, .. }),
-                            rotate: Some(_),
-                        }) if deps.is_empty() && derive_vault_id(&frames[i].header().author, nonce) == vault
+                            rotate: Some(rot),
+                        }) if rot.wraps.iter().any(|(id, _)| *id == frames[i].header().author)
+                            && deps.is_empty() && derive_vault_id(&frames[i].header().author, nonce) == vault
                     )
             })
             .min_by_key(|&i| (depth[i], frames[i].id()));
+
+        let rotation_ok = if let Some(checked) = checked {
+            frames.iter().map(|f| checked[&f.id()]).collect::<Vec<_>>()
+        } else {
+            let mut checked = BTreeMap::new();
+            let mut ok = Vec::new();
+            for i in 0..frames.len() {
+                let frame = frames[i];
+                let body = frame.member_body().unwrap();
+                let valid = if let Some(rot) = &body.rotate {
+                    let leaving = match body.op {
+                        Some(MemberOp::Remove { device, .. }) => Some(device),
+                        Some(MemberOp::RotateRecovery { .. }) => Some(frame.header().author),
+                        _ => None,
+                    };
+                    let covers_new = match body.op {
+                        Some(MemberOp::Create { nonce, .. }) => {
+                            frame.header().seq == 0
+                                && frame.header().prev.is_zero()
+                                && body.deps.is_empty()
+                                && derive_vault_id(&frame.header().author, &nonce) == vault
+                                && rot.wraps.iter().any(|(id, _)| *id == frame.header().author)
+                        }
+                        Some(MemberOp::RotateRecovery { new, .. }) => {
+                            rot.wraps.iter().any(|(id, _)| *id == new)
+                        }
+                        _ => true,
+                    };
+                    let causal: Vec<_> = past[i].iter().map(|&j| frames[j]).collect();
+                    let recipients = |state: RefState| {
+                        state
+                            .devices
+                            .into_iter()
+                            .chain(state.active_recovery)
+                            .collect::<BTreeSet<_>>()
+                    };
+                    let unforked = recipients(
+                        Self::build_checked(vault, &causal, &[], None, Some(&checked)).solve(),
+                    );
+                    let with_forks = (!member_fork_seq.is_empty() || !data_fork_seq.is_empty())
+                        .then(|| {
+                            recipients(
+                                Self::build_checked(
+                                    vault,
+                                    &causal,
+                                    &[],
+                                    Some((&member_fork_seq, &data_fork_seq)),
+                                    Some(&checked),
+                                )
+                                .solve(),
+                            )
+                        });
+                    covers_new
+                        && unforked
+                            .iter()
+                            .filter(|id| with_forks.as_ref().is_none_or(|f| f.contains(id)))
+                            .all(|id| {
+                                Some(*id) == leaving
+                                    || rot.wraps.iter().any(|(recipient, _)| recipient == id)
+                            })
+                } else {
+                    true
+                };
+                checked.insert(frame.id(), valid);
+                ok.push(valid);
+            }
+            ok
+        };
 
         // Compute pure recovery lineage chain in topological order.
         let mut lineage = BTreeSet::new();
@@ -214,7 +306,7 @@ impl<'a> RefGraph<'a> {
             let mut order: Vec<usize> = (0..frames.len()).collect();
             order.sort_by_key(|&i| (depth[i], frames[i].id()));
             for i in order {
-                if i == g || void[i] {
+                if i == g || void[i] || !rotation_ok[i] {
                     continue;
                 }
                 let author = frames[i].header().author;
@@ -259,6 +351,7 @@ impl<'a> RefGraph<'a> {
             past,
             depth,
             void,
+            rotation_ok,
             member_fork_seq,
             data_fork_seq,
             genesis,
@@ -282,7 +375,7 @@ impl<'a> RefGraph<'a> {
     fn admissions(&self, dev: DeviceId) -> Vec<usize> {
         (0..self.frames.len())
             .filter(|&i| {
-                if self.void[i] {
+                if self.void[i] || !self.rotation_ok[i] {
                     return false;
                 }
                 match self.op(i) {
@@ -302,7 +395,7 @@ impl<'a> RefGraph<'a> {
     }
 
     fn authorized(&self, i: usize, chosen: &[usize]) -> bool {
-        if self.void[i] {
+        if self.void[i] || !self.rotation_ok[i] {
             return false;
         }
         if self.genesis == Some(i) {

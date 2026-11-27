@@ -34,7 +34,7 @@ use crate::{
 };
 
 /// Default maximum size of one frame (one heads blob or one entry).
-pub const DEFAULT_MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_FRAME_LEN: usize = 145 + 16 * 1024 * 1024 + 64;
 
 /// Default for how many inbound sync connections one peer may hold open at once.
 pub const DEFAULT_MAX_INBOUND_PER_PEER: usize = 2;

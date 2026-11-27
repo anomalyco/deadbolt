@@ -125,9 +125,12 @@ pub(super) fn adopt(s: &mut Loaded, welcomed: Welcomed) -> Result<VaultInfo> {
         inviter_addr,
         peers,
     } = welcomed;
-    s.learn(&inviter, Some(&inviter_name), inviter_addr, peers);
     let id = vault.id();
     s.add_vault(vault)?;
+    s.learn(&inviter, Some(&inviter_name), inviter_addr, peers);
+    if let Err(error) = s.save_peers() {
+        tracing::warn!(vault = %id, %error, "saving learned peers failed");
+    }
     Ok(s.vault_info(&id))
 }
 
@@ -708,6 +711,26 @@ mod tests {
         let b_dir = tempfile::tempdir().unwrap();
         let a = test_daemon(a_dir.path(), "alpha").await;
         let vault = a.with(|s| s.create_vault("personal")).unwrap();
+        let peer =
+            deadbolt_core::Author::new(deadbolt_core::v2::DeviceKeys::from_seed(&[0x63; 32]), 0);
+        let peer_addr = Addr {
+            relay: None,
+            direct: vec!["127.0.0.1:4567".parse().unwrap()],
+        };
+        a.with(|s| {
+            let consent = peer.join_consent(&vault, &s.id);
+            s.update(vault, |v, author| {
+                Ok(v.add(author, peer.id(), peer.keys().kem_public(), consent)?)
+            })?;
+            s.learn(
+                &peer.id(),
+                Some("gamma"),
+                Some(peer_addr.clone()),
+                Default::default(),
+            );
+            s.save_peers()
+        })
+        .unwrap();
         for keep in [false, true] {
             let mut seed = Zeroizing::new([0u8; 32]);
             getrandom::fill(seed.as_mut_slice()).unwrap();
@@ -748,9 +771,17 @@ mod tests {
                 let (loaded, info) = fresh.persist(&store, &Secret::new("pass"), KDF).unwrap();
                 assert_eq!(info.name, "personal");
                 assert_eq!(loaded.id, b_dev);
+                assert_eq!(
+                    loaded.peer(&peer.id()).unwrap().addr.as_ref(),
+                    Some(&peer_addr)
+                );
                 drop(loaded);
                 let reopened = Loaded::open(&store, b"pass").unwrap();
                 assert!(reopened.vaults.contains_key(&vault));
+                assert_eq!(
+                    reopened.peer(&peer.id()).unwrap().addr.as_ref(),
+                    Some(&peer_addr)
+                );
                 assert_eq!(reopened.meta.device_name, "beta");
                 assert_eq!(
                     reopened.peer(&dev(&a)).unwrap().name.as_deref(),

@@ -407,9 +407,9 @@ impl EpochGraph {
         out
     }
 
-    /// True iff some offer of `epoch` to the recovery root is exactly the deterministic recovery
-    /// wrap of the known `k_e`: checkable by any key holder without `R_kem`'s secret.
-    fn recovery_wrap_ok(
+    /// True iff an offer matches the deterministic wrap of the known key to this recipient,
+    /// checkable by any key holder without the recipient's secret.
+    fn recipient_wrap_ok(
         &self,
         info: &EpochInfo,
         root: &DeviceId,
@@ -555,9 +555,8 @@ impl EpochGraph {
     }
 
     /// Epochs `recipient` can unlock, as far as `keyring` can check: direct wraps plus E5
-    /// back-links this keyring verified. The recovery root's direct wraps count only when they
-    /// are the exact deterministic recovery wrap of a key in `keyring`, so a junk wrap to the
-    /// cold root is caught by any online key holder.
+    /// back-links this keyring verified. Every direct offer must match the deterministic
+    /// wrap of a held key, so naming a recipient alone never proves delivery.
     pub fn reachable_by(
         &self,
         recipient: &DeviceId,
@@ -565,15 +564,13 @@ impl EpochGraph {
         resolved: &ResolvedMembership,
     ) -> BTreeSet<EpochId> {
         let back = self.verified_back_links(keyring);
-        let root_kem = resolved
-            .active_recovery
-            .filter(|root| root == recipient)
-            .and_then(|root| resolved.kem_of(&root));
-        let direct = self.epochs.values().filter(|info| match &root_kem {
-            Some(kem) => keyring
-                .get(&info.id)
-                .is_some_and(|k| self.recovery_wrap_ok(info, recipient, kem, k)),
-            None => info.recipients.contains(recipient),
+        let kem = resolved.kem_of(recipient);
+        let direct = self.epochs.values().filter(|info| {
+            kem.as_ref().is_some_and(|kem| {
+                keyring
+                    .get(&info.id)
+                    .is_some_and(|key| self.recipient_wrap_ok(info, recipient, kem, key))
+            })
         });
         back_closure(direct.map(|info| info.id), &back)
     }

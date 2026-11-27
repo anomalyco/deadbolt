@@ -3,7 +3,8 @@
 use crate::id::{DeviceId, Signature};
 
 use super::crypto::{
-    BACK_LINK_LEN, EpochId, FrameId, KemPublic, NetPublic, WRAP_LEN, derive_vault_id, verify_strict,
+    BACK_LINK_LEN, EpochId, FrameId, KemPublic, KemSecret, NetPublic, WRAP_LEN, derive_vault_id,
+    verify_strict,
 };
 use super::frame::{
     FrameError, FrameHeader, JoinConsent, MAX_BACK_LINKS, MAX_BODY_LEN, MAX_DEPS, MAX_PARENTS,
@@ -559,6 +560,18 @@ pub fn validate_member_body(header: &FrameHeader, body: &MemberBody) -> Result<(
     }
     if let Some(rot) = &body.rotate {
         validate_rotate(rot)?;
+    }
+    let kem = match &body.op {
+        Some(MemberOp::Create { recovery_kem, .. }) => Some(recovery_kem),
+        Some(MemberOp::Add { kem, .. }) => Some(kem),
+        Some(MemberOp::RotateRecovery { new_kem, .. }) => Some(new_kem),
+        _ => None,
+    };
+    // Every clamped X25519 scalar rejects the same non-contributory public keys.
+    if kem.is_some_and(|kem| KemSecret::from_bytes(&[0; 32]).diffie_hellman(kem).is_err()) {
+        return Err(FrameError::InvalidStructure(
+            "non-contributory membership KEM key",
+        ));
     }
     match (&body.op, &body.rotate) {
         (Some(MemberOp::Create { nonce, .. }), Some(rot)) => {

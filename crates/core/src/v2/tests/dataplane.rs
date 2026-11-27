@@ -149,6 +149,7 @@ fn sealed_data_and_checkpoint_frames_round_trip() {
         mheads: Vec::new(),
         timestamp_ms: 9,
         state_mac: [1; 32],
+        meta_mac: [4; 32],
         pack_hash: [2; 32],
         pack_len: 3,
     };

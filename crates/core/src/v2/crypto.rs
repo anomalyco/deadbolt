@@ -615,7 +615,9 @@ fn derive_x25519_wrap_key(
 /// Wraps a 32-byte `EpochKey` to `recipient_pk` using `X25519Wrap` (`suite = 1`).
 ///
 /// Output is 80 bytes: `pk_e[32] || XChaCha20Poly1305(k, [0; 24], aad, K_e)[48]`.
-/// Rejects non-contributory DH and unsupported suites (including reserved `suite = 2`).
+/// The ephemeral scalar is derived from the fresh 256-bit epoch key, info and AAD,
+/// making every offer checkable by other key holders. Rejects non-contributory DH
+/// and unsupported suites (including reserved `suite = 2`).
 pub fn wrap_epoch_key(
     suite: u8,
     recipient_pk: &KemPublic,
@@ -626,7 +628,7 @@ pub fn wrap_epoch_key(
     if suite != SUITE_X25519_WRAP {
         return Err(CryptoError::UnsupportedSuite(suite));
     }
-    x25519_wrap_with(&KemSecret::generate()?, recipient_pk, info, aad, key)
+    wrap_recovery_epoch_key(suite, recipient_pk, info, aad, key)
 }
 
 /// Wraps `K_e` to the recovery root with an ephemeral scalar derived from
@@ -676,8 +678,8 @@ fn x25519_wrap_with(
     let pk_e = sk_e.public_key();
     let dh = sk_e.diffie_hellman(recipient_pk)?;
     let wrap_key = derive_x25519_wrap_key(&dh, &pk_e, recipient_pk, info)?;
-    // Safe: `wrap_key` seals exactly one plaintext under one `aad`: `sk_e` is either fresh or
-    // (recovery wraps) derived from this very `K_e`, `info` and `aad`.
+    // Safe: `wrap_key` seals exactly one plaintext under one `aad`: `sk_e` is
+    // derived from this very `K_e`, `info` and `aad`.
     let ct = aead_seal_with_nonce(&wrap_key, &[0u8; NONCE_LEN], aad, key.as_bytes())?;
     let mut out = [0u8; WRAP_LEN];
     out[..32].copy_from_slice(pk_e.as_bytes());

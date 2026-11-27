@@ -26,8 +26,9 @@ use crate::blocks::{BlockReader, Blocks};
 use crate::error::{Error, Result};
 
 /// The largest payload a record may carry. A corrupt length prefix can't make
-/// a reader allocate more.
-pub const MAX_RECORD: usize = 16 << 20;
+/// a reader allocate more. Includes a maximum 16 MiB frame body, its 145-byte
+/// header and 64-byte signature; the CLI checks this against the core frame cap.
+pub const MAX_RECORD: usize = 16 * 1024 * 1024 + 209;
 /// The sync marker every record starts with.
 pub const MAGIC: [u8; 8] = *b"DBLG\x02\0\0\0";
 const LEN: usize = 4;

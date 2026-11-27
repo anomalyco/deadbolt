@@ -63,7 +63,7 @@ impl VaultWrite<'_> {
             .base
             .as_ref()
             .and_then(|b| b.meta.frontier.get(&device))
-            .map_or(0, |(seq, _)| seq + 1);
+            .map_or(0, |(seq, _)| seq.saturating_add(1));
         let mut counted = 0u64;
         loop {
             let Some(f) = self

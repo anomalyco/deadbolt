@@ -273,7 +273,12 @@ impl Vault {
         if *by == *author && self.position_of(by).is_some_and(|tip| tip >= seq) {
             return true;
         }
-        if self
+        if self.live_base().is_none_or(|base| {
+            base.meta
+                .frontier
+                .get(author)
+                .is_some_and(|(at, _)| seq <= *at)
+        }) && self
             .member_clocks()
             .get(by)
             .is_some_and(|c| c.get(author) > seq)
