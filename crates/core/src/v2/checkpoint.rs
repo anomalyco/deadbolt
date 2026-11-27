@@ -57,6 +57,8 @@ pub struct CheckpointPayload {
     pub timestamp_ms: u64,
     /// `BLAKE3::keyed_hash(K_mac(epoch), canonical fold at frontier)`.
     pub state_mac: [u8; 32],
+    /// Keyed commitment to the canonical causal metadata.
+    pub meta_mac: [u8; 32],
     /// `BLAKE3` of the encrypted `DBPK` pack file.
     pub pack_hash: [u8; 32],
     /// Byte length of the encrypted `DBPK` pack file.
@@ -79,6 +81,7 @@ impl CheckpointPayload {
         encode_mheads(&mut w, &self.mheads)?;
         w.u64(self.timestamp_ms);
         w.bytes(&self.state_mac);
+        w.bytes(&self.meta_mac);
         w.bytes(&self.pack_hash);
         w.u64(self.pack_len);
         Ok(w.into_bytes())
@@ -99,6 +102,7 @@ impl CheckpointPayload {
             mheads: decode_mheads(&mut r)?,
             timestamp_ms: r.u64()?,
             state_mac: r.array::<32>()?,
+            meta_mac: r.array::<32>()?,
             pack_hash: r.array::<32>()?,
             pack_len: r.u64()?,
         };
@@ -148,6 +152,7 @@ pub fn build_checkpoint(
     mheads: Vec<FrameId>,
     timestamp_ms: u64,
 ) -> Result<CheckpointPayload, PayloadError> {
+    pack.meta.validate(&pack.state)?;
     Ok(CheckpointPayload {
         frontier: pack
             .meta
@@ -158,6 +163,7 @@ pub fn build_checkpoint(
         mheads,
         timestamp_ms,
         state_mac: state_mac(k_mac, &pack.state)?,
+        meta_mac: meta_mac(k_mac, pack)?,
         pack_hash: sealed.hash,
         pack_len: sealed.len,
     })
@@ -247,12 +253,21 @@ pub fn verify_checkpoint<'f>(
     frames: impl IntoIterator<Item = &'f DataFrame>,
 ) -> Result<CheckpointVerdict, PayloadError> {
     let frontier = payload.frontier_map();
-    let Some((ours, covered)) = fold_covered(ctx, frames, &frontier) else {
+    let frames: Vec<_> = frames.into_iter().collect();
+    let Some((ours, covered)) = fold_covered(ctx, frames.iter().copied(), &frontier) else {
         return Ok(CheckpointVerdict::Unverifiable);
     };
     let expected_state_mac = state_mac(k_mac, &ours)?;
     let pack_ok = pack.is_none_or(|(p, seen)| pack_matches(k_mac, payload, p, seen));
-    if expected_state_mac == payload.state_mac && pack_ok {
+    let ids: BTreeSet<_> = covered.iter().map(|f| f.id).collect();
+    let usable = frames.iter().copied().filter(|f| {
+        ids.contains(&f.id) || frontier.get(&f.author).is_none_or(|(seq, _)| f.seq > *seq)
+    });
+    let meta_ok = super::fold::compact_at(ctx, None, usable, Some(&frontier))
+        .ok()
+        .and_then(|ours| meta_mac(k_mac, &ours).ok())
+        .is_some_and(|mac| mac == payload.meta_mac);
+    if expected_state_mac == payload.state_mac && meta_ok && pack_ok {
         return Ok(CheckpointVerdict::Agreed);
     }
     if pack_ok && covered.iter().any(|f| !ctx.counts(f)) {
@@ -278,10 +293,18 @@ pub fn pack_matches(
     seen == payload.pack_commitment() && content_matches(k_mac, payload, pack)
 }
 
+fn meta_mac(k_mac: &[u8; 32], pack: &Pack) -> Result<[u8; 32], PayloadError> {
+    let mut hash = blake3::Hasher::new_keyed(k_mac);
+    hash.update(b"checkpoint metadata");
+    hash.update(&pack.meta.encode()?);
+    Ok(hash.finalize().into())
+}
+
 /// [`pack_matches`] without the file: `pack` holds what `payload` commits to, however it
 /// was sealed (this device re-seals a pack its store couldn't take byte for byte).
 pub fn content_matches(k_mac: &[u8; 32], payload: &CheckpointPayload, pack: &Pack) -> bool {
     pack.meta.validate(&pack.state).is_ok()
         && pack.meta.frontier == payload.frontier_map()
+        && meta_mac(k_mac, pack).is_ok_and(|mac| mac == payload.meta_mac)
         && state_mac(k_mac, &pack.state).is_ok_and(|mac| mac == payload.state_mac)
 }

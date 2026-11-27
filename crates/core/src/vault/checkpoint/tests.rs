@@ -347,3 +347,70 @@ fn supersedes_from_base(a: &Author, d: &Author) {
     let (seq, _) = frontier[&a.id()];
     assert!(clocks[&d.id()].get(&a.id()) > seq);
 }
+
+#[test]
+fn checkpoint_authenticates_metadata_even_when_state_and_sealed_bytes_match() {
+    let a = author(1);
+    let b = author(2);
+    let (mut v, _) = vault(&a, "personal");
+    let consent = b.join_consent(&v.id(), &a.id());
+    v.transact(
+        |w| w.add(&a, b.id(), b.keys().kem_public(), consent),
+        |_, _| Ok::<_, Error>(()),
+    )
+    .unwrap();
+    fill(&mut v, &a, 2);
+    let mut vb = Vault::open(b.keys(), v.frames().cloned()).unwrap();
+    fill(&mut vb, &b, 1);
+    give(&vb, &mut v, a.keys().kem_key());
+    let made = checkpoint(&mut v, &a);
+    let mut tampered = made.pack.clone();
+    // Shrinking a cross-stream clock is still structurally valid, but changes its MAC.
+    let b_seq = tampered.meta.frontier[&b.id()].0;
+    tampered.meta.stream_clocks.insert(
+        b.id(),
+        crate::v2::VectorClock::from_counts([(b.id(), b_seq + 1)]),
+    );
+    assert!(tampered.meta.validate(&tampered.state).is_ok());
+    assert_ne!(tampered.meta, made.pack.meta);
+    assert!(!v.pack_matches(&made.frame, &tampered, &made.sealed));
+    assert_eq!(v.adopt_local_base(tampered), None);
+
+    let mut inflated = made.pack.clone();
+    inflated
+        .meta
+        .stream_clocks
+        .get_mut(&b.id())
+        .unwrap()
+        .raise(a.id(), u64::MAX);
+    assert!(inflated.meta.validate(&inflated.state).is_err());
+    let seq = v.frame(&made.frame).unwrap().header().seq;
+    // Even an unchecked foreign base must not vouch for a checkpoint above its frontier.
+    v.set_base(made.frame, inflated);
+    assert!(!v.acked(&b.id(), &a.id(), seq));
+}
+
+#[test]
+fn maximum_frontier_is_rejected_and_removal_does_not_overflow() {
+    let a = author(1);
+    let b = author(2);
+    let (mut v, _) = vault(&a, "personal");
+    let consent = b.join_consent(&v.id(), &a.id());
+    v.transact(
+        |w| w.add(&a, b.id(), b.keys().kem_public(), consent),
+        |_, _| Ok::<_, Error>(()),
+    )
+    .unwrap();
+    let made = checkpoint(&mut v, &a);
+    let mut bad = made.pack;
+    bad.meta.frontier.insert(b.id(), (u64::MAX, FrameId::ZERO));
+    bad.meta.stream_clocks.insert(
+        b.id(),
+        crate::v2::VectorClock::from_counts([(b.id(), u64::MAX)]),
+    );
+    assert!(bad.meta.validate(&bad.state).is_err());
+    // Exercise the arithmetic defensively even if an internal caller bypasses validation.
+    v.base = Some(bad);
+    let result = v.transact(|w| w.remove(&a, b.id()), |_, _| Ok::<_, Error>(()));
+    assert!(result.is_ok());
+}

@@ -26,10 +26,10 @@ pub use records::{
 pub struct PackMeta {
     /// Highest covered seq (and its frame) per data stream.
     pub frontier: BTreeMap<DeviceId, (u64, FrameId)>,
-    /// Each stream's full clock at its frontier frame, so a post-frontier frame's `dclock`
-    /// rebuilds its exact full clock.
+    /// Each stream's clock projected onto this frontier. Causal dependencies on
+    /// uncompacted frames are retained in `seen_by`, never credited as compacted counts.
     pub stream_clocks: BTreeMap<DeviceId, VectorClock>,
-    /// Exact clock of every frame that still owns a standing register write or tombstone.
+    /// Frontier-bounded clock of every standing register write or tombstone.
     pub dots: BTreeMap<(DeviceId, u64), VectorClock>,
     /// Deleted items and their winning delete.
     pub tombstones: BTreeMap<ItemId, Tombstone>,
@@ -54,8 +54,27 @@ impl PackMeta {
             return Err(PayloadError::Invalid("stream clocks must match frontier"));
         }
         for (author, (seq, _)) in &self.frontier {
-            if self.stream_clocks[author].get(author) != seq.saturating_add(1) {
+            if *seq >= u64::MAX - 1 || self.stream_clocks[author].get(author) != seq + 1 {
                 return Err(PayloadError::Invalid("stream clock must end at frontier"));
+            }
+        }
+        for clock in self.stream_clocks.values().chain(self.dots.values()) {
+            for (author, count) in clock.iter() {
+                if *count == u64::MAX
+                    || self
+                        .frontier
+                        .get(author)
+                        .is_none_or(|(seq, _)| *count > seq + 1)
+                {
+                    return Err(PayloadError::Invalid("clock above frontier"));
+                }
+            }
+        }
+        for ((author, seq), clock) in &self.dots {
+            if self.frontier.get(author).is_none_or(|(f, _)| seq > f)
+                || clock.get(author) != seq.saturating_add(1)
+            {
+                return Err(PayloadError::Invalid("invalid dot clock"));
             }
         }
         for (author, seq) in state.dots() {
@@ -70,6 +89,9 @@ impl PackMeta {
             return Err(PayloadError::Invalid("tombstones disagree with state"));
         }
         for (key, thresholds) in &self.seen_by {
+            if key.1 >= u64::MAX - 1 {
+                return Err(PayloadError::Invalid("invalid seen-by sequence"));
+            }
             let above = self.frontier.get(&key.0).is_none_or(|(f, _)| key.1 > *f);
             if !(self.dots.contains_key(key) || above) || thresholds.is_empty() {
                 return Err(PayloadError::Invalid(
@@ -83,6 +105,13 @@ impl PackMeta {
             }
         }
         Ok(())
+    }
+
+    /// Canonical metadata bytes authenticated by the checkpoint.
+    pub fn encode(&self) -> Result<Vec<u8>, PayloadError> {
+        let mut w = Writer::new();
+        self.encode_into(&mut w)?;
+        Ok(w.into_bytes())
     }
 
     fn encode_into(&self, w: &mut Writer) -> Result<(), PayloadError> {
