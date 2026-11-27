@@ -243,7 +243,23 @@ pub fn resolve<'a>(
     }
 
     let structural_lineage = compute_recovery_lineage(vault, &nodes);
-    let structural = authorize(vault, &nodes, &[], &structural_lineage);
+    let unavailable_recipients: BTreeSet<_> = data_fork_seq
+        .keys()
+        .copied()
+        .chain(
+            member_fork_seq
+                .keys()
+                .filter(|id| structural_lineage.contains(id))
+                .copied(),
+        )
+        .collect();
+    let structural = authorize(
+        vault,
+        &nodes,
+        &[],
+        &structural_lineage,
+        &unavailable_recipients,
+    );
     let genesis_creator_forked = nodes.iter().any(|n| {
         n.frame.header().seq == 0
             && matches!(
@@ -253,7 +269,13 @@ pub fn resolve<'a>(
             && member_fork_seq.get(&n.frame.header().author) == Some(&0)
     });
     let mutual_removals = find_mutual_removals(&nodes, &structural, &structural_lineage);
-    let (chosen, authority) = choose_removals(vault, &nodes, structural, &structural_lineage);
+    let (chosen, authority) = choose_removals(
+        vault,
+        &nodes,
+        structural,
+        &structural_lineage,
+        &unavailable_recipients,
+    );
 
     // A retired root's handoff is a non-void frame, so any later `Member` fork of that root is
     // above its retire seq and cannot undo it; recovery roots never write counted data either.
@@ -430,6 +452,7 @@ fn authorize(
     nodes: &[DagNode<'_>],
     chosen: &[usize],
     known_lineage: &BTreeSet<DeviceId>,
+    unavailable_recipients: &BTreeSet<DeviceId>,
 ) -> Authority {
     let mut state = Authority::default();
     let mut cuts: BTreeMap<DeviceId, Vec<usize>> = BTreeMap::new();
@@ -479,6 +502,35 @@ fn authorize(
             .is_some_and(|&ret_idx| ret_idx != idx && !nodes[ret_idx].saw(idx));
         if retired || !state.admitted_before(&author, idx, nodes) {
             continue;
+        }
+        // A rotation may leave out only recipients that have left in its causal past,
+        // plus the principal this very operation removes or replaces.
+        if let Some(rot) = &body.rotate {
+            let leaving = match &body.op {
+                Some(MemberOp::Remove { device, .. }) => Some(*device),
+                Some(MemberOp::RotateRecovery { .. }) => Some(author),
+                _ => None,
+            };
+            let covered = |device: &DeviceId| rot.wraps.iter().any(|(id, _)| id == device);
+            let missing = state.admissions.iter().any(|(device, adds)| {
+                Some(*device) != leaving
+                    && !unavailable_recipients.contains(device)
+                    && adds.iter().any(|&admit| node.saw(admit))
+                    && !state
+                        .retired_roots
+                        .get(device)
+                        .is_some_and(|&ret| node.saw(ret))
+                    && !state
+                        .removals
+                        .iter()
+                        .any(|&r| node.saw(r) && remove_target(nodes[r].frame) == Some(*device))
+                    && !covered(device)
+            });
+            let missing_new_root = matches!(&body.op,
+                Some(MemberOp::RotateRecovery { new, .. }) if !covered(new));
+            if missing || missing_new_root {
+                continue;
+            }
         }
         match &body.op {
             Some(MemberOp::Create { .. }) => {}
@@ -532,6 +584,7 @@ fn choose_removals(
     nodes: &[DagNode<'_>],
     structural: Authority,
     structural_lineage: &BTreeSet<DeviceId>,
+    unavailable_recipients: &BTreeSet<DeviceId>,
 ) -> (Vec<usize>, Authority) {
     let mut candidates: Vec<usize> = structural.removals.iter().copied().collect();
     candidates.sort_by_key(|&idx| {
@@ -576,7 +629,13 @@ fn choose_removals(
             continue;
         }
         chosen.push(candidate);
-        let trial = authorize(vault, nodes, &chosen, structural_lineage);
+        let trial = authorize(
+            vault,
+            nodes,
+            &chosen,
+            structural_lineage,
+            unavailable_recipients,
+        );
         let valid = chosen.iter().all(|&winner| {
             let Some(w_victim) = remove_target(nodes[winner].frame) else {
                 return false;

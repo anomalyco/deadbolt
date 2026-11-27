@@ -72,7 +72,7 @@ const LOW_ORDER_X25519_POINTS: [[u8; 32]; 7] = [
 ];
 
 #[test]
-fn x25519_wrap_round_trip_and_non_determinism() {
+fn x25519_wrap_round_trip_and_context_bound_determinism() {
     let recipient = KemSecret::from_bytes(&[0x42; 32]);
     let key = EpochKey::from_bytes([0x99; 32]);
     let info = b"deadbolt/v2 wrap test";
@@ -81,7 +81,7 @@ fn x25519_wrap_round_trip_and_non_determinism() {
     let w1 = wrap_epoch_key(SUITE_X25519_WRAP, &recipient.public_key(), info, aad, &key).unwrap();
     let w2 = wrap_epoch_key(SUITE_X25519_WRAP, &recipient.public_key(), info, aad, &key).unwrap();
     assert_eq!(w1.len(), WRAP_LEN);
-    assert_ne!(w1, w2, "wraps must use fresh ephemeral keys");
+    assert_eq!(w1, w2, "wraps must be checkable by every epoch key holder");
 
     let opened1 = unwrap_epoch_key(SUITE_X25519_WRAP, &recipient, info, aad, &w1).unwrap();
     let opened2 = unwrap_epoch_key(SUITE_X25519_WRAP, &recipient, info, aad, &w2).unwrap();

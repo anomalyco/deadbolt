@@ -509,7 +509,17 @@ pub(super) fn dummy_rotate(parents: Vec<EpochId>, recipient: DeviceId, tag: u8) 
         parents,
         commit: [tag; 32],
         back: Vec::new(),
-        wraps: vec![(recipient, [tag; WRAP_LEN])],
+        // These fixtures exercise authority ordering, not recipient selection.
+        wraps: pool()
+            .devices
+            .iter()
+            .map(DeviceKeys::device_id)
+            .chain(pool().roots.iter().map(RecoverySecret::recovery_id))
+            .chain([recipient])
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|id| (id, [tag; WRAP_LEN]))
+            .collect(),
     }
 }
 
