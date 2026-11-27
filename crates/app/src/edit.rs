@@ -173,6 +173,7 @@ impl App {
         if !self.edits() || !self.loaded || !self.leave_edit() {
             return;
         }
+        self.health.pending_fix = None;
         self.edit.delete = None;
         self.edit.form = Some(Form::new("login", "", None));
         self.search.focused = false;

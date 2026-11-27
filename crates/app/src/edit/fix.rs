@@ -48,7 +48,7 @@ impl App {
     ///   marks `form.fixing = true`, focuses the password field, generates a
     ///   site-rule-aware candidate, reveals it, and copies it to the concealed clipboard.
     pub(crate) fn open_fix_form(&mut self, kind: Option<FindingKind>) {
-        if self.deleting() {
+        if !self.edits() || self.editing() {
             return;
         }
         let Some(item) = self

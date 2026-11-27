@@ -274,13 +274,9 @@ impl App {
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
             Done::SshGenerated { seq, result } => self.on_ssh_generated(seq, result),
             Done::FileSaved(result) => match result {
-                Ok(name) => {
-                    if !self.accepts_vault_replies() {
-                        return;
-                    }
-                    self.notice = Some(format!("Saved {name}"));
-                }
                 Err(failure) if failure.locked() => self.on_locked(tx),
+                _ if !self.accepts_vault_replies() => {}
+                Ok(name) => self.notice = Some(format!("Saved {name}")),
                 Err(failure) => self.notice = Some(crate::onboarding::sentence(&failure.message)),
             },
             Done::Activity { seq, result } => self.on_activity(seq, result, tx),

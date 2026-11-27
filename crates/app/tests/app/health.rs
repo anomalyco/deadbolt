@@ -175,6 +175,30 @@ fn security_view_navigates_tabs_opens_change_urls_ignores_and_runs_fix_flow() {
 }
 
 #[test]
+fn late_fix_read_preserves_a_new_item() {
+    let mut r = rig("vault-risk");
+    let item = r.rt.state.detail.clone().unwrap();
+    r.rt.update(|s, tx| {
+        s.select(None);
+        s.fix_finding(&item.id, Some(FindingKind::Breached), tx);
+    });
+    let seq = r.take_get(Some(&item.id));
+    assert!(r.rt.state.health.pending_fix.is_some());
+    r.new_item();
+    r.fill("username", "new-account");
+    let generating = r.take_generate();
+    assert!(r.rt.state.health.pending_fix.is_none());
+    r.reply(Done::Item {
+        seq,
+        result: Ok(Values::new(item)),
+    });
+    assert!(r.rt.state.edit.form.as_ref().unwrap().is_new());
+    assert_eq!(r.value("username"), "new-account");
+    assert_eq!(r.rt.state.generating(), Some(generating));
+    assert!(!r.sent().iter().any(|j| matches!(j, Job::Generate { .. })));
+}
+
+#[test]
 fn navigating_or_a_failed_read_cancels_a_pending_fix() {
     for cancel in ["selection", "pane", "failure"] {
         let mut r = rig("vault-risk");
