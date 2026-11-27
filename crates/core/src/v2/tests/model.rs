@@ -66,19 +66,32 @@ struct RefGraph<'a> {
     retired: BTreeMap<DeviceId, usize>,
 }
 
+type OuterForks<'a> = (&'a BTreeMap<DeviceId, u64>, &'a BTreeMap<DeviceId, u64>);
+
 impl<'a> RefGraph<'a> {
     fn build(vault: VaultId, all_frames: &'a [Frame], proofs: &[FraudProof]) -> Self {
-        Self::build_checked(vault, &all_frames.iter().collect::<Vec<_>>(), proofs, None)
+        Self::build_checked(
+            vault,
+            &all_frames.iter().collect::<Vec<_>>(),
+            proofs,
+            None,
+            None,
+        )
     }
 
     fn build_checked(
         vault: VaultId,
         all_frames: &[&'a Frame],
         proofs: &[FraudProof],
+        outer_forks: Option<OuterForks<'_>>,
         checked: Option<&BTreeMap<FrameId, bool>>,
     ) -> Self {
-        let mut member_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
-        let mut data_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
+        let mut member_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+            .map(|(member, _)| member.clone())
+            .unwrap_or_default();
+        let mut data_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+            .map(|(_, data)| data.clone())
+            .unwrap_or_default();
 
         // Scan explicit proofs + all frame pairs directly (no detect_fraud_in_frames call).
         for p in proofs {
@@ -240,18 +253,35 @@ impl<'a> RefGraph<'a> {
                         _ => true,
                     };
                     let causal: Vec<_> = past[i].iter().map(|&j| frames[j]).collect();
-                    let causal = Self::build_checked(vault, &causal, &[], Some(&checked));
-                    let state = causal.solve();
-                    covers_new
-                        && state
+                    let recipients = |state: RefState| {
+                        state
                             .devices
+                            .into_iter()
+                            .chain(state.active_recovery)
+                            .collect::<BTreeSet<_>>()
+                    };
+                    let unforked = recipients(
+                        Self::build_checked(vault, &causal, &[], None, Some(&checked)).solve(),
+                    );
+                    let with_forks = (!member_fork_seq.is_empty() || !data_fork_seq.is_empty())
+                        .then(|| {
+                            recipients(
+                                Self::build_checked(
+                                    vault,
+                                    &causal,
+                                    &[],
+                                    Some((&member_fork_seq, &data_fork_seq)),
+                                    Some(&checked),
+                                )
+                                .solve(),
+                            )
+                        });
+                    covers_new
+                        && unforked
                             .iter()
-                            .chain(state.active_recovery.iter())
+                            .filter(|id| with_forks.as_ref().is_none_or(|f| f.contains(id)))
                             .all(|id| {
                                 Some(*id) == leaving
-                                    || data_fork_seq.contains_key(id)
-                                    || (member_fork_seq.contains_key(id)
-                                        && causal.lineage.contains(id))
                                     || rot.wraps.iter().any(|(recipient, _)| recipient == id)
                             })
                 } else {

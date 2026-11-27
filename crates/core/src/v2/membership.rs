@@ -171,14 +171,17 @@ pub fn resolve<'a>(
     frames: impl IntoIterator<Item = &'a Frame>,
     fraud_proofs: impl IntoIterator<Item = &'a FraudProof>,
 ) -> ResolvedMembership {
-    resolve_checked(vault, frames, fraud_proofs, None)
+    resolve_checked(vault, frames, fraud_proofs, None, None)
 }
+
+type OuterForks<'a> = (&'a BTreeMap<DeviceId, u64>, &'a BTreeMap<DeviceId, u64>);
 
 // A causal sub-view reuses coverage decisions already made in topological order.
 fn resolve_checked<'a>(
     vault: &VaultId,
     frames: impl IntoIterator<Item = &'a Frame>,
     fraud_proofs: impl IntoIterator<Item = &'a FraudProof>,
+    outer_forks: Option<OuterForks<'_>>,
     checked: Option<&BTreeMap<FrameId, bool>>,
 ) -> ResolvedMembership {
     let all_frames: Vec<&'a Frame> = frames
@@ -186,8 +189,12 @@ fn resolve_checked<'a>(
         .filter(|f| f.header().vault == *vault)
         .collect();
 
-    let mut member_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
-    let mut data_fork_seq: BTreeMap<DeviceId, u64> = BTreeMap::new();
+    let mut member_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+        .map(|(member, _)| member.clone())
+        .unwrap_or_default();
+    let mut data_fork_seq: BTreeMap<DeviceId, u64> = outer_forks
+        .map(|(_, data)| data.clone())
+        .unwrap_or_default();
     let mut explicit_member_fork_ids: BTreeMap<DeviceId, BTreeSet<FrameId>> = BTreeMap::new();
 
     let implicit_proofs = detect_fraud_in_frames(all_frames.iter().copied());
@@ -422,16 +429,8 @@ fn rotation_coverage(
                     Some(MemberOp::RotateRecovery { .. }) => Some(author),
                     _ => None,
                 };
-                let lineage = if member_forks.is_empty() {
-                    BTreeSet::new()
-                } else {
-                    compute_recovery_lineage(vault, &nodes[..idx], &ok)
-                };
                 let covered = |device: &DeviceId| {
-                    Some(*device) == leaving
-                        || data_forks.contains_key(device)
-                        || (member_forks.contains_key(device) && lineage.contains(device))
-                        || rot.wraps.iter().any(|(id, _)| id == device)
+                    Some(*device) == leaving || rot.wraps.iter().any(|(id, _)| id == device)
                 };
                 let new_covered = match &body.op {
                     Some(MemberOp::Create { .. }) => is_genesis(vault, node.frame),
@@ -455,11 +454,30 @@ fn rotation_coverage(
                 });
                 new_covered
                     && (covers_all_admissions || {
-                        // Keep rejected ancestors as chain links, but deny them authority via
-                        // checked. Detect Member forks only inside this causal sub-DAG.
-                        let past = (0..idx).filter(|&j| node.saw(j)).map(|j| nodes[j].frame);
-                        let membership = resolve_checked(vault, past, [], Some(&checked));
-                        membership.eligible_recipients().iter().all(covered)
+                        // Keep rejected ancestors as chain links, but deny them authority.
+                        // Neither a past removal nor a fork-voided admission requires a wrap.
+                        let past: Vec<_> = (0..idx)
+                            .filter(|&j| node.saw(j))
+                            .map(|j| nodes[j].frame)
+                            .collect();
+                        let unforked =
+                            resolve_checked(vault, past.iter().copied(), [], None, Some(&checked))
+                                .eligible_recipients();
+                        let with_forks =
+                            (!member_forks.is_empty() || !data_forks.is_empty()).then(|| {
+                                resolve_checked(
+                                    vault,
+                                    past.iter().copied(),
+                                    [],
+                                    Some((member_forks, data_forks)),
+                                    Some(&checked),
+                                )
+                                .eligible_recipients()
+                            });
+                        unforked
+                            .iter()
+                            .filter(|id| with_forks.as_ref().is_none_or(|f| f.contains(id)))
+                            .all(covered)
                     })
             }
         };

@@ -818,3 +818,87 @@ fn concurrent_removal_and_recovery_handoff_keep_their_causal_recipients() {
     assert_eq!(got.active_recovery, Some(r1));
     assert!(!got.is_active_device(&c.device_id()));
 }
+
+#[test]
+fn a_fork_voided_admission_does_not_block_an_honest_removal() {
+    let p = pool();
+    let (a, b, d, x) = (&p.devices[0], &p.devices[1], &p.devices[2], &p.devices[3]);
+    let root = p.roots[0].recovery_id();
+    let mut frames = coverage_base();
+    let tip = frames.last().unwrap().id();
+    let epoch = EpochId::from_frame_id(frames[0].id());
+    let add = build_add_frame(
+        a.sign_key(),
+        p.vault,
+        &resolve(&p.vault, &frames, &[]),
+        0,
+        FrameId::ZERO,
+        vec![tip],
+        x.device_id(),
+        x.kem_public(),
+        sign_join_consent(x, &p.vault, &a.device_id()),
+        None,
+    )
+    .unwrap();
+    let rewrap = Rewrap {
+        epoch,
+        suite: SUITE_X25519_WRAP,
+        wraps: vec![(x.device_id(), [1; WRAP_LEN])],
+    };
+    let witnessed = Frame::sign_member(
+        d.sign_key(),
+        p.vault,
+        0,
+        FrameId::ZERO,
+        MemberBody {
+            deps: vec![add.id()],
+            op: Some(MemberOp::Rewrap(rewrap.clone())),
+            rotate: None,
+        },
+    )
+    .unwrap();
+    frames.extend([add.clone(), witnessed.clone()]);
+    let before = resolve(&p.vault, &frames, &[]);
+    assert!(before.is_active_device(&x.device_id()));
+    assert!(before.authorized_frames.contains(&witnessed.id()));
+    let mut fork_body = add.member_body().unwrap().clone();
+    if let Some(MemberOp::Add { rewrap: offer, .. }) = &mut fork_body.op {
+        *offer = Some(rewrap);
+    }
+    let sibling = Frame::sign_member(a.sign_key(), p.vault, 0, FrameId::ZERO, fork_body).unwrap();
+    let removal = Frame::sign_member(
+        d.sign_key(),
+        p.vault,
+        1,
+        witnessed.id(),
+        MemberBody {
+            deps: vec![witnessed.id()],
+            op: Some(MemberOp::Remove {
+                device: a.device_id(),
+                last_seen_seq: None,
+            }),
+            rotate: Some(covered_rotate([root, b.device_id(), d.device_id()], 2)),
+        },
+    )
+    .unwrap();
+    // D's chain still includes Add(X), but it does not cite the sibling.
+    frames.push(removal.clone());
+    for explicit_proof in [false, true] {
+        let mut view = frames.clone();
+        let proofs = if explicit_proof {
+            vec![FraudProof::from_frames(&add, &sibling).unwrap()]
+        } else {
+            view.push(sibling.clone());
+            vec![]
+        };
+        let got = resolve(&p.vault, &view, &proofs);
+        assert!(!got.is_active_device(&x.device_id()));
+        assert!(got.authorized_frames.contains(&removal.id()));
+        assert!(!got.is_active_device(&a.device_id()));
+        assert!(got.removed.contains_key(&a.device_id()));
+        assert_matches_ref(p.vault, &view, &proofs);
+        for seed in 0..4 {
+            assert_eq!(resolve(&p.vault, &shuffled(&view, seed), &proofs), got);
+        }
+    }
+}
