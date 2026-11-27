@@ -32,6 +32,11 @@ pub struct Status {
     /// Whether Touch ID is enabled on this store, but its enrolled slot was
     /// reset (expired after 14 days, fingerprint set changed, or passphrase changed).
     pub touch_id_reset: bool,
+    /// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+    /// Whether the store is still a v1 `store.redb`, which the next unlock
+    /// moves to v2 (`initialized` is true meanwhile).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub v1_store: bool,
     /// How the daemon sees the client asking (`deadbolt debug whoami`).
     pub caller: CallerInfo,
     /// A newer Deadbolt for this install, from the daemon's background

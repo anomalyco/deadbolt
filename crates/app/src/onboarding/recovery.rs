@@ -23,12 +23,23 @@ pub struct Recovery {
     pub vault: String,
     /// The vault's id, shortened for reading out.
     pub id: String,
-    kit: RecoveryKit,
+    pub(super) kit: RecoveryKit,
+    /// DELETABLE(v1-migrate): with the two below. The kits of the other
+    /// vaults an upgrade moved, shown after this one.
+    pub(super) then: Vec<Recovery>,
+    /// Which of how many moved vaults this is, when an upgrade moved it.
+    pub(super) moved: Option<(usize, usize)>,
 }
 
 impl Recovery {
     pub fn new(vault: String, id: String, kit: RecoveryKit) -> Recovery {
-        Recovery { vault, id, kit }
+        Recovery {
+            vault,
+            id,
+            kit,
+            then: Vec::new(),
+            moved: None,
+        }
     }
 
     /// The words in order, for the grid.
@@ -108,6 +119,8 @@ impl App {
                     vault,
                     id: super::short(&id).to_owned(),
                     kit,
+                    then: Vec::new(),
+                    moved: None,
                 }));
             }
             step => o.step = step,
@@ -128,7 +141,14 @@ impl App {
     /// "I've saved these words": wipe the words now, then open the vault.
     pub fn save_recovery(&mut self, tx: &mut rune::Tx) {
         let o = &mut self.onboarding;
-        if !matches!(o.step, Step::Recovery(_)) {
+        let Step::Recovery(recovery) = &mut o.step else {
+            return;
+        };
+        // DELETABLE(v1-migrate): an upgrade shows each moved vault's words.
+        if let Some(next) = recovery.take_next() {
+            o.forget_recovery_copy();
+            o.step = Step::Recovery(next);
+            tx.animated();
             return;
         }
         // Dropping the step drops the kit, and with it the only copy of the
@@ -192,8 +212,13 @@ pub(super) fn recovery(s: &App, k: &Kit, r: &Recovery) -> Paged {
         .copied_kit
         .as_ref()
         .is_some_and(|c| c.showing(s.clock));
-    let about = "These 24 words are the only way to recover your vault if you \
-                 lose every device. Deadbolt won’t show them again.";
+    let about = match r.moved {
+        // DELETABLE(v1-migrate)
+        Some((n, of)) => super::upgrade::about(n, of),
+        None => "These 24 words are the only way to recover your vault if you \
+                 lose every device. Deadbolt won’t show them again."
+            .into(),
+    };
     let mut panel = col()
         .key("panel")
         .w(PANEL_W)

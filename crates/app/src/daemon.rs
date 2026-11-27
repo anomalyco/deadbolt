@@ -182,6 +182,12 @@ pub enum Done {
     Status(Option<Status>),
     /// The status right after unlocking.
     Unlocked(Result<Status, Failure>),
+    /// DELETABLE(v1-migrate): an unlock that moved a v1 store to v2, with
+    /// each moved vault's new recovery kit.
+    Upgraded {
+        status: Box<Status>,
+        migrated: Vec<deadbolt_proto::daemon::MigratedVault>,
+    },
     /// The outcome of a Touch ID unlock attempt, plus the fresh status when it
     /// failed so the lock screen sees if the biometric slot was reset.
     UnlockedBiometric(Result<Status, (Failure, Option<Box<Status>>)>),

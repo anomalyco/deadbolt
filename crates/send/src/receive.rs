@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::{
     Bundle, MAX_SEALED_LEN, SEND_ALPN, SendTicket, close,
     error::{Error, Result},
-    open, proof, status,
+    proof, status,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -135,7 +135,9 @@ pub async fn receive(
     progress(Progress::Decrypting);
     // The sender enforces the expiry it sealed into the header; this clock may
     // not agree with its clock.
-    let (_header, plaintext) = open(&ticket.key, &sealed)?;
+    // DELETABLE(v1-send): back to `open(&ticket.key, &sealed)?` once existing
+    // v1 users have upgraded to v2; until then an older sender's bundle opens.
+    let plaintext = crate::v1::open_served(&ticket.key, &sealed)?;
     Bundle::decode(&plaintext)
 }
 

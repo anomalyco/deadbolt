@@ -63,7 +63,10 @@ impl Daemon {
         // inside a run reaching for a secret) is an entry, its own runs'
         // registrations aren't.
         let mut recorded = true;
-        let screened = match super::macos_autofill::check_access(socket, &caller, &command) {
+        // DELETABLE(v1-migrate): the `and_then`.
+        let access = super::macos_autofill::check_access(socket, &caller, &command)
+            .and_then(|()| self.refuse_autofill_upgrade(&caller, &command));
+        let screened = match access {
             Err(error) => Some(Err(error)),
             Ok(()) => self.screen(kernel.as_ref(), &command).inspect(|screened| {
                 recorded = screened.is_err();

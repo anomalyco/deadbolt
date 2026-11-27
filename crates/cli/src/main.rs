@@ -14,6 +14,8 @@ mod health;
 mod import;
 mod items;
 mod mcp;
+// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+mod migrate;
 mod prompt;
 mod receive;
 mod recovery;
@@ -119,6 +121,17 @@ enum Commands {
         /// 8h, 1d, never). Default: `unlock_timeout` in config.toml, else never.
         #[arg(long)]
         timeout: Option<String>,
+    },
+    /// DELETABLE(v1-migrate): remove once existing v1 users have migrated to v2.
+    ///
+    /// Move this device's v1 vaults (store.redb) to v2, under the same
+    /// passphrase. Any unlock does this too. Shows each vault's new recovery
+    /// kit, and keeps store.redb as store.redb.v1.bak.
+    #[cfg(feature = "v1-migrate")]
+    Migrate {
+        /// Print {migrated: [{vault, name, default, items, recovery_kit}], backup} as one JSON line.
+        #[arg(long)]
+        json: bool,
     },
     /// Lock the store.
     Lock,
@@ -579,6 +592,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     }
     caller::install();
     match cli.command {
+        // DELETABLE(v1-migrate)
+        #[cfg(feature = "v1-migrate")]
+        Commands::Migrate { json } => {
+            if vault.is_some() {
+                bail!("--vault does not apply to this command");
+            }
+            migrate::run(&paths, json, from_stdin).await?;
+        }
         Commands::Send(args) => return send::send(&paths, args, vault, from_stdin).await,
         Commands::Receive(args) => return receive::run(args).await,
         Commands::Mcp => mcp::run(&paths).await?,
@@ -698,6 +719,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             json,
         } => {
             let status = client::ensure_running(&paths).await?;
+            // DELETABLE(v1-migrate): never a new vault over a v1 store.
+            #[cfg(feature = "v1-migrate")]
+            if status.v1_store {
+                bail!(daemon::migrate_v1::FOUND_V1);
+            }
             if !status.initialized {
                 setup(&paths, device_name, from_stdin).await?;
             }
@@ -855,7 +881,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 println!("unlocked");
                 return Ok(ExitCode::SUCCESS);
             }
-            unlock(&paths, timeout_secs, from_stdin).await?;
+            let migrated = unlock(&paths, timeout_secs, from_stdin).await?;
+            // DELETABLE(v1-migrate)
+            migrate::print(&migrated, false);
             println!("unlocked");
         }
         Commands::Status { json } => remote::status(&paths, vault, json, from_stdin).await?,
@@ -922,14 +950,20 @@ async fn setup(paths: &Paths, device_name: Option<String>, from_stdin: bool) -> 
     Ok(())
 }
 
-async fn unlock(paths: &Paths, timeout_secs: Option<u64>, from_stdin: bool) -> Result<()> {
+/// Unlocks, returning the vaults it moved from a v1 store first
+/// (DELETABLE(v1-migrate): back to `Result<()>` with it).
+async fn unlock(
+    paths: &Paths,
+    timeout_secs: Option<u64>,
+    from_stdin: bool,
+) -> Result<Vec<crate::protocol::MigratedVault>> {
     if can_try_touch_id(from_stdin)
         && let Some(status) = client::status(paths).await
         && !status.unlocked
     {
         if status.touch_id_ready {
             match client::simple(paths, Command::UnlockBiometric { timeout_secs }).await {
-                Ok(_) => return Ok(()),
+                Ok(_) => return Ok(Vec::new()),
                 Err(err) => {
                     if std::io::stderr().is_terminal() {
                         if let Some(after) = client::status(paths).await
@@ -952,7 +986,7 @@ async fn unlock(paths: &Paths, timeout_secs: Option<u64>, from_stdin: bool) -> R
         }
     }
     let passphrase = prompt::passphrase(from_stdin, false)?;
-    client::simple(
+    let reply = client::simple(
         paths,
         Command::Unlock {
             passphrase,
@@ -960,7 +994,7 @@ async fn unlock(paths: &Paths, timeout_secs: Option<u64>, from_stdin: bool) -> R
         },
     )
     .await?;
-    Ok(())
+    Ok(migrate::migrated(reply))
 }
 
 /// Touch ID is tried on interactive terminals when the user did not supply a
@@ -989,7 +1023,9 @@ async fn request_with(
 ) -> Result<Reply> {
     match client::call(paths, command.clone(), &mut *on_event).await {
         Err(error) if client::code(&error) == Some(ErrorCode::Locked) && prompt::interactive() => {
-            unlock(paths, None, from_stdin).await?;
+            let migrated = unlock(paths, None, from_stdin).await?;
+            // DELETABLE(v1-migrate): on stderr, beside this command's output.
+            migrate::print(&migrated, true);
             client::call(paths, command, on_event).await
         }
         result => result,

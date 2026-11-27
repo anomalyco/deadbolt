@@ -178,11 +178,8 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 passphrase,
                 timeout_secs: None,
             };
-            Done::Unlocked(
-                status_after(paths, Some(launch), command, false)
-                    .await
-                    .map_err(|(f, _)| f),
-            )
+            // DELETABLE(v1-migrate): back to `status_after`, as Touch ID.
+            crate::onboarding::upgrade::unlock(paths, launch, command).await
         }
         Job::UnlockBiometric => {
             let command = Command::UnlockBiometric { timeout_secs: None };

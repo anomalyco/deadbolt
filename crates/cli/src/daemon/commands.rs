@@ -82,8 +82,13 @@ impl Daemon {
                 passphrase,
                 timeout_secs,
             } => {
-                self.unlock(passphrase, timeout_secs).await?;
-                Ok(Reply::Done)
+                let migrated = self.unlock(passphrase, timeout_secs).await?;
+                // DELETABLE(v1-migrate): back to `Reply::Done` alone.
+                Ok(if migrated.is_empty() {
+                    Reply::Done
+                } else {
+                    Reply::Unlocked { migrated }
+                })
             }
             Command::UnlockBiometric { timeout_secs } => {
                 let outcome = tokio::select! {

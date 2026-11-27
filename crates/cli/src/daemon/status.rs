@@ -54,6 +54,12 @@ impl Daemon {
         let Some(session) = guard.as_mut() else {
             return Err(if crate::disk::is_initialized(&self.paths.data) {
                 fail(ErrorCode::Locked, "locked: run `deadbolt unlock`")
+            } else if super::v1_store(&self.paths.data) {
+                // DELETABLE(v1-migrate)
+                fail(
+                    ErrorCode::Locked,
+                    "locked: run `deadbolt unlock` to upgrade your v1 vaults to v2",
+                )
             } else {
                 fail(
                     ErrorCode::NotInitialized,
@@ -137,7 +143,9 @@ impl Daemon {
     }
 
     pub(super) fn status(&self) -> Status {
-        let initialized = crate::disk::is_initialized(&self.paths.data);
+        // DELETABLE(v1-migrate): a v1 store counts as set up (and locked).
+        let v1_store = super::v1_store(&self.paths.data);
+        let initialized = crate::disk::is_initialized(&self.paths.data) || v1_store;
         let touch_id_available = self.is_touch_id_available();
         let touch_id_cfg = Config::load(&self.paths.config)
             .map(|c| c.touch_id())
@@ -185,6 +193,7 @@ impl Daemon {
             touch_id_enabled,
             touch_id_ready,
             touch_id_reset,
+            v1_store,
             // Filled in for the connection that asked (`handle`).
             caller: caller::nobody(),
             update: self
