@@ -53,10 +53,11 @@ impl Engine {
             },
         );
         let made = self.check_append(result)?;
-        self.store.install_pack(vault, &made.sealed)?;
+        let installed = self.store.install_pack(vault, &made.sealed);
         if let Some(v) = self.vaults.get_mut(&vault) {
             v.set_base(made.frame, made.pack);
         }
+        installed?;
         Ok(made.frame)
     }
 

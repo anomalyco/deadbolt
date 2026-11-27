@@ -441,7 +441,9 @@ pub fn missing_for<S: State>(
     if hello.v != 1 {
         return Err(Error::Protocol("unsupported sync envelope").into());
     }
-    s.learn(peer, &hello.name, hello.addr, hello.peers)?;
+    if s.vaults().any(|v| v.is_member(peer)) {
+        s.learn(peer, &hello.name, hello.addr, hello.peers)?;
+    }
     let me = s.device_id();
     let mut logs = VecDeque::new();
     let mut data = Vec::new();
