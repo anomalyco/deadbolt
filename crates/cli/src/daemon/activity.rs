@@ -72,16 +72,10 @@ impl Daemon {
                 recorded = screened.is_err();
             }),
         };
+        let can_show_kits = caller.class != CallerClass::AutoFill;
         let mut result = match screened {
             Some(result) => result,
             None => match command {
-                Command::Unlock {
-                    passphrase,
-                    timeout_secs,
-                } if caller.class == CallerClass::AutoFill => self
-                    .unlock_for(passphrase, timeout_secs, false)
-                    .await
-                    .map(|migrated| Reply::Unlocked { migrated }),
                 command @ Command::ActivityReport { .. } => self.report(&caller, command),
                 Command::Resolve { refs, purpose } => self.resolve(&caller, &refs, purpose),
                 command @ (Command::Health { .. }
@@ -90,11 +84,11 @@ impl Daemon {
                 // Exporting an SSH private key asks the user each time.
                 command @ Command::ItemGet { .. } => {
                     match self.verify_ssh_export(&caller, &command, conv).await {
-                        Ok(()) => self.clone().dispatch(command, conv).await,
+                        Ok(()) => self.clone().dispatch(command, conv, can_show_kits).await,
                         Err(error) => Err(error),
                     }
                 }
-                command => self.clone().dispatch(command, conv).await,
+                command => self.clone().dispatch(command, conv, can_show_kits).await,
             },
         };
         ledger::bound_caller(&mut caller);

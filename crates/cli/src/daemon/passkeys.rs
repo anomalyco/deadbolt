@@ -691,7 +691,7 @@ pub(super) mod tests {
             };
             *f.daemon.biometric_hook.lock().unwrap() =
                 Some(Arc::new(|_| Err(biometric::UnlockError::Cancelled)));
-            assert!(f.daemon.clone().run(remove(), &conv).await.is_err());
+            assert!(f.daemon.clone().run(remove(), &conv, true).await.is_err());
             assert_eq!(count(&f.daemon), 1);
             let key = f.key;
             let calls = Arc::new(AtomicUsize::new(0));
@@ -700,7 +700,7 @@ pub(super) mod tests {
                 seen.fetch_add(1, Ordering::SeqCst);
                 Ok(Zeroizing::new(key))
             }));
-            f.daemon.clone().run(remove(), &conv).await.unwrap();
+            f.daemon.clone().run(remove(), &conv, true).await.unwrap();
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(count(&f.daemon), 0);
         }
@@ -747,6 +747,7 @@ pub(super) mod tests {
                             query: vec![made.passkey.item],
                         },
                         &conv,
+                        true,
                     )
                     .await;
                 assert_eq!(removed.is_err(), vanished);

@@ -25,9 +25,10 @@ impl Daemon {
         self: Arc<Self>,
         command: Command,
         conv: &Conversation,
+        can_show_kits: bool,
     ) -> Result<Reply> {
         let mut span = Span::root("daemon.command").attr("command", command.name());
-        let result = self.dispatch_command(command, conv).await;
+        let result = self.dispatch_command(command, conv, can_show_kits).await;
         match &result {
             Ok(_) => span.ok(),
             Err(error) => span.fail(crate::client::code(error).map(ErrorCode::name)),
@@ -40,6 +41,7 @@ impl Daemon {
         self: Arc<Self>,
         command: Command,
         conv: &Conversation,
+        can_show_kits: bool,
     ) -> Result<Reply> {
         // Whether it is use and holds the daemon busy: `Command::policy`.
         let policy = command.policy();
@@ -50,7 +52,7 @@ impl Daemon {
         if used {
             self.touch();
         }
-        let result = self.clone().run(command, conv).await;
+        let result = self.clone().run(command, conv, can_show_kits).await;
         if used {
             self.touch();
         }
@@ -64,6 +66,7 @@ impl Daemon {
         self: Arc<Self>,
         command: Command,
         conv: &Conversation,
+        can_show_kits: bool,
     ) -> Result<Reply> {
         match command {
             Command::Status => Ok(Reply::Status(Box::new(self.status()))),
@@ -82,7 +85,9 @@ impl Daemon {
                 passphrase,
                 timeout_secs,
             } => {
-                let migrated = self.unlock(passphrase, timeout_secs).await?;
+                let migrated = self
+                    .unlock_for(passphrase, timeout_secs, can_show_kits)
+                    .await?;
                 // DELETABLE(v1-migrate): back to `Reply::Done` alone.
                 Ok(if migrated.is_empty() {
                     Reply::Done

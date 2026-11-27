@@ -248,6 +248,29 @@ async fn autofill_extension_is_confined_to_its_narrow_command_set() {
 }
 
 #[tokio::test]
+async fn passphrase_unlock_without_pending_kits_returns_done_to_autofill() {
+    let f = unlocked().await;
+    for socket in [SocketKind::Control, SocketKind::AutoFill] {
+        f.daemon.lock().await;
+        let reply = send_on(
+            &f.daemon,
+            socket,
+            Some((CallerClass::AutoFill, "macOS AutoFill")),
+            Command::Unlock {
+                passphrase: Zeroizing::new("test".into()),
+                timeout_secs: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(reply, Message::Ok { reply: Reply::Done }),
+            "{reply:?}"
+        );
+        assert!(f.daemon.status().unlocked);
+    }
+}
+
+#[tokio::test]
 async fn pending_migration_kits_require_a_caller_that_can_display_them() {
     let f = unlocked().await;
     f.daemon

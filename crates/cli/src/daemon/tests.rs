@@ -577,10 +577,13 @@ async fn local_item_commands_work_immediately_after_unlock_with_offline_peers() 
         },
     ];
     for command in commands {
-        tokio::time::timeout(Duration::from_secs(2), daemon.clone().run(command, &conv))
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            daemon.clone().run(command, &conv, true),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(!*daemon.ready.borrow());
     }
     assert!(

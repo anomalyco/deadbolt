@@ -370,6 +370,7 @@ impl Daemon {
     /// once the passphrase has opened the store.
     /// Returns the vaults it moved from a v1 store first, if any
     /// (DELETABLE(v1-migrate): back to `Result<()>` with it).
+    #[cfg(test)]
     async fn unlock(
         self: &Arc<Self>,
         passphrase: zeroize::Zeroizing<String>,
