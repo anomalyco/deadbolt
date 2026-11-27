@@ -508,6 +508,21 @@ pub(crate) fn compact_at<'f>(
         }
         None => (FoldedState::default(), PackMeta::default()),
     };
+    // Recover causal witnesses clipped by the previous frontier before extending clocks.
+    for (&(target, target_seq), thresholds) in &meta.seen_by {
+        for (&by, &at) in thresholds {
+            if meta.frontier.get(&by).is_some_and(|(f, _)| *f >= at)
+                && let Some(clock) = meta.stream_clocks.get_mut(&by)
+            {
+                clock.observe(target, target_seq);
+            }
+        }
+        for (&(by, seq), clock) in &mut meta.dots {
+            if thresholds.get(&by).is_some_and(|&at| seq >= at) {
+                clock.observe(target, target_seq);
+            }
+        }
+    }
     let resolved = chains(ctx.membership, view, &starts_of(&meta));
     let mut chains = resolved.clone();
     for chain in chains.values_mut() {
