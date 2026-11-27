@@ -20,15 +20,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The org shares five macOS runners, so the macOS leg of `rust` runs only
+  # when a change can reach it. Docs, the site, the extension (bar the key
+  # `crates/cli` embeds) and the release pipeline cannot; Linux still runs on
+  # every change. Anything unexpected (a force push, a new branch) runs both.
+  changes:
+    name: Changes
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.os.outputs.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+      - id: os
+        env:
+          # A pull request checks out its merge commit: HEAD^1 is the base.
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
+        run: |
+          os='["ubuntu-latest","macos-latest"]'
+          if files=$(git diff --name-only "$BASE" HEAD); then
+            reach=$({
+              grep -vE '^(docs|site|extension|\.github/release|\.github/workflows)/|\.md$' <<<"$files"
+              grep -xE 'extension/manifest-key\.txt|\.github/workflows/ci\.yml' <<<"$files"
+            } || true)
+            if [ -z "$reach" ]; then os='["ubuntu-latest"]'; fi
+          fi
+          echo "os=$os" >> "$GITHUB_OUTPUT"
+
   rust:
     name: Rust (${{ matrix.os }})
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.changes.outputs.os || '["ubuntu-latest","macos-latest"]') }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       # The cheapest gate first, before any install or cache: it needs only git
