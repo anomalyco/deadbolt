@@ -461,7 +461,8 @@ impl Engine {
     }
 
     /// Records what `from` says about itself (authoritative) and about others
-    /// (fills gaps; newer addresses win).
+    /// (fills gaps; newer addresses win). The caller authenticates `from`; pairing
+    /// may record a verified inviter before installing the first vault.
     pub fn learn(
         &mut self,
         from: &DeviceId,
@@ -470,7 +471,7 @@ impl Engine {
         hints: BTreeMap<String, Hint>,
     ) {
         let allowed = self.peer_set();
-        if !allowed.contains(from) {
+        if !allowed.contains(from) && self.vaults.values().any(|v| v.was_removed(from)) {
             return;
         }
         let bounded = |mut addr: Addr| {

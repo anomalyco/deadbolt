@@ -407,8 +407,8 @@ impl EpochGraph {
         out
     }
 
-    /// True iff some offer of `epoch` to the recovery root is exactly the deterministic recovery
-    /// wrap of the known `k_e`: checkable by any key holder without `R_kem`'s secret.
+    /// True iff an offer matches the deterministic wrap of the known key to this recipient,
+    /// checkable by any key holder without the recipient's secret.
     fn recipient_wrap_ok(
         &self,
         info: &EpochInfo,
