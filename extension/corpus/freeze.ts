@@ -120,6 +120,15 @@ function freezeInPage(): string {
     if (Number(cs.opacity) < 1) keep.push(`opacity:${cs.opacity}`)
     const security = cs.getPropertyValue("-webkit-text-security")
     if (security && security !== "none" && (el as HTMLInputElement).type !== "password") keep.push(`-webkit-text-security:${security}`)
+    // A wrapper too thin to show what it clips (a honeypot's): its overflow and its box.
+    const clip = [cs.overflow, cs.overflowX, cs.overflowY].find((o) => o === "hidden" || o === "clip")
+    if (clip && !el.hasAttribute("data-db-box")) {
+      const r = el.getBoundingClientRect()
+      if (r.width < 2 || r.height < 2) {
+        keep.push(`overflow:${clip}`)
+        el.setAttribute("data-db-box", [r.x, r.y, r.width, r.height].map((n) => Math.round(n)).join(",") + ",0")
+      }
+    }
     if (keep.length) el.setAttribute("style", keep.join(";"))
     else el.removeAttribute("style")
   }

@@ -31,12 +31,14 @@ const textual = (f: ScannedField) => f.facts.type === "text" || f.facts.type ===
 
 /**
  * Before roles: a password box after another in the same cluster is its
- * confirmation, unless it's a PIN or token box.
+ * confirmation, unless it's a PIN or token box. A masked box that no
+ * password score claims (a bank's masked "User ID") isn't a first password.
  */
 export function confirmations(fields: ScannedField[]) {
   const seen = new Set<FormCluster | undefined>()
   for (const f of fields) {
     if (f.facts.type !== "password" || f.score.otp >= FIELD_THRESHOLD) continue
+    if (f.score.password < FIELD_THRESHOLD && f.score["new-password"] < FIELD_THRESHOLD) continue
     if (seen.has(f.cluster)) {
       f.score["new-password"] += 4
       f.score.password -= 4
@@ -63,6 +65,10 @@ export function rationalize(fields: ScannedField[]) {
   }
   for (const cluster of new Set(fields.map((f) => f.cluster))) {
     const own = fields.filter((f) => f.cluster === cluster)
+    // A masked user ID beside a plain box for who you are (a bank's national ID): a second
+    // identifier the saved login doesn't hold apart from the username, so neither is filled into it.
+    if (own.some((f) => IDENTIFIER.includes(f.role) && f.facts.type !== "password"))
+      for (const f of own) if (f.facts.type === "password" && IDENTIFIER.includes(f.role)) f.role = null
     const passwords = own.filter((f) => f.role === "password")
     if (passwords.length !== 1 || own.some((f) => f.role === "new-password" || IDENTIFIER.includes(f.role))) continue
     const before = own.slice(0, own.indexOf(passwords[0])).reverse()
@@ -137,11 +143,12 @@ const GROUPS: Array<[string, string[]]> = (
     ["offer", ["gift card", "promo code", "coupon", "voucher", "discount code", "redeem", "balance"]],
     ["file", ["encrypt", "pdf", "upload", "document", "file"]],
     ["payroll", ["direct deposit", "routing number", "payroll", "payee", "withholding"]],
+    ["game-code", ["room code", "game code", "game pin", "join code", "party code", "join game", "join a game", "join room"]],
   ] as Array<[string, string[]]>
 ).map(([name, list]) => [name, list.map((p) => words(p).trim())])
 
-/** A button that moves a sign-in along without naming it: Continue, Next, Verify. */
-const PROCEED = ["continue", "next", "verify", "submit", "confirm", "go", "weiter", "suivant", "continuer", "valider", "verifier", "confirmer", "continuar", "siguiente", "confirmar", "verificar", "bestatigen", "prufen", "avanti", "verder", "volgende", "次へ", "続行", "确认", "下一步"].map((p) => words(p).trim())
+/** A button that moves a sign-in along without naming it: Continue, Next, Verify, Send magic link. */
+const PROCEED = ["continue", "next", "verify", "submit", "confirm", "go", "magic link", "send link", "email me a link", "send me a link", "login link", "sign in link", "weiter", "suivant", "continuer", "valider", "verifier", "confirmer", "continuar", "siguiente", "confirmar", "verificar", "bestatigen", "prufen", "avanti", "verder", "volgende", "次へ", "続行", "确认", "下一步"].map((p) => words(p).trim())
 const KINDS: FormKind[] = ["login", "signup", "change-password", "reset", "mfa", "newsletter"]
 const kindsOf = (text: string, min: number) => {
   const score = scoreFormText(text)
@@ -204,14 +211,28 @@ export function clusterFeatures(cluster: FormCluster, fields: ScannedField[], gr
     named ||= buttonKinds.length > 0 || proceed
   }
   out.add(!buttons.length ? "button:none" : named ? "button:named" : "button:other")
-  for (const p of page.paths) out.add(`path:${p}`)
-  for (const k of page.title) out.add(`title:${k}`)
+  // A newsletter box on a sign-in page: the page's path and title aren't the form's.
+  if (!saysNewsletter(cluster, graph)) {
+    for (const p of page.paths) out.add(`path:${p}`)
+    for (const k of page.title) out.add(`title:${k}`)
+  }
   // Nothing anywhere says sign-in: not its words, buttons, autocomplete, path or title, nor
   // a box named a password (unless the form's words say it's for something else).
   const said = [...out].some((f) => /^(button:(login|signup)|autocomplete:login)$/.test(f) || (/^(words|path|title):/.test(f) && SIGN_IN_KINDS.has(f.split(":")[1])))
   if (!said && !(namedPassword && !elsewhere)) out.add("signal:none")
   return [...out].sort()
 }
+
+/** A cluster's own words and its boxes' labels, not the page's title or headings. */
+export const ownText = (cluster: FormCluster, graph: FormGraph) => `${graph.context(cluster)} ${words(cluster.controls.map((el) => graph.label(el)).join(" "))}`
+
+/** Whether a cluster's own words say newsletter and not sign in: the page's path, title and providers aren't its. */
+export function saysNewsletter(cluster: FormCluster | undefined, graph: FormGraph): boolean {
+  if (!cluster?.root) return false
+  const own = scoreFormText(ownText(cluster, graph))
+  return own.newsletter >= NEWSLETTER_MIN && own.login < NEWSLETTER_MIN
+}
+const NEWSLETTER_MIN = 3
 
 /** Features that only ever say "a login": their weights are kept at zero or above. */
 const SAYS_LOGIN = /^(words:(auth|login|signup|mfa|reset|change-password)|button:(login|signup)|path:(login|signup|reset|change-password)|title:(login|signup|mfa|reset|change-password)|autocomplete:login|role:named-password)$/

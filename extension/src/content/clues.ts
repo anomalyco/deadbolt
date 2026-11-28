@@ -61,6 +61,8 @@ const NOT_A_LOGIN_FIELD: Clue[] = [
   // Security questions: answers the user knows, never a login field.
   ["security question", -8], ["secret question", -8], ["security answer", -8], ["your answer", -6], ["answer", -5],
   ["memorable", -5],
+  // A party game's room to join: a short code with no account behind it.
+  ["room code", -8], ["game code", -8], ["game pin", -8], ["join code", -6], ["party code", -6],
 ]
 
 /** A security question's answer, often in a masked box: never a password. */
@@ -70,10 +72,11 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
   username: prepare([
     ["username", 5], ["user name", 5], ["user id", 4], ["userid", 4], ["login id", 4], ["login", 2], ["log in", 1],
     ["sign in", 1], ["account name", 3], ["account", 1], ["identifier", 3], ["member id", 3], ["member number", 3],
-    ["customer number", 2], ["handle", 1], ["email or username", 3], ["username or email", 3], ["email or phone", 2],
+    ["customer number", 2], ["customer id", 3], ["cust id", 3], ["handle", 1], ["email or username", 3], ["username or email", 3], ["email or phone", 2],
     ["benutzername", 5], ["benutzer", 3], ["nombre de usuario", 5], ["usuario", 3], ["nom d utilisateur", 5],
     ["identifiant", 4], ["nome utente", 5], ["utente", 3], ["gebruikersnaam", 5], ["nome de usuario", 5],
-    ["ユーザー名", 5], ["ユーザーid", 4], ["用户名", 5], ["账号", 4], ["帳號", 4], ["логин", 4],
+    ["ユーザー名", 5], ["ユーザーid", 4], ["用户名", 5], ["账号", 4], ["帳號", 4],
+    ["使用者代號", 5], ["用戶代號", 5], ["用户代号", 5], ["身分證字號", 4], ["身份證字號", 4], ["身份证号", 4], ["логин", 4],
     ["имя пользователя", 5], ["아이디", 4], ["사용자 이름", 5], ["שם משתמש", 5], ["קוד משתמש", 5],
     ["uzivatelske jmeno", 5], ["brukernavn", 5], ["användarnamn", 5], ["brugernavn", 5], ["käyttäjätunnus", 5],
     ["nazwa użytkownika", 5], ["kullanıcı adı", 5], ["tên đăng nhập", 5],
@@ -99,7 +102,7 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
   ]),
   password: prepare([
     ["password", 5], ["passwd", 5], ["pwd", 4], ["pass", 1], ["contrasena", 5], ["mot de passe", 5],
-    ["passwort", 5], ["kennwort", 5], ["wachtwoord", 5], ["senha", 5], ["パスワード", 5], ["密码", 5], ["密碼", 5],
+    ["passwort", 5], ["kennwort", 5], ["wachtwoord", 5], ["senha", 5], ["パスワード", 5], ["密码", 5], ["密碼", 5], ["網銀密碼", 5],
     ["пароль", 5], ["비밀번호", 5], ["passord", 5], ["lösenord", 5], ["adgangskode", 5], ["salasana", 5],
     ["hasło", 5], ["heslo", 5], ["şifre", 5], ["mật khẩu", 5], ["kata sandi", 5], ["parola", 5], ["lozinka", 5],
     ["pin", -2],
@@ -156,8 +159,10 @@ export interface FieldFacts {
   autocomplete: string[]
   /** words() of labels, aria-label, placeholder, title and nearby text. */
   display: string
-  /** squash(words()) of id, name, class and test ids. */
+  /** squash(words()) of id, name and test ids. */
   code: string
+  /** words() of the class attribute, camelCase split: matched on word edges, so `opacity-100` never reads "city". */
+  classes?: string
   maxLength: number
   inputMode: string
   /** The field's label asks a question ("What was your first pet's name?"). */
@@ -166,33 +171,63 @@ export interface FieldFacts {
 
 export const ROLES = Object.keys(FIELD_CLUES) as FieldRole[]
 
+interface Compiled {
+  role: FieldRole
+  value: number
+  /** What to look for in display text, as hasPhrase would. */
+  display: string
+  /** What to look for in an id or name, squashed; null when too short to match there, or when a stronger phrase owns it. */
+  code: string | null
+  /** What to look for in class names, word by word: the display text of every phrase sharing `code`. */
+  classes: string[]
+}
+
 /**
- * Every field clue, made ready once: what to look for in display text (as
- * hasPhrase would), and in code text, if it's long enough to match there.
- * scoreField runs for every field of every scan.
+ * Every field clue, made ready once. Phrases that squash to the same code
+ * ("username" and "user name") match an id or class once, at the strongest
+ * weight among them; the class names may spell any of them ("user-name",
+ * "userName", "username"). scoreField runs for every field of every scan.
  */
-const COMPILED = ROLES.flatMap((role) =>
-  FIELD_CLUES[role].map(([phrase, value]) => {
+const COMPILED: Compiled[] = ROLES.flatMap((role) => {
+  const clues: Compiled[] = FIELD_CLUES[role].map(([phrase, value]) => {
     const compact = squash(phrase)
-    return {
-      role,
-      value,
-      display: NON_SPACED.test(phrase) ? phrase : ` ${phrase} `,
-      code: compact.length >= 4 || SHORT_CODE_TOKENS.has(compact) ? compact : null,
-    }
-  }),
-)
+    const display = NON_SPACED.test(phrase) ? phrase : ` ${phrase} `
+    return { role, value, display, code: compact.length >= 4 || SHORT_CODE_TOKENS.has(compact) ? compact : null, classes: [] }
+  })
+  const strongest = new Map<string, Compiled>()
+  for (const c of clues) {
+    if (c.code === null) continue
+    const kept = strongest.get(c.code)
+    if (!kept || Math.abs(c.value) > Math.abs(kept.value)) strongest.set(c.code, c)
+  }
+  for (const c of clues) if (c.code !== null) strongest.get(c.code)!.classes.push(c.display)
+  for (const c of clues) if (c.code !== null && strongest.get(c.code) !== c) c.code = null
+  return clues
+})
+
+/** Whether a clue matches the field's code: its ids as one squashed string, or its class names word by word. */
+const inCode = (f: FieldFacts, clue: Compiled) => clue.code !== null && (f.code.includes(clue.code) || (!!f.classes && clue.classes.some((d) => f.classes!.includes(d))))
+
+/** Clues of a user id strong enough to say a masked box holds who you are, not a secret. */
+const USER_ID = 4
 
 export function scoreField(f: FieldFacts): Record<FieldRole, number> {
   const score = Object.fromEntries(ROLES.map((r) => [r, 0])) as Record<FieldRole, number>
   // Whether the label itself names a login field: a question that doesn't is a security question.
   let named = false
+  // Whether its own words name a user id, or a secret.
+  let user = false
+  let secret = false
   for (const clue of COMPILED) {
-    if (f.display.includes(clue.display)) {
+    const shown = f.display.includes(clue.display)
+    const coded = inCode(f, clue)
+    if (shown) {
       score[clue.role] += clue.value
       if (clue.value > 0 && clue.role !== "captcha") named = true
     }
-    if (clue.code !== null && f.code.includes(clue.code)) score[clue.role] += clue.value * 0.8
+    if (coded) score[clue.role] += clue.value * 0.8
+    if ((shown || coded) && clue.role === "username" && clue.value >= USER_ID) user = true
+    if ((shown || coded) && (clue.role === "password" || clue.role === "new-password" || clue.role === "otp") && clue.value > 0) secret = true
   }
 
   for (const token of f.autocomplete) {
@@ -210,6 +245,11 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
     score.username -= 10
     score.email -= 10
     score.phone -= 10
+    // A bank's masked "User ID" box: who you are, typed blind, never a password to save or confirm.
+    if (user && !secret) {
+      score.password -= 8
+      score["new-password"] -= 8
+    }
   } else {
     score.password -= 10
     score["new-password"] -= 10
@@ -249,7 +289,7 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
  * Security number" doesn't.
  */
 export function namesRole(f: FieldFacts, roles: readonly FieldRole[]): boolean {
-  return COMPILED.some((c) => c.value > 0 && roles.includes(c.role) && (f.display.includes(c.display) || (c.code !== null && f.code.includes(c.code))))
+  return COMPILED.some((c) => c.value > 0 && roles.includes(c.role) && (f.display.includes(c.display) || inCode(f, c)))
 }
 
 export const FIELD_THRESHOLD = 3

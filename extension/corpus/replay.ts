@@ -19,6 +19,7 @@ export const SHADOW = "data-db-shadow"
 /** The size a control with no box of its own gets (an unmeasured page, or one written by hand). */
 const DEFAULT_BOX = { x: 0, y: 0, w: 240, h: 32 }
 
+const TEXT_SECURITY = /-webkit-text-security\s*:\s*([a-z-]+)/i
 const closedRoots = new WeakMap<Element, ShadowRoot>()
 let ready = false
 
@@ -74,6 +75,19 @@ export function register() {
     const box = parseBox(this.getAttribute(BOX))
     return box ? box.vis && !hiddenUp(this) : !hiddenUp(this)
   }
+  // happy-dom drops vendor-prefixed properties, so a text box the page masks
+  // with `-webkit-text-security` (which Chromium honours) would read unmasked:
+  // its inline declaration stands in for the computed one.
+  const computed = window.getComputedStyle.bind(window)
+  const withTextSecurity = (el: Element, pseudo?: string | null) => {
+    const style = computed(el, pseudo)
+    const security = TEXT_SECURITY.exec(el.getAttribute?.("style") ?? "")?.[1]
+    if (!security || style.getPropertyValue("-webkit-text-security")) return style
+    const read = (name: string) => (name === "-webkit-text-security" ? security : style.getPropertyValue(name))
+    return new Proxy(style, { get: (target, key) => (key === "getPropertyValue" ? read : Reflect.get(target, key)) })
+  }
+  window.getComputedStyle = withTextSecurity as typeof window.getComputedStyle
+  globalThis.getComputedStyle = withTextSecurity as typeof getComputedStyle
   Element.prototype.getBoundingClientRect = function (this: Element) {
     const box = parseBox(this.getAttribute(BOX))
     if (box) return rect(box.x, box.y, box.w, box.h)

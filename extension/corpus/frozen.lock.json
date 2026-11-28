@@ -27,6 +27,14 @@
    "source": "modeled"
   },
   {
+   "id": "ancestor-opacity-hidden-step2",
+   "file": "frozen/ancestor-opacity-hidden-step2.html",
+   "url": "https://store.gamehub.example/id/login",
+   "sha256": "da311683f83aa2e0d4270d5f68deefce706af03ed3f4c025215a8c0e27019715",
+   "bytes": 924,
+   "source": "modeled"
+  },
+  {
    "id": "apple-account-signin",
    "file": "frozen/apple-account-signin.html",
    "url": "https://idmsa.apple.com/appleauth/auth/authorize/signin",
@@ -64,6 +72,14 @@
    "url": "https://online.northbank.example/logon",
    "sha256": "ddcd37477cdf37fcf01e495e4b9503d3927a1ba68b1e49810f093b83a0844746",
    "bytes": 1435,
+   "source": "modeled"
+  },
+  {
+   "id": "bank-two-masked-zh-login",
+   "file": "frozen/bank-two-masked-zh-login.html",
+   "url": "https://www.harborbank.example/MyBank",
+   "sha256": "0f9397a8199820e11e6fd64ee3564f81c36e7a02e1bf488f524f03d102c30fdd",
+   "bytes": 1303,
    "source": "modeled"
   },
   {
@@ -331,6 +347,14 @@
    "source": "modeled"
   },
   {
+   "id": "decoy-footer-newsletter-with-sso",
+   "file": "frozen/decoy-footer-newsletter-with-sso.html",
+   "url": "https://www.netshield.example/login",
+   "sha256": "9fb04c59e3470286c550b8b0fedc2523d282439b183585e07c84e2af1a03a8bb",
+   "bytes": 1654,
+   "source": "modeled"
+  },
+  {
    "id": "decoy-gift-card-balance",
    "file": "frozen/decoy-gift-card-balance.html",
    "url": "https://www.starbucks.com/gift/balance",
@@ -371,6 +395,14 @@
    "source": "modeled"
   },
   {
+   "id": "decoy-huge-catalog-no-login",
+   "file": "frozen/decoy-huge-catalog-no-login.html",
+   "url": "https://www.toolyard.example/",
+   "sha256": "825a63fa9c92040ea243af18dee26e067f5036694cd75c75b5f92ef8eac78b7b",
+   "bytes": 37976,
+   "source": "modeled"
+  },
+  {
    "id": "decoy-invite-teammates",
    "file": "frozen/decoy-invite-teammates.html",
    "url": "https://linear.app/acme/settings/members",
@@ -400,6 +432,14 @@
    "url": "https://www.nytimes.com/",
    "sha256": "e1b91b19af5bb91abee5d0fe18bcff39d5311938e691e5d7677bdd47c2ae67c8",
    "bytes": 997,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-newsletter-autocomplete-email",
+   "file": "frozen/decoy-newsletter-autocomplete-email.html",
+   "url": "https://www.glowbeauty.example/basket",
+   "sha256": "e4a11ac7ff3dd0e623785c10906f1de91a7357f9794514c19ba519a383e46018",
+   "bytes": 1028,
    "source": "modeled"
   },
   {
@@ -448,6 +488,14 @@
    "url": "https://www.shipfast.example/tracking",
    "sha256": "61c5519a2abc5804ba1363af7a8ffa3d0ca9efc1f629435c933f62526de17f03",
    "bytes": 622,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-party-game-room-code",
+   "file": "frozen/decoy-party-game-room-code.html",
+   "url": "https://play.partybox.example/",
+   "sha256": "c39d10da18c27c4d808c6f9fd125181b5250f533e4e74d96e2727be30322e4ca",
+   "bytes": 854,
    "source": "modeled"
   },
   {
@@ -851,6 +899,14 @@
    "source": "modeled"
   },
   {
+   "id": "login-honeypot-password",
+   "file": "frozen/login-honeypot-password.html",
+   "url": "https://members.knitclub.example/login",
+   "sha256": "a07b4d4c21b508857a3350e10a93875968b0883f0af64ba7e51286a810bc257c",
+   "bytes": 1061,
+   "source": "modeled"
+  },
+  {
    "id": "login-masked-2fa",
    "file": "frozen/login-masked-2fa.html",
    "url": "https://portal.fleetops.example/login",
@@ -1051,6 +1107,14 @@
    "source": "modeled"
   },
   {
+   "id": "signup-create-password-bday",
+   "file": "frozen/signup-create-password-bday.html",
+   "url": "https://www.pinboard-ideas.example/",
+   "sha256": "287ea1f635501a4945d1ff5e6c057c138717ff6010b5a3939a822e8671ed466e",
+   "bytes": 1473,
+   "source": "modeled"
+  },
+  {
    "id": "signup-two-step-names",
    "file": "frozen/signup-two-step-names.html",
    "url": "https://join.studyhall.example/signup",
@@ -1104,6 +1168,14 @@
    "url": "https://dashboard.stripe.com/login",
    "sha256": "6b6f326d0886d69f49b3882bd7b95ddfd35c7f75702e615ea794d6e25aa75c44",
    "bytes": 1377,
+   "source": "modeled"
+  },
+  {
+   "id": "tailwind-opacity-email",
+   "file": "frozen/tailwind-opacity-email.html",
+   "url": "https://links.shortly.example/a/sign_in",
+   "sha256": "a5e9cc3b2772036197285eaa23ab8ece9a5d283fe788f35fd6f8af3b113f4507",
+   "bytes": 1331,
    "source": "modeled"
   },
   {
