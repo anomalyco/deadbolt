@@ -235,7 +235,6 @@ export function scanForms(source: ScanSource = openRoots()): FormField[] {
     found.push({ el, role, display, code, maxLength: el instanceof HTMLInputElement && el.maxLength > 0 ? el.maxLength : 0 })
   }
   splitCardBoxes(found)
-  notACard(found, graph)
   // Selects and date parts with no role of their own: their options, or their section, say.
   const cardForms = new Set(found.filter((c) => c.role && formKindOf(c.role) === "card").map((c) => formOf(c.el)))
   for (const c of found) {
@@ -243,6 +242,8 @@ export function scanForms(source: ScanSource = openRoots()): FormField[] {
     const card = cardForms.has(formOf(c.el))
     c.role = roleForDatePart(null, c.el, c.display + c.code, card) ?? (c.el instanceof HTMLSelectElement ? roleFromOptions(c.el, card) : null)
   }
+  // After the selects: an expiry in month and year dropdowns counts.
+  notACard(found, graph)
   const fields = sectionsOf(found.filter((c): c is Candidate & { role: FormRole } => c.role !== null))
   // One lone box guessed from its text (a newsletter's email, a phone
   // number on its own) isn't an address form; one the site marked is.

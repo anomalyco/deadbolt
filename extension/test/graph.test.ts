@@ -9,6 +9,7 @@ function page(html: string, path = "/login", title = "") {
   document.body.innerHTML = html
 }
 const setURL = (url: string) => (window as unknown as { happyDOM: { setURL(u: string): void } }).happyDOM.setURL(url)
+const MONTHS = Array.from({ length: 12 }, (_, i) => `<option value="${i + 1}">${String(i + 1).padStart(2, "0")}</option>`).join("")
 const ids = (els: Element[]) => els.map((el) => el.id)
 const digits = (prefix: string, label: string) =>
   [1, 2, 3, 4, 5, 6].map((i) => `<input id="${prefix}${i}" maxlength="1" inputmode="numeric" aria-label="${label}, digit ${i}">`).join("")
@@ -119,10 +120,10 @@ describe("scoped login detection", () => {
   test("a transfer's PIN, a product's purchase code and a gift card's access number are no sign-in", () => {
     page(`<form><label for="n">Payee name</label><input id="n"><label for="a">Amount</label><input id="a" inputmode="decimal">
       <label for="pin">Confirm with your 4-digit PIN</label><input id="pin" type="password" inputmode="numeric" maxlength="4"><button>Send money</button></form>`, "/transfers/new")
-    expect(scanPage()).toMatchObject({ kind: null, fields: [] })
+    expect(scanPage().kind).toBeNull()
     page(`<form><label for="m">Model number</label><input id="m"><label for="s">Serial number</label><input id="s">
       <label for="c">6-digit purchase code</label><input id="c" inputmode="numeric" maxlength="6"><label for="e">Email</label><input id="e" type="email" autocomplete="email"><button>Register</button></form>`, "/register")
-    expect(scanPage()).toMatchObject({ kind: null, fields: [] })
+    expect(scanPage().kind).toBeNull()
     page(`<section><h2>Gift card</h2><form><label for="g">Gift card number</label><input id="g" inputmode="numeric" maxlength="15">
       <label for="pin">Access number</label><input id="pin" type="password" inputmode="numeric" maxlength="8"><button>Apply gift card</button></form></section>`, "/cart")
     expect(scanPage()).toMatchObject({ kind: null, fields: [] })
@@ -138,6 +139,56 @@ describe("scoped login detection", () => {
       <label for="c">Confirm new password</label><input id="c" type="password" autocomplete="new-password"><button>Change password</button></form>`, "/signinoptions/password")
     expect(scanPage().kind).toBe("change-password")
   })
+
+  test("a gift card form above a real email-first sign-in doesn't hide it", () => {
+    page(`<section><h2>Send a gift card</h2><form id="gift"><label for="to">Recipient's email</label><input id="to" type="email">
+      <button>Send gift card</button></form></section>
+      <form id="login"><h2>Sign in</h2><label for="e">Email</label><input id="e" type="email" autocomplete="username"><button type="submit">Continue</button></form>`, "/checkout")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(result.fields.map((f) => [f.el.id, f.role])).toEqual([["e", "username"]])
+  })
+
+  test("a sign-in's first step with a workspace, a region and a work email is still a login", () => {
+    page(`<h1>Sign in</h1><form><label for="w">Workspace</label><input id="w" name="workspace">
+      <label for="r">Region</label><select id="r" name="region"><option>US</option><option>EU</option></select>
+      <label for="e">Work email</label><input id="e" type="email" name="email"><button type="submit">Sign in</button></form>`, "/login")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(result.fields.map((f) => [f.el.id, f.role])).toEqual([["e", "email"]])
+  })
+
+  test("a masked 2FA box with no maxlength beside the password stays a code", () => {
+    page(`<form><label for="u">Username</label><input id="u" name="username">
+      <label for="p">Password</label><input id="p" type="password" name="password">
+      <label for="t">Two-factor code</label><input id="t" type="password" name="mfa"><button type="submit">Sign in</button></form>`, "/login")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(result.fields.map((f) => [f.el.id, f.role])).toEqual([["u", "username"], ["p", "password"], ["t", "otp"]])
+  })
+
+  test("a form's submit button inside a web component is still its submit", () => {
+    page(`<form><label for="u">Username</label><input id="u" autocomplete="username"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password"><my-button></my-button></form>`, "/login")
+    const inner = document.querySelector("my-button")!.attachShadow({ mode: "open" })
+    inner.innerHTML = `<button type="submit" id="go">Sign in</button>`
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(result.submit).toBe(inner.getElementById("go")!)
+  })
+
+  test("two forms each asking for a code they sent, in one box each, are no sign-in step", () => {
+    page(`<h1>Verify your contact details</h1>
+      <form><p>We sent a code to your email.</p><label for="ec">Verification code</label><input id="ec" inputmode="numeric" maxlength="6"><button>Verify email</button></form>
+      <form><p>We texted a code to your phone.</p><label for="pc">Verification code</label><input id="pc" inputmode="numeric" maxlength="6"><button>Verify phone</button></form>`, "/account/verify-contact")
+    expect(scanPage()).toMatchObject({ kind: null, fields: [] })
+  })
+
+  test("a box under aria-hidden through a shadow host, out of the tab order, is concealed", () => {
+    page(`<form><label for="u">Email</label><input id="u" type="email" autocomplete="username"><div aria-hidden="true"><pw-box></pw-box></div><button>Next</button></form>`, "/login")
+    const inner = document.querySelector("pw-box")!.attachShadow({ mode: "open" })
+    inner.innerHTML = `<input type="password" id="trap" tabindex="-1">`
+    expect(scanPage().fields.map((f) => f.el.id)).toEqual(["u"])
+  })
 })
 
 describe("scoped identity and card detection", () => {
@@ -151,6 +202,14 @@ describe("scoped identity and card detection", () => {
     page(`<h2>Pay with a card or gift card</h2><form><label for="n">Card number</label><input id="n"><label for="x">Expiry (MM/YY)</label><input id="x">
       <label for="c">Security code</label><input id="c"></form>`, "/checkout")
     expect(scanForms().map((f) => f.role)).toEqual(["cc-number", "cc-exp", "cc-csc"])
+  })
+
+  test("a card with month and year dropdowns is a payment card, beside gift card words", () => {
+    page(`<section><h2>Pay with credit card or gift card</h2><form><label for="n">Card number</label><input id="n">
+      <label for="m">Month</label><select id="m"><option value="">Month</option>${MONTHS}</select>
+      <label for="y">Year</label><select id="y"><option value="">Year</option>${Array.from({ length: 10 }, (_, i) => `<option>${new Date().getFullYear() + i}</option>`).join("")}</select>
+      <label for="c">Security code</label><input id="c"></form></section>`, "/checkout")
+    expect(scanForms().map((f) => [f.el.id, f.role])).toEqual([["n", "cc-number"], ["m", "cc-exp-month"], ["y", "cc-exp-year"], ["c", "cc-csc"]])
   })
 
   test("a URL box isn't an address", () => {

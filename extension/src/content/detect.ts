@@ -10,8 +10,8 @@
 
 import type { FieldRole, SurfaceKind } from "../messages"
 import { bestRole, FORM_KINDS, hasPhrase, providerFromLabel, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind, type Provider } from "./clues"
-import { graphOf, innerText, isVisible, type FormCluster, type FormGraph, type ScanSource } from "./graph"
-import { confirmations, decoyCluster, rationalize, type ScannedField } from "./rationalize"
+import { graphOf, innerText, isVisible, within, type FormCluster, type FormGraph, type ScanSource } from "./graph"
+import { confirmations, decoyCluster, LOGIN_TOKENS, rationalize, unclaimedBoxes, type ScannedField } from "./rationalize"
 import { deepQueryAll, openRoots } from "./shadow"
 
 export { ignored, isVisible, labelText, type FormControl } from "./graph"
@@ -216,7 +216,8 @@ function collectControls(cluster: FormCluster | undefined, graph: FormGraph) {
       continue
     }
     if (!text || text.length > 40 || el instanceof HTMLAnchorElement) continue
-    if (root && !root.contains(el)) continue
+    // Through shadow hosts: a form's button may be inside a web component (<my-button>).
+    if (root && !within(root, el)) continue
     buttonText.push(text)
     const isSubmitType = (el as HTMLButtonElement).type === "submit"
     if (!submit && (SUBMIT_TEXT.test(text) || (isSubmitType && form))) submit = el
@@ -225,7 +226,7 @@ function collectControls(cluster: FormCluster | undefined, graph: FormGraph) {
   return { submit, buttonText, provider }
 }
 
-function decideKind(fields: ScannedField[], otpBoxes: number, text: string, controls: ReturnType<typeof collectControls>): FormKind | null {
+function decideKind(fields: ScannedField[], otpBoxes: number, text: string, controls: ReturnType<typeof collectControls>, unclaimed: number): FormKind | null {
   const { buttonText, provider } = controls
   const count = (...roles: FieldRole[]) => fields.filter((f) => f.role && roles.includes(f.role)).length
   const pw = count("password")
@@ -276,6 +277,16 @@ function decideKind(fields: ScannedField[], otpBoxes: number, text: string, cont
 
   if (otp > 0 && pw === 0) score.mfa += 6
   if (otp > 0 && pw > 0) score.mfa += 1
+
+  // No password, no sign-in autocomplete, and two or more boxes no login
+  // role claims: more likely a transfer, a registration or a comment than a
+  // sign-in, though a sign-in's own wording and path can still say it is one
+  // (a workspace, a region and a work email).
+  if (pw + npw === 0 && unclaimed >= 2 && !LOGIN_TOKENS.some((t) => ac.has(t))) {
+    score.mfa -= 6
+    score.signup -= 4
+    score.login -= 2
+  }
 
   if (ident > 0 && pw + npw === 0 && !provider) score.newsletter += 1
   if (pw + npw > 0) score.newsletter -= 8
@@ -352,16 +363,21 @@ function codePageText(root: Element | null): string {
  */
 export function scanPage(source: ScanSource = openRoots()): ScanResult {
   const graph = graphOf(source)
-  const { fields: all, codeGroups } = collectFields(graph)
+  const collected = collectFields(graph)
+  // Gift card and coupon forms are set aside first, so one above the real sign-in never stands for it.
+  const decoys = new Set(graph.clusters.filter((c) => decoyCluster(c, collected.fields.filter((f) => f.cluster === c), graph)))
+  const all = collected.fields.filter((f) => !f.cluster || !decoys.has(f.cluster))
+  const codeGroups = collected.codeGroups.filter((g) => !decoys.has(graph.clusterOf(g[0])!))
   const cluster = primaryCluster(all, codeGroups, graph)
   // Judge and report the primary cluster only, so a sign-up form or newsletter
   // box elsewhere on the page doesn't change what the login form is.
   const inScope = (el: Element) => !cluster || graph.clusterOf(el) === cluster
   const scanned = all.filter((f) => inScope(f.el))
   const controls = collectControls(cluster, graph)
-  if (cluster && decoyCluster(cluster, scanned, graph)) return { kind: null, fields: [], provider: controls.provider }
   const root = cluster?.root ?? null
-  const formKind = decideKind(scanned, codeGroups.some((g) => inScope(g[0])) ? 1 : 0, contextText(root), controls)
+  const formKind = decideKind(scanned, codeGroups.some((g) => inScope(g[0])) ? 1 : 0, contextText(root), controls, unclaimedBoxes(cluster, scanned))
+  // Every cluster asking for a code, counted before codes the user brings lose their role below.
+  const codeClusters = new Set([...codeGroups.map((g) => graph.clusterOf(g[0])), ...all.filter((f) => f.role === "otp").map((f) => f.cluster)])
   if (formKind) adjustRoles(scanned, formKind)
 
   // Codes the user brings themselves (sent, or backup) aren't the login's to fill.
@@ -385,7 +401,6 @@ export function scanPage(source: ScanSource = openRoots()): ScanResult {
   // nothing in it to fill. A sign-in asks for one code: a page asking for
   // codes in several forms, none of them Deadbolt's, is verifying contact
   // details.
-  const codeClusters = new Set([...codeGroups.map((g) => graph.clusterOf(g[0])), ...all.filter((f) => f.role === "otp").map((f) => f.cluster)])
   const stepOnly = formKind === "mfa" && brought > 0 && codeClusters.size < 2
   const kind = formKind === "newsletter" || (!fields.length && !stepOnly) ? null : formKind
   return { kind, fields, submit: controls.submit, provider: controls.provider }

@@ -285,7 +285,7 @@ const OBSERVE: MutationObserverInit = {
   childList: true,
   subtree: true,
   attributes: true,
-  attributeFilter: ["type", "class", "hidden", "autocomplete", "aria-hidden", "style"],
+  attributeFilter: ["type", "class", "hidden", "autocomplete", "aria-hidden", "inert", "style"],
 }
 let observer: MutationObserver | null = null
 

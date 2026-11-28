@@ -65,11 +65,11 @@ export const isVisible = (el: Element): boolean => shown(el.getBoundingClientRec
  * them, a person never does.
  */
 export function concealed(el: Element, style: (el: Element) => CSSStyleDeclaration = getComputedStyle): boolean {
-  if (el.closest("[inert]")) return true
-  const hidden = el.closest('[aria-hidden="true"]')
+  if (composedClosest(el, "[inert]")) return true
+  const hidden = composedClosest(el, '[aria-hidden="true"]')
   if (!hidden) return false
   if ((el as HTMLElement).tabIndex < 0) return true
-  for (let node: Element | null = el; node; node = node.parentElement) {
+  for (let node: Element | null = el; node; node = composedParent(node)) {
     if (Number(style(node).opacity || 1) <= 0.05) return true
     if (node === hidden) break
   }
@@ -107,6 +107,9 @@ export function labelText(el: FormControl, labels: ArrayLike<HTMLLabelElement> =
   if (placeholder.includes("@")) parts.push("email")
   return parts.filter(Boolean).join(" ").slice(0, 300)
 }
+
+/** The element's parent, or its shadow root's host. */
+const composedParent = (el: Element): Element | null => el.parentElement ?? ((el.getRootNode() as ShadowRoot).host ?? null)
 
 /** The nearest element around `el` matching `selector`, through shadow hosts. */
 function composedClosest(el: Element, selector: string): Element | null {
