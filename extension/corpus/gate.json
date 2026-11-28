@@ -8,13 +8,13 @@
   "margin": 0.005,
   "floors": {
     "micro": {
-      "precision": 0.9778,
-      "recall": 0.9892
+      "precision": 0.995,
+      "recall": 0.995
     },
     "roles": {
       "identifier": {
         "precision": 0.995,
-        "recall": 0.9778
+        "recall": 0.995
       },
       "password": {
         "precision": 0.995,
@@ -29,22 +29,22 @@
         "recall": 0.995
       },
       "card": {
-        "precision": 0.8897,
+        "precision": 0.995,
         "recall": 0.995
       },
       "address": {
-        "precision": 0.9627,
+        "precision": 0.995,
         "recall": 0.995
       }
     },
-    "pageKind": 0.9879
+    "pageKind": 0.995
   },
   "ceilings": {
     "decoyFalseTrigger": 0.005,
-    "decoyFormsFalseTrigger": 0.0229
+    "decoyFormsFalseTrigger": 0.005
   },
   "holdout": {
-    "precision": 0.9758,
+    "precision": 0.995,
     "recall": 0.995,
     "pageKind": 0.995,
     "decoyFalseTrigger": 0.005
@@ -53,11 +53,13 @@
     "amazon-add-address",
     "amazon-email",
     "amazon-password",
+    "ancestor-opacity-hidden-step2",
     "apple-account-signin",
     "auth0-identifier",
     "auth0-password",
     "aws-signin",
     "bank-customer-dob-postcode",
+    "bank-two-masked-zh-login",
     "bestbuy-checkout-below-fold",
     "bofa-home-login",
     "chase-shadow-login",
@@ -91,27 +93,32 @@
     "decoy-filter-by-key",
     "decoy-flight-booking-reference",
     "decoy-flight-search",
+    "decoy-footer-newsletter-with-sso",
     "decoy-gift-card-balance",
     "decoy-giftcard-balance-email",
     "decoy-guest-wifi-portal",
     "decoy-hotel-confirmation",
     "decoy-hr-badge-pin",
+    "decoy-huge-catalog-no-login",
     "decoy-invite-teammates",
     "decoy-job-application",
     "decoy-mortgage-calculator",
     "decoy-news-search-header",
+    "decoy-newsletter-autocomplete-email",
     "decoy-newsletter-footer",
     "decoy-newsletter-popup-account",
     "decoy-newsletter-signup-modal",
     "decoy-org-invite-member",
     "decoy-package-tracking",
     "decoy-parcel-tracking-zip",
+    "decoy-party-game-room-code",
     "decoy-password-strength-checker",
     "decoy-profile-lock-pin",
     "decoy-protect-pdf-password",
     "decoy-recovery-codes-display",
     "decoy-refer-friend",
     "decoy-seed-phrase-import",
+    "decoy-share-link-password",
     "decoy-store-locator",
     "decoy-store-search-zip",
     "decoy-support-request",
@@ -155,6 +162,7 @@
     "linear-email-code",
     "linear-login",
     "linkedin-login",
+    "login-honeypot-password",
     "login-masked-2fa",
     "login-modal-homepage",
     "login-newsletter-footer",
@@ -180,10 +188,15 @@
     "shadow-mybutton-login",
     "shopify-card-frame",
     "shopify-checkout",
+    "signup-create-password-bday",
+    "signup-two-step-names",
     "signup-two-step-password",
     "slack-workspace-signin",
+    "sms-code-step",
+    "sso-workspace-region",
     "stripe-checkout",
     "stripe-dashboard-login",
+    "tailwind-opacity-email",
     "vercel-totp-boxes",
     "wellsfargo-login",
     "x-login-flow"
