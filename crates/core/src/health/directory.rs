@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::site::shared::{self, Group};
 use crate::site::{registrable_domain, url_host, valid_domain};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,16 +46,6 @@ struct RawBreach {
     t: String,
     d: String,
     a: String,
-}
-
-#[derive(Deserialize)]
-struct RawShared {
-    #[serde(default)]
-    shared: Vec<String>,
-    #[serde(default)]
-    from: Vec<String>,
-    #[serde(default)]
-    to: Vec<String>,
 }
 
 /// Inserts exact domain entries first, then rolls subdomain keys (such as
@@ -141,36 +132,15 @@ static CHANGE_URLS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
 /// Maps every domain in a shared-credential group (or `from` -> `to` migration)
 /// to one canonical domain for reuse deduplication.
 static SHARED_GROUPS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
-    let raw: Vec<RawShared> =
-        serde_json::from_str(include_str!("../../data/health/shared.json")).unwrap_or_default();
     let mut map = HashMap::new();
-    for group in raw {
-        if !group.shared.is_empty() {
-            let mut members: Vec<String> = group
-                .shared
-                .into_iter()
-                .map(|d| registrable_domain(&d))
-                .filter(|d| valid_domain(d))
-                .collect();
-            members.sort();
-            members.dedup();
-            if let Some(canonical) = members.first().cloned() {
-                for member in members {
-                    map.insert(member, canonical.clone());
-                }
-            }
-        }
-        if let Some(target) = group
-            .to
-            .first()
-            .map(|d| registrable_domain(d))
-            .filter(|d| valid_domain(d))
-        {
-            for from in group.from {
-                let domain = registrable_domain(&from);
-                if valid_domain(&domain) {
-                    map.insert(domain, target.clone());
-                }
+    for group in shared::groups() {
+        let (members, canonical) = match group {
+            Group::Shared(sites) => (sites, sites.first()),
+            Group::Moved { from, to } => (from, to.first()),
+        };
+        if let Some(canonical) = canonical {
+            for member in members {
+                map.insert(member.clone(), canonical.clone());
             }
         }
     }
