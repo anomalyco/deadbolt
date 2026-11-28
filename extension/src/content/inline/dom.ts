@@ -14,6 +14,8 @@ export const MENU_CAPTION = 22
 export const MENU_MIN_WIDTH = 240
 /** The menu's gap to each side of the viewport. */
 export const MENU_MARGIN = 4
+/** The account list's gap to its field. */
+export const MENU_GAP = 6
 /** The save offer's place: the top right corner, near the toolbar button. */
 export const SAVE_INSET = 12
 /** The offer's compact pill, before its frame says its size. */
@@ -102,6 +104,40 @@ export function frameAround(box: Box): { el: Element; left: number; top: number 
     best = { el, left: r.left, top: r.top }
   }
   return best
+}
+
+/** Which side of its field the account list is on. */
+export type MenuSide = "above" | "below"
+
+/**
+ * Where the account list of `height` goes over field `r` in a viewport
+ * `viewport` tall: its side, and its top. A login field's list goes above
+ * it whenever it fits there (`above`), `MENU_GAP` over the field's top:
+ * the browser's own autofill list for that field opens below it, and a page
+ * can't cover that list, so the two never overlap. Near the top of the
+ * viewport, and for any other list, it goes below, else above anyway.
+ *
+ * `was`, the side it's on already, keeps it there while it still fits, so a
+ * list that grows (`db:menu-resize`) grows away from its field with its
+ * near edge pinned, rather than jumping across the field.
+ *
+ * `others`: the form's other fields under the list's width. Above never
+ * covers one of them (a password box's list would sit on the username box
+ * over it, taking the click meant for it); then it goes below.
+ */
+export function menuPlace(
+  r: { top: number; bottom: number },
+  height: number,
+  viewport: number,
+  above: boolean,
+  was: MenuSide | null = null,
+  others: Array<{ top: number; bottom: number }> = [],
+): { side: MenuSide; top: number } {
+  const aboveTop = r.top - height - MENU_GAP
+  const fitsAbove = r.top >= height + MENU_MARGIN + MENU_GAP && !others.some((o) => o.bottom > aboveTop && o.top < r.top)
+  const fitsBelow = r.bottom + MENU_GAP + height < viewport
+  const side: MenuSide = was === "above" && fitsAbove ? "above" : was === "below" && fitsBelow ? "below" : above && fitsAbove ? "above" : fitsBelow ? "below" : "above"
+  return { side, top: side === "above" ? Math.max(MENU_MARGIN, r.top - height - MENU_GAP) : r.bottom + MENU_GAP }
 }
 
 /** A random valid custom-element name, such as `kqzvt-hmwbe`. */

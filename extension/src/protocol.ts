@@ -31,6 +31,7 @@ export type PasskeyCancelledReply = ReplyOf<"passkey-cancelled">
 export type LearnedReply = ReplyOf<"learned">
 export type LearnTextReply = ReplyOf<"learn-text">
 export type LearnDeletedReply = ReplyOf<"learn-deleted">
+export type UnlockPromptReply = ReplyOf<"unlock-prompt">
 export type ErrorReply = ReplyOf<"error">
 
 /** What a request of each type is answered with, besides an error. */
@@ -54,6 +55,7 @@ export interface ReplyFor {
   learn: LearnedReply
   "learn-read": LearnTextReply
   "learn-delete": LearnDeletedReply
+  "unlock-prompt": UnlockPromptReply
 }
 
 /** The reply type each request expects. */
@@ -77,11 +79,13 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   learn: "learned",
   "learn-read": "learn-text",
   "learn-delete": "learn-deleted",
+  "unlock-prompt": "unlock-prompt",
 }
 
 export type HostMessage =
   | { kind: "reply"; id: number | string | null; reply: Reply }
-  | { kind: "changed"; change: Change }
+  /** `touchIdReady`: on `locked`, Touch ID can unlock it now. */
+  | { kind: "changed"; change: Change; touchIdReady?: true }
 
 /** A check for a member of a generated union. Each set must name every member, so a new one in crates/proto fails the typecheck until it's listed here. */
 const memberOf =
@@ -204,7 +208,7 @@ function signInOf(v: unknown): { signIn?: SignIn } {
 export function parseHostMessage(raw: unknown): HostMessage | null {
   if (!isObject(raw) || typeof raw.type !== "string") return null
   if (raw.type === "changed") {
-    return isChange(raw.change) ? { kind: "changed", change: raw.change } : null
+    return isChange(raw.change) ? { kind: "changed", change: raw.change, ...(raw.touchIdReady === true ? { touchIdReady: true as const } : {}) } : null
   }
   const id = typeof raw.id === "number" || typeof raw.id === "string" ? raw.id : raw.id === null ? null : undefined
   if (id === undefined) return null
@@ -223,6 +227,7 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
         status: raw.status,
         detail: str(raw.detail, 1000),
         capabilities: strings(raw.capabilities),
+        ...(raw.touchIdReady === true ? { touchIdReady: true } : {}),
       }
     }
     case "list": {
@@ -288,6 +293,8 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
       return typeof raw.text === "string" ? { type: "learn-text", text: raw.text, next: typeof raw.next === "number" && raw.next > 0 ? raw.next : null } : null
     case "learn-deleted":
       return { type: "learn-deleted", found: raw.found === true }
+    case "unlock-prompt":
+      return { type: "unlock-prompt", app: raw.app === true }
     case "error": {
       return { type: "error", code: isCode(raw.code) ? raw.code : "failed", message: str(raw.message, 1000) ?? "" }
     }

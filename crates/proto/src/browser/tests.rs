@@ -219,6 +219,7 @@ fn requests() {
             Request::LearnDelete { session: s("s1") },
             json!({"type": "learn-delete", "session": "s1"}),
         ),
+        (Request::UnlockPrompt, json!({"type": "unlock-prompt"})),
     ];
     for (request, wire) in cases {
         golden(request.clone(), wire.clone());
@@ -281,9 +282,22 @@ fn replies() {
                 status: HostStatus::NotSetUp,
                 detail: Some(s("Set up Deadbolt")),
                 capabilities: CAPABILITIES.map(String::from).to_vec(),
+                touch_id_ready: false,
             },
             json!({"type": "hello", "protocol": 3, "version": "1.2.3", "status": "not-set-up",
                    "detail": "Set up Deadbolt", "capabilities": CAPABILITIES}),
+        ),
+        (
+            Body::Hello {
+                protocol: PROTOCOL,
+                version: s("1.2.3"),
+                status: HostStatus::Locked,
+                detail: None,
+                capabilities: vec![s("unlock-prompt")],
+                touch_id_ready: true,
+            },
+            json!({"type": "hello", "protocol": 3, "version": "1.2.3", "status": "locked",
+                   "capabilities": ["unlock-prompt"], "touchIdReady": true}),
         ),
         (
             Body::List {
@@ -351,8 +365,16 @@ fn replies() {
         (
             Body::Changed {
                 change: Change::Items,
+                touch_id_ready: false,
             },
             json!({"type": "changed", "change": "items"}),
+        ),
+        (
+            Body::Changed {
+                change: Change::Locked,
+                touch_id_ready: true,
+            },
+            json!({"type": "changed", "change": "locked", "touchIdReady": true}),
         ),
         (
             Body::Forms {
@@ -457,6 +479,10 @@ fn replies() {
             Body::LearnDeleted { found: false },
             json!({"type": "learn-deleted", "found": false}),
         ),
+        (
+            Body::UnlockPrompt { app: true },
+            json!({"type": "unlock-prompt", "app": true}),
+        ),
     ];
     for (body, wire) in cases {
         golden(body, wire);
@@ -490,6 +516,7 @@ fn envelopes() {
             id: None,
             body: Body::Changed {
                 change: Change::Started,
+                touch_id_ready: false,
             },
         },
         json!({"type": "changed", "change": "started"}),

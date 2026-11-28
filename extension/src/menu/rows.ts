@@ -14,6 +14,8 @@ export type Row =
   | { generate: true }
   | { identity: FormIdentity }
   | { card: FormCard }
+  /** "Unlock Deadbolt": Touch ID when it's ready, else Deadbolt's window (see bg/unlock.ts). */
+  | { unlock: { touchId: boolean } }
 
 export const CHEVRON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 
@@ -88,6 +90,8 @@ export function matches(item: Row, q: string): boolean {
   if (!q) return true
   // A generated password matches nothing typed: typing a password of one's own puts it away.
   if ("generate" in item) return false
+  // Unlocking is what the list is for while it's locked, whatever's typed.
+  if ("unlock" in item) return true
   const hay =
     "identity" in item
       ? [item.identity.title, item.identity.summary]

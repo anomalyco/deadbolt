@@ -3,7 +3,7 @@
 // the tests' fakes.
 
 import type { Status } from "../messages"
-import type { Change, ErrorCode, ReplyFor, RequestBody } from "../protocol"
+import type { Change, ErrorCode, ReplyFor, RequestBody, UnlockPromptReply } from "../protocol"
 
 export class HostError extends Error {
   constructor(
@@ -32,6 +32,8 @@ export interface VaultBackend {
   /** Try again now, e.g. when the popup opens. */
   reconnectNow(): Promise<void>
   send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, options?: SendOptions): Promise<ReplyFor[T]>
+  /** Touch ID, or Deadbolt's window for the passphrase (`unlock-prompt`); hello follows when no `unlocked` push may. */
+  unlockPrompt(): Promise<UnlockPromptReply>
 }
 
 export const cancelled = () => new HostError("cancelled", "The request was cancelled.")

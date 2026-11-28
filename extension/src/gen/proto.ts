@@ -227,6 +227,7 @@ export type RequestBody =
       type: "learn-delete"
       session: string
     }
+  | { type: "unlock-prompt" }
 
 /** A login saved for the site, without values. */
 export type Account = {
@@ -327,6 +328,8 @@ export type Body =
       detail?: string
       /** What this host does (`CAPABILITIES`). */
       capabilities: string[]
+      /** Locked, and Touch ID can unlock it now (`unlock-prompt` asks for it). */
+      touchIdReady?: boolean
     }
   | {
       type: "list"
@@ -368,6 +371,8 @@ export type Body =
   | {
       type: "changed"
       change: Change
+      /** On `locked`: Touch ID can unlock it now, as hello's says. */
+      touchIdReady?: boolean
     }
   | {
       type: "forms"
@@ -405,4 +410,8 @@ export type Body =
   | {
       type: "learn-deleted"
       found: boolean
+    }
+  | {
+      type: "unlock-prompt"
+      app: boolean
     }

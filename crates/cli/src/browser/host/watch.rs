@@ -20,15 +20,19 @@ pub(super) const RECONNECT: Duration = Duration::from_secs(2);
 /// Starts the daemon if none runs, never unlocking it.
 /// Also whether a daemon answered.
 pub(super) async fn hello(paths: &Paths) -> (Body, bool) {
+    let mut touch_id_ready = false;
     let (status, detail) = match client::ensure_running(paths).await {
         Ok(status) if !status.initialized => (
             HostStatus::NotSetUp,
             Some("Set up Deadbolt to fill passwords: run `deadbolt init`".to_string()),
         ),
-        Ok(status) if !status.unlocked => (
-            HostStatus::Locked,
-            Some("Unlock Deadbolt to fill passwords".to_string()),
-        ),
+        Ok(status) if !status.unlocked => {
+            touch_id_ready = status.touch_id_ready;
+            (
+                HostStatus::Locked,
+                Some("Unlock Deadbolt to fill passwords".to_string()),
+            )
+        }
         Ok(_) => (HostStatus::Ready, None),
         Err(error) => (HostStatus::Unavailable, Some(format!("{error:#}"))),
     };
@@ -38,6 +42,7 @@ pub(super) async fn hello(paths: &Paths) -> (Body, bool) {
         status,
         detail,
         capabilities: CAPABILITIES.map(String::from).to_vec(),
+        touch_id_ready,
     };
     (body, status != HostStatus::Unavailable)
 }
@@ -54,10 +59,21 @@ pub(super) async fn watch(
 ) {
     let push = |change: Change| {
         let frames = frames.clone();
+        let paths = paths.clone();
         async move {
+            // Whether Touch ID can unlock it now, for the menu's unlock row.
+            // A status, never a hello: a daemon that's stopping (`locked`
+            // comes just before `stopped`) mustn't be started again.
+            let touch_id_ready = change == Change::Locked
+                && client::status(&paths)
+                    .await
+                    .is_some_and(|s| !s.unlocked && s.touch_id_ready);
             let envelope = Envelope {
                 id: None,
-                body: Body::Changed { change },
+                body: Body::Changed {
+                    change,
+                    touch_id_ready,
+                },
             };
             match encode(&envelope) {
                 Ok(frame) => frames.send(frame).await.is_ok(),

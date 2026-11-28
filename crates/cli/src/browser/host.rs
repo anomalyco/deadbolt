@@ -10,10 +10,13 @@
 //!
 //! The host only checks requests' shape and turns them into daemon commands:
 //! the daemon finds a page's site from its origin and decides what it gets.
-//! The host never prompts for a passphrase or Touch ID.
+//! The host never prompts for a passphrase. It asks for Touch ID, or brings
+//! Deadbolt's window forward, only on `unlock-prompt` ([`unlock`]), which
+//! the user's click in the extension's locked menu sends.
 
 mod learn;
 mod protocol;
+mod unlock;
 mod watch;
 
 use std::sync::Arc;
@@ -47,6 +50,8 @@ const CHECKS: (u32, Duration) = (20, Duration::from_secs(1));
 const FILLS: (u32, Duration) = (60, Duration::from_millis(250));
 /// Learning logs a line per sign-in step and frame: a burst, then a steady trickle.
 const LEARNS: (u32, Duration) = (100, Duration::from_millis(100));
+/// Each unlock prompt raises Touch ID or a window: a few, then one every two seconds.
+const UNLOCKS: (u32, Duration) = (3, Duration::from_secs(2));
 
 /// Serves the extension at `origin` until stdin closes.
 pub async fn run(paths: Paths, origin: &str) -> Result<()> {
@@ -155,6 +160,9 @@ struct Serial {
     fills: Bucket,
     passkey_lists: Bucket,
     learns: Bucket,
+    unlocks: Bucket,
+    /// How `unlock-prompt` brings Deadbolt's window forward.
+    open_app: unlock::OpenApp,
 }
 
 /// Where a request goes once read.
@@ -181,6 +189,8 @@ impl Host {
                 fills: Bucket::new(FILLS, now),
                 passkey_lists: Bucket::new(passkeys::LISTS, now),
                 learns: Bucket::new(LEARNS, now),
+                unlocks: Bucket::new(UNLOCKS, now),
+                open_app: unlock::open_app,
             },
             ceremonies: Ceremonies::new(now),
         }
@@ -686,6 +696,13 @@ impl Serial {
                 Ok(Body::LearnDeleted {
                     found: std::fs::remove_file(path).is_ok(),
                 })
+            }
+            // Touch ID waits on the user: requests behind it wait too.
+            Request::UnlockPrompt => {
+                if !self.unlocks.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                unlock::prompt(&self.paths, self.open_app).await
             }
         }
     }

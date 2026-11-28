@@ -84,6 +84,48 @@ describe("Host", () => {
     expect(host.status).toEqual({ state: "locked", detail: "Unlock Deadbolt" })
   })
 
+  test("a locked hello that says Touch ID is ready marks the status, for the menu's unlock row", async () => {
+    const ready = host.connect()
+    ports[0].push(hello(1, "locked", { detail: "Unlock Deadbolt", touchIdReady: true }))
+    await ready
+    expect(host.status).toEqual({ state: "locked", detail: "Unlock Deadbolt", touchId: true })
+  })
+
+  test("a locked push says whether Touch ID can unlock now, and sends no hello (which would start a stopping daemon)", async () => {
+    const ready = host.connect()
+    ports[0].push(hello(1))
+    await ready
+    ports[0].push({ type: "changed", change: "locked", touchIdReady: true })
+    expect(host.status).toEqual({ state: "locked", detail: "Unlock Deadbolt to fill passwords", touchId: true })
+    ports[0].push({ type: "changed", change: "unlocked" })
+    ports[0].push(hello(2))
+    await tick()
+    ports[0].push({ type: "changed", change: "locked" })
+    expect(host.status).toEqual({ state: "locked", detail: "Unlock Deadbolt to fill passwords" })
+    expect(ports[0].sent.map((m) => m.type)).toEqual(["hello", "hello"])
+  })
+
+  test("unlock-prompt that unlocked with no push asks hello, so a waiting menu sees ready", async () => {
+    const ready = host.connect()
+    ports[0].push(hello(1, "locked", { touchIdReady: true }))
+    await ready
+    const asked = host.unlockPrompt()
+    await tick()
+    expect(ports[0].last()).toEqual({ type: "unlock-prompt", id: 2 })
+    ports[0].push({ id: 2, type: "unlock-prompt", app: false })
+    expect(await asked).toEqual({ type: "unlock-prompt", app: false })
+    expect(ports[0].last()).toEqual({ type: "hello", id: 3 })
+    ports[0].push(hello(3))
+    await tick()
+    expect(host.status).toEqual({ state: "ready", version: "0.4.0" })
+    // Deadbolt's window came forward instead: the passphrase's `unlocked` push will say.
+    const app = host.unlockPrompt()
+    await tick()
+    ports[0].push({ id: 4, type: "unlock-prompt", app: true })
+    await app
+    expect(ports[0].sent).toHaveLength(4)
+  })
+
   test("a different protocol version is unavailable, not ready", async () => {
     const ready = host.connect()
     ports[0].push(hello(1, "ready", { protocol: PROTOCOL + 1 }))

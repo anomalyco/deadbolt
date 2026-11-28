@@ -24,6 +24,12 @@ pub const MAX_AGE_SECS: u64 = 14 * 24 * 60 * 60;
 /// is killed and the dialog dismissed.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A Touch ID prompt nobody answered within [`PROMPT_TIMEOUT`]. Callers take
+/// it as a cancel: the user walked away, and nothing else comes up for them.
+pub fn prompt_timed_out() -> UnlockError {
+    UnlockError::Unavailable("Touch ID prompt timed out".into())
+}
+
 /// Timeout for non-interactive helper probes (`status`, `seal`).
 #[cfg(target_os = "macos")]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -553,7 +559,7 @@ mod macos {
     use crate::disk::Zeroizing;
     use anyhow::{Context, Result, anyhow, bail};
 
-    use super::{BiometricStatus, CancelHandle, PROBE_TIMEOUT, UnlockError};
+    use super::{BiometricStatus, CancelHandle, PROBE_TIMEOUT, UnlockError, prompt_timed_out};
 
     const EXIT_CANCELLED: i32 = 10;
     const EXIT_UNAVAILABLE: i32 = 11;
@@ -905,7 +911,7 @@ mod macos {
             if now >= deadline {
                 guard.kill_and_reap();
                 drop(reader.join());
-                return Err(UnlockError::Unavailable("Touch ID prompt timed out".into()));
+                return Err(prompt_timed_out());
             }
             let wait_for = (deadline - now).min(Duration::from_millis(25));
             let cguard = cancel.cancelled.lock().unwrap_or_else(|e| e.into_inner());

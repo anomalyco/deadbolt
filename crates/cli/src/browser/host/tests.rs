@@ -74,6 +74,7 @@ fn replies_have_the_documented_shapes() {
         id: None,
         body: Body::Changed {
             change: HostChange::Locked,
+            touch_id_ready: false,
         },
     };
     assert_eq!(
@@ -259,6 +260,8 @@ async fn a_daemon_that_goes_away_is_announced_when_back() {
                     change: Change::Locked,
                 },
             ],
+            // `locked` asks the daemon's status for Touch ID; this one hangs up.
+            vec![],
             vec![watching()],
         ],
         false,
@@ -818,4 +821,118 @@ async fn passkey_lists_are_rate_limited() {
     }
     let answer = host.answer(list, &frames).await.unwrap();
     assert_eq!(json(&answer)["code"], "rate_limited");
+}
+
+/// What `unlock-prompt` opened the app for, in place of opening it.
+static APP_OPENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn open_no_app(_: &Paths) -> std::io::Result<()> {
+    APP_OPENED.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+/// A set-up, locked daemon's status, whose Touch ID is ready or not.
+fn locked(touch_id_ready: bool) -> Message {
+    Message::Ok {
+        reply: Reply::Status(Box::new(crate::protocol::Status {
+            pid: 1,
+            version: client::version(),
+            protocol: crate::protocol::PROTOCOL_VERSION,
+            program: None,
+            home: String::new(),
+            initialized: true,
+            unlocked: false,
+            locks_in_secs: None,
+            device: None,
+            vaults: vec![],
+            peers_online: 0,
+            peers: 0,
+            touch_id_available: touch_id_ready,
+            touch_id_enabled: touch_id_ready,
+            touch_id_ready,
+            touch_id_reset: false,
+            v1_store: false,
+            caller: crate::protocol::CallerInfo::unverified("test"),
+            update: None,
+        })),
+    }
+}
+
+/// Hello says when Touch ID can unlock the locked vault, which is what the
+/// menu's "Unlock Deadbolt · Touch ID" row reads.
+#[tokio::test]
+async fn hello_says_touch_id_is_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = test_paths(dir.path());
+    fake_daemon(&paths, vec![vec![locked(true)]], false);
+    let (body, reached) = hello(&paths).await;
+    assert!(reached);
+    let hello = json(&Envelope { id: None, body });
+    assert_eq!(hello["status"], "locked");
+    assert_eq!(hello["touchIdReady"], true);
+    assert!(
+        hello["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&"unlock-prompt".into())
+    );
+}
+
+/// `unlock-prompt` unlocks with Touch ID when it's ready, opens the app
+/// for the passphrase when it isn't or Touch ID failed, and opens nothing
+/// when the user cancelled Touch ID.
+#[tokio::test]
+async fn unlock_prompt_asks_touch_id_else_opens_the_app() {
+    let biometric = |outcome: Message| vec![vec![locked(true)], vec![outcome]];
+    let refused = |code: ErrorCode| Message::Error {
+        code,
+        message: "no".into(),
+    };
+    let cases = [
+        (
+            biometric(Message::Ok { reply: Reply::Done }),
+            serde_json::json!({"id": 1, "type": "unlock-prompt", "app": false}),
+            0,
+        ),
+        (
+            biometric(refused(ErrorCode::Cancelled)),
+            serde_json::json!({"id": 1, "type": "error", "code": "cancelled",
+                               "message": "Touch ID was cancelled"}),
+            0,
+        ),
+        // Left unanswered for a minute: the daemon calls that a cancel, and
+        // nothing comes forward for a user who walked away.
+        (
+            biometric(Message::Error {
+                code: ErrorCode::Cancelled,
+                message: crate::daemon::biometric::prompt_timed_out().to_string(),
+            }),
+            serde_json::json!({"id": 1, "type": "error", "code": "cancelled",
+                               "message": "Touch ID was cancelled"}),
+            0,
+        ),
+        (
+            biometric(refused(ErrorCode::Failed)),
+            serde_json::json!({"id": 1, "type": "unlock-prompt", "app": true}),
+            1,
+        ),
+        (
+            vec![vec![locked(false)]],
+            serde_json::json!({"id": 1, "type": "unlock-prompt", "app": true}),
+            1,
+        ),
+    ];
+    for (script, want, opened) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        fake_daemon(&paths, script, false);
+        let mut host = Host::new(paths);
+        host.serial.open_app = open_no_app;
+        let (frames, _outbox) = mpsc::channel(16);
+        let before = APP_OPENED.load(Ordering::SeqCst);
+        let body =
+            serde_json::to_vec(&serde_json::json!({"id": 1, "type": "unlock-prompt"})).unwrap();
+        assert_eq!(json(&host.answer(&body, &frames).await.unwrap()), want);
+        assert_eq!(APP_OPENED.load(Ordering::SeqCst) - before, opened, "{want}");
+    }
 }

@@ -11,7 +11,7 @@
 // dwell (see ui/dom.ts) before it does anything.
 
 
-import type { FieldRole, MenuLoadReply, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
+import type { FieldRole, MenuLoadReply, MenuRefresh, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground, UnlockReply } from "./messages"
 import { provider as providerOf } from "./signin"
 import type { Account } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, watchVisibility } from "./ui/dom"
@@ -204,6 +204,8 @@ function row(item: Row, i: number): HTMLElement {
       ? [avatar(item.card.brand || item.card.title, icon("card")), cardLine(item.card), item.card.brand && item.card.title !== item.card.brand ? item.card.title : item.card.cardholder || item.card.title]
       : "generate" in item
       ? [avatar("", icon("key")), "Use a strong password", "Saved only if you sign up with it"]
+      : "unlock" in item
+      ? [avatar("", icon("lock")), item.unlock.touchId ? "Unlock Deadbolt · Touch ID" : "Unlock Deadbolt", item.unlock.touchId ? "Then pick a login here" : "Opens Deadbolt to type your passphrase"]
       : "passkey" in item
       ? [avatar("", icon("passkey")), item.passkey.username || "Passkey", `Passkey · ${item.passkey.vault}`]
       : "provider" in item
@@ -442,7 +444,18 @@ function narrow(text: string) {
   port?.postMessage({ type: "db:matches", count: left.length })
 }
 
-function showStatus(status: Status) {
+function showStatus(status: Status, unlock = false) {
+  // Locked, with a host that unlocks from here: one row that does it, a pick like any other.
+  if (status.state === "locked" && unlock) {
+    accounts = [{ unlock: { touchId: status.touchId === true } }]
+    active = 0
+    listbox("Deadbolt")
+    rowsEl.classList.remove("bare")
+    rowsEl.replaceChildren(...accounts.map(row))
+    setCaption("")
+    say("")
+    return highlight()
+  }
   accounts = []
   listbox(null)
   highlightEl.hidden = true
@@ -479,6 +492,7 @@ async function pick(i: number) {
   }
   // "Sign in with …" fills nothing: the page's own button for it gets a ring, and the user clicks it.
   if ("provider" in a) return signInWith(i, a.provider)
+  if ("unlock" in a) return unlock(i, a.unlock.touchId)
   // Checked: now it may move. A ring turns round the avatar while the fill is on its way.
   document.body.classList.remove("held")
   highlightEl.classList.remove("pressing")
@@ -520,6 +534,25 @@ async function pick(i: number) {
   setTimeout(() => done(), FAILED_STAYS_MS)
 }
 
+
+/**
+ * "Unlock Deadbolt" picked: Touch ID comes up, or Deadbolt's window, and the
+ * row says which to answer. The menu stays; once the vault is ready, it
+ * lists the site's logins in place (db:menu-refresh).
+ */
+async function unlock(i: number, touchId: boolean) {
+  const sub = rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".sub")
+  if (sub) sub.textContent = touchId ? "Waiting for Touch ID…" : "Opening Deadbolt…"
+  const reply = await send<UnlockReply>({ type: "db:menu-unlock", token })
+  busy = false
+  relax()
+  if (!reply?.ok) {
+    if (sub) sub.textContent = touchId ? "Then pick a login here" : "Opens Deadbolt to type your passphrase"
+    return say(reply?.message || "Couldn't unlock. Try again.")
+  }
+  if (reply.app && sub) sub.textContent = "Type your passphrase in Deadbolt"
+  announce(reply.app ? "Type your passphrase in Deadbolt" : "Unlocked")
+}
 
 /**
  * A "Sign in with …" row picked: the page's content script rings the site's
@@ -610,7 +643,7 @@ function show(reply: MenuLoadReply) {
   if (reply.kind === "offer") return showOffer(reply)
   if (reply.kind === "notice") return showNotice(reply)
   if (mode !== "accounts") return
-  if (reply.kind === "status") return showStatus(reply.status)
+  if (reply.kind === "status") return showStatus(reply.status, reply.unlock === true)
   if (reply.kind === "forms") return showForms(reply)
   universal = reply.kind === "accounts" && reply.universal === true
   signsIn = new Set(reply.kind === "accounts" ? (reply.signsIn ?? []) : [])
@@ -942,8 +975,9 @@ if (window.parent !== window) window.parent.postMessage({ type: "db:menu-ready" 
 // Turning site icons on or off shows in the open menu at once.
 onIconSettings(() => void load())
 
-// Unlocking in the app, or a sync, updates the open menu in place.
-chrome.runtime.onMessage.addListener((message: StatusChanged) => {
-  if (message?.type === "db:status") void load()
+// Unlocking in the app, or a sync, updates the open menu in place; so does
+// the unlock this menu asked for, once its site's logins are in hand.
+chrome.runtime.onMessage.addListener((message: StatusChanged | MenuRefresh) => {
+  if (message?.type === "db:status" || (message?.type === "db:menu-refresh" && !!token && message.token === token)) void load()
 })
 

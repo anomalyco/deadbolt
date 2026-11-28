@@ -4,10 +4,12 @@
 // and turns `changed` pushes into a status that the popup and menus follow.
 
 import type { Status } from "../messages"
-import { NATIVE_HOST, parseHostMessage, PROTOCOL, REPLY_TYPE, type Change, type ErrorReply, type Reply, type ReplyFor, type RequestBody } from "../protocol"
+import { NATIVE_HOST, parseHostMessage, PROTOCOL, REPLY_TYPE, type Change, type ErrorReply, type Reply, type ReplyFor, type RequestBody, type UnlockPromptReply } from "../protocol"
 import { cancelled, HostError, type Listener, type SendOptions, type VaultBackend } from "./backend"
 
 const TIMEOUT_MS = 30_000
+/** `unlock-prompt` waits on the user at Touch ID, which the daemon gives 60 s (biometric::PROMPT_TIMEOUT), then on the host. */
+export const UNLOCK_TIMEOUT_MS = 90_000
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
 
 interface Pending {
@@ -77,7 +79,7 @@ export class Host implements VaultBackend {
         const detail = `This extension speaks protocol ${PROTOCOL}, but Deadbolt speaks ${reply.protocol}. Update both.`
         this.setStatus({ state: "unavailable", detail }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
-      else this.setStatus({ state: reply.status, detail: reply.detail }, change)
+      else this.setStatus({ state: reply.status, detail: reply.detail, ...(reply.touchIdReady ? { touchId: true } : {}) }, change)
     } catch (err) {
       if (err instanceof HostError && err.code === "disconnected") return
       this.setStatus({ state: "unavailable", detail: (err as Error).message }, change)
@@ -126,7 +128,7 @@ export class Host implements VaultBackend {
   private received(raw: unknown) {
     const message = parseHostMessage(raw)
     if (!message) return
-    if (message.kind === "changed") return this.changed(message.change)
+    if (message.kind === "changed") return this.changed(message.change, message.touchIdReady === true)
     if (typeof message.id !== "number") return
     const pending = this.pending.get(message.id)
     if (!pending) return
@@ -135,10 +137,22 @@ export class Host implements VaultBackend {
     pending.resolve(message.reply)
   }
 
-  private changed(change: Change) {
+  /**
+   * Asks the host to unlock (see bg/unlock.ts). Touch ID that unlocked, or a
+   * vault that already was, may come with no `unlocked` push this port
+   * hears (a daemon started just now): hello says where it stands then.
+   */
+  async unlockPrompt(): Promise<UnlockPromptReply> {
+    const reply = await this.send({ type: "unlock-prompt" }, { timeout: UNLOCK_TIMEOUT_MS })
+    if (!reply.app && this.status.state !== "ready") void this.hello("unlocked")
+    return reply
+  }
+
+  /** `touchId`: on `locked`, the host says Touch ID can unlock it now, as hello does. */
+  private changed(change: Change, touchId = false) {
     switch (change) {
       case "locked":
-        this.setStatus({ state: "locked", detail: "Unlock Deadbolt to fill passwords" }, change)
+        this.setStatus({ state: "locked", detail: "Unlock Deadbolt to fill passwords", ...(touchId ? { touchId: true } : {}) }, change)
         break
       case "stopped":
         // Hello would start the daemon again; wait for `started`, which the

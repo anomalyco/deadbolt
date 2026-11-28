@@ -43,9 +43,9 @@ import { learning } from "./learn"
 import { deepActiveElement, eventTarget, markOwnHost } from "./shadow"
 import {
   boxNow, corner, covered, formOf, frameAround, frameStyle, GESTURE_WINDOW_MS, hostTag, important, isControl,
-  MAX_RAISES, MENU_CAPTION, MENU_CHROME, MENU_MARGIN, MENU_MIN_WIDTH, MENU_ROW, modalAround, pageAccount, PILL_MAX,
+  MAX_RAISES, MENU_CAPTION, MENU_CHROME, MENU_MARGIN, MENU_MIN_WIDTH, MENU_ROW, menuPlace, modalAround, pageAccount, PILL_MAX,
   RADIUS, REVEAL_LATEST_MS, SAVE_CAP_MS, SAVE_GUESS, SAVE_LOAD_MS, send, SHADOW, unzoom, within,
-  type AnchorBox, type Rect,
+  type AnchorBox, type MenuSide, type Rect,
 } from "./inline/dom"
 import {
   applyFill, applyFormsFill, formsStateOf, markSubmitted, noteSubmitGesture, resetFillState, stepped as steppedWith,
@@ -67,6 +67,8 @@ export interface PageState {
   /** Identity and payment fields (see forms.ts), and which snapshot they are. */
   formFields(): FormField[]
   formsForm(): number
+  /** The user asked to fill `el` (see manualOpen): take it as a login field if the scan didn't. Whether it is one now. */
+  manual?(el: HTMLInputElement): boolean
 }
 
 
@@ -88,6 +90,9 @@ let token: string | null = null
 let port: MessagePort | null = null
 let raf = 0
 let menuHeight = 0
+/** A login field's list goes above it when there's room (see menuPlace); the side it took stays while it fits. */
+let preferAbove = false
+let side: MenuSide | null = null
 let raises = 0
 /** Set while Deadbolt itself hides and shows the host. */
 let raising = false
@@ -129,6 +134,10 @@ let menuOrigin = ""
 let lastGestureAt = 0
 /** What the user's last pointerdown landed on: a click into a field asks for the menu outright. */
 let lastPointer: EventTarget | null = null
+/** The field the user last opened the context menu on, and when: "Fill with Deadbolt" is for it. */
+let contextTarget: { el: EventTarget | null; at: number } | null = null
+/** How long after its context menu opened "Fill with Deadbolt" is still about that field. */
+const CONTEXT_MS = 60_000
 const recentGesture = () => Date.now() - lastGestureAt < GESTURE_WINDOW_MS
 /**
  * The menu opens only in the top page. A frame's position, size and style are
@@ -219,13 +228,24 @@ function targetRect(): Rect | null {
     const left = inside ? r.right - width - (r.height - height) / 2 : Math.min(r.right + 6, innerWidth - width - 4)
     return { left, top: r.top + (r.height - height) / 2, width, height }
   }
-  // As wide as the field (or the frame's box), left-aligned with it, within the viewport.
+  // As wide as the field (or the frame's box), left-aligned with it, within
+  // the viewport; a login list above the field, clear of the browser's own
+  // autofill list below it (see menuPlace).
   const width = Math.min(Math.max(r.width, MENU_MIN_WIDTH), innerWidth - 2 * MENU_MARGIN)
-  const below = r.bottom + 6
-  const fitsBelow = below + menuHeight < innerHeight
-  const top = fitsBelow ? below : Math.max(4, r.top - menuHeight - 6)
   const left = Math.min(Math.max(MENU_MARGIN, r.left), innerWidth - width - MENU_MARGIN)
-  return { left, top, width, height: menuHeight }
+  const placed = menuPlace(r, menuHeight, innerHeight, preferAbove, side, preferAbove ? fieldsUnder(left, width) : [])
+  side = placed.side
+  return { left, top: placed.top, width, height: menuHeight }
+}
+
+/** The page's other login fields that show between `left` and `left + width`: what a list above its field mustn't cover (see menuPlace). */
+function fieldsUnder(left: number, width: number): DOMRect[] {
+  if (!anchor) return []
+  return state
+    .targets()
+    .filter((t) => t.el !== anchor && t.el.isConnected)
+    .map((t) => t.el.getBoundingClientRect())
+    .filter((b) => b.width >= 2 && b.height >= 2 && b.right > left && b.left < left + width)
 }
 
 /**
@@ -296,6 +316,11 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   lastTarget = null
   const shown = Math.min(Math.max(rows, 1), 5)
   menuHeight = shown * MENU_ROW + MENU_CHROME + (captioned ? MENU_CAPTION : 0)
+  // An identity or card list stays below its field; a login list goes above.
+  // Not for a frame's field: this page can't see the frame's other fields,
+  // which a list above might cover (see fieldsUnder).
+  preferAbove = as === "accounts" && !captioned && !!el
+  side = null
   raises = 0
   const box = (host = document.createElement(hostTag()))
   box.setAttribute("popover", "manual")
@@ -488,6 +513,7 @@ export const menuHost = (): HTMLElement | null => host
 
 export function closeMenu(refocus = false, dismissed = false) {
   cancelAnimationFrame(raf)
+  stopResume()
   guard.reset()
   reveal = null
   revealAnim = null
@@ -934,6 +960,7 @@ export function initMenu(page: PageState) {
   document.addEventListener("pointerdown", onPointerDown, true)
   document.addEventListener("keydown", onKeyDown, true)
   document.addEventListener("input", onInput, true)
+  document.addEventListener("contextmenu", onContextMenu, true)
   window.addEventListener("pointermove", onPointerMove, { capture: true, passive: true })
   if (!isTop) window.addEventListener("scroll", onFrameScroll, { capture: true, passive: true })
   // Leaving the page (or entering the back/forward cache) takes the menu
@@ -998,6 +1025,17 @@ export function initMenu(page: PageState) {
         return void respond(openSaveSurface(String(message.token)))
       case "db:signin-offer":
         return void respond(openSignInSurface(String(message.token)))
+      case "db:manual-open": {
+        // The shortcut goes to every frame: only the one with focus takes it.
+        // The context menu's goes to the frame it opened in, about its field.
+        if (message.context !== true && !document.hasFocus()) return
+        const fromContext = message.context === true
+        const context = fromContext && contextTarget && Date.now() - contextTarget.at < CONTEXT_MS ? contextTarget.el : null
+        contextTarget = null
+        return void respond(manualOpen(context, fromContext))
+      }
+      case "db:menu-resumed":
+        return void respond(resumed(String(message.token)))
       case "db:point":
         return void respond(pointAtProvider(isTop, String(message.provider), () => closeMenu()))
       case "db:chooser":
@@ -1038,6 +1076,78 @@ function moveAt(t: string, box: Box): boolean {
   guard.placementChanged()
   return true
 }
+
+/**
+ * The user asked for the account menu on a field (the fill shortcut, or
+ * "Fill with Deadbolt" in its context menu, see bg/doors.ts): it opens on
+ * that field (`at`, else the focused one) even where the scan passed over
+ * it, with the checks a click gets (the field shows and is on top, see
+ * manualFields; in a frame, only of the top page's site, see
+ * Autofill.query). The browser's shortcut and context menu are the user's
+ * own gesture: a page can make neither, nor send this message.
+ */
+function manualOpen(at: EventTarget | null, fromContext: boolean): boolean {
+  // The context menu's ask is about the field it opened on, and only that:
+  // never whatever has focus (a right-click in a contenteditable, say).
+  if (fromContext && !isControl(at)) return false
+  const el = fromContext ? at : deepActiveElement()
+  if (!isControl(el) || learning()) return false
+  // Something on top of the field, Deadbolt's own surface aside: no menu, as for a click.
+  if (!fillable(el, host)) return false
+  // An identity or card field opens its own menu, never one of logins.
+  const forms = state.formFields().some((f) => f.el === el)
+  if (!forms && !(el instanceof HTMLInputElement && state.manual?.(el))) return false
+  // The focus's own focusin isn't this ask: it opens nothing on its own.
+  if (deepActiveElement() !== el) {
+    lastGestureAt = 0
+    el.focus({ preventScroll: true })
+  }
+  lastGestureAt = Date.now()
+  dismissedFor = null
+  quiet.delete(el)
+  if (el instanceof HTMLInputElement) byHand.delete(formOf(el))
+  emptyUntil.delete(el)
+  void maybeOpen(el, "again")
+  return true
+}
+
+function onContextMenu(event: MouseEvent) {
+  if (event.isTrusted) contextTarget = { el: eventTarget(event) ?? null, at: Date.now() }
+}
+
+/**
+ * The vault unlocked from this open menu, and it now lists the site's
+ * logins (bg/unlock.ts): keyboard focus goes into it as for ↓, so the
+ * user's next Enter picks its first login rather than submitting the form.
+ */
+function resumed(t: string): boolean {
+  if (!host || t !== token || mode !== "accounts" || closing) return false
+  const enter = () => {
+    port?.postMessage({ type: "db:menu-enter" })
+    frame?.focus()
+    frame?.contentWindow?.focus()
+  }
+  if (document.hasFocus()) return enter(), true
+  // Deadbolt's own window came forward for the passphrase: focus goes in
+  // once the user is back in this window, or the menu's window for Enter
+  // (see Entry) would be over before they are.
+  stopResume()
+  // The window's own focus: an element's doesn't bubble up to it.
+  const back = (event: FocusEvent) => {
+    if (event.target instanceof Node) return
+    stopResume()
+    if (host && token === t && mode === "accounts" && !closing) enter()
+  }
+  window.addEventListener("focus", back)
+  stopResume = () => {
+    window.removeEventListener("focus", back)
+    stopResume = () => {}
+  }
+  return true
+}
+
+/** Stops waiting for this window's focus to resume the menu (see resumed). */
+let stopResume = () => {}
 
 /** Called after each page scan: offer the menu on an already-focused field. */
 export function refreshMenu(focused: HTMLInputElement) {

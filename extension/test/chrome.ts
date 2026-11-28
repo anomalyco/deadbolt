@@ -279,6 +279,8 @@ export function fakeHost(): FakeHost {
     onChange: (l: (s: Status) => void) => void listeners.push(l),
     connect: async () => {},
     reconnectNow: async () => {},
+    // Through `send` as it is when called, which a test may have replaced.
+    unlockPrompt: () => host.send({ type: "unlock-prompt" }),
     send: async (req: Request) => {
       requests.push(req)
       switch (req.type) {
@@ -316,6 +318,8 @@ export function fakeHost(): FakeHost {
         }
         case "save-form":
           return { type: "save-form", ref: req.ref ?? `${"d".repeat(64)}:${"9".repeat(32)}`, created: !req.ref }
+        case "unlock-prompt":
+          return { type: "unlock-prompt", app: false }
       }
       throw new Error("unexpected")
     },

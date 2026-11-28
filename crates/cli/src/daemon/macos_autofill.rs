@@ -234,10 +234,14 @@ fn map_passkey_error(error: shared_passkeys::Error) -> anyhow::Error {
     }
 }
 
+/// A Touch ID prompt the user cancelled, or left unanswered until it timed
+/// out (see [`biometric::prompt_timed_out`]): either way, `cancelled`.
 pub(super) fn is_biometric_cancelled(error: &anyhow::Error) -> bool {
-    error.to_string() == biometric::UnlockError::Cancelled.to_string()
-        || error.to_string() == "Touch ID was cancelled"
-        || error.to_string() == "the request was cancelled"
+    let error = error.to_string();
+    error == biometric::UnlockError::Cancelled.to_string()
+        || error == biometric::prompt_timed_out().to_string()
+        || error == "Touch ID was cancelled"
+        || error == "the request was cancelled"
 }
 
 impl Daemon {

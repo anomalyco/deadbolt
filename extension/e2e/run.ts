@@ -3043,7 +3043,17 @@ async function viewportResize() {
   }
 }
 
-/** On a page with a CSS zoom above the menu's host, the menu still sits under the field at its own size, and fills. */
+/**
+ * Whether the account list at `m` sits beside the login field at `f` as
+ * content/inline/dom.ts menuPlace puts it: its bottom 6 px above the field
+ * when it fits there, else its top 6 px below it, within `slack` px.
+ */
+function besideField(m: { y: number; height: number }, f: { y: number; height: number }, slack = 2): boolean {
+  const gap = f.y >= m.height + 10 ? f.y - (m.y + m.height) : m.y - (f.y + f.height)
+  return gap >= 0 && Math.abs(gap - 6) < slack
+}
+
+/** On a page with a CSS zoom above the menu's host, the menu still sits beside the field at its own size, and fills. */
 async function pageZoom() {
   const run = await launch()
   const page = await run.context.newPage()
@@ -3056,8 +3066,8 @@ async function pageZoom() {
         continue
       }
       const [m, f, row] = await Promise.all([menu.frameElement().then((e) => e.boundingBox()), page.locator("#email").boundingBox(), menu.locator("button.row").first().boundingBox()])
-      const placed = !!m && !!f && Math.abs(m.x - f.x) < 2 && Math.abs(m.y - (f.y + f.height + 6)) < 2 && Math.abs(m.width - Math.max(f.width, 240)) < 2
-      check(placed && !!row && Math.abs(row.height - 46) < 2, `on ${path} the menu sits under the field at its own size (menu ${JSON.stringify(m)}, field ${JSON.stringify(f)}, row ${row?.height})`)
+      const placed = !!m && !!f && Math.abs(m.x - f.x) < 2 && besideField(m, f) && Math.abs(m.width - Math.max(f.width, 240)) < 2
+      check(placed && !!row && Math.abs(row.height - 46) < 2, `on ${path} the menu sits beside the field at its own size (menu ${JSON.stringify(m)}, field ${JSON.stringify(f)}, row ${row?.height})`)
       await menu.locator("button.row").first().click()
       const filled = await until(`a pick on ${path} fills`, async () => (await page.inputValue("#password")) !== "", 4000)
       check(!!filled, `and a pick there fills (${filled ? "" : await footText(menu)})`)

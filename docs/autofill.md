@@ -391,18 +391,39 @@ never gets such rows.
 One service worker owns the extension's only port to the host
 (`chrome.runtime.connectNative("anomaly.deadbolt.browser")`). It sends hello on
 connect, reconnects with backoff (1s up to 60s) when the host goes away, and
-follows `changed`. It never asks for the passphrase: a locked vault shows
-"Unlock Deadbolt" and waits for `unlocked`. A `stopped` push shows Deadbolt as
-not running without sending hello, which would start the daemon again.
+follows `changed`. It never asks for the passphrase: a locked vault's menu
+shows one row, "Unlock Deadbolt · Touch ID" (or "Unlock Deadbolt" when Touch
+ID can't unlock it now), a pick like any other. Picking it sends
+`unlock-prompt`: the host raises Touch ID, or brings Deadbolt's own window
+forward for the passphrase. The menu stays open, and once the vault is ready
+it lists the site's logins in place with keyboard focus in it (once the
+browser window has focus again), so ⏎ fills the first. With nothing saved
+for the site, focus stays in the field. A passphrase is never typed into the browser. A `stopped` push
+shows Deadbolt as not running without sending hello, which would start the
+daemon again.
 
 - **Inline menu.** Focusing a username, email, password or code field in the
   top page after a click or keypress opens a menu of that site's logins,
-  title and username, under the field. It's as wide as the field and
+  title and username, 6 px above the field, where the browser's own autofill
+  list (which opens below a login field, and which no page can cover) never
+  overlaps it. It goes 6 px below instead near the top of the viewport,
+  when above would cover another field of the form (a password box's list
+  over its username box), and for a field in a frame, whose other fields
+  the top page can't see. A list that grows keeps its edge by the field. It's as wide as the field and
   left-aligned with it, at least 240 px (room for the avatar, title
   and username) and at most the viewport less 4 px each side. It doesn't
   name the site: logins are only ever offered for the page's own site, or a
   same-site frame's own site, which the page already shows. ↓/↑ choose, ⏎
   fills, esc or ⇥ closes it with focus back in the field, and ↓ reopens it.
+  ⌘⇧L (Ctrl+Shift+L elsewhere, the `fill` command) or "Fill with Deadbolt"
+  in a field's context menu opens it on that field even where the scan
+  found no login form: the field as the username (or the password, when
+  it's masked) and the box of the other kind right beside it in its own
+  form, if the next box that shows is of that kind and the site didn't opt
+  it out. Only boxes on screen as they stand, on top and enabled. An
+  identity or card field opens its own menu; a right-click anywhere but a
+  field opens nothing. Going back to the page's own login form ends it. Only the browser raises either, from the user's
+  own key or click.
   Inside, the rows are a listbox that takes focus itself and points at the
   active row (`aria-activedescendant`); "Filled", "Saved" and why a pick
   didn't go ahead are said through a live region in the frame. None of it,
@@ -2191,8 +2212,8 @@ login's; only their words change.
   sign-in count as use. Hello, list, check, `generate-check`,
   `generate-drop` and passkey-list don't, because a browser asks for those on
   every page and would otherwise hold the vault open.
-- **Locked means locked.** While the store is locked, every request but hello
-  and `generate-check` gets `locked`. Hello starts the daemon if it isn't running but never unlocks
+- **Locked means locked.** While the store is locked, every request but hello,
+  `generate-check` and `unlock-prompt` gets `locked`. Hello starts the daemon if it isn't running but never unlocks
   it.
 
 ## Host messages
@@ -2217,7 +2238,8 @@ The host exits when the port closes.
 - **Rate limits:** per connection, `check` and `generate-check` share a
   burst of 20 then one a second, `fill` and `generate` share a burst of 60
   then four a second, and `passkey-create` and `passkey-get` together a burst
-  of 10 then one a second, with at most four running at once. Past that a
+  of 10 then one a second, with at most four running at once, and
+  `unlock-prompt` a burst of 3 then one every two seconds. Past that a
   request gets `rate_limited`; nothing else is limited.
 - **Requests** carry an `id`, a string of up to 200 characters or a number. The
   reply echoes it. A message without a usable id, or one that isn't JSON, gets
@@ -2231,17 +2253,18 @@ The host exits when the port closes.
 ```json
 { "id": "1", "type": "hello" }
 { "id": "1", "type": "hello", "protocol": 3, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "learn-files", "forms", "save-form"] }
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "learn-files", "forms", "save-form", "unlock-prompt"] }
 ```
 
 `status` is one of:
 
 - `ready`: unlocked.
-- `locked`: `detail` says "Unlock Deadbolt to fill passwords".
+- `locked`: `detail` says "Unlock Deadbolt to fill passwords";
+  `touchIdReady`, when true, says Touch ID can unlock it now.
 - `not-set-up`: no device yet.
 - `unavailable`: the daemon couldn't be reached or started; `detail` says why.
 
-Hello starts the daemon if needed. It's the only message that does.
+Hello starts the daemon if needed; so does `unlock-prompt`, and nothing else.
 
 ### list: the logins for a page
 
@@ -2530,6 +2553,23 @@ lowercase UUID as for `learn`, and `learn-read` shares its rate. Like
 `learn`, neither is gated: no unlock, Touch ID or approval, since a log
 holds no values and only the extension reaches the host.
 
+### unlock-prompt: unlock from the locked menu
+
+```json
+{ "id": 13, "type": "unlock-prompt" }
+{ "id": 13, "type": "unlock-prompt", "app": false }
+```
+
+Sent only when the user picks "Unlock Deadbolt" in the locked menu
+(capability `unlock-prompt`). With Touch ID ready, the host asks the daemon
+to unlock with it (`app` false), and requests behind it wait while the user
+is at the prompt; a prompt cancelled, or left unanswered until it times out
+after a minute, is `cancelled`, and nothing comes forward. Without it, or when
+Touch ID fails any other way, the host brings Deadbolt's window forward
+(`deadbolt app`) for the passphrase (`app` true), and `unlocked` follows
+once it's typed there. An unlocked vault answers `app` false at once.
+A burst of three, then one every two seconds; past that it's `rate_limited`.
+
 ### changed (pushed)
 
 ```json
@@ -2538,7 +2578,9 @@ holds no values and only the extension reaches the host.
 
 `change` is one of:
 
-- `locked` or `unlocked`.
+- `locked` or `unlocked`. `locked` may carry `"touchIdReady": true`, as hello
+  does: the host reads the daemon's status for it (never a hello, which
+  would start a daemon that's stopping).
 - `items`: logins or vaults changed, here or by sync.
 - `stopped`: the daemon stopped, which locks it.
 - `started`: a daemon is running again after the one watched went away, or

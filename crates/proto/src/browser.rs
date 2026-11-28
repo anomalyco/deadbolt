@@ -51,7 +51,7 @@ pub const MAX_REPLY: usize = 1024 * 1024;
 
 /// What this host does, in `hello`. The extension offers a feature only when
 /// the host names it.
-pub const CAPABILITIES: [&str; 10] = [
+pub const CAPABILITIES: [&str; 11] = [
     "list",
     "fill",
     "check",
@@ -62,6 +62,7 @@ pub const CAPABILITIES: [&str; 10] = [
     "learn-files",
     "forms",
     "save-form",
+    "unlock-prompt",
 ];
 
 /// A message from the extension, after its `id`.
@@ -171,6 +172,10 @@ pub enum Request {
     LearnDelete {
         session: String,
     },
+    /// The user clicked "Unlock Deadbolt" in the locked menu: Touch ID when
+    /// it's ready, else Deadbolt's own window, where the passphrase is
+    /// typed. The browser never asks for the passphrase.
+    UnlockPrompt,
 }
 
 /// What a page says about a new-password field: its `passwordrules`, length
@@ -257,6 +262,10 @@ pub enum Body {
         detail: Option<String>,
         /// What this host does ([`CAPABILITIES`]).
         capabilities: Vec<String>,
+        /// Locked, and Touch ID can unlock it now (`unlock-prompt` asks for it).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        touch_id_ready: bool,
     },
     List {
         /// The site the origin belongs to, as the logins are saved for.
@@ -291,8 +300,13 @@ pub enum Body {
         message: String,
     },
     /// Pushed when the daemon locks, unlocks, stops, starts or its items change.
+    #[serde(rename_all = "camelCase")]
     Changed {
         change: Change,
+        /// On `locked`: Touch ID can unlock it now, as hello's says.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        touch_id_ready: bool,
     },
     #[serde(rename_all = "camelCase")]
     Forms {
@@ -327,6 +341,12 @@ pub enum Body {
     },
     LearnDeleted {
         found: bool,
+    },
+    /// The answer to `unlock-prompt`: `app` when Deadbolt's window came
+    /// forward for the passphrase (`unlocked` follows once it's typed
+    /// there), false when Touch ID unlocked it or it already was.
+    UnlockPrompt {
+        app: bool,
     },
 }
 

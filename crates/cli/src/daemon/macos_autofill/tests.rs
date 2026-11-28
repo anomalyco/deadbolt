@@ -1019,3 +1019,18 @@ async fn activity_records_fills_and_passkeys_without_values_and_skips_lookups() 
     let raw = serde_json::to_string(&entries).unwrap();
     assert!(!raw.contains(pw), "{raw}");
 }
+
+/// A Touch ID prompt left unanswered until it timed out is a cancel, as the
+/// user pressing Cancel is: `unlock-biometric` answers `cancelled`, and the
+/// browser host brings nothing forward (see browser/host/unlock.rs).
+#[test]
+fn an_unanswered_touch_id_prompt_counts_as_cancelled() {
+    let timed_out = anyhow::anyhow!("{}", biometric::prompt_timed_out());
+    assert!(is_biometric_cancelled(&timed_out));
+    assert!(is_biometric_cancelled(&anyhow::anyhow!(
+        "{}",
+        biometric::UnlockError::Cancelled
+    )));
+    let unavailable = biometric::UnlockError::Unavailable("no finger enrolled".into());
+    assert!(!is_biometric_cancelled(&anyhow::anyhow!("{unavailable}")));
+}
