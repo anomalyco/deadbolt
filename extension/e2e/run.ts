@@ -3894,7 +3894,7 @@ async function frameLogins() {
     check(menu.parentFrame() === page.mainFrame(), "a login field in a same-site frame opens the menu in the top page")
     const box = await (await menu.frameElement()).boundingBox()
     const field = await inner.locator("#account_name_text_field").boundingBox()
-    check(!!box && !!field && besideField(box, field, 18) && Math.abs(box.x - field.x) < 8, `beside where the field shows (${JSON.stringify(box)} vs ${JSON.stringify(field)})`)
+    check(!!box && !!field && box.y >= field.y + field.height && box.y < field.y + field.height + 24 && Math.abs(box.x - field.x) < 8, `under where the field shows (${JSON.stringify(box)} vs ${JSON.stringify(field)})`)
     await shotAround(page, "frame-login-menu", menu, "#aid-auth-widget-iFrame")
     await settled(menu)
     await menu.locator("button.row", { hasText: "alex@acme.test" }).click()
@@ -3956,13 +3956,13 @@ async function frameLogins() {
       check(!!(await until("the widget focuses the password box", () => password.evaluate((el) => el === document.activeElement))), "the widget focuses its password box once open")
       const under = async (m: Frame) => {
         const [box, field] = await Promise.all([m.frameElement().then((e) => e.boundingBox()).catch(() => null), password.boundingBox()])
-        return !!box && !!field && Math.abs(box.x - field.x) < 8 && besideField(box, field, 18)
+        return !!box && !!field && Math.abs(box.x - field.x) < 8 && box.y >= field.y + field.height && box.y < field.y + field.height + 24
       }
       // Opened by the widget's own focus right after the Enter, or asked for with ↓.
       if (!(await until("the password step's list opens", menuNow, 2000))) await password.press("ArrowDown")
       const narrowed = await until("the password menu opens", menuNow, 15_000)
       check(!!narrowed && (await narrowed.locator("button.row").count()) === 1 && ((await narrowed.locator(".row .sub").textContent()) ?? "") === "admin", "a username typed by hand narrows the frame's password step to its login")
-      check(!!narrowed && (await under(narrowed)), "its list opens beside the password box, not over it")
+      check(!!narrowed && (await under(narrowed)), "its list opens under the password box, not over it")
       if (narrowed) await shotAround(page, "frame-login-password-step", narrowed, "#aid-auth-widget-iFrame")
       // A hint comes in above the boxes, inside the frame: only the frame sees the password box move.
       await typed.locator("h1").evaluate((el) => void ((el as HTMLElement).style.marginBottom = "54px"))
