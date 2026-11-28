@@ -579,14 +579,8 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       c.ok(await pickForm(c, "#cc-number", "Visa"), "the card menu fills")
       const card = await Promise.all(["#cc-number", "#cc-month", "#cc-year", "#cc-csc", "#cc-name"].map((s) => value(c.page, s)))
       c.ok(card[0].replace(/\D/g, "") === "4242424242424242" && card[1] === "08" && card[2] === "2028" && card[3] === "123" && card[4] === "Alex Mercer", `number, expiry selects, code and name (${card.join(" | ")})`)
+      // One pick fills the whole address: fields of the form below the fold are scrolled to as they're written (docs/autofill.md).
       c.ok(await pickForm(c, "#bill-line1", "Home"), "the billing address fills from an identity")
-      // An address goes only into fields on screen at the pick (docs/autofill.md): the rest, below the fold, take a second pick there.
-      const below = await c.page.evaluate(() => document.getElementById("bill-country")!.getBoundingClientRect().top > innerHeight)
-      if (below) {
-        c.ok((await value(c.page, "#bill-country")) === "", "a field below the fold gets nothing")
-        await c.page.locator("#bill-country").scrollIntoViewIfNeeded()
-        c.ok(await pickForm(c, "#bill-city", "Home"), "a pick there fills the rest")
-      }
       const bill = await Promise.all(["#bill-line1", "#bill-line2", "#bill-city", "#bill-state", "#bill-zip", "#bill-country"].map((s) => value(c.page, s)))
       c.ok(JSON.stringify(bill) === JSON.stringify(["123 Main St", "Apt 4", "Brooklyn", "NY", "11201", "US"]), `the whole billing address (${bill.join(" | ")})`)
       await c.page.click("#submit")
@@ -658,16 +652,15 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
     "below-fold-checkout": async (c) => {
       await c.page.goto(g("below-fold-checkout"))
       c.ok(await c.page.evaluate(() => document.getElementById("ship-line1")!.getBoundingClientRect().top > innerHeight), "the shipping address starts below the fold")
-      c.ok(await pickForm(c, "#ship-line1", "Home"), "scrolled to, the address menu fills")
+      // Only the name shows, at the bottom of the window: the rest of the address and the card are below the fold.
+      await c.page.evaluate(() => scrollTo(0, document.getElementById("ship-name")!.getBoundingClientRect().bottom + scrollY - innerHeight + 4))
+      const below = await c.page.evaluate(() => ["ship-city", "ship-zip", "ship-country"].every((id) => document.getElementById(id)!.getBoundingClientRect().top > innerHeight))
+      c.ok(below, "the rest of the address is below the fold")
+      const scrolled = await c.page.evaluate(() => scrollY)
+      c.ok(await pickForm(c, "#ship-name", "Home"), "one pick on the name fills")
       const SHIP = ["#ship-name", "#ship-line1", "#ship-line2", "#ship-city", "#ship-state", "#ship-zip", "#ship-country"]
-      let ship = await Promise.all(SHIP.map((s) => value(c.page, s)))
-      // An address goes only into fields on screen at the pick (docs/autofill.md): any still below take a second pick there.
-      for (let tries = 0; tries < 3 && ship.some((v) => !v); tries++) {
-        const rest = SHIP[ship.findIndex((v) => !v)]
-        await c.page.locator(rest).scrollIntoViewIfNeeded()
-        c.ok(await pickForm(c, rest, "Home"), `a pick on ${rest} fills the rest`)
-        ship = await Promise.all(SHIP.map((s) => value(c.page, s)))
-      }
+      const ship = await Promise.all(SHIP.map((s) => value(c.page, s)))
+      c.ok(Math.abs((await c.page.evaluate(() => scrollY)) - scrolled) <= 2, "and the page is scrolled back where the user had it")
       c.ok(JSON.stringify(ship) === JSON.stringify(["Alex Mercer", "123 Main St", "Apt 4", "Brooklyn", "NY", "11201", "US"]), `the whole shipping address (${ship.join(" | ")})`)
       c.ok(await pickForm(c, "#cc-number", "Visa"), "the card menu fills")
       const card = await Promise.all(["#cc-number", "#cc-month", "#cc-year", "#cc-csc", "#cc-name"].map((s) => value(c.page, s)))

@@ -33,7 +33,7 @@
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type QueryReply, type SurfaceKind, type SurfaceMode, type ToContent } from "../messages"
 import { epochNow, gridBox, inFrame, MENU_MOTION, reducedMotion, Spring, timing } from "../ui/motion"
 import { asksNewPassword, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
-import { approvedForms, approveForms, onScreen } from "./formfill"
+import { approvedForms, approveForms, offScreen, onScreen } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing } from "./ring"
 import { readPageIcon } from "./site-icon"
@@ -676,8 +676,8 @@ async function maybeOpenForms(el: FormControl, how: Asked) {
   querying = (async () => {
     const box = isTop ? undefined : fillable(el) ? visibleBox(el) : null
     if (box === null) return
-    // What the menu says an identity fills: only the fields it would fill now, those on screen.
-    const fillsNow = (x: FormField) => f.kind !== "identity" || x.el === el || onScreen(x.el)
+    // What the menu says an identity fills: the fields on screen, and in the top page those of the same form it scrolls to (see offScreen).
+    const fillsNow = (x: FormField) => f.kind !== "identity" || x.el === el || onScreen(x.el) || (isTop && offScreen(x.el, el))
     const roles = [...new Set(sectionFields(state.formFields(), f.section, f.kind).filter(fillsNow).map((x) => x.role))]
     const reply = await send<QueryReply>({ type: "db:forms-query", kind: f.kind, form: state.formsForm(), section: f.section, roles, explicit, ...(box ? { box } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)

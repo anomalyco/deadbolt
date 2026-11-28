@@ -66,7 +66,7 @@ export interface SubmitStep {
 export interface SubmitPlan {
   form: HTMLFormElement | null
   button: HTMLElement
-  /** The form's submit is its page script's (see scriptHandled): hold its native submit before clicking. */
+  /** The form's submit is its page script's (see scriptHandled): its native submit is held (see holdNativeSubmit). */
   scripted?: true
 }
 export type Refusal = "insecure" | "kind" | "button" | "scope" | "destination" | "captcha" | "values" | "first" | "purpose" | "error" | "delivered"
@@ -93,7 +93,8 @@ export const HOLD_MS = SETTLE_MS + 2000
 const held = new WeakMap<HTMLFormElement, number>()
 
 /**
- * For a moment after Deadbolt clicks a script-handled form's button, a submit of
+ * For a moment after a plan to submit a script-handled form (each check
+ * before the click, see submitPlan, arms it again), a submit of
  * it that the page's script didn't take (no preventDefault: its script
  * failed to load, or it isn't React's after all) goes nowhere: Deadbolt
  * prevents it, so the browser never GETs the fields into the URL. Listened
@@ -209,5 +210,9 @@ export function submitPlan(step: SubmitStep): SubmitPlan | Refusal {
   // A code step's prompt that describes delivery by SMS or email takes a
   // code the person brings, never the login's authenticator code.
   if (deliveredCode(fields, scope, accountChip(step.account))) return "delivered"
-  return { form, button, ...(form && form.method !== "post" && scriptHandled(form, control) ? { scripted: true as const } : {}) }
+  if (form && form.method !== "post" && scriptHandled(form, control)) {
+    holdNativeSubmit(form)
+    return { form, button, scripted: true }
+  }
+  return { form, button }
 }

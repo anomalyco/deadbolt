@@ -166,6 +166,14 @@ Every automatic submit goes through the content script's checks
 
 - a form whose fields and button it owns, posting in the tab (no `target`,
   `formtarget` or `<base target>` other than `_self`) to this origin;
+- a form its page's script submits, as React's `<form onSubmit>` is: no
+  `method` on the form or its button and no action of its own (none, empty,
+  `#`, or React's `javascript:` placeholder), so to the browser it's a GET
+  of the page. It's never a search (a search landmark, or a search box among
+  its fields). For a few seconds from the check, a native submit of it that
+  the page's script didn't take (`preventDefault`) is stopped, so the fields
+  never land in the URL. A form that says GET itself, or names a route to
+  GET, is never submitted;
 - a form-less step, as Google's sign-in is: no `<form>` at all, a
   `<button type="button">` Next whose click the page's own script handles.
   Every field sits in one `dialog` or `main` region (else the body), no form
@@ -1816,11 +1824,18 @@ on top at its middle, gets a click; the input has to show it after. With no
 match, what was typed is taken back. The country goes before the region,
 wherever it is in the form, since a state list can depend on it.
 
-An identity goes only into fields the user can see as the page stands:
-nothing is scrolled into view to fill it, and a field smaller than 40×16
-CSS pixels, not wholly on screen, or covered at its middle (Deadbolt's own
-pill aside) is skipped, so a page can't collect an address through boxes
-tucked out of sight. The menu's "Fills …" counts only those fields. A field
+An identity goes only into fields the user can see: a field smaller than
+40×16 CSS pixels, or covered at its middle (Deadbolt's own pill aside), is
+skipped, so a page can't collect an address through boxes tucked out of
+sight. In the top page, fields of the same `<form>` as one that shows and
+that only the window's scroll keeps out of view (below the fold on a tall
+checkout) go too (`offScreen`): enabled, at least 40×16, not hidden by
+style, not `inert`, `aria-hidden` or `tabindex=-1`, within the page's
+width, and not cut by any scrolling or clipping box inside the page. Each is
+scrolled into view just before it's written and has to be wholly on screen
+and on top there; once the fill is done, the page scrolls back to where the
+user had it. A field outside any form, in another form, or in a frame is
+never scrolled to. The menu's "Fills …" counts the same fields. A field
 holding what the user typed themselves is never overwritten (the same keyed
 digest of the last trusted input as for logins); a value Deadbolt filled
 before is, so picking Work after Home replaces Home's values.

@@ -5,7 +5,7 @@ import type { FillAck, FormsAck, SurfaceMode, ToContent } from "../../messages"
 import { approvals } from "../approvals"
 import type { FormControl } from "../detect"
 import { fillable, fillFields, visibleBox } from "../fill"
-import { fillCheck, fillForm, takeApproved, type FormsState } from "../formfill"
+import { fillCheck, fillForm, offScreen, takeApproved, type FormsState } from "../formfill"
 import { fitsPattern, rememberGenerated } from "../generate"
 import { learning } from "../learn"
 import type { PageState } from "../inline"
@@ -105,7 +105,9 @@ export async function applyFormsFill(h: FillHost, message: Extract<ToContent, { 
   if (!targets?.length) return { filled: [] }
   if (h.mode() === "pill") await h.pillSettled(700)
   if (state.formsForm() !== message.form) return { filled: [] }
-  const { filled } = await fillForm(targets, values, (el) => fillCheck(targets[0].kind, h.ownPill())(el))
+  // An identity's fields below the fold were approved for this pick: each is scrolled to as it's written (see offScreen).
+  const reach = targets[0].kind === "identity" && h.isTop ? (el: FormControl) => offScreen(el) : undefined
+  const { filled } = await fillForm(targets, values, (el) => fillCheck(targets[0].kind, h.ownPill())(el), reach)
   return { filled }
 }
 

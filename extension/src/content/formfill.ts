@@ -64,6 +64,53 @@ export function onScreen(el: FormControl, ours?: Element | null, disabledSelect 
   return onTop(el, box, ours)
 }
 
+/**
+ * Whether an identity field off screen may be scrolled to and filled on an
+ * explicit pick: it passes every check onScreen makes but the viewport's.
+ * Enabled, at least 40×16, not hidden by style, not inert, aria-hidden or
+ * taken out of the tab order, within the page's width (never pushed off to
+ * one side), and not cut by any scrolling or clipping box of the page (an
+ * overflow box that hides a trap): only the window's scroll keeps it from
+ * view. And in a form, the same one as the field the user picked from
+ * (`anchor`), if given. It's written only once it's scrolled into view and
+ * passes onScreen there (see fillForm).
+ */
+export function offScreen(el: FormControl, anchor?: FormControl): boolean {
+  if (!el.isConnected || el.disabled || ("readOnly" in el && el.readOnly) || el.tabIndex < 0) return false
+  const form = el.form ?? el.closest("form")
+  if (!form || (anchor && form !== (anchor.form ?? anchor.closest("form")))) return false
+  if (el.closest("[inert], [aria-hidden=true]")) return false
+  const r = el.getBoundingClientRect()
+  if (r.width < MIN_IDENTITY.width || r.height < MIN_IDENTITY.height || hiddenByStyle(el)) return false
+  if (r.left < 0 || r.right > innerWidth || r.top + scrollY < 0) return false
+  const box = clippedBox(el, false)
+  return !!box && (box.right - box.left) * (box.bottom - box.top) >= 0.95 * r.width * r.height
+}
+
+/**
+ * Scroll positions a fill moved to bring fields into view, kept the first
+ * time each moved, and put back once the fill is done: the window's, and
+ * those of any scrolling box above the field.
+ */
+class ScrollKeeper {
+  private kept = new Map<Element | Window, [number, number]>()
+
+  /** Scrolls `el` into view, keeping where everything was first. */
+  bring(el: Element) {
+    if (!this.kept.has(window)) this.kept.set(window, [scrollX, scrollY])
+    for (let node = el.parentElement; node; node = node.parentElement) if (!this.kept.has(node) && (node.scrollTop || node.scrollLeft || node.scrollHeight > node.clientHeight)) this.kept.set(node, [node.scrollLeft, node.scrollTop])
+    el.scrollIntoView?.({ block: "center", inline: "nearest" })
+  }
+
+  restore() {
+    for (const [node, [left, top]] of this.kept) {
+      if (node === window) window.scrollTo(left, top)
+      else Object.assign(node as Element, { scrollLeft: left, scrollTop: top })
+    }
+    this.kept.clear()
+  }
+}
+
 /** The check a field of `kind` gets before it's approved and again before it's written. */
 export const fillCheck = (kind: FormKind, ours?: Element | null) => (el: FormControl) => (kind === "identity" ? onScreen(el, ours) : fillable(el, ours))
 
@@ -89,9 +136,21 @@ const DEPENDENT_WAIT_MS = 2500
  * country or state combobox gets its option chosen (see combobox.ts), the
  * country first. Fields with nothing to write are left alone, and so are
  * fields holding what the user typed themselves (a value Deadbolt filled
- * before may be replaced). Returns the roles written.
+ * before may be replaced). A field `reach` takes (see offScreen, for an
+ * identity the user picked) that fails `check` only for being off screen is
+ * scrolled into view and checked again there; once the fill is done, the
+ * page scrolls back to where the user had it. Returns the roles written.
  */
-export async function fillForm(fields: FormField[], given: FormValues, check: (el: FormControl) => boolean = fillable): Promise<{ filled: FormRole[]; last?: FormControl }> {
+export async function fillForm(fields: FormField[], given: FormValues, check: (el: FormControl) => boolean = fillable, reach?: (el: FormControl) => boolean): Promise<{ filled: FormRole[]; last?: FormControl }> {
+  const scroll = new ScrollKeeper()
+  try {
+    return await fillAll(fields, given, (el) => check(el) || (!!reach?.(el) && (scroll.bring(el), check(el))))
+  } finally {
+    scroll.restore()
+  }
+}
+
+async function fillAll(fields: FormField[], given: FormValues, check: (el: FormControl) => boolean): Promise<{ filled: FormRole[]; last?: FormControl }> {
   const filled: FormRole[] = []
   let last: FormControl | undefined
   const roles = fields.map((f) => f.role)
@@ -173,7 +232,11 @@ export async function fillForm(fields: FormField[], given: FormValues, check: (e
 export async function approveForms(state: FormsState, form: number, kind: FormKind, section: string | undefined, measure: boolean, ours?: Element | null): Promise<FormsApproved | null> {
   state.rescan()
   if (state.form() !== form) return null
-  const fields = sectionFields(state.fields(), section, kind).filter((f) => approveCheck(kind, ours)(f.el))
+  const all = sectionFields(state.fields(), section, kind)
+  const shown = all.filter((f) => approveCheck(kind, ours)(f.el))
+  // An identity's fields off screen in the form of one that shows go too, scrolled to as they're written (see offScreen). Not for a frame, whose fields must all show.
+  const anchors = shown.map((f) => f.el)
+  const fields = kind === "identity" && !measure && anchors.length ? all.filter((f) => shown.includes(f) || anchors.some((a) => offScreen(f.el, a))) : shown
   if (!fields.length) return null
   const boxes = measure ? await ownBoxes(fields) : undefined
   if (boxes === null || state.form() !== form) return null
