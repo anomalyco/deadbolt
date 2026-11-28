@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { findAccountTile, findProviderButton, scanPage, signInWithText } from "../src/content/detect"
 import { eventTarget } from "../src/content/shadow"
 import { isAccountPage, isChooserPage, isProviderPage, pageAccountOf, provider } from "../src/signin"
-import { pageFacts } from "../src/content/outcome"
+import { noteSubmitShell, pageFacts } from "../src/content/outcome"
 import { scanForms } from "../src/content/forms"
 
 function page(html: string, path = "/login", title = "") {
@@ -343,6 +343,83 @@ describe("what the page shows after a sign-in", () => {
   test("a code step", () => {
     const f = facts(`<form><label for="c">Authentication code</label><input id="c" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`, "alex", "/mfa")
     expect(f).toMatchObject({ mfa: true, loginForm: false })
+  })
+
+  describe("a single-page app's signed-in shell", () => {
+    /** The background's probe after a submit that hasn't failed, in the document that made it. */
+    const signedIn = (html: string, path = "/dashboard", search = "") => {
+      page(html, path + search, "")
+      const scan = scanPage()
+      return pageFacts(scan.kind, scan.fields, "alex@example.com", false, true).signOut
+    }
+    /** A login form submitted with `before` beside it, then swapped for `after` without a page load. */
+    const submitThen = (before: string, after: string, path = "/dashboard") => {
+      page(before, "/login", "")
+      noteSubmitShell()
+      const result = signedIn(after, path)
+      page("", "/", "")
+      noteSubmitShell()
+      return result
+    }
+    const login = `<form><input name="username" autocomplete="username"><input type="password" autocomplete="current-password"><button>Continue</button></form>`
+    const menu = `<header><button aria-label="Account menu" aria-haspopup="menu"><img src="a.png" alt=""></button></header>`
+
+    test("an account menu, a profile button or an avatar menu counts as Sign out", () => {
+      expect(signedIn(`${menu}<h1>Projects</h1>`)).toBe(true)
+      expect(signedIn(`<div><button aria-haspopup="true"><img src="a.png" alt="Your avatar"></button></div>`, "/somewhere")).toBe(true)
+      expect(signedIn(`<header><button aria-label="Signed in as Alex Mercer">AM</button></header>`, "/")).toBe(true)
+      // On an app's own path, a header button opening a menu that's only a picture.
+      expect(signedIn(`<header><button aria-haspopup="menu"><svg></svg></button></header>`)).toBe(true)
+    })
+
+    test("signed-out pages' controls don't", () => {
+      expect(signedIn(`<header><a href="/signup">Create account</a><a href="/somewhere">Sign in to your account</a></header>`, "/")).toBe(false)
+      // A store's signed-out header: a plain Account link, or one to its account page.
+      expect(signedIn(`<header><a href="/account">Account</a></header>`, "/")).toBe(false)
+      expect(signedIn(`<header><a href="/me">My Account</a></header>`, "/")).toBe(false)
+      expect(signedIn(`<header><a href="/account" aria-haspopup="menu">Account menu</a></header>`, "/")).toBe(false)
+      expect(signedIn(`<nav><a href="/me" title="Profile">Me</a></nav>`)).toBe(false)
+      expect(signedIn(`<nav><button aria-haspopup="menu">Products</button></nav>`, "/home")).toBe(false)
+      // A hamburger: unlabelled, only aria-expanded, or named as the page's menu.
+      expect(signedIn(`<header><button aria-expanded="false"><svg></svg></button></header>`)).toBe(false)
+      expect(signedIn(`<header><button class="nav-toggle" aria-haspopup="menu"><svg></svg></button></header>`)).toBe(false)
+      expect(signedIn(`<header><button id="theme" aria-haspopup="true"><svg></svg></button></header>`)).toBe(false)
+      expect(signedIn(`<header><button aria-haspopup="menu"><svg></svg></button></header>`, "/pricing")).toBe(false)
+      expect(signedIn(`<header><button aria-haspopup="menu"><svg></svg></button></header>`, "/account")).toBe(false)
+      expect(signedIn(`<main><button>Profile</button></main>`, "/")).toBe(false)
+      expect(signedIn(`<header><button aria-label="Account menu" aria-haspopup="menu" hidden></button></header>`)).toBe(false)
+    })
+
+    test("never beside a Sign in control, an error in the URL, or a failure in a status region", () => {
+      expect(signedIn(`${menu}<a href="/somewhere">Sign in</a>`)).toBe(false)
+      expect(signedIn(`${menu}<button>Log in</button>`)).toBe(false)
+      expect(signedIn(menu, "/dashboard", "?error=1")).toBe(false)
+      expect(signedIn(menu, "/dashboard", "?x=1&invalid")).toBe(false)
+      expect(signedIn(`${menu}<div role="status">Incorrect password</div>`)).toBe(false)
+      expect(signedIn(`${menu}<div aria-live="polite">Invalid email or password</div>`)).toBe(false)
+    })
+
+    test("never with an error, the login form, a password box, a code step, or on a sign-in URL", () => {
+      page(`${menu}<div role="alert">Incorrect password</div>`, "/dashboard", "")
+      expect(pageFacts(null, [], "alex@example.com", false, true)).toMatchObject({ error: true, signOut: false })
+      expect(signedIn(menu + login)).toBe(false)
+      expect(signedIn(`${menu}<div><input type="password" name="pin"></div>`)).toBe(false)
+      expect(signedIn(`${menu}<form><label for="c">Authentication code</label><input id="c" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`)).toBe(false)
+      expect(signedIn(menu, "/login")).toBe(false)
+    })
+
+    test("only a shell that came with the sign-in: one already beside the login form doesn't count", () => {
+      // A login modal over a page whose header already shows an account menu.
+      expect(submitThen(`${menu}<dialog open>${login}</dialog>`, `${menu}<h1>Projects</h1>`)).toBe(false)
+      expect(submitThen(login, `${menu}<h1>Projects</h1>`)).toBe(true)
+    })
+
+    test("only in the background's probe after a submit: the corner offer's probe and a failed or navigated sign-in don't ask for it", () => {
+      // Without `shell` (bg/save.ts sends it only for an unfailed submit in the same document), no shell counts.
+      page(menu, "/dashboard", "")
+      expect(pageFacts(null, [], undefined, false).signOut).toBe(false)
+      expect(pageFacts(null, [], undefined, false, true).signOut).toBe(true)
+    })
   })
 })
 

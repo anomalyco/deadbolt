@@ -275,8 +275,10 @@ export type ToContent =
   /**
    * What the top page shows now, to tell whether a sign-in worked (see
    * PageFacts). `username`: the one just submitted, to look for on the page.
+   * `shell`: the submit hasn't failed and this is the document that made
+   * it, so a single-page app's signed-in shell may count (see pageFacts).
    */
-  | { type: "db:probe"; username?: string }
+  | { type: "db:probe"; username?: string; shell?: true }
   /**
    * Point at the site's own "Sign in with <provider>" button, if one shows;
    * answers whether it found one. The user clicks it, never Deadbolt.

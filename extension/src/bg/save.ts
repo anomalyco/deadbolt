@@ -729,7 +729,9 @@ export class Saver {
 
   /** What the top page shows now, from the document that settled. */
   private async probe(target: FrameTarget, c: Capture): Promise<PageFacts | null> {
-    return cleanFacts(await sendToFrame(target, { type: "db:probe", ...(c.username ? { username: c.username } : {}) }))
+    // An app shell counts only in the document that submitted, for a sign-in no page has said failed (see pageFacts).
+    const shell = !c.failed && c.document === target.documentId
+    return cleanFacts(await sendToFrame(target, { type: "db:probe", ...(c.username ? { username: c.username } : {}), ...(shell ? { shell: true as const } : {}) }))
   }
 
   /** How the sign-in went, from what the page shows: looked at again when it shows nothing either way. */

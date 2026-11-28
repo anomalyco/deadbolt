@@ -16,11 +16,11 @@ import { ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
-import { formFailed, pageFacts } from "./content/outcome"
+import { formFailed, noteSubmitShell, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { chainActive, initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
-import { SETTLE_MS, submitPlan, type SubmitPlan } from "./content/signin-submit"
+import { noteStop, settledPlan, submitPlan, type SubmitPlan } from "./content/signin-submit"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 import { paymentProvider } from "./payments"
 
@@ -254,7 +254,7 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     if (!isTop) return void respond(null)
     try {
       refresh()
-      respond(pageFacts(kind, fields, typeof message.username === "string" ? message.username : undefined, provider))
+      respond(pageFacts(kind, fields, typeof message.username === "string" ? message.username : undefined, provider, message.shell === true))
     } catch {
       respond(null)
     }
@@ -490,6 +490,7 @@ let submitGestureAt = -Infinity
 
 /** What was submitted goes to the background, to offer to save it if the sign-in works. */
 function captured() {
+  noteSubmitShell()
   scheduleScan()
   void submitted()
   settleAfterSubmit()
@@ -525,9 +526,9 @@ async function sessionSubmit(message: Extract<ToContent, { type: "db:signin-subm
     stepSubmitted()
     return true
   }
-  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
-  const after = plan()
-  if (!after || after.button !== before.button) return false
+  // Esc during the settle, or the step changing, stops it (see settledPlan).
+  const after = await settledPlan(before, plan)
+  if (!after) return false
   sessionSubmitted = formId
   captured()
   stepSubmitted()
@@ -583,6 +584,7 @@ function onSubmit(event: Event) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isTrusted && event.key === "Escape") noteStop()
   if (event.isTrusted && event.key === "Escape" && isTop && offerSignIn) void send({ type: "db:signin-stop" })
   if (!event.isTrusted || event.key !== "Enter") return
   const target = realTarget(event)

@@ -11,6 +11,7 @@ import { IDENTIFIER_ROLES, phoneLike, type Box, type FieldRole, type FillValues 
 import { inPlace, type Field, type FormControl } from "./detect"
 import { eventTarget, isOwnHost, openRoots, shadowRootOf } from "./shadow"
 import { tag, tagKey } from "./tag"
+import { pasteText } from "./typing"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -958,9 +959,18 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
       const form = boxes[0].owner.form
       const whole = boxes.length === values.totp.length && boxes.every((b) => b.owner.form === form && inPlace(b) && check(b.el))
       if (whole) {
+        const code = values.totp
         let i = 0
-        while (i < boxes.length && write(boxes[i], values.totp[i], boxes)) i++
-        if (i === boxes.length) {
+        while (i < boxes.length && write(boxes[i], code[i], boxes)) i++
+        // A component that takes the code only as a paste (its boxes turn a
+        // written digit down): the code goes to the first box as a paste,
+        // after the same checks, and counts only if every box then shows it.
+        const shows = () => boxes.map((b) => b.el.value).join("") === code
+        if (i === boxes.length && !shows() && boxes.every((b) => inPlace(b) && checkField(b.el))) {
+          boxes[0].el.focus({ preventScroll: true })
+          if (checkField(boxes[0].el)) pasteText(boxes[0].el, code)
+        }
+        if (i === boxes.length && shows()) {
           filled.push("otp")
           last = boxes[i - 1].el
         }

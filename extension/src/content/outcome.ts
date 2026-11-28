@@ -32,6 +32,18 @@ const NOTICE_BOX = "[aria-live=polite], [id*=lert], [class*=lert]"
 const MAX_BOX_TEXT = 2 * MAX_TEXT
 const MAX_BOX_CHILDREN = 12
 const CONTROLS = "a, button, [role=button], [role=menuitem], input[type=submit], input[type=button]"
+/** What an account or profile menu's trigger says, by its label, title, text or its image's alt: a signed-in app's shell. */
+const ACCOUNT_MENU = /\b(account|profile|user) menu\b|\bavatar\b|^(my|your) (account|profile)$|^(account|profile)$|^(open|toggle|show) (the )?(user|account|profile)\b|^(signed|logged) in as\b|^(mein konto|mon compte|mi cuenta|profil|perfil)$/
+/** A page of a signed-in app, by its path. */
+const APP_PATH = /^\/(?:[\w-]+\/)?(dashboard|app|home|inbox|overview|projects|workspace|feed|console)(?:[/?#]|$)/i
+/** A label that says who's signed in: it counts without a menu. */
+const SIGNED_IN_AS = /^(signed|logged) in as\b/
+/** A control that offers to sign in: the page is still signed out. */
+const SIGN_IN = /^(sign\s?in|log\s?in|login)$/i
+/** What a page's own menu buttons are called in their id or class: a hamburger, a drawer, a theme or language switch, a search. */
+const NOT_AVATAR = /nav|menu|burger|drawer|theme|lang|search/i
+const SHELL_REGION = "header, nav, aside, [role=banner], [role=navigation], [role=menubar]"
+const MENU_TRIGGERS = "button, a, [role=button], [aria-haspopup]"
 
 const normalize = (text: string) => text.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim().toLowerCase()
 
@@ -48,8 +60,15 @@ const textOf = (el: Element) => normalize(((el as HTMLElement).innerText ?? el.t
  * What the page shows now. `kind` and `fields` are the content script's last
  * scan; `username` the one just submitted, if any. Never throws: anything
  * that goes wrong reads as "not seen".
+ *
+ * With `shell` (the background's probe after a submit that hasn't failed,
+ * in the document that submitted: a single-page app that signed in without a
+ * page load), a signed-in app's shell counts as Sign out (see shellShown),
+ * but only with no login form, password box, error, code step or challenge
+ * showing, off a sign-in looking URL, and only if no shell showed when the
+ * form was submitted (see noteSubmitShell).
  */
-export function pageFacts(kind: SurfaceKind | null, fields: Field[], username?: string, provider = false): PageFacts {
+export function pageFacts(kind: SurfaceKind | null, fields: Field[], username?: string, provider = false, shell = false): PageFacts {
   const deadline = performance.now() + BUDGET_MS
   const late = () => performance.now() > deadline
   const loginForm = kind === "login" || kind === "signup" || kind === "change-password"
@@ -86,6 +105,7 @@ export function pageFacts(kind: SurfaceKind | null, fields: Field[], username?: 
   step("challenge", () => challengeShown(roots, late))
   if (username) step("account", () => accountShown(roots, username, late))
   step("signOut", () => signOutShown(roots, late))
+  if (shell && !shellAtSubmit && !facts.loginForm && !facts.error && !facts.mfa && !facts.challenge && !facts.loginish) step("signOut", () => !passwordShown(roots) && shellShown(roots, late))
   return facts
 }
 
@@ -178,6 +198,71 @@ function accountShown(roots: Array<Document | ShadowRoot>, username: string, lat
       const parent = node.parentElement
       if (parent && !parent.closest("script, style, noscript, template, input, textarea") && has(text) && isVisible(parent)) return true
     }
+  }
+  return false
+}
+
+/** A visible password box anywhere: a sign-in that's still asking. */
+const passwordShown = (roots: Array<Document | ShadowRoot>) => deepQueryAll("input[type=password]", roots).slice(0, MAX_ELEMENTS).some(isVisible)
+
+/** Whether a shell trigger already showed beside the login form when it was last submitted (see noteSubmitShell). */
+let shellAtSubmit = false
+
+/**
+ * The user submitted a login form in this document: whether an app shell's
+ * trigger shows beside it now (a login modal over a signed-in-looking page,
+ * an account link in a signed-out header). If one does, no shell counts as
+ * a sign-in after this submit: only a shell that comes with the sign-in may.
+ */
+export function noteSubmitShell() {
+  try {
+    const deadline = performance.now() + BUDGET_MS
+    shellAtSubmit = shellTrigger(openRoots(), () => performance.now() > deadline)
+  } catch {
+    shellAtSubmit = true
+  }
+}
+
+/**
+ * A signed-in app's shell, as a single-page app mounts it in place of its
+ * login form (see shellTrigger), on a page that doesn't also say it's signed
+ * out or failed: no visible Sign in or Log in control, no error in the URL's
+ * query, and no failure in a status or polite live region.
+ */
+function shellShown(roots: Array<Document | ShadowRoot>, late: () => boolean): boolean {
+  if (/[?&](error|failed|invalid)\b/i.test(location.search)) return false
+  for (const el of deepQueryAll(CONTROLS, roots).slice(0, MAX_ELEMENTS)) {
+    if (late()) return false
+    if (SIGN_IN.test(normalize(controlText(el))) && isVisible(el)) return false
+  }
+  for (const el of deepQueryAll("[role=status], [aria-live=polite]", roots).slice(0, MAX_ELEMENTS)) {
+    if ((el.textContent?.length ?? 0) <= MAX_BOX_TEXT && FAILURE.test(textOf(el)) && isVisible(el)) return false
+  }
+  return shellTrigger(roots, late)
+}
+
+/**
+ * An app shell's trigger: an account or profile menu's (an avatar button,
+ * "Account menu") that opens a menu (aria-haspopup or aria-expanded), or a
+ * "Signed in as …" label; or, on an app's own path (/dashboard, /app,
+ * /home…), a header or navigation button that opens a menu
+ * (aria-haspopup="menu" or "true") and is only a picture, and isn't named
+ * as the page's navigation, a drawer, a theme, language or search switch.
+ * Never a plain "Account" or "My account" link, nor a link to a sign-in or
+ * account page: signed-out stores show those.
+ */
+function shellTrigger(roots: Array<Document | ShadowRoot>, late: () => boolean): boolean {
+  const app = APP_PATH.test(location.pathname)
+  for (const el of deepQueryAll(MENU_TRIGGERS, roots).slice(0, MAX_ELEMENTS)) {
+    if (late()) return false
+    if (el instanceof HTMLAnchorElement && (LOGIN_URL.test(el.getAttribute("href") ?? "") || /account\b/i.test(el.getAttribute("href") ?? ""))) continue
+    const menu = el.hasAttribute("aria-haspopup") || el.hasAttribute("aria-expanded")
+    const alt = Array.from(el.querySelectorAll("img[alt]"), (img) => img.getAttribute("alt") ?? "")
+    const labels = [el.getAttribute("aria-label"), el.getAttribute("title"), controlText(el), ...alt].map((t) => normalize((t ?? "").slice(0, MAX_TEXT))).filter(Boolean)
+    const named = labels.some((t) => t.length <= 60 && (SIGNED_IN_AS.test(t) || (menu && ACCOUNT_MENU.test(t))))
+    const popup = el.getAttribute("aria-haspopup")
+    const avatar = app && (popup === "menu" || popup === "true") && !!el.closest(SHELL_REGION) && !normalize(controlText(el)) && !!el.querySelector("img, svg") && !NOT_AVATAR.test(`${el.id} ${el.getAttribute("class") ?? ""}`)
+    if ((named || avatar) && inViewport(el)) return true
   }
   return false
 }
