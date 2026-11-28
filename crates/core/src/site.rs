@@ -153,7 +153,7 @@ pub fn closeness(origin: &str, url: &str) -> Option<Closeness> {
     let host = host_of(&saved)?;
     let site = registrable_domain(&page_host);
     if !host_matches(&host, &site) {
-        return shares(&site, &saved).then_some(Closeness::Shared);
+        return (page.scheme() == "https" && shares(&site, &saved)).then_some(Closeness::Shared);
     }
     let trim = |h: &str| h.strip_suffix('.').unwrap_or(h).to_string();
     let (page_host, host) = (trim(&page_host), trim(&host));
@@ -846,6 +846,10 @@ mod tests {
             Some(Shared)
         );
         assert_eq!(closeness("https://twitter.com", "https://x.com"), None);
+        assert_eq!(
+            closeness("http://themeforest.net", "https://envato.com"),
+            None
+        );
     }
 
     #[test]

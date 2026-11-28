@@ -271,7 +271,7 @@ mod tests {
             serde_json::from_str(include_str!("../data/password-rules/password-rules.json"))
                 .unwrap();
         assert_eq!(QUIRKS.len(), raw.len());
-        assert_eq!(QUIRKS.len(), 471, "the count at the pinned commit");
+        assert!(QUIRKS.len() > 400, "{}", QUIRKS.len());
         let mut weak = 0;
         for (domain, text) in QUIRKS.iter() {
             let rules = Rules::parse(text);

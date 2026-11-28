@@ -467,7 +467,23 @@ describe("new passwords", () => {
     expect(requests("save")).toEqual([])
     const list = host.host.send.bind(host.host)
     host.host.send = (async (req: RequestBody) =>
-      req.type === "list" ? { type: "list", site: "example.com", accounts: [{ ...(await list(req) as { accounts: object[] }).accounts[0] }] } : list(req)) as typeof host.host.send
+      req.type === "list" ? { type: "list", site: "example.com", accounts: [{ ...(await list(req) as { accounts: object[] }).accounts[0], urls: ["example.com/login"] }] } : list(req)) as typeof host.host.send
+    await submit({ password: "forgotten", newPassword: "a new one" }, "change-password")
+    expect(saver.pending(1)).toMatchObject({ username: "alex@example.com", update: true })
+  })
+
+  test("but never the only login of a site that shares this one's credentials", async () => {
+    const list = host.host.send.bind(host.host)
+    const only = (urls: string[]) => {
+      host.host.send = (async (req: RequestBody) =>
+        req.type === "list" ? { type: "list", site: "example.com", accounts: [{ ...(await list(req) as { accounts: object[] }).accounts[0], urls }] } : list(req)) as typeof host.host.send
+    }
+    // Listed here because its site shares example.com's credentials.
+    only(["https://example.net/login"])
+    await submit({ password: "forgotten", newPassword: "a new one" }, "change-password")
+    expect(saver.pending(1)).toBeUndefined()
+    // The same login saved for a host of this site is the one to update.
+    only(["https://accounts.example.com/login"])
     await submit({ password: "forgotten", newPassword: "a new one" }, "change-password")
     expect(saver.pending(1)).toMatchObject({ username: "alex@example.com", update: true })
   })
