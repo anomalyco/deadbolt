@@ -124,7 +124,7 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
   otp: prepare([
     ["one time code", 6], ["one time password", 6], ["otp", 5], ["totp", 5], ["verification code", 6],
     ["verify code", 5], ["security code", 5], ["authentication code", 6], ["auth code", 4], ["authenticator", 4],
-    ["2fa", 5], ["two factor", 5], ["mfa", 5], ["sms code", 5], ["login code", 5], ["code", 2], ["passcode", 3],
+    ["2fa", 5], ["two factor", 5], ["mfa", 5], ["sms code", 5], ["email code", 6], ["e mail code", 6], ["login code", 5], ["code", 2], ["passcode", 3],
     ["6 digit", 4], ["enter code", 4], ["pin", 3], ["token", 2], ["token code", 4],
     ["codigo de verificacion", 6], ["code de verification", 6],
     ["bestatigungscode", 6], ["verifizierungscode", 6], ["確認コード", 6], ["認証コード", 6],
@@ -352,7 +352,7 @@ export const FORM_CLUES: Record<FormKind, Clue[]> = {
   mfa: prepare([
     ["two factor", 3], ["2 step", 3], ["two step", 3], ["verification code", 3], ["enter the code", 3],
     ["enter code", 2], ["sent a code", 3], ["we sent", 2], ["authenticator app", 3], ["verify it s you", 3],
-    ["check your phone", 2], ["code de verification", 3], ["bestatigungscode", 3], ["確認コード", 3],
+    ["check your phone", 2], ["security check", 3], ["code de verification", 3], ["bestatigungscode", 3], ["確認コード", 3],
     ["codigo de verificacao", 3], ["codigo de verificacion", 3], ["verificacao em duas etapas", 3], ["verificacion en dos pasos", 3],
     ["verification en deux etapes", 3], ["zwei faktor", 3], ["bestatigung in zwei schritten", 3], ["2 段階認証", 3], ["認証コード", 3],
     ["card number", -4], ["checkout", -4], ["pay", -3], ["shipping", -3],

@@ -193,6 +193,29 @@ function pageFacts(fields: ScannedField[], codeGroups: HTMLInputElement[][], gra
   return { paths, title: FORM_KINDS.filter((k) => title[k] >= FORM_THRESHOLD), codeClusters: codes.size }
 }
 
+/** How far above a form with no button of its own the button beside it may be. */
+const BESIDE_DEPTH = 2
+
+/** A button outside the form that submits it all the same (`<button form="…">`). */
+const submitsForm = (root: Element, el: Element) => root instanceof HTMLFormElement && (el as HTMLButtonElement).form === root
+
+/**
+ * A cluster's buttons: its own, and any that name its form (`form="…"`);
+ * with none, the buttons just beside it (a sign-in card's "Sign In" after
+ * its form), a level or two up, while that holds no other boxes.
+ */
+function formButtons(root: Element, buttons: Element[], graph: FormGraph): Element[] {
+  const own = buttons.filter((el) => (within(root, el) || submitsForm(root, el)) && graph.visible(el))
+  if (own.length) return own
+  let node = root.parentElement
+  for (let depth = 0; node && depth < BESIDE_DEPTH && node !== document.body; depth++, node = node.parentElement) {
+    if (Array.from(node.querySelectorAll("input:not([type=hidden]), select, textarea")).some((el) => !root.contains(el))) return []
+    const beside = buttons.filter((el) => node!.contains(el) && !root.contains(el) && graph.visible(el))
+    if (beside.length) return beside
+  }
+  return []
+}
+
 /** Every cluster in a form or container whose fields the rules gave a login role, with the model's verdict on it. */
 function judge(graph: FormGraph, collected: ReturnType<typeof collectFields>): ClusterVerdict[] {
   // Nothing claimed in a form or container: no page facts or buttons to read.
@@ -204,7 +227,7 @@ function judge(graph: FormGraph, collected: ReturnType<typeof collectFields>): C
     const root = cluster.root
     const fields = collected.fields.filter((f) => f.cluster === cluster)
     if (!root || !fields.some((f) => f.role)) continue
-    const labels = buttons.filter((el) => within(root, el) && graph.visible(el)).map(controlText).filter((t) => t && t.length <= 40)
+    const labels = formButtons(root, buttons, graph).map(controlText).filter((t) => t && t.length <= 40)
     const features = clusterFeatures(cluster, fields, graph, page, labels)
     out.push({ cluster, offer: decoyCluster(cluster, fields, graph), features, odds: loginOdds(features) })
   }
@@ -223,16 +246,24 @@ const anchorRank = (f: ScannedField) =>
 
 /**
  * Of clusters that ask for as much, how well each fits the page: one whose
- * words and buttons say sign-up only, on a page whose path doesn't (or sign-in
- * only, on one whose path says sign-up), fits worse; then one with boxes no
- * login role claims (a sign-up's names); then the model's odds.
+ * words, buttons or new password say what the path does (sign-up on
+ * /signup, else sign-in) fits best, one that says both next, then one that
+ * says neither, and one that says the other (or a reset, off a reset path)
+ * worst. Off a
+ * sign-up path, one with no boxes a login role leaves unclaimed (a sign-up's
+ * names) fits better. Ties keep page order: the model's odds only set decoys
+ * aside, they don't rank sign-in forms.
  */
 function fit(cluster: FormCluster | undefined, verdicts: ReadonlyMap<FormCluster, ClusterVerdict>, signupPage: boolean): number[] {
   const v = cluster && verdicts.get(cluster)
-  if (!v) return [1, 1, 0]
-  const says = (kind: string) => v.features.includes(`button:${kind}`) || v.features.includes(`words:${kind}`)
-  const other = signupPage ? says("login") && !says("signup") : says("signup") && !says("login")
-  return [other ? 0 : 1, v.features.includes("unclaimed:0") ? 1 : 0, v.odds]
+  const features = v ? v.features : ["unclaimed:0"]
+  const says = (kind: string) => features.includes(`button:${kind}`) || features.includes(`words:${kind}`)
+  const login = says("login")
+  const signup = says("signup") || features.includes("role:new-password")
+  const reset = says("reset") && !login && !signup && !RESET_URL.test(location.pathname)
+  // One that says both ("Sign in or create account") fits either path better than one that says neither.
+  const intent = signupPage ? (signup && !login ? 2 : signup ? 1 : login || reset ? -1 : 0) : login && !signup ? 2 : login ? 1 : signup || reset ? -1 : 0
+  return [intent, !signupPage && features.includes("unclaimed:0") ? 1 : 0]
 }
 
 /**
@@ -323,11 +354,13 @@ function collectControls(cluster: FormCluster | undefined, graph: FormGraph, fie
     const raw = (el.textContent ?? "").replace(/\s+/g, " ").trim()
     if (!el.hasAttribute("aria-label") && raw.length > MAX_CONTROL_TEXT && !el.querySelector("style")) continue
     // Its label and kind matter only on a page with login fields, and only as the form's own button.
-    const own = fields && !(el instanceof HTMLAnchorElement) && (!root || within(root, el))
-    if (!own && (provider && signinNear > 0 || !mayNameProvider(el, raw))) continue
+    const own = fields && !(el instanceof HTMLAnchorElement) && (!root || within(root, el) || submitsForm(root, el))
+    const named = mayNameProvider(el, raw)
+    if (!own && (provider && signinNear > 0 || !named)) continue
     if (!graph.visible(el)) continue
     const text = controlText(el)
-    if ((!provider || signinNear === 0) && providerForControl(el, text)) {
+    // Every provider button is one, however many came before: a second one ("Continue with Apple") is never the submit.
+    if (named && providerForControl(el, text)) {
       provider = true
       if (beside(el)) {
         near = true
@@ -337,8 +370,8 @@ function collectControls(cluster: FormCluster | undefined, graph: FormGraph, fie
       continue
     }
     if (!text || text.length > 40 || el instanceof HTMLAnchorElement) continue
-    // Through shadow hosts: a form's button may be inside a web component (<my-button>).
-    if (root && !within(root, el)) continue
+    // Through shadow hosts: a form's button may be inside a web component (<my-button>), or outside it, naming it.
+    if (root && !within(root, el) && !submitsForm(root, el)) continue
     buttonText.push(text)
     const isSubmitType = (el as HTMLButtonElement).type === "submit" || (el as HTMLInputElement).type === "image"
     if (!submit && SUBMIT_TEXT.test(text)) submit = el

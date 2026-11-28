@@ -14,7 +14,8 @@
 // A cluster is a login (1) when it holds a field the gold label gives a
 // login role, or it's the code or reset step of a non-decoy page whose label
 // claims no field; else 0 (decoys, and the footer newsletter beside a real
-// sign-in). The fit is deterministic: full-batch proximal gradient descent
+// sign-in). Any other cluster of a sign-in page (a sign-up beside the sign-in,
+// which the label doesn't cover) is left out. The fit is deterministic: full-batch proximal gradient descent
 // on L2-regularised log loss with an L1 penalty, a fixed number of steps
 // from zero, classes weighted equally, and weights rounded to 0.01. Each
 // step projects every weight onto its sign (featureSign): sign-in wording
@@ -27,7 +28,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { featureSign, withWeights } from "../src/content/rationalize"
+import { featureSign, saysNewsletter, withWeights } from "../src/content/rationalize"
 import { controlKey, load } from "./replay"
 import { corpusProblems, loadDetector, pct, readGold, readLock, runAll, score, splitTable, type Gold } from "./score"
 import type { Weights } from "../src/content/weights.gen"
@@ -64,6 +65,9 @@ async function examples(gold: Gold[], lock: ReturnType<typeof readLock>, d: Awai
     const step = !g.decoy && g.kind !== null && !Object.keys(g.login).length
     for (const v of clusterVerdicts(graph)) {
       const login = !g.decoy && (step || v.cluster.controls.some((el) => controlKey(el) in g.login))
+      // A second sign-in-like form on a sign-in page (a sign-up beside the sign-in) is unlabelled, not a
+      // non-login: only the page's form is labelled. A newsletter box beside it is a non-login.
+      if (!login && !g.decoy && g.kind !== null && !saysNewsletter(v.cluster, graph)) continue
       out.push({ page: p.id, features: v.features, y: login ? 1 : 0 })
     }
   }

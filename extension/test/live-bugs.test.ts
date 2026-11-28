@@ -388,8 +388,24 @@ describe("buttons, verbs and headings a sign-in may use", () => {
     expect(verdict.features).toContain("title:login")
     const result = scanPage()
     expect(result.kind).toBe("login")
-    expect(byId(result)).toEqual({ access: "username", sec: "password", pw: "password" })
+    // The security number is a second secret the saved login doesn't hold: the password goes only into the named box.
+    expect(byId(result)).toEqual({ access: "username", pw: "password" })
     expect(result.submit?.id).toBe("logon")
+  })
+
+  test("a bank's short unnamed masked box beside its named password is no password, with no Remember me to say sign-in", () => {
+    page(`<form><h1>Internet Banking Logon</h1><label for="access">Customer access number</label><input id="access" name="userId" maxlength="19">
+      <label for="sec">Security Number</label><input id="sec" name="securityNumber" type="password" maxlength="6">
+      <label for="pw">Internet Password</label><input id="pw" name="password" type="password" maxlength="12">
+      <input type="submit" id="logon" value="Logon"></form>`, "/ibank/loginPage.action")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ access: "username", pw: "password" })
+  })
+
+  test("a named password and a named second password box both stay passwords", () => {
+    page(`<h1>Log in</h1><form><input id="u" name="username"><input id="p" type="password" name="password" maxlength="8"><input id="p2" type="password" name="secondPassword" maxlength="8"><button>Log in</button></form>`)
+    expect(byId(scanPage())).toEqual({ u: "username", p: "password", p2: "password" })
   })
 
   test("a card's own footer inside a section still speaks for its form", () => {
@@ -429,13 +445,30 @@ describe("which form is the page's", () => {
     expect(result.submit?.textContent).toBe("Log In")
   })
 
-  test("a sign-in above the sign-up on /signup: the sign-up is the form", () => {
-    page(`<header><form><input id="le" type="email"><input id="lp" type="password"><button type="submit">Log in</button></form></header>
-      <main><h1>Create your account</h1><form><input id="se" type="email" autocomplete="email"><input id="sp" type="password" autocomplete="new-password">
-      <input id="sc" type="password" autocomplete="new-password"><button type="submit">Sign up</button></form></main>`, "/signup")
+  test("a header sign-in above the four-box sign-up on /signup: the sign-up is the form", () => {
+    page(`<header><form><input id="le" type="email" placeholder="Email"><input id="lp" type="password" placeholder="Password"><button type="submit">Log in</button></form></header>
+      <main><h1>Create your account</h1><form><label for="nm">Full name</label><input id="nm" name="name" autocomplete="name"><label for="se">Email</label><input id="se" type="email" autocomplete="email">
+      <label for="sp">Password</label><input id="sp" type="password" autocomplete="new-password"><label for="sc">Confirm password</label><input id="sc" type="password" autocomplete="new-password">
+      <button type="submit">Sign up</button></form></main>`, "/signup")
     const result = scanPage()
     expect(result.kind).toBe("signup")
     expect(byId(result)).toEqual({ se: "email", sp: "new-password", sc: "new-password" })
+  })
+
+  test("on /login, an email-first sign-in beats a reset form after it", () => {
+    page(`<main><section><h2>Sign in</h2><form><label for="le">Email</label><input id="le" type="email"><button type="submit">Sign in</button></form></section>
+      <section><h2>Forgot your password?</h2><form><label for="re">Email</label><input id="re" type="email"><p>We'll send you a link to reset your password.</p><button type="submit">Continue</button></form></section></main>`, "/login")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ le: "email" })
+  })
+
+  test("on /login, a sign-in beats a Get started widget asking to create a password after it", () => {
+    page(`<main><section><h2>Sign in</h2><form><label for="le">Email</label><input id="le" type="email"><label for="lp">Password</label><input id="lp" type="password"><button type="submit">Sign in</button></form></section>
+      <aside><h2>Get started</h2><form><label for="ge">Email</label><input id="ge" type="email"><label for="gp">Create a password</label><input id="gp" type="password" autocomplete="new-password"><button type="submit">Continue</button></form></aside></main>`, "/login")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ le: "email", lp: "password" })
   })
 
   test("a login link button before Log in: Log in is the submit button", () => {
@@ -557,5 +590,93 @@ describe("masked boxes and boxes for either", () => {
     expect(scoreField(facts(" library card number ", "password")).username).toBeGreaterThanOrEqual(3)
     expect(scoreField(facts(" library card number ", "password")).password).toBeLessThan(3)
     expect(scoreField(facts(" card number ")).username).toBeLessThan(0)
+  })
+})
+
+describe("review fixes", () => {
+  test("a second provider button inside the form is never its submit", () => {
+    page(`<main><form><button type="button">Continue with Google</button><button type="button">Continue with Apple</button>
+      <label for="e">Email</label><input id="e" type="email"><button type="submit" id="go">Continue</button></form></main>`, "/start")
+    const result = scanPage()
+    expect(result.provider).toBe(true)
+    expect(result.submit?.id).toBe("go")
+  })
+
+  test("a checkout's contact step asking for a phone for SMS updates keeps its email and phone", () => {
+    page(`<form><h2>Contact information</h2><label for="em">Email</label><input id="em" type="email"><label for="tel">Phone (for SMS updates)</label><input id="tel" type="tel">
+      <button type="submit">Continue</button></form>`, "/checkout", "Checkout - Example Store")
+    expect(formRoles()).toEqual({ em: "email", tel: "tel" })
+  })
+
+  test("text alerts about an order are no marketing popup", () => {
+    page(`<form><h2>Get order updates</h2><label for="em">Email</label><input id="em" type="email"><label for="tel">Mobile number for text updates</label><input id="tel" type="tel"><button>Save</button></form>`, "/orders/123")
+    expect(formRoles()).toEqual({ em: "email", tel: "tel" })
+  })
+
+  test("a five-box B2B sign-up with one password on /get-started is a sign-up", () => {
+    page(`<main><h1>Start your free trial</h1><form><label for="fn">First name</label><input id="fn" name="first_name"><label for="ln">Last name</label><input id="ln" name="last_name">
+      <label for="co">Company</label><input id="co" name="company"><label for="em">Work email</label><input id="em" name="email" type="email">
+      <label for="pw">Password</label><input id="pw" name="password" type="password"><button type="submit">Start trial</button></form></main>`, "/get-started")
+    const result = scanPage()
+    expect(result.kind).not.toBeNull()
+    expect(byId(result)).toEqual({ em: "email", pw: expect.stringMatching(/password/) })
+  })
+
+  test("a four-box enterprise sign-in (account, sub-user, username, password) on / is a sign-in", () => {
+    page(`<main><form><label for="acct">Account</label><input id="acct" name="account"><label for="sub">Sub-user</label><input id="sub" name="subuser">
+      <label for="un">Username</label><input id="un" name="username"><label for="pw">Password</label><input id="pw" name="password" type="password">
+      <button type="submit">Enter</button></form></main>`, "/")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result).pw).toBe("password")
+    expect(byId(result).un).toBe("username")
+  })
+
+  test("a button outside the form that names it (form=) is its submit and its button", () => {
+    page(`<div role="dialog"><h3>Join</h3><form id="ef"><label for="u">Email address</label><input id="u" type="email" name="username" autocomplete="username"></form>
+      <button form="ef" type="submit" id="go">Continue</button></div>`, "/")
+    const [verdict] = clusterVerdicts()
+    expect(verdict.features).toContain("button:proceed")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(result.submit?.id).toBe("go")
+  })
+
+  test("a one-box form with no button of its own takes the Sign In button beside it", () => {
+    page(`<div><div>Sign In</div><div><form><input name="username" id="u" placeholder="Username" autocomplete="username"></form></div>
+      <div role="button" tabindex="-1" aria-label="Sign In"></div></div>`, "/")
+    expect(clusterVerdicts()[0].features).toContain("button:login")
+    expect(scanPage().kind).toBe("login")
+  })
+
+  test("a button beside a form doesn't count when another form shares the container", () => {
+    page(`<div><form><input id="a" name="username" autocomplete="username"></form><form><input id="b" type="search"></form><button>Search</button></div>`, "/")
+    expect(clusterVerdicts()[0].features).toContain("button:none")
+  })
+
+  test("on /login, a Sign in or create account form beats a form that says neither", () => {
+    page(`<main><h1>Sign in or create account</h1><form><label for="a">Email</label><input id="a" type="email"><button type="submit">Continue</button></form></main>
+      <div><form><input id="b" type="email" placeholder="Email"></form></div>`, "/account/login")
+    expect(byId(scanPage())).toEqual({ a: "email" })
+  })
+
+  test("Продолжить moves a sign-in along", () => {
+    page(`<form><input id="ph" type="tel" placeholder="Телефон"><button type="submit">Продолжить</button></form>`, "/")
+    expect(clusterVerdicts()[0].features).toContain("button:proceed")
+  })
+
+  test("an Email code box is a code, not an email; two forms of sent codes are verifying contact details", () => {
+    page(`<main><h1>Verify your contact details</h1><form><p>We sent a code to your email address.</p><label for="ec">Email code</label><input id="ec" name="emailCode" maxlength="6" inputmode="numeric"><button>Verify email</button></form>
+      <form><p>We texted a code to your phone.</p><label for="pc">SMS code</label><input id="pc" name="smsCode" maxlength="6" inputmode="numeric"><button>Verify phone</button></form></main>`, "/account/verify")
+    expect(clusterVerdicts().every((v) => v.features.includes("role:otp"))).toBe(true)
+    expect(scanPage().kind).toBeNull()
+  })
+
+  test("a Security check heading says it's a sign-in's code step", () => {
+    page(`<main><h1>Security check</h1><form><label for="c">Code</label><input id="c" name="code" inputmode="numeric" maxlength="6"><button type="submit">Verify</button></form></main>`, "/security-check")
+    const [verdict] = clusterVerdicts()
+    expect(verdict.features).toContain("words:mfa")
+    expect(verdict.features).not.toContain("signal:none")
+    expect(scanPage().kind).toBe("mfa")
   })
 })
