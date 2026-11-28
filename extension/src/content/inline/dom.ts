@@ -120,9 +120,21 @@ export type MenuSide = "above" | "below"
  * `was`, the side it's on already, keeps it there while it still fits, so a
  * list that grows (`db:menu-resize`) grows away from its field with its
  * near edge pinned, rather than jumping across the field.
+ *
+ * `others`: the form's other fields under the list's width. Above never
+ * covers one of them (a password box's list would sit on the username box
+ * over it, taking the click meant for it); then it goes below.
  */
-export function menuPlace(r: { top: number; bottom: number }, height: number, viewport: number, above: boolean, was: MenuSide | null = null): { side: MenuSide; top: number } {
-  const fitsAbove = r.top >= height + MENU_MARGIN + MENU_GAP
+export function menuPlace(
+  r: { top: number; bottom: number },
+  height: number,
+  viewport: number,
+  above: boolean,
+  was: MenuSide | null = null,
+  others: Array<{ top: number; bottom: number }> = [],
+): { side: MenuSide; top: number } {
+  const aboveTop = r.top - height - MENU_GAP
+  const fitsAbove = r.top >= height + MENU_MARGIN + MENU_GAP && !others.some((o) => o.bottom > aboveTop && o.top < r.top)
   const fitsBelow = r.bottom + MENU_GAP + height < viewport
   const side: MenuSide = was === "above" && fitsAbove ? "above" : was === "below" && fitsBelow ? "below" : above && fitsAbove ? "above" : fitsBelow ? "below" : "above"
   return { side, top: side === "above" ? Math.max(MENU_MARGIN, r.top - height - MENU_GAP) : r.bottom + MENU_GAP }

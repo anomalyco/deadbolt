@@ -26,6 +26,16 @@ describe("the account list's place by its login field", () => {
     expect(menuPlace(r, HEIGHT, VIEW, true).side).toBe("above")
   })
 
+  test("a password box's list doesn't sit on the username box over it: it goes below", () => {
+    const username = field(330)
+    const password = field(400)
+    expect(menuPlace(password, HEIGHT, VIEW, true, null, [username])).toEqual({ side: "below", top: password.bottom + 6 })
+    // A field far enough above is clear of it.
+    expect(menuPlace(password, HEIGHT, VIEW, true, null, [field(100)]).side).toBe("above")
+    // Already above when the username box shows over it (a step that adds it): it moves below.
+    expect(menuPlace(password, HEIGHT, VIEW, true, "above", [username]).side).toBe("below")
+  })
+
   test("an identity or card list stays below, and goes above only when it can't fit there", () => {
     expect(menuPlace(field(400), HEIGHT, VIEW, false)).toEqual({ side: "below", top: 446 })
     expect(menuPlace(field(800), HEIGHT, VIEW, false)).toEqual({ side: "above", top: 800 - HEIGHT - 6 })

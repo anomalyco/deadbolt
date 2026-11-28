@@ -232,10 +232,20 @@ function targetRect(): Rect | null {
   // the viewport; a login list above the field, clear of the browser's own
   // autofill list below it (see menuPlace).
   const width = Math.min(Math.max(r.width, MENU_MIN_WIDTH), innerWidth - 2 * MENU_MARGIN)
-  const placed = menuPlace(r, menuHeight, innerHeight, preferAbove, side)
-  side = placed.side
   const left = Math.min(Math.max(MENU_MARGIN, r.left), innerWidth - width - MENU_MARGIN)
+  const placed = menuPlace(r, menuHeight, innerHeight, preferAbove, side, preferAbove ? fieldsUnder(left, width) : [])
+  side = placed.side
   return { left, top: placed.top, width, height: menuHeight }
+}
+
+/** The page's other login fields that show between `left` and `left + width`: what a list above its field mustn't cover (see menuPlace). */
+function fieldsUnder(left: number, width: number): DOMRect[] {
+  if (!anchor) return []
+  return state
+    .targets()
+    .filter((t) => t.el !== anchor && t.el.isConnected)
+    .map((t) => t.el.getBoundingClientRect())
+    .filter((b) => b.width >= 2 && b.height >= 2 && b.right > left && b.left < left + width)
 }
 
 /**
@@ -307,7 +317,9 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   const shown = Math.min(Math.max(rows, 1), 5)
   menuHeight = shown * MENU_ROW + MENU_CHROME + (captioned ? MENU_CAPTION : 0)
   // An identity or card list stays below its field; a login list goes above.
-  preferAbove = as === "accounts" && !captioned
+  // Not for a frame's field: this page can't see the frame's other fields,
+  // which a list above might cover (see fieldsUnder).
+  preferAbove = as === "accounts" && !captioned && !!el
   side = null
   raises = 0
   const box = (host = document.createElement(hostTag()))

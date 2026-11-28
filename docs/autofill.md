@@ -405,8 +405,10 @@ daemon again.
   top page after a click or keypress opens a menu of that site's logins,
   title and username, 6 px above the field, where the browser's own autofill
   list (which opens below a login field, and which no page can cover) never
-  overlaps it; near the top of the viewport it goes 6 px below instead. A
-  list that grows keeps its edge by the field. It's as wide as the field and
+  overlaps it. It goes 6 px below instead near the top of the viewport,
+  when above would cover another field of the form (a password box's list
+  over its username box), and for a field in a frame, whose other fields
+  the top page can't see. A list that grows keeps its edge by the field. It's as wide as the field and
   left-aligned with it, at least 240 px (room for the avatar, title
   and username) and at most the viewport less 4 px each side. It doesn't
   name the site: logins are only ever offered for the page's own site, or a
