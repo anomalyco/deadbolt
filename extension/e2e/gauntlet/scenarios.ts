@@ -603,7 +603,8 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.click("#continue")
       await c.page.waitForURL("**/google-hidden-password/password")
       c.ok((await c.page.locator("#trapped").count()) === 0, "the server found nothing in hiddenPassword")
-      await sameOrOwnPick(c, "#password", "a hidden password box on step 1 doesn't end the sign-in session")
+      c.ok(await filledWith(c.page, "#password", KIT_PASSWORD, 4000), "a hidden password box on step 1 doesn't end the sign-in session: the next step fills from the same pick")
+      await wait("the pill goes", () => !menuFrame(c.page), 8000)
       await c.page.click("#submit")
       c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
     },
@@ -615,7 +616,8 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       c.ok(await pick(c, "#username"), "the email step of a form with no action fills")
       await c.page.click("#next")
       await c.page.waitForSelector("#password")
-      await sameOrOwnPick(c, "#password", "PR 4: a step re-rendered in place counts as the next step")
+      c.ok(await filledWith(c.page, "#password", KIT_PASSWORD, 4000), "a step re-rendered in place is the next step: it fills from the same pick")
+      await wait("the pill goes", () => !menuFrame(c.page), 8000)
       await c.page.click("#submit")
       c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
       c.ok(urls.every((u) => !new URL(u).search), `the form is never submitted natively, so no field lands in the URL (${urls.map((u) => new URL(u).search).filter(Boolean).length} queries)`)
@@ -626,8 +628,7 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await sleep(2500)
       const group = async (p: string) => (await Promise.all([1, 2, 3, 4, 5, 6].map((i) => value(c.page, `#${p}${i}`)))).join("")
       c.ok((await group("s")) === "", "the texted code's six boxes get 0 bytes")
-      // TODO(PR 3): twelve one-digit boxes on a page aren't grouped per form yet, so neither group is taken for a code.
-      c.pend(h.isCode(await group("a")), "the authenticator's six boxes fill with the code", "PR 3: per-form code groups")
+      c.ok(h.isCode(await group("a")), "the authenticator's six boxes fill with the code")
       c.ok((await codesAsked(c)) <= 1, "the vault is asked for at most one code")
       for (const [i, d] of [...SMS_CODE].entries()) await c.page.fill(`#s${i + 1}`, d)
       await c.page.click("#verify-sms")
@@ -674,23 +675,6 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.click("#submit")
       c.ok(!!(await wait("saved", async () => (await c.page.locator("#result[data-ok]").count()) > 0)), "and the form submits")
     },
-  }
-
-  /**
-   * A next step's password box: filled from the first step's pick, which is
-   * the aim (a pending check until `until` lands), or else from its own menu,
-   * which must work today.
-   */
-  async function sameOrOwnPick(c: Ctx, sel: string, until: string) {
-    const same = await filledWith(c.page, sel, KIT_PASSWORD, 4000)
-    c.pend(same, "the next step's password fills from the same pick", until)
-    await wait("the pill goes", () => !menuFrame(c.page), 8000)
-    if (!same) {
-      const menu = await menuOn(c, sel)
-      if (menu) await menu.locator("button.row", { hasText: ALEX }).first().click()
-      c.ok(await filledWith(c.page, sel, KIT_PASSWORD), "the password fills from its own menu")
-      await wait("the pill goes", () => !menuFrame(c.page), 8000)
-    }
   }
 
   /** A code sent by text or email: never filled from the authenticator, Resend included. */

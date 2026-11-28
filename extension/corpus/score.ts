@@ -113,17 +113,22 @@ function readGold(): Gold[] {
     .map((l) => JSON.parse(l) as Gold)
 }
 
-type Detector = { scanPage: typeof import("../src/content/detect").scanPage; scanForms: typeof import("../src/content/forms").scanForms; openRoots: typeof import("../src/content/shadow").openRoots }
+type Detector = {
+  scanPage: typeof import("../src/content/detect").scanPage
+  scanForms: typeof import("../src/content/forms").scanForms
+  scanGraph: typeof import("../src/content/graph").scanGraph
+  openRoots: typeof import("../src/content/shadow").openRoots
+}
 
 /** What the extension makes of the page (content.ts, refresh): the login's fields, and the identity and payment fields the login doesn't claim. */
 function predict(d: Detector, id: string): Prediction {
-  const roots = d.openRoots(document, undefined, true)
-  const result = d.scanPage(roots)
+  const graph = d.scanGraph(d.openRoots(document, undefined, true))
+  const result = d.scanPage(graph)
   const fields = result.kind && result.kind !== "reset" ? result.fields : []
   const login: Record<string, string> = {}
   for (const f of fields) login[controlKey(f.el)] = f.role
   const forms: Record<string, string> = {}
-  for (const f of d.scanForms(roots)) if (!fields.some((l) => l.el === f.el)) forms[controlKey(f.el)] = f.role
+  for (const f of d.scanForms(graph)) if (!fields.some((l) => l.el === f.el)) forms[controlKey(f.el)] = f.role
   return { id, kind: result.kind, login: sorted(login), forms: sorted(forms) }
 }
 
@@ -315,7 +320,12 @@ async function main() {
   }
 
   register()
-  const d: Detector = { ...(await import("../src/content/detect")), ...(await import("../src/content/forms")), ...(await import("../src/content/shadow")) }
+  const d: Detector = {
+    ...(await import("../src/content/detect")),
+    ...(await import("../src/content/forms")),
+    ...(await import("../src/content/graph")),
+    ...(await import("../src/content/shadow")),
+  }
   const only = opt("--only")
   const first = runAll(d, lock, html, only)
   const second = runAll(d, lock, html, only)

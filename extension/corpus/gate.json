@@ -8,63 +8,72 @@
   "margin": 0.005,
   "floors": {
     "micro": {
-      "precision": 0.8642,
-      "recall": 0.9739
+      "precision": 0.995,
+      "recall": 0.995
     },
     "roles": {
       "identifier": {
-        "precision": 0.9325,
-        "recall": 0.9627
+        "precision": 0.995,
+        "recall": 0.995
       },
       "password": {
-        "precision": 0.8521,
-        "recall": 0.9424
+        "precision": 0.995,
+        "recall": 0.995
       },
       "new-password": {
-        "precision": 0.7728,
+        "precision": 0.995,
         "recall": 0.995
       },
       "otp": {
-        "precision": 0.6379,
+        "precision": 0.995,
         "recall": 0.995
       },
       "card": {
-        "precision": 0.895,
+        "precision": 0.995,
         "recall": 0.995
       },
       "address": {
-        "precision": 0.9474,
+        "precision": 0.995,
         "recall": 0.995
       }
     },
-    "pageKind": 0.8911
+    "pageKind": 0.995
   },
   "ceilings": {
-    "decoyFalseTrigger": 0.2193,
-    "decoyFormsFalseTrigger": 0.0764
+    "decoyFalseTrigger": 0.005,
+    "decoyFormsFalseTrigger": 0.005
   },
   "exactPages": [
     "amazon-add-address",
     "amazon-email",
     "amazon-password",
+    "apple-account-signin",
     "auth0-identifier",
     "auth0-password",
     "aws-signin",
     "bestbuy-checkout-below-fold",
+    "bofa-home-login",
     "chase-shadow-login",
+    "clerk-signin",
     "closed-shadow-login",
     "cloudflare-login",
     "coinbase-signin",
     "coinbase-sms-code",
     "decoy-admin-user-edit",
+    "decoy-api-keys",
+    "decoy-author-hostname",
+    "decoy-bank-transfer-pin",
     "decoy-blog-comment",
+    "decoy-cart-promo-giftcard",
     "decoy-chat-widget",
     "decoy-claim-username",
+    "decoy-cms-general-settings",
     "decoy-coupon-six-digits",
     "decoy-delete-account",
     "decoy-docs-search",
     "decoy-dual-sent-codes",
     "decoy-flight-search",
+    "decoy-gift-card-balance",
     "decoy-invite-teammates",
     "decoy-job-application",
     "decoy-mortgage-calculator",
@@ -77,6 +86,7 @@
     "decoy-store-locator",
     "decoy-store-search-zip",
     "decoy-support-request",
+    "decoy-warranty-code",
     "discord-login",
     "dropbox-signup-modal",
     "ebay-signin-phone",
@@ -87,6 +97,8 @@
     "github-password-reset",
     "github-signup",
     "gitlab-signup",
+    "google-change-password",
+    "google-identifier",
     "google-password",
     "google-sms-code",
     "google-totp",

@@ -9,8 +9,12 @@
 // matched in memory; nothing here leaves the page.
 
 import type { FieldRole, SurfaceKind } from "../messages"
-import { bestRole, FIELD_THRESHOLD, FORM_KINDS, hasPhrase, providerFromLabel, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind, type Provider } from "./clues"
+import { bestRole, FORM_KINDS, hasPhrase, providerFromLabel, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind, type Provider } from "./clues"
+import { graphOf, innerText, isVisible, within, type FormCluster, type FormGraph, type ScanSource } from "./graph"
+import { confirmations, decoyCluster, LOGIN_TOKENS, rationalize, unclaimedBoxes, type ScannedField } from "./rationalize"
 import { deepQueryAll, openRoots } from "./shadow"
+
+export { ignored, isVisible, labelText, type FormControl } from "./graph"
 
 /** A password box that asks for a new password by autocomplete, whatever the detector made of its form: a sign-up, never a sign-in step to submit. */
 export const asksNewPassword = (fields: Field[]) => fields.some((f) => f.el.type === "password" && /\bnew-password\b/.test(f.el.autocomplete))
@@ -32,40 +36,8 @@ const SKIP_INPUT_TYPES = new Set([
   "datetime-local", "month", "week", "time", "search",
 ])
 
-/**
- * Marks sites put on fields, forms or <body> to keep password managers away:
- * 1Password's, LastPass's, Bitwarden's, Dashlane's and Deadbolt's own.
- */
-function optedOut(el: Element | null | undefined): boolean {
-  if (!el) return false
-  const on = (name: string) => el.hasAttribute(name) && el.getAttribute(name)?.toLowerCase() !== "false"
-  return (
-    on("data-1p-ignore") ||
-    on("data-op-ignore") ||
-    on("data-bwignore") ||
-    on("data-deadbolt-ignore") ||
-    el.getAttribute("data-lpignore")?.toLowerCase() === "true" ||
-    el.getAttribute("data-form-type")?.toLowerCase() === "other"
-  )
-}
-
-/** An input, select or textarea: what identity and payment forms are made of. */
-export type FormControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
-
-/** The site asked password managers to leave this field alone, on it, its form or the page. */
-export const ignored = (el: FormControl) => optedOut(el) || optedOut(el.form ?? el.closest("form")) || optedOut(document.body)
-
 /** Minimum score for the page to count as a given kind of form. */
 const FORM_THRESHOLD = 3
-
-export function isVisible(el: Element): boolean {
-  const rect = el.getBoundingClientRect()
-  if (rect.width < 2 || rect.height < 2) return false
-  const style = getComputedStyle(el)
-  return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0.05
-}
-
-const innerText = (el: Element | null | undefined) => ((el as HTMLElement | null)?.innerText ?? el?.textContent ?? "").trim()
 
 /** Label of a button. Matched against vocabularies only, never stored. */
 export function controlText(el: Element): string {
@@ -88,54 +60,24 @@ export function visibleLabel(el: Element): string {
 
 // ---- Field facts ---------------------------------------------------------------
 
-/** Closest preceding text when a field has no <label>, e.g. a <span> above it. */
-function nearbyText(el: Element): string {
-  let node: Element | null = el
-  for (let depth = 0; node && depth < 3; depth++) {
-    let sibling = node.previousElementSibling
-    for (let i = 0; sibling && i < 2; i++, sibling = sibling.previousElementSibling) {
-      if (sibling.matches("input, select, textarea") || sibling.querySelector("input, select, textarea")) return ""
-      const text = innerText(sibling)
-      if (text) return text.length <= 80 ? text : ""
-    }
-    node = node.parentElement
-  }
-  return ""
-}
-
-/** A field's labels, aria label, placeholder and title, or the text just before it. */
-export function labelText(el: FormControl): string {
-  const parts: string[] = []
-  for (const label of Array.from(el.labels ?? [])) parts.push(innerText(label))
-  const labelledBy = el.getAttribute("aria-labelledby")
-  const root = el.getRootNode() as Document | ShadowRoot
-  if (labelledBy) for (const id of labelledBy.split(/\s+/)) parts.push(innerText(root.getElementById?.(id)))
-  const placeholder = el.getAttribute("placeholder") ?? ""
-  parts.push(el.getAttribute("aria-label") ?? "", placeholder, el.getAttribute("title") ?? "")
-  if (!parts.some(Boolean)) parts.push(nearbyText(el))
-  // "you@example.com" as a placeholder means an email box.
-  if (placeholder.includes("@")) parts.push("email")
-  return parts.filter(Boolean).join(" ").slice(0, 300)
-}
-
 /**
  * A password box, or a text box the page masks with CSS
  * (`-webkit-text-security`) to keep the browser's own password handling away.
  */
-export function masked(el: HTMLInputElement): boolean {
+export function masked(el: HTMLInputElement, style: (el: Element) => CSSStyleDeclaration = getComputedStyle): boolean {
   if (el.type === "password") return true
   if (el.type !== "text") return false
-  const security = getComputedStyle(el).getPropertyValue("-webkit-text-security")
+  const security = style(el).getPropertyValue("-webkit-text-security")
   return !!security && security !== "none"
 }
 
-function factsFor(el: HTMLInputElement): FieldFacts {
+function factsFor(el: HTMLInputElement, graph: FormGraph, isMasked: boolean): FieldFacts {
   const code = [el.id, el.name, el.getAttribute("class"), el.getAttribute("data-testid"), el.getAttribute("data-test")]
     .filter((v): v is string => typeof v === "string" && v.length > 0)
     .join(" ")
-  const label = labelText(el)
+  const label = graph.label(el)
   return {
-    type: masked(el) ? "password" : (el.getAttribute("type") || "text").toLowerCase(),
+    type: isMasked ? "password" : (el.getAttribute("type") || "text").toLowerCase(),
     autocomplete: (el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).filter(Boolean),
     display: words(label),
     question: /[?？]\s*$/.test(Array.from(el.labels ?? [], (l) => innerText(l)).join(" ") || label),
@@ -150,13 +92,6 @@ function eligible(el: Element): el is HTMLInputElement {
 }
 
 // ---- The page ------------------------------------------------------------------
-
-interface ScannedField {
-  el: HTMLInputElement
-  facts: FieldFacts
-  score: Record<FieldRole, number>
-  role: FieldRole | null
-}
 
 export interface Field {
   el: HTMLInputElement
@@ -189,50 +124,59 @@ export interface ScanResult {
   provider: boolean
 }
 
-function collectFields(roots: Array<Document | ShadowRoot>): { fields: ScannedField[]; otpBoxes: HTMLInputElement[] } {
+/** Login inputs read per scan. */
+const MAX_INPUTS = 200
+
+/** The scan's login fields, scored and settled, and each cluster's one-digit code boxes, where there are a code's worth. */
+function collectFields(graph: FormGraph): { fields: ScannedField[]; codeGroups: HTMLInputElement[][] } {
   const fields: ScannedField[] = []
-  const otpBoxes: HTMLInputElement[] = []
-  for (const el of deepQueryAll<HTMLInputElement>("input", roots).slice(0, 200)) {
-    if (!eligible(el) || !isVisible(el) || ignored(el)) continue
-    // One-character boxes for codes are grouped into a single split OTP field.
+  const boxes = new Map<FormCluster | undefined, HTMLInputElement[]>()
+  let read = 0
+  for (const el of graph.controls) {
+    if (!eligible(el)) continue
+    if (++read > MAX_INPUTS) break
+    const isMasked = masked(el, graph.style)
+    // A secret the page shows (an API key), not one it asks for.
+    if (isMasked && el.readOnly) continue
+    const cluster = graph.clusterOf(el)
+    // One-character boxes for codes are grouped, per cluster, into a single split OTP field.
     if (el.maxLength === 1) {
-      otpBoxes.push(el)
+      const group = boxes.get(cluster)
+      if (group) group.push(el)
+      else boxes.set(cluster, [el])
       continue
     }
-    const facts = factsFor(el)
-    fields.push({ el, facts, score: scoreField(facts), role: null })
+    const facts = factsFor(el, graph, isMasked)
+    fields.push({ el, facts, score: scoreField(facts), role: null, cluster })
   }
-
-  // Context: a password field right after another one is a confirmation,
-  // unless it's really a PIN or token box.
-  let previousPassword: HTMLInputElement | null = null
-  for (const f of fields) {
-    if (f.facts.type !== "password" || f.score.otp >= FIELD_THRESHOLD) continue
-    if (previousPassword && previousPassword.form === f.el.form) {
-      f.score["new-password"] += 4
-      f.score.password -= 4
-    }
-    previousPassword = f.el
-  }
+  confirmations(fields)
   for (const f of fields) f.role = bestRole(f.score)
-  return { fields, otpBoxes: otpBoxes.length >= 4 && otpBoxes.length <= 8 ? otpBoxes : [] }
+  rationalize(fields)
+  return { fields, codeGroups: [...boxes.values()].filter((g) => g.length >= 4 && g.length <= 8) }
 }
 
-/** The form that holds the most important field, if the page uses <form>. */
-function primaryForm(fields: ScannedField[]): HTMLFormElement | null {
+/**
+ * The cluster that holds the most important field: a password, else who
+ * you are, else a code; else the first group of one-digit code boxes whose
+ * code Deadbolt holds, else the first such group.
+ */
+function primaryCluster(fields: ScannedField[], codeGroups: HTMLInputElement[][], graph: FormGraph): FormCluster | undefined {
   const anchor =
     fields.find((f) => f.role === "password" || f.role === "new-password") ??
     fields.find((f) => f.role === "username" || f.role === "email" || f.role === "phone") ??
     fields.find((f) => f.role === "otp")
-  return anchor ? (anchor.el.form ?? anchor.el.closest("form")) : null
+  if (anchor) return anchor.cluster
+  const clusterOf = (group: HTMLInputElement[]) => graph.clusterOf(group[0])
+  const held = codeGroups.find((g) => heldCode(words(graph.label(g[0])), () => codePageText(clusterOf(g)?.root ?? null)))
+  return (held ?? codeGroups[0]) && clusterOf(held ?? codeGroups[0])
 }
 
-function contextText(form: HTMLFormElement | null): string {
+function contextText(root: Element | null): string {
   const parts = [document.title]
   for (const h of Array.from(document.querySelectorAll("h1, h2, h3, [role=heading]")).slice(0, 6)) parts.push(innerText(h))
-  if (form) {
-    parts.push(innerText(form).slice(0, 3000))
-    for (const input of Array.from(form.querySelectorAll<HTMLInputElement>("input[type=submit], input[type=button]")))
+  if (root) {
+    parts.push(innerText(root).slice(0, 3000))
+    for (const input of Array.from(root.querySelectorAll<HTMLInputElement>("input[type=submit], input[type=button]")))
       parts.push(input.value)
   }
   return words(parts.join(" \n "))
@@ -252,34 +196,37 @@ export function providerForControl(el: Element, text: string): Provider | null {
   return match.provider
 }
 
-function collectControls(form: HTMLFormElement | null, roots: Array<Document | ShadowRoot>) {
+function collectControls(cluster: FormCluster | undefined, graph: FormGraph) {
   let submit: Element | undefined
   let provider = false
   const buttonText: string[] = []
+  const root = cluster?.root ?? null
+  const form = cluster?.form ?? null
   // The login form's own buttons first, so a huge nav can't push them past the cap.
-  const candidates = new Set<Element>(form ? Array.from(form.querySelectorAll(CLICKABLE)) : [])
-  for (const el of deepQueryAll(CLICKABLE, roots)) {
+  const candidates = new Set<Element>(root ? Array.from(root.querySelectorAll(CLICKABLE)) : [])
+  for (const el of deepQueryAll(CLICKABLE, graph.roots)) {
     if (candidates.size >= 500) break
     candidates.add(el)
   }
   for (const el of candidates) {
-    if (!isVisible(el)) continue
+    if (!graph.visible(el)) continue
     const text = controlText(el)
     if (!provider && providerForControl(el, text)) {
       provider = true
       continue
     }
     if (!text || text.length > 40 || el instanceof HTMLAnchorElement) continue
-    if (form && !form.contains(el)) continue
+    // Through shadow hosts: a form's button may be inside a web component (<my-button>).
+    if (root && !within(root, el)) continue
     buttonText.push(text)
     const isSubmitType = (el as HTMLButtonElement).type === "submit"
     if (!submit && (SUBMIT_TEXT.test(text) || (isSubmitType && form))) submit = el
   }
-  if (!provider) provider = deepQueryAll(PROVIDER_WIDGETS, roots).length > 0
+  if (!provider) provider = deepQueryAll(PROVIDER_WIDGETS, graph.roots).length > 0
   return { submit, buttonText, provider }
 }
 
-function decideKind(fields: ScannedField[], otpBoxes: number, text: string, controls: ReturnType<typeof collectControls>): FormKind | null {
+function decideKind(fields: ScannedField[], otpBoxes: number, text: string, controls: ReturnType<typeof collectControls>, unclaimed: number): FormKind | null {
   const { buttonText, provider } = controls
   const count = (...roles: FieldRole[]) => fields.filter((f) => f.role && roles.includes(f.role)).length
   const pw = count("password")
@@ -287,7 +234,8 @@ function decideKind(fields: ScannedField[], otpBoxes: number, text: string, cont
   const ident = count("username", "email", "phone")
   const otp = count("otp") + (otpBoxes ? 1 : 0)
   const ac = new Set(fields.flatMap((f) => f.facts.autocomplete))
-  const url = location.hostname + location.pathname
+  // The path only: a host like author.example.com or sso.example.com says nothing of the page.
+  const url = location.pathname
 
   const score = scoreFormText(text + words(buttonText.join(" ")))
   // Shape of the form.
@@ -312,6 +260,12 @@ function decideKind(fields: ScannedField[], otpBoxes: number, text: string, cont
   if (pw === 1 && npw === 0) score.signup -= 2
   // A "Create account" link next to an email-first sign-in doesn't make it a sign-up.
   if (pw + npw === 0 && !SIGNUP_URL.test(url)) score.signup = Math.min(score.signup, 2)
+  // New passwords and no box for who you are: someone signed in setting a
+  // password (a change or a reset), not a sign-up, which asks who you are.
+  if (npw > 0 && pw === 0 && ident === 0 && !SIGNUP_URL.test(url)) {
+    score.signup -= 3
+    score["change-password"] += 3
+  }
 
   // Shape alone is weak here (two password boxes can be password + PIN); the
   // "current / new password" wording does most of the work.
@@ -323,6 +277,16 @@ function decideKind(fields: ScannedField[], otpBoxes: number, text: string, cont
 
   if (otp > 0 && pw === 0) score.mfa += 6
   if (otp > 0 && pw > 0) score.mfa += 1
+
+  // No password, no sign-in autocomplete, and two or more boxes no login
+  // role claims: more likely a transfer, a registration or a comment than a
+  // sign-in, though a sign-in's own wording and path can still say it is one
+  // (a workspace, a region and a work email).
+  if (pw + npw === 0 && unclaimed >= 2 && !LOGIN_TOKENS.some((t) => ac.has(t))) {
+    score.mfa -= 6
+    score.signup -= 4
+    score.login -= 2
+  }
 
   if (ident > 0 && pw + npw === 0 && !provider) score.newsletter += 1
   if (pw + npw > 0) score.newsletter -= 8
@@ -388,33 +352,45 @@ export function heldCode(label: string, page: () => string): boolean {
 }
 
 /** What the page says around its code box: title, headings and the start of its text. */
-function codePageText(form: HTMLFormElement | null): string {
+function codePageText(root: Element | null): string {
   const heads = Array.from(document.querySelectorAll("h1, h2, h3, [role=heading]")).slice(0, 6).map((h) => innerText(h))
-  return words([document.title, ...heads, innerText(form), innerText(document.body).slice(0, 3000)].join(" \n "))
+  return words([document.title, ...heads, innerText(root), innerText(document.body).slice(0, 3000)].join(" \n "))
 }
 
-export function scanPage(roots = openRoots()): ScanResult {
-  const { fields: all, otpBoxes } = collectFields(roots)
-  const form = primaryForm(all)
-  // Judge and report the primary form only, so a sign-up form or newsletter
+/**
+ * The page's login form: its kind, its fields and its submit button. Takes
+ * a scan's graph (graph.ts), shared with scanForms, or the roots to make one.
+ */
+export function scanPage(source: ScanSource = openRoots()): ScanResult {
+  const graph = graphOf(source)
+  const collected = collectFields(graph)
+  // Gift card and coupon forms are set aside first, so one above the real sign-in never stands for it.
+  const decoys = new Set(graph.clusters.filter((c) => decoyCluster(c, collected.fields.filter((f) => f.cluster === c), graph)))
+  const all = collected.fields.filter((f) => !f.cluster || !decoys.has(f.cluster))
+  const codeGroups = collected.codeGroups.filter((g) => !decoys.has(graph.clusterOf(g[0])!))
+  const cluster = primaryCluster(all, codeGroups, graph)
+  // Judge and report the primary cluster only, so a sign-up form or newsletter
   // box elsewhere on the page doesn't change what the login form is.
-  const inScope = (el: Element) => !form || form.contains(el)
+  const inScope = (el: Element) => !cluster || graph.clusterOf(el) === cluster
   const scanned = all.filter((f) => inScope(f.el))
-  const controls = collectControls(form, roots)
-  const formKind = decideKind(scanned, otpBoxes.length, contextText(form), controls)
+  const controls = collectControls(cluster, graph)
+  const root = cluster?.root ?? null
+  const formKind = decideKind(scanned, codeGroups.some((g) => inScope(g[0])) ? 1 : 0, contextText(root), controls, unclaimedBoxes(cluster, scanned))
+  // Every cluster asking for a code, counted before codes the user brings lose their role below.
+  const codeClusters = new Set([...codeGroups.map((g) => graph.clusterOf(g[0])), ...all.filter((f) => f.role === "otp").map((f) => f.cluster)])
   if (formKind) adjustRoles(scanned, formKind)
 
   // Codes the user brings themselves (sent, or backup) aren't the login's to fill.
   let page: string | undefined
-  const pageText = () => (page ??= codePageText(form))
+  const pageText = () => (page ??= codePageText(root))
   let brought = 0
   for (const f of scanned)
     if (f.role === "otp" && !heldCode(f.facts.display, pageText)) {
       f.role = null
       brought++
     }
-  const boxes = otpBoxes.length && inScope(otpBoxes[0]) ? otpBoxes : []
-  const split = boxes.length && heldCode(words(labelText(boxes[0])), pageText) ? boxes : []
+  const boxes = codeGroups.find((g) => inScope(g[0])) ?? []
+  const split = boxes.length && heldCode(words(graph.label(boxes[0])), pageText) ? boxes : []
   if (boxes.length && !split.length) brought++
 
   const fields: Field[] = scanned.filter((f) => f.role).map((f) => ({ el: f.el, role: f.role!, owner: ownerOf(f.el) }))
@@ -422,8 +398,11 @@ export function scanPage(roots = openRoots()): ScanResult {
 
   // Sign-in wording with no fields to fill isn't a form; a code step whose
   // code the user brings still is one (a sign-in that isn't over), with
-  // nothing in it to fill.
-  const kind = formKind === "newsletter" || (!fields.length && !(formKind === "mfa" && brought)) ? null : formKind
+  // nothing in it to fill. A sign-in asks for one code: a page asking for
+  // codes in several forms, none of them Deadbolt's, is verifying contact
+  // details.
+  const stepOnly = formKind === "mfa" && brought > 0 && codeClusters.size < 2
+  const kind = formKind === "newsletter" || (!fields.length && !stepOnly) ? null : formKind
   return { kind, fields, submit: controls.submit, provider: controls.provider }
 }
 

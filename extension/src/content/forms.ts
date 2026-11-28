@@ -11,8 +11,8 @@
 
 import { FORM_ROLES, formKindOf, type FormRole } from "../messages"
 import type { FormKind } from "../protocol"
-import { ignored, isVisible, labelText, type FormControl } from "./detect"
-import { deepQueryAll, openRoots } from "./shadow"
+import { graphOf, type FormControl, type FormGraph, type ScanSource } from "./graph"
+import { openRoots } from "./shadow"
 
 export interface FormField {
   el: FormControl
@@ -31,7 +31,7 @@ export interface FormField {
 export const formFieldInPlace = (f: FormField) =>
   f.el.isConnected && (f.el.form ?? f.el.closest("form")) === f.form && f.el.parentNode === f.parent
 
-const SKIP_TYPES = new Set(["hidden", "submit", "button", "image", "reset", "checkbox", "radio", "file", "range", "color", "password", "search", "time", "week", "datetime-local"])
+const SKIP_TYPES = new Set(["hidden", "submit", "button", "image", "reset", "checkbox", "radio", "file", "range", "color", "password", "search", "time", "week", "datetime-local", "url"])
 /** Section modifiers that can come before the field name in an autocomplete attribute. */
 const MODIFIER = /^(section-.+|shipping|billing|home|work|mobile|fax|pager)$/
 const LOGIN_TOKENS = new Set(["username", "current-password", "new-password", "one-time-code", "webauthn"])
@@ -208,14 +208,18 @@ function codeOf(el: Element): string {
   return plain([el.id, el.getAttribute("name"), el.getAttribute("data-testid")].filter(Boolean).join(" ").replace(/[_\-[\].]+/g, " "))
 }
 
-/** Every visible identity or payment field in the page, by role and section. */
-export function scanForms(roots = openRoots()): FormField[] {
+/**
+ * Every visible identity or payment field in the page, by role and section.
+ * Takes a scan's graph (graph.ts), shared with scanPage, or the roots to make one.
+ */
+export function scanForms(source: ScanSource = openRoots()): FormField[] {
+  const graph = graphOf(source)
   const found: Candidate[] = []
-  for (const el of deepQueryAll("input, select, textarea", roots).slice(0, 300)) {
-    if (!eligible(el) || !isVisible(el) || ignored(el)) continue
+  for (const el of graph.controls) {
+    if (!eligible(el)) continue
     const ac = autocompleteRole(el)
     if (ac === "login") continue
-    const display = plain(labelText(el))
+    const display = plain(graph.label(el))
     const code = codeOf(el)
     let role = ac ?? fromText(display, code)
     // A street address in one box is a textarea.
@@ -238,6 +242,8 @@ export function scanForms(roots = openRoots()): FormField[] {
     const card = cardForms.has(formOf(c.el))
     c.role = roleForDatePart(null, c.el, c.display + c.code, card) ?? (c.el instanceof HTMLSelectElement ? roleFromOptions(c.el, card) : null)
   }
+  // After the selects: an expiry in month and year dropdowns counts.
+  notACard(found, graph)
   const fields = sectionsOf(found.filter((c): c is Candidate & { role: FormRole } => c.role !== null))
   // One lone box guessed from its text (a newsletter's email, a phone
   // number on its own) isn't an address form; one the site marked is.
@@ -248,6 +254,24 @@ export function scanForms(roots = openRoots()): FormField[] {
 }
 
 const formOf = (el: Element): HTMLFormElement | null => (el as FormControl).form ?? el.closest("form")
+
+/** A gift card's, coupon's or balance check's words, in a cluster or the heading over it. */
+const NOT_A_CARD = w(/\b(gift ?cards?|giftcard|voucher|coupon|loyalty|rewards? card|check (your )?balance|card balance)\b/)
+const EXPIRY: ReadonlySet<FormRole | null> = new Set(["cc-exp", "cc-exp-month", "cc-exp-year"])
+
+/**
+ * A card number with no expiry beside it, in a cluster whose words are a
+ * gift card's or a balance check's, is that card, not a payment card: it and
+ * its code get no card role.
+ */
+function notACard(found: Candidate[], graph: FormGraph) {
+  const clusters = new Set(found.filter((c) => c.role === "cc-number").map((c) => graph.clusterOf(c.el)))
+  for (const cluster of clusters) {
+    const own = found.filter((c) => graph.clusterOf(c.el) === cluster)
+    if (!cluster || own.some((c) => EXPIRY.has(c.role)) || !NOT_A_CARD.test(plain(graph.context(cluster)))) continue
+    for (const c of own) if (c.role?.startsWith("cc-")) c.role = null
+  }
+}
 
 /**
  * A card number in several short boxes: the first says so (its label, name
