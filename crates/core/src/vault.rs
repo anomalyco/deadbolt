@@ -471,7 +471,8 @@ impl Vault {
             .map(|(id, s)| view::item(*id, s))
     }
 
-    /// Live logins for a page's registrable domain, in item-id order. Checks
+    /// Live logins for a page's registrable domain or a site sharing its
+    /// credentials ([`crate::site::shared`]), in item-id order. Checks
     /// the URL fields before materializing anything else.
     pub fn site_logins<'a>(
         &'a self,

@@ -4372,6 +4372,8 @@ mod mcp;
 mod migrate_v1;
 #[path = "cli/recovery.rs"]
 mod recovery;
+#[path = "cli/shared_sites.rs"]
+mod shared_sites;
 #[path = "cli/taint.rs"]
 mod taint;
 #[path = "cli/updates.rs"]

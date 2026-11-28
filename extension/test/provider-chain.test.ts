@@ -245,7 +245,9 @@ describe("provider chain authority", () => {
     fake.answer = (m, doc) => m.type === "db:auth-probe" ? { signOut: true, loginForm: false, uncertain: false, challenge: false } : answer(m, doc)
   }
   const saves = () => host.requests.filter((r) => r.type === "save")
-  test.each([false, true])("one of the person's provider accounts: saved at the provider's own host, only that login fills, and the site is linked once signed in (already linked: %s)", async (already) => {
+  // A link listed for a site sharing this one's credentials isn't this site's link.
+  test.each(["no", "this site", "a site sharing its credentials"])("one of the person's provider accounts: saved at the provider's own host, only that login fills, and the site is linked once signed in (already linked on %s)", async (linkedOn) => {
+    const already = linkedOn === "this site"
     // Saved for the site, or at a lookalike host, it isn't a provider account.
     await chain.start(home, { ...own, urls: [SITE] }, true)
     await chain.start(home, { ...own, urls: ["https://accounts.google.com.evil.test"] }, true)
@@ -253,7 +255,7 @@ describe("provider chain authority", () => {
     const other = { ...providerAccount, ref: `${"c".repeat(64)}:${"3".repeat(32)}` }
     const send = host.host.send.bind(host.host)
     host.host.send = (async (req) => req.type === "list"
-      ? { type: "list", site: "example.com", accounts: (req as { origin: string }).origin === SITE ? (already ? [{ ...linked, signIn: { provider: "google", account: providerAccount.username } }] : []) : [other, providerAccount] }
+      ? { type: "list", site: "example.com", accounts: (req as { origin: string }).origin === SITE ? (linkedOn === "no" ? [] : [{ ...linked, urls: [already ? SITE : "https://example.net"], signIn: { provider: "google", account: providerAccount.username } }]) : [other, providerAccount] }
       : send(req as never)) as typeof host.host.send
     await chain.start(home, own, true)
     expect(chain.active(1)).toBe(true)

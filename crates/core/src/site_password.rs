@@ -266,10 +266,16 @@ mod tests {
 
     #[test]
     fn every_quirk_parses_and_generates_or_is_weak() {
-        assert!(QUIRKS.len() > 100, "the vendored rules load");
+        // Every entry loads: one that failed to parse would empty the table.
+        let raw: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(include_str!("../data/password-rules/password-rules.json"))
+                .unwrap();
+        assert_eq!(QUIRKS.len(), raw.len());
+        assert!(QUIRKS.len() > 400, "{}", QUIRKS.len());
         let mut weak = 0;
         for (domain, text) in QUIRKS.iter() {
             let rules = Rules::parse(text);
+            assert_ne!(rules, Rules::default(), "{domain}: {text}");
             let password = match password_rules::generate(&rules, password_rules::Field::default())
             {
                 Err(Refused::Weak) => {
@@ -283,6 +289,17 @@ mod tests {
             }
             if let Some(min) = rules.min_length {
                 assert!(password.len() >= min.min(256), "{domain}");
+            }
+            for set in &rules.required {
+                assert!(password.bytes().any(|b| set.contains(b)), "{domain}");
+            }
+            if let Some(run) = rules.max_consecutive {
+                let longest = password
+                    .as_bytes()
+                    .chunk_by(|a, b| a == b)
+                    .map(<[u8]>::len)
+                    .max();
+                assert!(longest <= Some(run.max(1)), "{domain}");
             }
         }
         // Sites that cap passwords at a few digits, or at eight characters.
