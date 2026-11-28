@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { fillable, fillFields, hiddenByStyle, ownValue, renderedParent, setInputValue, trackUserInput, visibleBox } from "../src/content/fill"
 import { ownerOf, type Field } from "../src/content/detect"
+import { tag as digest } from "../src/content/tag"
 import { scanForms } from "../src/content/forms"
 import { fillForm, readSubmitted } from "../src/content/formfill"
 import { countryCode, readBirthday, readCardNumber, readExpiry, splitNumber, valueFor } from "../src/content/transform"
@@ -40,6 +41,53 @@ describe("ownValue", () => {
     el.dispatchEvent(event)
     expect(event.isTrusted).toBeFalsy()
     expect(await ownValue(el, el.value)).toBeUndefined()
+  })
+
+  test("a trusted keystroke's value is the user's, and only that value", async () => {
+    const el = input()
+    el.addEventListener("input", trackUserInput)
+    for (const value of ["c", "co", "correct horse"]) {
+      el.value = value
+      const event = new Event("input", { bubbles: true, composed: true })
+      Object.defineProperty(event, "isTrusted", { value: true })
+      el.dispatchEvent(event)
+    }
+    expect(await ownValue(el, "correct horse")).toBe("correct horse")
+    expect(await ownValue(el, "correct hors")).toBeUndefined()
+    expect(await ownValue(el, "co")).toBeUndefined()
+  })
+})
+
+describe("the keyed input tag", () => {
+  const key = (...k: number[]) => Uint32Array.from(k)
+
+  test("tells values apart, holds none of them, and depends on the key", () => {
+    const k = key(1, 2, 3, 4)
+    const values = ["", "a", "b", "ab", "ba", "aa", "correct horse", "correct horsf", "pässwörd", "\u0000", "\u0000\u0000", "x".repeat(500)]
+    const tags = values.map((v) => digest(v, k))
+    expect(new Set(tags).size).toBe(values.length)
+    for (const t of tags) expect(t).toMatch(/^[0-9a-f]{16}$/)
+    expect(digest("correct horse", k)).toBe(digest("correct horse", key(1, 2, 3, 4)))
+    expect(digest("correct horse", k)).not.toBe(digest("correct horse", key(1, 2, 3, 5)))
+    expect(digest("correct horse", k)).not.toBe(digest("correct horse", key(9, 2, 3, 4)))
+  })
+
+  test("no collisions across a hundred thousand similar values", () => {
+    const k = crypto.getRandomValues(new Uint32Array(4))
+    const seen = new Set<string>()
+    for (let i = 0; i < 100_000; i++) seen.add(digest(`hunter${i}`, k))
+    expect(seen.size).toBe(100_000)
+  })
+
+  test("is cheap enough for every keystroke", () => {
+    const k = crypto.getRandomValues(new Uint32Array(4))
+    const value = "correct horse battery staple"
+    const n = 20_000
+    const start = performance.now()
+    for (let i = 0; i < n; i++) digest(value.slice(0, (i % value.length) + 1), k)
+    const each = ((performance.now() - start) * 1000) / n
+    // The HMAC it replaces cost about 10 µs, and a promise, per keystroke.
+    expect(each).toBeLessThan(5)
   })
 })
 

@@ -10,37 +10,31 @@
 import { IDENTIFIER_ROLES, phoneLike, type Box, type FieldRole, type FillValues } from "../messages"
 import { inPlace, type Field, type FormControl } from "./detect"
 import { eventTarget, isOwnHost, openRoots, shadowRootOf } from "./shadow"
+import { tag, tagKey } from "./tag"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 // ---- Typed or filled ----------------------------------------------------------
 
 /**
- * A keyed digest of the value each field last got from a trusted input event
- * or from Deadbolt, so no plaintext is kept. The key never leaves this
- * content script and can't be exported. Only matching values are captured on
- * submit. That cuts noise from pages that fill fields themselves; it isn't
- * proof the user chose the value (a page can change a field around the
- * user's own keystrokes), and nothing depends on it being so.
+ * A keyed tag (see tag.ts) of the value each field last got from a trusted
+ * input event or from Deadbolt, so no plaintext is kept. Only matching
+ * values are captured on submit. That cuts noise from pages that fill
+ * fields themselves; it isn't proof the user chose the value (a page can
+ * change a field around the user's own keystrokes), and nothing depends on
+ * it being so.
  */
-const key: Promise<CryptoKey | null> | null = globalThis.crypto?.subtle
-  ? crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign"]).catch(() => null)
-  : null
-const digests = new WeakMap<Element, Promise<string | null>>()
+const key = tagKey()
+const digest = (value: string) => tag(value, key!)
+const digests = new WeakMap<Element, string>()
 /** The same, for the values Deadbolt itself last wrote into identity and card fields only. */
-const ours = new WeakMap<Element, Promise<string | null>>()
-
-async function digest(value: string): Promise<string | null> {
-  const k = await key
-  if (!k) return null
-  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(value)))
-  return Array.from(sig, (b) => b.toString(16).padStart(2, "0")).join("")
-}
+const ours = new WeakMap<Element, string>()
 
 export function trackUserInput(event: Event) {
+  if (!key || !event.isTrusted) return
   const el = eventTarget(event)
   // A select the user chose in counts too, for an address or card they changed (see readSubmitted).
-  if (key && event.isTrusted && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) digests.set(el, digest(el.value))
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) digests.set(el, digest(el.value))
 }
 
 /** Deadbolt is writing `value` into an identity or card field (see formfill.ts). */
@@ -59,25 +53,20 @@ export function noteFilled(el: Element, value: string) {
 export async function typedByUser(el: Element, value: string): Promise<boolean> {
   if (!value || (await ownValue(el, value)) === undefined) return false
   const mine = ours.get(el)
-  if (!mine) return true
-  const [a, b] = await Promise.all([mine, digest(value)])
-  return a === null || a !== b
+  return !mine || mine !== digest(value)
 }
 
 /** Whether the field holds what Deadbolt last wrote into it, unchanged since. */
 export async function filledByDeadbolt(el: Element, value: string): Promise<boolean> {
   const mine = ours.get(el)
   if (!value || !mine || (await ownValue(el, value)) === undefined) return false
-  const [a, b] = await Promise.all([mine, digest(value)])
-  return a !== null && a === b
+  return mine === digest(value)
 }
 
 /** `value` if it's what the user last typed into the field or Deadbolt filled. */
 export async function ownValue(el: Element, value: string): Promise<string | undefined> {
   const recorded = digests.get(el)
-  if (!value || !recorded) return undefined
-  const [a, b] = await Promise.all([recorded, digest(value)])
-  return a !== null && a === b ? value : undefined
+  return value && recorded && recorded === digest(value) ? value : undefined
 }
 
 // ---- Can the user see it? -----------------------------------------------------
