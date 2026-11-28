@@ -34,6 +34,27 @@ const BUTTONS = "button, input[type=submit], input[type=button], input[type=imag
 /** How long a filled step settles before its submit: the page may still be taking the values in, or swapping the step away. */
 export const SETTLE_MS = 150
 
+/** How many times the user pressed Esc in this page (see noteStop). */
+let stops = 0
+
+/** The user pressed Esc themselves (a trusted keydown): a submit waiting out its settle doesn't go. */
+export function noteStop() {
+  stops++
+}
+
+/**
+ * Waits out SETTLE_MS after a plan, then makes it again: the plan to submit,
+ * or null if the user pressed Esc meanwhile, the step can't be submitted any
+ * more, or its button changed.
+ */
+export async function settledPlan(before: SubmitPlan, plan: () => SubmitPlan | null): Promise<SubmitPlan | null> {
+  const seen = stops
+  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS))
+  if (stops !== seen) return null
+  const after = plan()
+  return after && after.button === before.button && stops === seen ? after : null
+}
+
 /** Whether the scope, or the page's title and headings, say it's for something other than signing in. */
 function notSignIn(scope: Element | null | undefined): boolean {
   const text = [document.title, ...Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, [role=heading]"), (el) => el.innerText), (scope as HTMLElement | null)?.innerText ?? ""]
@@ -71,15 +92,17 @@ export interface SubmitPlan {
 }
 export type Refusal = "insecure" | "kind" | "button" | "scope" | "destination" | "captcha" | "values" | "first" | "purpose" | "error" | "delivered"
 
+/** An action that goes nowhere of its own: none, empty, "#", or React 19's javascript: placeholder. */
+const noAction = (action: string | null | undefined) => action == null || /^\s*#?\s*$/.test(action) || /^\s*javascript:/i.test(action)
+
 /**
  * Whether a form's submit is only its page script's: no method on the form
- * or its button, and no action of its own (none, empty, "#", or React 19's
- * javascript: placeholder for a form action). React's <form onSubmit>.
+ * or its button, and no action of its own on either (a `formaction="#"`
+ * on a form that names a route still goes there). React's <form onSubmit>.
  */
 export function scriptHandled(form: HTMLFormElement, control: HTMLButtonElement | HTMLInputElement | null): boolean {
   if (form.hasAttribute("method") || control?.hasAttribute("formmethod")) return false
-  const action = control?.getAttribute("formaction") ?? form.getAttribute("action")
-  return action === null || /^\s*#?\s*$/.test(action) || /^\s*javascript:/i.test(action)
+  return noAction(control?.getAttribute("formaction")) && noAction(form.getAttribute("action"))
 }
 
 /** A search form: a search landmark, or a search box among its fields. */
@@ -90,36 +113,45 @@ export function searchLike(form: HTMLFormElement): boolean {
 
 /** How long a script-handled form's native submit stays held after its plan: past the settle and the click. */
 export const HOLD_MS = SETTLE_MS + 2000
-const held = new WeakMap<HTMLFormElement, number>()
+/** Each held form: until when, the timer that lets it go then, and how (its listener removed). */
+const held = new WeakMap<HTMLFormElement, { until: number; timer: ReturnType<typeof setTimeout>; release: () => void }>()
 
 /**
  * For a moment after a plan to submit a script-handled form (each check
- * before the click, see submitPlan, arms it again), a submit of
+ * before the click, see submitPlan, holds it again from then), a submit of
  * it that the page's script didn't take (no preventDefault: its script
  * failed to load, or it isn't React's after all) goes nowhere: Deadbolt
- * prevents it, so the browser never GETs the fields into the URL. Listened
- * for last, on the window (or the form's shadow root, which a submit event
- * doesn't leave), after the page's own handlers.
+ * prevents it, so the browser never GETs the fields into the URL. Every
+ * submit in that time is held, a page's own synthetic one included, so one
+ * can't spend the hold before the real one comes; but only while the form
+ * and its submitter are still script-handled: a form its script turned into
+ * a POST for its next step goes. Listened for last, on the window (or the
+ * form's shadow root, which a submit event doesn't leave), after the page's
+ * own handlers, and only until the hold runs out.
  */
 export function holdNativeSubmit(form: HTMLFormElement) {
-  const armed = held.has(form)
-  held.set(form, performance.now() + HOLD_MS)
-  if (armed) return
+  const until = performance.now() + HOLD_MS
+  const prior = held.get(form)
+  // Held again: one listener still, its time from now, and one timer to let it go.
+  if (prior) {
+    clearTimeout(prior.timer)
+    held.set(form, { ...prior, until, timer: setTimeout(prior.release, HOLD_MS + 50) })
+    return
+  }
   const root = form.getRootNode()
   const on: EventTarget = root instanceof ShadowRoot ? root : window
-  const done = () => {
+  const release = () => {
     held.delete(form)
     on.removeEventListener("submit", guard)
   }
   const guard = (event: Event) => {
-    if (event.target !== form) return
-    if (performance.now() <= (held.get(form) ?? 0) && !event.defaultPrevented) event.preventDefault()
-    done()
+    if (event.target !== form || event.defaultPrevented || performance.now() > (held.get(form)?.until ?? 0)) return
+    const submitter = (event as SubmitEvent).submitter
+    const control = submitter instanceof HTMLButtonElement || submitter instanceof HTMLInputElement ? submitter : null
+    if (scriptHandled(form, control)) event.preventDefault()
   }
   on.addEventListener("submit", guard)
-  setTimeout(() => {
-    if ((held.get(form) ?? 0) <= performance.now()) done()
-  }, HOLD_MS + 50)
+  held.set(form, { until, timer: setTimeout(release, HOLD_MS + 50), release })
 }
 
 /**

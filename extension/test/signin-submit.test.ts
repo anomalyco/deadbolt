@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { scanPage } from "../src/content/detect"
-import { accountChip, holdNativeSubmit, scriptHandled, searchLike, submitPlan } from "../src/content/signin-submit"
+import { accountChip, HOLD_MS, holdNativeSubmit, noteStop, scriptHandled, searchLike, settledPlan, submitPlan } from "../src/content/signin-submit"
 
 // happy-dom does no hit testing: the box last measured is on top there.
 const rect = Element.prototype.getBoundingClientRect
@@ -238,17 +238,88 @@ describe("a form", () => {
     expect([searchLike(f("a")), searchLike(f("d"))]).toEqual([false, true])
   })
 
-  test("held, a script-handled form's native submit the page didn't take goes nowhere; one it took is left alone", () => {
+  const submit = (el: HTMLFormElement, submitter?: HTMLElement) => {
+    const event = new Event("submit", { bubbles: true, cancelable: true })
+    if (submitter) Object.defineProperty(event, "submitter", { value: submitter })
+    el.dispatchEvent(event)
+    return event.defaultPrevented
+  }
+
+  test("held, every submit of a script-handled form the page didn't take goes nowhere: a decoy doesn't spend the hold", () => {
     page(form(`novalidate`))
     const el = document.querySelector("form")!
     holdNativeSubmit(el)
-    const native = new Event("submit", { bubbles: true, cancelable: true })
-    el.dispatchEvent(native)
-    expect(native.defaultPrevented).toBe(true)
-    // Once is enough: the hold is spent.
-    const later = new Event("submit", { bubbles: true, cancelable: true })
-    el.dispatchEvent(later)
-    expect(later.defaultPrevented).toBe(false)
+    // A page's own synthetic submit first, then the real one: both held.
+    expect(submit(el)).toBe(true)
+    expect(submit(el, el.querySelector("button")!)).toBe(true)
+    // One the page's script took (preventDefault before ours) is its own.
+    el.addEventListener("submit", (e) => e.preventDefault(), { once: true })
+    const taken = new Event("submit", { bubbles: true, cancelable: true })
+    el.dispatchEvent(taken)
+    expect(taken.defaultPrevented).toBe(true)
+  })
+
+  test("a form its script turned into a POST for its next step goes, while held", () => {
+    page(form(`novalidate`))
+    const el = document.querySelector("form")!
+    holdNativeSubmit(el)
+    el.setAttribute("method", "post")
+    el.setAttribute("action", "/login")
+    expect(submit(el)).toBe(false)
+    // So does one whose submitter names a route of its own.
+    page(form(`novalidate`).replace(`<button type="submit">`, `<button type="submit" formaction="/session" formmethod="post">`))
+    const other = document.querySelector("form")!
+    holdNativeSubmit(other)
+    expect(submit(other, other.querySelector("button")!)).toBe(false)
+  })
+
+  test("held again, one listener and one timer: it lets go once its time is up", async () => {
+    page(form(`novalidate`))
+    const el = document.querySelector("form")!
+    const added: unknown[] = []
+    const removed: unknown[] = []
+    const add = window.addEventListener
+    const remove = window.removeEventListener
+    window.addEventListener = ((type: string, l: unknown, o?: unknown) => (type === "submit" && added.push(l), add.call(window, type, l as EventListener, o as AddEventListenerOptions))) as typeof window.addEventListener
+    window.removeEventListener = ((type: string, l: unknown, o?: unknown) => (type === "submit" && removed.push(l), remove.call(window, type, l as EventListener, o as EventListenerOptions))) as typeof window.removeEventListener
+    try {
+      holdNativeSubmit(el)
+      holdNativeSubmit(el)
+      holdNativeSubmit(el)
+      expect(added).toHaveLength(1)
+      await Bun.sleep(HOLD_MS + 120)
+      // (Earlier tests' holds run out meanwhile too: this one's listener is among those let go.)
+      expect(removed).toContain(added[0])
+      // Let go: a submit now is the browser's.
+      expect(submit(el)).toBe(false)
+    } finally {
+      Object.assign(window, { addEventListener: add, removeEventListener: remove })
+    }
+  })
+
+  test("a formaction of # on a form that names a route isn't the page script's", () => {
+    page(`<form action="/route"><button formaction="#">Go</button></form>`)
+    const el = document.querySelector("form")!
+    expect(scriptHandled(el, el.querySelector("button"))).toBe(false)
+    page(`<form action="#"><button formaction="/route">Go</button></form>`)
+    expect(scriptHandled(document.querySelector("form")!, document.querySelector("button"))).toBe(false)
+    page(`<form action="#"><button formaction="javascript:void 0">Go</button></form>`)
+    expect(scriptHandled(document.querySelector("form")!, document.querySelector("button"))).toBe(true)
+  })
+
+  test("Esc while a submit waits out its settle stops it; without one, the same plan goes", async () => {
+    page(form(`method="post" action="/session"`))
+    fill("input[name=username]", "alex")
+    fill("input[name=password]", "correct horse")
+    const make = () => {
+      const p = plan(true)
+      return typeof p === "string" ? null : p
+    }
+    const before = make()!
+    expect(await settledPlan(before, make)).toMatchObject({ button: before.button })
+    const waiting = settledPlan(before, make)
+    noteStop()
+    expect(await waiting).toBeNull()
   })
 
   test("a button naming a form that isn't there refuses", () => {
