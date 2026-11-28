@@ -129,7 +129,8 @@ export function transition(flow: AuthFlow | FlowStart | undefined, event: FlowEv
       if (!nextStep(filled, account)) return undefined
       const startedAt = same?.startedAt ?? now
       const until = startedAt + SESSION_TTL_MS + (event.navigates ? SESSION_GRACE_MS : 0)
-      const auto = flow?.automatic ? { automatic: true, automaticSubmits: flow.automaticSubmits ?? 0 } : {}
+      // Only the same login's flow carries its automatic submits on; another login's fill starts as a fill.
+      const auto = same?.automatic ? { automatic: true, automaticSubmits: same.automaticSubmits ?? 0 } : {}
       return { ref: account.ref, site: event.site, origin: same?.origin ?? event.target.origin, documentId: event.target.documentId, filledAt: now, filled, startedAt, until, ...auto }
     }
     case "tick":
@@ -230,6 +231,8 @@ export class AuthFlows {
   private timers = new Map<number, ReturnType<typeof setTimeout>>()
   private queues = new Map<number, Promise<unknown>>()
   private cancels = new Map<number, number>()
+  /** Bumped when every flow ends (a lock): work in any tab started before then arms nothing, stored flow or not. */
+  private epoch = 0
   /** The last time the user themselves (or an automatic flow) submitted a login form in each tab, and in which document. */
   private submits = new Map<number, { documentId: string; at: number }>()
 
@@ -251,8 +254,9 @@ export class AuthFlows {
     this.timers.set(tabId, setTimeout(() => void this.set(tabId, undefined), Math.max(0, flow.until - Date.now())))
   }
 
+  /** Changes whenever the tab's flow ends, or every flow does: both only ever count up. */
   generation(tabId: number): number {
-    return this.cancels.get(tabId) ?? 0
+    return this.epoch + (this.cancels.get(tabId) ?? 0)
   }
 
   serial<T>(tabId: number, work: () => Promise<T>): Promise<T> {
@@ -263,18 +267,19 @@ export class AuthFlows {
 
   /** The tab's flow ends (Esc, the user leaving), including fills still on their way. */
   cancel(tabId: number) {
-    this.cancels.set(tabId, this.generation(tabId) + 1)
+    this.cancels.set(tabId, (this.cancels.get(tabId) ?? 0) + 1)
     return this.serial(tabId, () => this.set(tabId, undefined))
   }
 
   /** Ends the tab's flow from inside serial. */
   async end(tabId: number) {
-    this.cancels.set(tabId, this.generation(tabId) + 1)
+    this.cancels.set(tabId, (this.cancels.get(tabId) ?? 0) + 1)
     await this.set(tabId, undefined)
   }
 
   /** Every flow ends (Deadbolt locked or went away): each one in session storage, whether or not this worker started it. */
   async endAll() {
+    this.epoch++
     const all = (await chrome.storage.session.get(null).catch(() => ({}))) as Record<string, unknown>
     const tabs = new Set([...this.timers.keys()])
     for (const key of Object.keys(all)) if (key.startsWith(KEY)) tabs.add(Number(key.slice(KEY.length)))

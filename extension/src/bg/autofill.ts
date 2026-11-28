@@ -679,6 +679,8 @@ export class Autofill {
    */
   private async arm(tabId: number, generation: number, next: AuthFlow | null) {
     if (generation !== this.generation(tabId)) return
+    // Locked or gone meanwhile: nothing is armed (an end still goes through).
+    if (next && this.host.status.state !== "ready") return
     if (next) {
       const top = await chrome.webNavigation.getFrame({ tabId, frameId: 0 }).catch(() => null)
       if (siteOfUrl(top?.url) !== next.site || generation !== this.generation(tabId)) return
@@ -763,9 +765,17 @@ export class Autofill {
    */
   private async pickSignIn(target: FrameTarget, account: Account, form: number, roles: FieldRole[], site: string, generation: number): Promise<PickReply> {
     if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return { ok: false, message: "Sign-in stopped." }
-    const s = { ref: account.ref, site, origin: target.origin, filled: [], startedAt: Date.now(), automatic: true, automaticSubmits: 0 }
+    const now = Date.now()
+    const s = { ref: account.ref, site, origin: target.origin, filled: [], startedAt: now, automatic: true, automaticSubmits: 0 }
+    // Stored before the fill, so Esc (stopAutomatic) finds it and cancels the fill on its way.
+    await this.flows.set(target.tabId, { ...s, documentId: target.documentId, filledAt: now, until: now + AUTOMATIC_ENTRY_MS })
+    if (generation !== this.generation(target.tabId)) return { ok: false, message: "Sign-in stopped." }
     const { reply, next } = await this.fillStep(target, account, roles, form, generation, undefined, s, false)
-    if (!reply.ok) return reply
+    if (!reply.ok) {
+      // Nothing went in: the entry mustn't stay to make a later form its first step.
+      if (generation === this.generation(target.tabId)) await this.flows.end(target.tabId)
+      return reply
+    }
     this.filled?.(target.tabId, site)
     if (generation !== this.generation(target.tabId)) return reply
     return { ok: true, submitted: await this.submitStep(target, s, roles, form, generation, next, true, account.username) }
@@ -787,6 +797,10 @@ export class Autofill {
     const now = Date.now()
     const submit = !roles.includes("otp") || now - (s.passwordSubmittedAt ?? -Infinity) <= AUTOMATIC_STEP_MS
     if (generation !== this.generation(target.tabId)) return false
+    if (this.host.status.state !== "ready") {
+      await this.flows.end(target.tabId)
+      return false
+    }
     if (!(await signInEnabled())) {
       await this.flows.end(target.tabId)
       return false

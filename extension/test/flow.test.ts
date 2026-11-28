@@ -43,6 +43,14 @@ describe("AuthFlow transitions", () => {
     expect(second).toMatchObject({ origin: SITE, documentId: "doc-2", filled: ["email", "password"], startedAt: T0, filledAt: T0 + 9000, until: T0 + SESSION_TTL_MS })
   })
 
+  test("another login's fill never inherits an automatic flow's submits", () => {
+    const auto = filled(start({ automatic: true, automaticSubmits: 2 }), ["email"])!
+    expect(auto).toMatchObject({ automatic: true, automaticSubmits: 2 })
+    const other = filled(auto, ["email"], { ref: "r2" })!
+    expect(other.automatic).toBeUndefined()
+    expect(other.automaticSubmits).toBeUndefined()
+  })
+
   test("another login's fill starts afresh, from its own origin", () => {
     const first = filled(start(), ["email"])!
     const other = filled(first, ["email"], { ref: "r2", origin: "https://login.example.com", now: T0 + 1000 })!
@@ -139,6 +147,13 @@ describe("AuthFlows, each tab's flow in session storage", () => {
     expect(fake.session).toEqual({})
   })
 
+  test("a lock changes every tab's generation, a tab with no flow stored yet included", async () => {
+    const flows = new AuthFlows()
+    const before = [flows.generation(1), flows.generation(42)]
+    await flows.endAll()
+    expect([flows.generation(1), flows.generation(42)].map((g, i) => g !== before[i])).toEqual([true, true])
+  })
+
   test("a lock ends every tab's flow, ones a restarted worker never started included", async () => {
     const flows = new AuthFlows()
     await flows.set(1, live())
@@ -146,7 +161,8 @@ describe("AuthFlows, each tab's flow in session storage", () => {
     fake.session["unrelated"] = 1
     await flows.endAll()
     expect(fake.session).toEqual({ unrelated: 1 })
-    expect(flows.generation(9)).toBe(1)
+    // The tab's own end and the lock's, one each.
+    expect(flows.generation(9)).toBe(2)
   })
 
   test("turning off Offer to sign in ends automatic flows only", async () => {
@@ -218,6 +234,52 @@ describe("Autofill follows a flow across its steps", () => {
     expect(fake.session).toEqual({})
     await autofill.page(at("https://www.example.com/password", "pw-doc"), "login", ["password"], 2)
     expect(fills()).toEqual([["username"]])
+  })
+
+  test("locking while a pick's fill is on its way writes nothing, though no flow was stored yet", async () => {
+    fake.fillAck = () => ({ filled: ["email"] })
+    const { token } = await autofill.query(pageSender(), ["email"], "email", 1)
+    await autofill.menuLoad(token!, menuSender(), SITE)
+    const release = host.holdFills()
+    const picking = autofill.menuPick(token!, ACCOUNTS[0].ref, menuSender())
+    for (let i = 0; i < 100 && !host.requests.some((r) => r.type === "fill"); i++) await Bun.sleep(1)
+    expect(fake.session).toEqual({})
+    host.setStatus({ state: "locked" })
+    release()
+    await picking
+    expect(fake.delivered.filter((d) => d.message.type === "db:fill")).toHaveLength(0)
+    expect(fake.session).toEqual({})
+  })
+
+  test("Esc while an automatic pick's fill is on its way: nothing is written or submitted", async () => {
+    const account = { ...ACCOUNTS[0], urls: [SITE] }
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req) => (req.type === "list" ? { type: "list", site: "example.com", accounts: [account] } : send(req as never))) as typeof host.host.send
+    autofill.signedOut = async () => true
+    const release = host.holdFills()
+    const target = { tabId: 1, frameId: 0, documentId: "top-doc", origin: SITE }
+    const picking = autofill.startAutomatic(target, account, { form: 1, roles: ["email", "password"] })
+    for (let i = 0; i < 100 && !host.requests.some((r) => r.type === "fill"); i++) await Bun.sleep(1)
+    // The entry is stored before the fill, so Esc finds it.
+    expect((fake.session["session:1"] as AuthFlow | undefined)?.automatic).toBe(true)
+    const stopping = autofill.stopAutomatic(1)
+    await Bun.sleep(1)
+    release()
+    expect((await picking).ok).toBe(false)
+    await stopping
+    expect(fake.delivered.filter((d) => d.message.type === "db:fill" || d.message.type === "db:signin-submit")).toHaveLength(0)
+    expect(fake.session).toEqual({})
+  })
+
+  test("an automatic pick that fills nothing leaves no entry behind to fill a later form", async () => {
+    const account = { ...ACCOUNTS[0], urls: [SITE] }
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req) => (req.type === "list" ? { type: "list", site: "example.com", accounts: [account] } : send(req as never))) as typeof host.host.send
+    autofill.signedOut = async () => true
+    fake.fillAck = () => ({ filled: [] })
+    const target = { tabId: 1, frameId: 0, documentId: "top-doc", origin: SITE }
+    expect((await autofill.startAutomatic(target, account, { form: 1, roles: ["email", "password"] })).ok).toBe(false)
+    expect(fake.session).toEqual({})
   })
 
   test("a step that comes too late fills nothing", async () => {
