@@ -16,8 +16,9 @@ use deadbolt_core::autofill::{self, Status, item_name};
 pub use deadbolt_core::autofill::{otp, urls, value};
 use deadbolt_core::listing::{SIGN_IN_HOSTS, saved_at_provider, sign_in_name, sign_in_provider};
 use deadbolt_core::site::{Site, page_url};
+use deadbolt_core::site_recipe::{RECIPE_FIELD, SiteRecipe, canonical_origin};
 use deadbolt_core::totp::Totp;
-use deadbolt_core::{Item, ItemId, VaultId};
+use deadbolt_core::{DataOp, Field, FieldType, Item, ItemId, VaultId};
 use deadbolt_proto::daemon::{
     ErrorCode, FieldInput, Fill, LoginRef, Secret, SignIn, SiteLogin, SiteStatus, SiteValues,
 };
@@ -106,8 +107,23 @@ pub fn sign_in(s: &Engine, item: &Item) -> Option<SignIn> {
     Some(SignIn { provider, account })
 }
 
+/// The form `item` was taught for the page at `origin` (see [`save_recipe`]),
+/// if it's a login of the page's own site and its recipe is a valid one for
+/// that exact origin. Anything else (another origin of the site, a site
+/// sharing its credentials, a recipe a newer or broken client wrote) has none.
+fn recipe(site: &Site, origin: Option<&str>, item: &Item) -> Option<String> {
+    let origin = origin?;
+    if !owned(site, item) {
+        return None;
+    }
+    let raw = value(item, RECIPE_FIELD)?;
+    let recipe = SiteRecipe::parse_and_validate(raw, site).ok()?;
+    (recipe.origin == origin).then(|| raw.to_string())
+}
+
 pub fn list(s: &Engine, origin: &str) -> Result<(String, Vec<SiteLogin>)> {
     let site = site(origin)?;
+    let page = canonical_origin(origin);
     let filled = s.filled();
     let mut found: Vec<_> = logins(s, &site)
         .map(|(vault, item)| {
@@ -123,6 +139,7 @@ pub fn list(s: &Engine, origin: &str) -> Result<(String, Vec<SiteLogin>)> {
                     .map(str::to_string)
                     .collect(),
                 sign_in: sign_in(s, &item),
+                recipe: recipe(&site, page.as_deref(), &item),
             };
             let used = filled.get(&filled_key(&login.login)).copied().unwrap_or(0);
             (autofill::rank(origin, &item, used), login)
@@ -275,6 +292,43 @@ pub fn save(s: &mut Engine, save: Save) -> Result<(LoginRef, bool)> {
         },
         true,
     ))
+}
+
+/// Keeps `recipe` (JSON, see [`SiteRecipe`]) on `login` as the form the user
+/// taught it on the page at `origin`, or with `None` clears the one it has.
+/// Only on a login of the page's own site, never one it only shares
+/// credentials with, and only a valid recipe for that exact origin: it is
+/// stored as compact JSON, so nothing but its own keys ever goes in.
+/// Returns whether the login changed.
+pub fn save_recipe(
+    s: &mut Engine,
+    origin: &str,
+    login: &LoginRef,
+    recipe: Option<&str>,
+) -> Result<bool> {
+    let site = site(origin)?;
+    let (vault, item) = find(s, login, &site)?;
+    own(&site, &item)?;
+    let op = match recipe {
+        Some(raw) => {
+            let recipe = SiteRecipe::parse_and_validate(raw, &site).map_err(|e| anyhow!("{e}"))?;
+            if canonical_origin(origin).as_deref() != Some(recipe.origin.as_str()) {
+                return Err(fail(
+                    ErrorCode::DomainMismatch,
+                    format!("the learned form is for {}, not {origin}", recipe.origin),
+                ));
+            }
+            let json = recipe.to_json();
+            if value(&item, RECIPE_FIELD) == Some(json.as_str()) {
+                return Ok(false);
+            }
+            DataOp::set(item.id, RECIPE_FIELD, Field::new(FieldType::Text, json))
+        }
+        None if item.fields.contains_key(RECIPE_FIELD) => DataOp::remove(item.id, RECIPE_FIELD),
+        None => return Ok(false),
+    };
+    s.update(vault, |v, secret| Ok(v.write(secret, vec![op])?))?;
+    Ok(true)
 }
 
 /// What a provider link saves (see link).

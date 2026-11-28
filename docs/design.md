@@ -93,6 +93,7 @@ of preceding entries don't solve that separate limit.
 | | notes | note | |
 | | sign-in-with | text (one line, at most 64 characters) | |
 | | sign-in-account | text (an item id, 32 lowercase hex digits) | |
+| | autofill-recipe | text (a taught form's JSON, at most 512 bytes; see docs/autofill.md) | |
 | card | number | secret (12–19 digits) | yes |
 | | expiry | month | |
 | | cvv | secret (3–4 digits) | |

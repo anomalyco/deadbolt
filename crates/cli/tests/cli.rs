@@ -1894,7 +1894,8 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
             "learn-files",
             "forms",
             "save-form",
-            "unlock-prompt"
+            "unlock-prompt",
+            "site-recipe"
         ])
     );
 
@@ -1994,6 +1995,75 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     assert_error(&reply, "bad_request");
     let reply = host.ask(serde_json::json!({"type": "unlock", "passphrase": "x"}));
     assert_error(&reply, "bad_request");
+    host.close();
+}
+
+/// A form taught on a page comes back with its login there, on that exact
+/// origin only; a recipe that isn't one, or a login of another site, is
+/// refused; and none clears it.
+#[test]
+fn browser_host_keeps_and_clears_taught_forms() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "username=sam",
+            "url=bank.example",
+            "password=hunter2",
+        ],
+    );
+    new(
+        &a,
+        &[
+            "login",
+            "username=alex",
+            "url=other.example",
+            "password=pw2",
+        ],
+    );
+    let mut host = Host::start(&a);
+    let origin = "https://portal.bank.example";
+    let bank = refs(&list(&mut host, origin)).pop().unwrap();
+    let other = refs(&list(&mut host, "https://other.example"))
+        .pop()
+        .unwrap();
+    let recipe = format!(
+        r#"{{"v":1,"origin":"{origin}","pathPattern":"/signon","clusterFingerprint":"9f2c41d0","slots":[{{"role":"username","name":"txt1","nthInput":0}}]}}"#
+    );
+    let saved = host.ask(serde_json::json!({
+        "type": "save-recipe", "origin": origin, "ref": bank, "recipe": recipe,
+    }));
+    assert_eq!(saved["type"], "save-recipe", "{saved}");
+    let listed = list(&mut host, origin);
+    assert_eq!(listed["accounts"][0]["recipe"], recipe.as_str(), "{listed}");
+    let elsewhere = list(&mut host, "https://bank.example");
+    assert!(
+        elsewhere["accounts"][0].get("recipe").is_none(),
+        "{elsewhere}"
+    );
+
+    let reply = host.ask(serde_json::json!({
+        "type": "save-recipe", "origin": origin, "ref": other, "recipe": recipe,
+    }));
+    assert_error(&reply, "domain_mismatch");
+    let big = recipe.replace("/signon", &format!("/{}", "a".repeat(600)));
+    let reply = host.ask(serde_json::json!({
+        "type": "save-recipe", "origin": origin, "ref": bank, "recipe": big,
+    }));
+    assert_error(&reply, "bad_request");
+    let unknown = recipe.replacen(r#""v":1,"#, r#""v":1,"password":"hunter2","#, 1);
+    let reply = host.ask(serde_json::json!({
+        "type": "save-recipe", "origin": origin, "ref": bank, "recipe": unknown,
+    }));
+    assert_eq!(reply["type"], "error", "{reply}");
+
+    let cleared =
+        host.ask(serde_json::json!({"type": "save-recipe", "origin": origin, "ref": bank}));
+    assert_eq!(cleared["type"], "save-recipe", "{cleared}");
+    let listed = list(&mut host, origin);
+    assert!(listed["accounts"][0].get("recipe").is_none(), "{listed}");
     host.close();
 }
 

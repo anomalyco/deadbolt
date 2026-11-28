@@ -357,6 +357,7 @@ fn site_login(login: proto::SiteLogin) -> SiteLogin {
         has_otp,
         urls,
         sign_in,
+        recipe: _,
     } = login;
     SiteLogin {
         login: login.into(),

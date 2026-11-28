@@ -432,6 +432,18 @@ daemon again.
   identity or card field opens its own menu; a right-click anywhere but a
   field opens nothing. Going back to the page's own login form ends it. Only the browser raises either, from the user's
   own key or click.
+  A pick in that menu teaches Deadbolt the form, and its footer says so: the
+  fields' roles, their places among the form's controls, their `id`, `name`
+  and `autocomplete` and a fingerprint of the form's shape (never a value,
+  at most 512 bytes) are kept on the login picked as its `autofill-recipe`
+  field (`save-recipe`), so it syncs to every paired device. On the next
+  visit to that exact origin and path, a page where the scan finds no login
+  form gets the menu on those fields as on any login form, if the form still
+  has the same fingerprint and every field is still where the recipe says,
+  enabled, editable, reachable and not opted out (a password only into a
+  box that masks it). A form that changed shape gets nothing from it: the
+  scan decides alone, and teaching it again replaces the recipe. "Reset
+  learned form" in the popup clears it.
   Inside, the rows are a listbox that takes focus itself and points at the
   active row (`aria-activedescendant`); "Filled", "Saved" and why a pick
   didn't go ahead are said through a live region in the frame. None of it,
@@ -2273,7 +2285,7 @@ The host exits when the port closes.
 ```json
 { "id": "1", "type": "hello" }
 { "id": "1", "type": "hello", "protocol": 3, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "learn-files", "forms", "save-form", "unlock-prompt"] }
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "learn-files", "forms", "save-form", "unlock-prompt", "site-recipe"] }
 ```
 
 `status` is one of:
@@ -2300,7 +2312,9 @@ Hello starts the daemon if needed; so does `unlock-prompt`, and nothing else.
 `username` is left out when the login has none. `signIn` is there only for a
 login that signs in with another account (see Sign in with Google, Apple,
 GitHub…); its `account` is left out when the linked login isn't in an
-unlocked vault. `title` is the login's name, else its URL's host. Accounts
+unlocked vault. `recipe` is there only for a login of the page's own site
+(not one of a site sharing its credentials) that was taught a form on this
+exact origin (see save-recipe). `title` is the login's name, else its URL's host. Accounts
 come closest first, by their closest URL: the page's origin (port included,
 so `localhost:3000` isn't `localhost:5173`), then its host on another scheme
 or port, then a parent or child host or one sharing a parent below the site,
@@ -2589,6 +2603,24 @@ Touch ID fails any other way, the host brings Deadbolt's window forward
 (`deadbolt app`) for the passphrase (`app` true), and `unlocked` follows
 once it's typed there. An unlocked vault answers `app` false at once.
 A burst of three, then one every two seconds; past that it's `rate_limited`.
+
+### save-recipe: keep or forget a taught form
+
+```json
+{ "id": 14, "type": "save-recipe", "origin": "https://portal.bank.example", "ref": "…",
+  "recipe": "{\"v\":1,\"origin\":\"https://portal.bank.example\",\"pathPattern\":\"/banking/*/signon\",\"clusterFingerprint\":\"9f2c41d0\",\"slots\":[{\"role\":\"username\",\"name\":\"txt1\",\"nthInput\":0}]}" }
+{ "id": 14, "type": "save-recipe" }
+```
+
+Keeps `recipe` on the login `ref` names as its `autofill-recipe` field, or
+without `recipe` clears it (capability `site-recipe`). The daemon refuses a
+login not saved for the page's site itself (`domain_mismatch`, a site that
+only shares its credentials included), and a recipe over 512 bytes, with
+any key it doesn't name, a version other than 1, an origin other than the
+page's own, a path with a query or fragment, other than 1 to 4 fields, a
+role other than `username`, `email`, `phone`, `password`, `new-password`
+or `otp`, or an `id`, `name` or `autocomplete` over 64 characters or with
+whitespace. It stores the recipe as compact JSON. Shares `check`'s rate.
 
 ### changed (pushed)
 

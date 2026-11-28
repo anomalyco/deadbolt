@@ -489,6 +489,8 @@ static SCHEMAS: [Schema; 18] = [
             known("notes", FieldType::Note, false),
             formatted("sign-in-with", Format::Line { max: 64 }),
             formatted("sign-in-account", Format::ItemRef),
+            // A form the user taught it (see crate::site_recipe), as JSON.
+            formatted("autofill-recipe", Format::Line { max: 512 }),
         ],
     },
     Schema {

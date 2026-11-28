@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use deadbolt_core::site_recipe::MAX_RECIPE_BYTES;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
@@ -703,6 +704,34 @@ impl Serial {
                     return Err(Refusal::slow_down());
                 }
                 unlock::prompt(&self.paths, self.open_app).await
+            }
+            Request::SaveRecipe {
+                origin,
+                login,
+                recipe,
+            } => {
+                site(&origin)?;
+                let login = parse_ref(&login)?;
+                if recipe.as_ref().is_some_and(|r| r.len() > MAX_RECIPE_BYTES) {
+                    return Err(Refusal::bad(format!(
+                        "a recipe is at most {MAX_RECIPE_BYTES} bytes"
+                    )));
+                }
+                if !self.checks.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                done(
+                    call(
+                        &self.paths,
+                        Command::SiteRecipe {
+                            origin,
+                            login,
+                            recipe,
+                        },
+                    )
+                    .await?,
+                )?;
+                Ok(Body::SaveRecipe)
             }
         }
     }

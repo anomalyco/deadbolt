@@ -83,6 +83,7 @@ pub fn tier(command: &Command) -> Tier {
         | C::SiteCheck { .. }
         | C::SiteSave { .. }
         | C::SiteLink { .. }
+        | C::SiteRecipe { .. }
         | C::FormItems { .. }
         | C::FormFill { .. }
         | C::PasskeyList { .. }
@@ -298,6 +299,15 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
                 .chain(login(&account.vault, &account.item, provider))
                 .collect(),
             vec!["sign-in-with".into()],
+        ),
+        // The login a form was taught to (or forgotten from), under its page.
+        Command::SiteRecipe {
+            origin,
+            login: target,
+            ..
+        } => (
+            login(&target.vault, &target.item, origin),
+            vec![deadbolt_core::site_recipe::RECIPE_FIELD.into()],
         ),
         Command::PasskeyGet {
             origin, passkey, ..

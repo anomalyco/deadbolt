@@ -11,6 +11,7 @@ use super::*;
 use crate::daemon::{Fill, FormKind, Secret, SignIn, SiteStatus, SiteValues, Verify};
 
 const REF: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const RECIPE: &str = r#"{"v":1,"origin":"https://bank.example","pathPattern":"/signon","clusterFingerprint":"9f2c41d0","slots":[{"role":"password","nthInput":0}]}"#;
 
 /// `value` is `wire` on the wire, and `wire` reads back as `value`.
 fn golden<T: Serialize + DeserializeOwned + PartialEq + Debug>(value: T, wire: Value) {
@@ -220,6 +221,23 @@ fn requests() {
             json!({"type": "learn-delete", "session": "s1"}),
         ),
         (Request::UnlockPrompt, json!({"type": "unlock-prompt"})),
+        (
+            Request::SaveRecipe {
+                origin: s("https://bank.example"),
+                login: s(REF),
+                recipe: Some(s(RECIPE)),
+            },
+            json!({"type": "save-recipe", "origin": "https://bank.example", "ref": REF, "recipe": RECIPE}),
+        ),
+        // Without a recipe, it clears the one the login has.
+        (
+            Request::SaveRecipe {
+                origin: s("https://bank.example"),
+                login: s(REF),
+                recipe: None,
+            },
+            json!({"type": "save-recipe", "origin": "https://bank.example", "ref": REF}),
+        ),
     ];
     for (request, wire) in cases {
         golden(request.clone(), wire.clone());
@@ -314,11 +332,34 @@ fn replies() {
                         provider: s("google"),
                         account: None,
                     }),
+                    recipe: None,
                 }],
             },
             json!({"type": "list", "site": "github.com", "accounts": [
                 {"ref": REF, "vault": "Personal", "title": "GitHub", "hasPassword": false,
                  "hasTotp": true, "urls": ["https://github.com"], "signIn": {"provider": "google"}}
+            ]}),
+        ),
+        // A taught form comes as the JSON it was saved as, beside the login.
+        (
+            Body::List {
+                site: s("bank.example"),
+                accounts: vec![Account {
+                    login: s(REF),
+                    vault: s("Personal"),
+                    title: s("Bank"),
+                    username: Some(s("alex")),
+                    has_password: true,
+                    has_totp: false,
+                    urls: vec![s("https://bank.example")],
+                    sign_in: None,
+                    recipe: Some(s(RECIPE)),
+                }],
+            },
+            json!({"type": "list", "site": "bank.example", "accounts": [
+                {"ref": REF, "vault": "Personal", "title": "Bank", "username": "alex",
+                 "hasPassword": true, "hasTotp": false, "urls": ["https://bank.example"],
+                 "recipe": RECIPE}
             ]}),
         ),
         (
@@ -483,6 +524,7 @@ fn replies() {
             Body::UnlockPrompt { app: true },
             json!({"type": "unlock-prompt", "app": true}),
         ),
+        (Body::SaveRecipe, json!({"type": "save-recipe"})),
     ];
     for (body, wire) in cases {
         golden(body, wire);

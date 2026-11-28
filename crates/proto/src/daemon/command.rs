@@ -342,6 +342,16 @@ pub enum Command {
         provider: String,
         account: LoginRef,
     },
+    /// Browser autofill: keeps `recipe`, a form the user taught it on the
+    /// page at `origin` (`deadbolt_core::site_recipe`), on `login`, or with
+    /// none clears the one it has. Refused unless one of the login's URLs is
+    /// on the page's site itself and the recipe is for that exact origin.
+    /// Replies `done`.
+    SiteRecipe {
+        origin: String,
+        login: LoginRef,
+        recipe: Option<String>,
+    },
     /// Passkeys: those in every vault for the relying party `rp_id` (the
     /// host of the page at `origin` when `None`), refused unless it is that
     /// host or a parent of it on the same site. Says whether a sign-in or
@@ -680,6 +690,7 @@ impl Command {
             | Self::SiteGenerateKeep { .. }
             | Self::SiteSave { .. }
             | Self::SiteLink { .. }
+            | Self::SiteRecipe { .. }
             | Self::PasskeyCreate { .. }
             | Self::PasskeyGet { .. }
             | Self::FormFill { .. }
@@ -754,6 +765,7 @@ impl Command {
             Self::SiteCheck { .. } => "site-check",
             Self::SiteSave { .. } => "site-save",
             Self::SiteLink { .. } => "site-link",
+            Self::SiteRecipe { .. } => "site-recipe",
             Self::PasskeyList { .. } => "passkey-list",
             Self::PasskeyCreate { .. } => "passkey-create",
             Self::PasskeyGet { .. } => "passkey-get",

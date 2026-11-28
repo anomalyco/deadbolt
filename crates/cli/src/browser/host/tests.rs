@@ -43,6 +43,7 @@ fn replies_have_the_documented_shapes() {
                     has_totp: false,
                     urls: vec!["https://github.com".into()],
                     sign_in: None,
+                    recipe: None,
                 },
                 Account {
                     login: "a:c".into(),
@@ -56,6 +57,7 @@ fn replies_have_the_documented_shapes() {
                         provider: "google".into(),
                         account: Some("sam@example.com".into()),
                     }),
+                    recipe: None,
                 },
             ],
         },
@@ -126,6 +128,7 @@ fn a_reply_over_the_browser_limit_becomes_an_error() {
                     has_totp: false,
                     urls: vec![],
                     sign_in: None,
+                    recipe: None,
                 })
                 .collect(),
         },
