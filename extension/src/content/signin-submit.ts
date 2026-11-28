@@ -9,6 +9,12 @@
 // doesn't say the code came by text or email. Nothing is submitted on a page
 // that isn't a secure context. A step is submitted at most once, after a
 // short settle that checks all of it again.
+//
+// A React <form onSubmit> has no method and no action of its own, so to the
+// browser it's a GET of this page, which would put every field in the URL.
+// Its submit is the page script's to handle: it may go, but never natively
+// (see holdNativeSubmit). A form that says GET itself, names a route to GET,
+// or searches is never submitted.
 
 import { IDENTIFIER_ROLES, type SurfaceKind } from "../messages"
 import { CAPTCHA, controlText, deliveredCode, isVisible, sole, visibleLabel, type Field } from "./detect"
@@ -60,20 +66,78 @@ export interface SubmitStep {
 export interface SubmitPlan {
   form: HTMLFormElement | null
   button: HTMLElement
+  /** The form's submit is its page script's (see scriptHandled): hold its native submit before clicking. */
+  scripted?: true
 }
 export type Refusal = "insecure" | "kind" | "button" | "scope" | "destination" | "captcha" | "values" | "first" | "purpose" | "error" | "delivered"
 
-/** The form a step's fields and button post with, checked: a POST to this origin, in this tab. */
+/**
+ * Whether a form's submit is only its page script's: no method on the form
+ * or its button, and no action of its own (none, empty, "#", or React 19's
+ * javascript: placeholder for a form action). React's <form onSubmit>.
+ */
+export function scriptHandled(form: HTMLFormElement, control: HTMLButtonElement | HTMLInputElement | null): boolean {
+  if (form.hasAttribute("method") || control?.hasAttribute("formmethod")) return false
+  const action = control?.getAttribute("formaction") ?? form.getAttribute("action")
+  return action === null || /^\s*#?\s*$/.test(action) || /^\s*javascript:/i.test(action)
+}
+
+/** A search form: a search landmark, or a search box among its fields. */
+export function searchLike(form: HTMLFormElement): boolean {
+  if (form.closest("[role=search], search")) return true
+  return !!form.querySelector("input[type=search], input[name=q], input[name=query], input[name=search], input[name=s]")
+}
+
+/** How long a script-handled form's native submit stays held after its plan: past the settle and the click. */
+export const HOLD_MS = SETTLE_MS + 2000
+const held = new WeakMap<HTMLFormElement, number>()
+
+/**
+ * For a moment after Deadbolt clicks a script-handled form's button, a submit of
+ * it that the page's script didn't take (no preventDefault: its script
+ * failed to load, or it isn't React's after all) goes nowhere: Deadbolt
+ * prevents it, so the browser never GETs the fields into the URL. Listened
+ * for last, on the window (or the form's shadow root, which a submit event
+ * doesn't leave), after the page's own handlers.
+ */
+export function holdNativeSubmit(form: HTMLFormElement) {
+  const armed = held.has(form)
+  held.set(form, performance.now() + HOLD_MS)
+  if (armed) return
+  const root = form.getRootNode()
+  const on: EventTarget = root instanceof ShadowRoot ? root : window
+  const done = () => {
+    held.delete(form)
+    on.removeEventListener("submit", guard)
+  }
+  const guard = (event: Event) => {
+    if (event.target !== form) return
+    if (performance.now() <= (held.get(form) ?? 0) && !event.defaultPrevented) event.preventDefault()
+    done()
+  }
+  on.addEventListener("submit", guard)
+  setTimeout(() => {
+    if ((held.get(form) ?? 0) <= performance.now()) done()
+  }, HOLD_MS + 50)
+}
+
+/**
+ * The form a step's fields and button post with, checked: a POST to this
+ * origin, or a script-handled form (see scriptHandled) that isn't a
+ * search, in this tab.
+ */
 function formScope(form: HTMLFormElement, fields: Field[], button: HTMLElement): Refusal | null {
   if (!fields.every((f) => f.el.form === form && form.contains(f.el))) return "scope"
   const control = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button : null
-  // A sign-in posts; a GET form puts what it sends in the URL.
   const method = control?.hasAttribute("formmethod") ? control.formMethod : form.method
-  const destination = button.getAttribute("formaction") ?? form.getAttribute("action") ?? location.href
   // The browsing context it goes to: the submitter's, the form's, else the document's <base target>.
   const target = button.getAttribute("formtarget") ?? form.getAttribute("target") ?? document.querySelector("base[target]")?.getAttribute("target") ?? ""
+  if (target && target !== "_self") return "destination"
+  // A sign-in posts; a GET form puts what it sends in the URL, unless its page's script submits it.
+  if (method !== "post") return method === "get" && scriptHandled(form, control) && !searchLike(form) ? null : "destination"
+  const destination = button.getAttribute("formaction") ?? form.getAttribute("action") ?? location.href
   try {
-    if (method !== "post" || new URL(destination, document.baseURI).origin !== location.origin || (target && target !== "_self")) return "destination"
+    if (new URL(destination, document.baseURI).origin !== location.origin) return "destination"
   } catch {
     return "destination"
   }
@@ -145,5 +209,5 @@ export function submitPlan(step: SubmitStep): SubmitPlan | Refusal {
   // A code step's prompt that describes delivery by SMS or email takes a
   // code the person brings, never the login's authenticator code.
   if (deliveredCode(fields, scope, accountChip(step.account))) return "delivered"
-  return { form, button }
+  return { form, button, ...(form && form.method !== "post" && scriptHandled(form, control) ? { scripted: true as const } : {}) }
 }

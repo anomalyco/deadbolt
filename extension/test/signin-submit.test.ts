@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { scanPage } from "../src/content/detect"
-import { accountChip, submitPlan } from "../src/content/signin-submit"
+import { accountChip, holdNativeSubmit, scriptHandled, searchLike, submitPlan } from "../src/content/signin-submit"
 
 // happy-dom does no hit testing: the box last measured is on top there.
 const rect = Element.prototype.getBoundingClientRect
@@ -190,6 +190,65 @@ describe("a form", () => {
       fill("input[name=password]", "correct horse")
       expect(plan(true)).toBe("destination")
     }
+  })
+
+  test("a React <form onSubmit>, with no method and no action, advances: its script handles the submit", () => {
+    for (const attrs of [`novalidate`, `action=""`, `action="#"`, `action="javascript:throw new Error('React form unexpectedly submitted.')"`]) {
+      page(form(attrs))
+      fill("input[name=username]", "alex")
+      fill("input[name=password]", "correct horse")
+      const p = plan(true)
+      expect(typeof p).toBe("object")
+      if (typeof p === "string") return
+      expect(p.form).toBeInstanceOf(HTMLFormElement)
+      expect(p.scripted).toBe(true)
+    }
+  })
+
+  test("an explicit GET, a GET to a route, a search form or another tab stays blocked", () => {
+    for (const html of [
+      form(`method="get"`),
+      form(`method="GET" action="/session"`),
+      form(`action="/search"`),
+      form(`role="search"`),
+      form(`novalidate`).replace("</form>", `<input type="search" name="q"></form>`),
+      form(`target="_blank"`),
+      form(`novalidate`).replace(`<button type="submit">`, `<button type="submit" formmethod="get">`),
+      form(`novalidate`).replace(`<button type="submit">`, `<button type="submit" formaction="/search">`),
+    ]) {
+      page(html)
+      fill("input[name=username]", "alex")
+      fill("input[name=password]", "correct horse")
+      expect(plan(true)).toBe("destination")
+    }
+  })
+
+  test("a POST plan isn't held as a script's", () => {
+    page(form(`method="post" action="/session"`))
+    fill("input[name=username]", "alex")
+    fill("input[name=password]", "correct horse")
+    const p = plan(true)
+    expect(typeof p === "object" && p.scripted).toBeFalsy()
+  })
+
+  test("scriptHandled and searchLike read only the form's own attributes", () => {
+    page(`<form id="a"></form><form id="b" method="get"></form><form id="c" action="/x"></form><search><form id="d"></form></search>`)
+    const f = (id: string) => document.getElementById(id) as HTMLFormElement
+    expect([scriptHandled(f("a"), null), scriptHandled(f("b"), null), scriptHandled(f("c"), null)]).toEqual([true, false, false])
+    expect([searchLike(f("a")), searchLike(f("d"))]).toEqual([false, true])
+  })
+
+  test("held, a script-handled form's native submit the page didn't take goes nowhere; one it took is left alone", () => {
+    page(form(`novalidate`))
+    const el = document.querySelector("form")!
+    holdNativeSubmit(el)
+    const native = new Event("submit", { bubbles: true, cancelable: true })
+    el.dispatchEvent(native)
+    expect(native.defaultPrevented).toBe(true)
+    // Once is enough: the hold is spent.
+    const later = new Event("submit", { bubbles: true, cancelable: true })
+    el.dispatchEvent(later)
+    expect(later.defaultPrevented).toBe(false)
   })
 
   test("a button naming a form that isn't there refuses", () => {
