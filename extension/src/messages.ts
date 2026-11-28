@@ -156,7 +156,7 @@ export type ToBackground =
    * field shows in the frame's viewport, so the menu can open in the top
    * page under it (see Autofill.query).
    */
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box; asksNew?: boolean }
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box; asksNew?: boolean; teach?: boolean }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean; asksNew?: boolean }
@@ -205,6 +205,10 @@ export type ToBackground =
   | { type: "db:learn-step"; session: string; step: LearnStep }
   /** What the user did in this frame since its last batch, for the recording's timeline, and salted digests of words typed since (see Words). Answers a LearnTaken. */
   | { type: "db:learn-events"; session: string; events: TimelineEvent[]; words?: string[] }
+  /** The forms taught on this frame's exact origin (see content/recipe.ts): JSON, as the host lists them; null to ask again later. */
+  | { type: "db:recipes-ask" }
+  /** The recipe made from the fields the user asked to fill by hand here, in form snapshot `form`: kept on the login a pick fills them with (bg/recipes.ts). */
+  | { type: "db:recipe-learn"; recipe: string; form: number }
   // inline menu
   /** `parent`: the origin of the parent window that handed the menu its token. */
   | { type: "db:menu-load"; token: string; parent: string }
@@ -230,6 +234,8 @@ export type ToBackground =
   | { type: "db:popup-offer"; tabId: number; id: string; choice: OfferChoice }
   /** Turn saving back on for the tab's site after "Never for this site". */
   | { type: "db:popup-saving-on"; tabId: number }
+  /** "Reset learned form": the tab's site forgets the form it was taught on this page. */
+  | { type: "db:popup-recipe-reset"; tabId: number }
   /** Whether the tab is recording, or has a recording waiting for Download or Delete. Answers with a Recording. */
   | { type: "db:popup-record"; tabId: number }
   /** Start or stop recording the tab. Answers with a LearnReply. */
@@ -351,6 +357,8 @@ export type ToContent =
   | { type: "db:learn"; session: LearnSession | null }
   /** To a top page on a site with a saved login: its own SVG icon, sanitized, or null (see content/site-icon.ts). */
   | { type: "db:site-icon" }
+  /** The forms taught on this page's origin now (none, after "Reset learned form"). */
+  | { type: "db:recipes-set"; recipes: string[] }
 
 /**
  * What the top page shows after a sign-in was submitted, as the content
@@ -456,7 +464,8 @@ export type MenuLoadReply =
    * opens the icon store from here (see ui/icon-store.ts). Off, rows show no icon.
    * `reveal`: those hosts whose icon no menu has dithered in yet this browser session.
    */
-  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; universal?: boolean; signsIn?: string[]; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
+  /** `teach`: the fields are ones the user asked to fill by hand, and a pick teaches Deadbolt the form (bg/recipes.ts). */
+  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; universal?: boolean; signsIn?: string[]; icons?: Record<string, StoredIcon | null>; reveal?: string[]; teach?: boolean }
   | { kind: "generate"; site: string }
   /**
    * An identity or card field's menu: the identities or cards to pick from.

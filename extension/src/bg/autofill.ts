@@ -51,6 +51,8 @@ interface MenuToken extends FrameTarget {
   notice?: { label: string; title: string }
   /** Picked: the menu folds into its pill and resizes it to say how the fill went, but answers nothing more. */
   picked?: boolean
+  /** On fields the user asked to fill by hand: a pick teaches Deadbolt the form (bg/recipes.ts). */
+  teach?: true
 }
 
 /** The login forms each tab's frames last reported. Filling from the popup needs one. */
@@ -140,6 +142,8 @@ export class Autofill {
   private lastState: string
   /** A picked login was filled in `tabId` on `site` (bg/site-icons.ts reads the site's icon then). */
   filled?: (tabId: number, site: string) => void
+  /** A pick filled form `form` in `target` with login `ref`: a form taught there is kept on it (bg/recipes.ts). */
+  taught?: (target: FrameTarget, ref: string, form: number) => void
   /**
    * Whether the top page in `target` looks signed out now: a fresh probe,
    * and no sign-in remembered there lately (bg/universal.ts). Unset, no
@@ -211,7 +215,7 @@ export class Autofill {
     return menuRowCount(accounts, t.focused) + passkeys
   }
 
-  private async list(origin: string, fresh = false): Promise<ListReply> {
+  async list(origin: string, fresh = false): Promise<ListReply> {
     const cached = this.lists.get(origin)
     if (!fresh && cached && Date.now() - cached.at < LIST_TTL_MS) return cached.reply
     const reply = await this.host.send({ type: "list", origin })
@@ -283,6 +287,7 @@ export class Autofill {
     pageAccount?: unknown,
     box?: unknown,
     asksNew?: unknown,
+    teach = false,
   ): Promise<QueryReply> {
     const target = await targetFor(sender)
     const clean = sanitizeRoles(roles)
@@ -356,7 +361,7 @@ export class Autofill {
     this.sweep()
     const token = newToken()
     const step = kind === "login" ? { kind: "login" as const, ...(asksNew === true ? { asksNew: true } : {}) } : {}
-    this.tokens.set(token, { ...target, ...(owner ? { owner } : {}), roles: clean, focused: focused as FieldRole, form: form as number, ...step, createdAt: Date.now(), ...(generate ? { generate } : {}), ...(only ? { only } : {}) })
+    this.tokens.set(token, { ...target, ...(owner ? { owner } : {}), roles: clean, focused: focused as FieldRole, form: form as number, ...step, createdAt: Date.now(), ...(generate ? { generate } : {}), ...(only ? { only } : {}), ...(teach ? { teach: true as const } : {}) })
     if (!owner || !at) return { token, rows }
     const opened = await sendToFrame<boolean>(owner, { type: "db:open-at", token, rows, box: at })
     if (!opened) this.tokens.delete(token)
@@ -380,7 +385,7 @@ export class Autofill {
       // The picks that sign in, so their pill says "Signing in…" (the pick itself decides again).
       const signing = (await this.signsInHere(t)) ? await Promise.all(accounts.map((a) => (!a.signIn || a.hasPassword) && this.signInAllowed(t, a))) : []
       const signsInRefs = accounts.filter((_, i) => signing[i]).map((a) => a.ref)
-      return { kind: "accounts", site: reply.site, accounts, focused: t.focused, ...(passkeys?.length ? { passkeys } : {}), ...(flow?.identifierFirst ? { continueAs: true } : {}), ...(signsInRefs.length ? { signsIn: signsInRefs } : {}), ...(icons ? { icons, reveal } : {}) }
+      return { kind: "accounts", site: reply.site, accounts, focused: t.focused, ...(passkeys?.length ? { passkeys } : {}), ...(flow?.identifierFirst ? { continueAs: true } : {}), ...(signsInRefs.length ? { signsIn: signsInRefs } : {}), ...(icons ? { icons, reveal } : {}), ...(t.teach && this.host.capabilities.includes("site-recipe") ? { teach: true } : {}) }
     } catch {
       return { kind: "status", status: this.host.status }
     }
@@ -669,6 +674,7 @@ export class Autofill {
     if (next !== undefined) await this.serial(target.tabId, () => this.arm(target.tabId, generation, next))
     const site = siteOf(new URL(target.origin).hostname)
     if (reply.ok && site) this.filled?.(target.tabId, site)
+    if (reply.ok) this.taught?.(target, account.ref, form)
     return reply
   }
 

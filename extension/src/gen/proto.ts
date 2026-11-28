@@ -228,6 +228,12 @@ export type RequestBody =
       session: string
     }
   | { type: "unlock-prompt" }
+  | {
+      type: "save-recipe"
+      origin: string
+      ref: string
+      recipe?: string
+    }
 
 /** A login saved for the site, without values. */
 export type Account = {
@@ -243,6 +249,12 @@ export type Account = {
    * `google`, or a name), and the linked account's username or title.
    */
   signIn?: SignIn
+  /**
+   * The form the user taught it for this exact origin (`save-recipe`), as
+   * JSON: where its fields are, never a value. Only on the page's own
+   * site's logins.
+   */
+  recipe?: string
 }
 
 /** What a fill asked for and the login has. */
@@ -415,3 +427,4 @@ export type Body =
       type: "unlock-prompt"
       app: boolean
     }
+  | { type: "save-recipe" }

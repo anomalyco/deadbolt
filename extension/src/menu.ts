@@ -679,7 +679,8 @@ function show(reply: MenuLoadReply) {
   rowsEl.replaceChildren(...accounts.map(row))
   // No site over logins: they're only ever the page's own site's (or a same-site frame's), which the page shows.
   setCaption("")
-  say("")
+  // Fields the user asked to fill by hand: the pick teaches Deadbolt the form (bg/recipes.ts).
+  say(reply.kind === "accounts" && reply.teach ? "Your pick teaches Deadbolt this form" : "")
   // The list is already at rest when it opens: no slide on the first paint.
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
   const left = visible()

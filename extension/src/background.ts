@@ -9,6 +9,7 @@ import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
 import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
+import { Recipes } from "./bg/recipes"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
 import { ProviderChain } from "./bg/provider-chain"
@@ -23,6 +24,8 @@ const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId)
 const signInWith = new SignInWith(host)
 const providers = new ProviderChain(host, passkeys, signInWith)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith, providers)
+const recipes = new Recipes(host, (origin, fresh) => autofill.list(origin, fresh))
+autofill.taught = (target, ref, form) => void recipes.filled(target, ref, form)
 const learner = new Learner(host, { badgeUnder: (tabId) => (saver.pending(tabId) || passkeys.prompt(tabId) ? "1" : "") })
 saver.badge = (tabId, text) => learner.badge(tabId, text)
 learner.listen()
@@ -82,7 +85,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return
     case "db:query":
       if (sender.tab?.id !== undefined && providers.active(sender.tab.id)) return { rows: 0 }
-      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount, message.box, message.asksNew)
+      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount, message.box, message.asksNew, message.teach === true)
     case "db:page":
       if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true, message.idEmpty === true, message.asksNew === true)
@@ -110,6 +113,10 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return learner.step(sender, String(message.session), message.step)
     case "db:learn-events":
       return learner.events(sender, String(message.session), message.events, message.words)
+    case "db:recipes-ask":
+      return recipes.forFrame(sender)
+    case "db:recipe-learn":
+      return recipes.learned(sender, message.recipe, message.form)
     // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
       if (universal.owns(message.token)) return universal.closed(message.token, sender, message.dismissed === true)
@@ -170,6 +177,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
         : { ok: false, message: "" }
     case "db:popup-saving-on":
       return fromExtensionPage(sender, "popup.html") ? saver.savingOn(message.tabId) : false
+    case "db:popup-recipe-reset":
+      return fromExtensionPage(sender, "popup.html") ? recipes.reset(message.tabId) : false
   }
 }
 
@@ -186,6 +195,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void providers.closed(tabId)
   void universal.closeTab(tabId)
   autofill.forgetTab(tabId)
+  recipes.forgetTab(tabId)
   forms.forgetTab(tabId)
   saver.forgetTab(tabId)
   signInWith.forgetTab(tabId)

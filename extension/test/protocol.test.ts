@@ -13,6 +13,14 @@ describe("parseHostMessage", () => {
     })
   })
 
+  test("a login's taught form comes through as its JSON, and save-recipe answers plainly", () => {
+    const ref = `${"a".repeat(64)}:${"b".repeat(32)}`
+    const recipe = '{"v":1,"origin":"https://bank.example","pathPattern":"/","clusterFingerprint":"aa","slots":[{"role":"username","nthInput":0}]}'
+    const list = parseHostMessage({ id: 1, type: "list", site: "bank.example", accounts: [{ ref, vault: "P", title: "Bank", hasPassword: true, hasTotp: false, urls: [], recipe }, { ref, vault: "P", title: "Big", hasPassword: true, hasTotp: false, urls: [], recipe: "x".repeat(513) }] })
+    expect(list?.kind === "reply" && list.reply.type === "list" && list.reply.accounts.map((a) => a.recipe)).toEqual([recipe, undefined])
+    expect(parseHostMessage({ id: 2, type: "save-recipe" })).toEqual({ kind: "reply", id: 2, reply: { type: "save-recipe" } })
+  })
+
   test("hello says when Touch ID can unlock, and unlock-prompt says whether the app came forward", () => {
     const hello = parseHostMessage({ id: 1, type: "hello", protocol: 3, version: "x", status: "locked", capabilities: ["unlock-prompt"], touchIdReady: true })
     expect(hello).toMatchObject({ kind: "reply", reply: { status: "locked", touchIdReady: true } })
