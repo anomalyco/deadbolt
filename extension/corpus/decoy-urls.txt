@@ -1,0 +1,83 @@
+# Decoy pages for the detection gate: real pages whose fields are not a sign-in
+# (searches, promo codes, newsletters, invites, admin and settings forms,
+# comments, support forms, transfers), where no login menu should open.
+# Freeze them with `bun corpus/freeze.ts --urls corpus/decoy-urls.txt --decoy`
+# (network, once, never in CI), then label each one in gold-labels.jsonl.
+# One URL per line, then what the trap is; # starts a comment or a section.
+# Pages behind a sign-in are listed commented out: freeze.ts never signs in,
+# so frozen/ has a page modeled on each instead (decoy-* in gold-labels.jsonl).
+
+# Site search
+https://www.nytimes.com/                         search box in the header, log-in link
+https://developer.mozilla.org/en-US/             type=search docs search, log-in and sign-up links
+https://www.homedepot.com/                       product search and a store ZIP box
+https://www.wikipedia.org/                       one big search box
+https://www.bbc.com/                             header search, sign-in link
+https://www.ikea.com/us/en/                      product search, ZIP for delivery
+https://www.walmart.com/                         search, "Sign in" in the header
+https://www.reddit.com/                          search beside log-in
+https://stackoverflow.com/                       search beside log-in and sign-up
+https://www.imdb.com/                            search with a category select
+https://www.etsy.com/                            search, sign-in button
+https://www.booking.com/                         destination search, dates, guests
+https://www.kayak.com/flights                    flight search: from, to, dates
+https://www.airbnb.com/                          where, check-in, check-out, guests
+https://www.zillow.com/                          address or ZIP search
+https://www.yelp.com/                            "find" and "near" boxes
+
+# Promo, coupon and gift cards
+https://www.target.com/cart                      promo code and a gift card access number (type=password)
+https://www.starbucks.com/gift/balance           gift "card number" and "security code"
+https://www.bestbuy.com/cart                     promo code
+https://www.macys.com/my-bag                     promo code, gift card number and PIN
+https://www.amazon.com/gc/redeem                 gift card claim code
+https://www.dominos.com/en/pages/order/          coupon code
+https://www.sephora.com/basket                   promo code, gift card
+https://www.apple.com/shop/gift-cards/balance    gift card PIN
+
+# Newsletters
+https://www.theverge.com/                        footer newsletter: email and Subscribe
+https://www.patagonia.com/home/                  newsletter modal worded "Sign up"
+https://www.economist.com/newsletters            newsletter sign-up list
+https://substack.com/                            "Type your email" to subscribe
+https://www.morningbrew.com/daily                newsletter email box
+https://www.allbirds.com/                        footer newsletter
+https://www.wired.com/newsletter                 newsletter page with an email box
+
+# Blog comments and contact or support forms
+https://wordpress.org/news/                      comment form: name, email, website
+https://www.smashingmagazine.com/                comments and newsletter
+https://support.google.com/accounts/contact/     support contact form
+https://www.zendesk.com/contact/                 sales contact form: name, email, company, phone
+https://www.hubspot.com/company/contact          contact form
+https://www.ups.com/track                        tracking number box
+https://www.fedex.com/en-us/tracking.html        tracking number box
+
+# Hostnames that look like auth
+https://author.today/                            "auth" in the host, no sign-in form here
+https://authors.google.com/                      "auth" in the host
+https://www.authentic.com/                       "auth" in the host
+
+# Calculators and tools
+https://www.bankrate.com/calculators/mortgages/mortgage-calculator.aspx   home price, down payment, rate
+https://www.calculator.net/loan-calculator.html  loan amount, term, rate
+https://www.xe.com/currencyconverter/            amount and currencies
+https://www.speedtest.net/                       no fields, a "Go" button
+
+# Product registration, job applications, referrals
+https://www.samsung.com/us/support/account/product-registration/   serial number, purchase date
+https://boards.greenhouse.io/                    job application: name, email, phone, resume
+https://jobs.lever.co/                           job application
+https://www.dropbox.com/referrals                refer a friend by email
+https://linktr.ee/                               "claim your username" on the home page
+
+# Behind a sign-in (modeled in frozen/ instead)
+# https://linear.app/<workspace>/settings/members                 invite teammates by email
+# https://github.com/orgs/<org>/people                            invite member: box named identifier
+# https://<site>/wp-admin/user-edit.php                           admin editing another user
+# https://<site>/wp-admin/options-general.php                     CMS settings: admin email, URLs
+# https://dashboard.stripe.com/test/apikeys                       read-only secrets in password boxes
+# https://github.com/settings/admin                               delete account: type your username
+# https://<bank>/transfers/new                                    transfer amount and a transaction PIN
+# https://<site>/account/verify-contact                           two six-box code groups (email and SMS)
+# https://slack.com/intl/en-gb/help/requests/new                  support request with order number

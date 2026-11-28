@@ -1,0 +1,622 @@
+{
+ "version": 1,
+ "viewport": "1280x800",
+ "pages": [
+  {
+   "id": "amazon-add-address",
+   "file": "frozen/amazon-add-address.html",
+   "url": "https://www.amazon.com/a/addresses/add",
+   "sha256": "a24b20b1be255636cf400fd1f9f2b328ad41255edc707b044ac158a640694a82",
+   "bytes": 3972,
+   "source": "modeled"
+  },
+  {
+   "id": "amazon-email",
+   "file": "frozen/amazon-email.html",
+   "url": "https://www.amazon.com/ap/signin",
+   "sha256": "fcd4bfd8ed4752a6abbec85ad96d7ca0e0c6171b1601a4debe109bb973c7cd78",
+   "bytes": 1313,
+   "source": "modeled"
+  },
+  {
+   "id": "amazon-password",
+   "file": "frozen/amazon-password.html",
+   "url": "https://www.amazon.com/ap/signin",
+   "sha256": "22a891716fb2922b8f5b886178d83af88954f7748423d7b60c642b14eca9d682",
+   "bytes": 1289,
+   "source": "modeled"
+  },
+  {
+   "id": "apple-account-signin",
+   "file": "frozen/apple-account-signin.html",
+   "url": "https://idmsa.apple.com/appleauth/auth/authorize/signin",
+   "sha256": "33d58fc27e34b698915b053d7de8ee3c3a624262e6b0127ce55f3d5b44f1b066",
+   "bytes": 1251,
+   "source": "modeled"
+  },
+  {
+   "id": "auth0-identifier",
+   "file": "frozen/auth0-identifier.html",
+   "url": "https://acme.us.auth0.com/u/login/identifier",
+   "sha256": "47d90f7af60203efb7d1bec72ecbd55649a9f11d9f1435a9224102ba41d6e632",
+   "bytes": 1155,
+   "source": "modeled"
+  },
+  {
+   "id": "auth0-password",
+   "file": "frozen/auth0-password.html",
+   "url": "https://acme.us.auth0.com/u/login/password",
+   "sha256": "c0f01ef97af27db2c801ae64ed413f77ee86b343f95df298437aa54377737c44",
+   "bytes": 1097,
+   "source": "modeled"
+  },
+  {
+   "id": "aws-signin",
+   "file": "frozen/aws-signin.html",
+   "url": "https://signin.aws.amazon.com/signin",
+   "sha256": "a17389200c2979cfc92e73b6f73e6aff2ac0c551d4f26e86700b05d3d875b408",
+   "bytes": 1312,
+   "source": "modeled"
+  },
+  {
+   "id": "bestbuy-checkout-below-fold",
+   "file": "frozen/bestbuy-checkout-below-fold.html",
+   "url": "https://www.bestbuy.com/checkout/r/payment",
+   "sha256": "44c01d7aea128f6d8f793a6363c926e505c5e253b6a584896083a6d049679c4a",
+   "bytes": 3409,
+   "source": "modeled"
+  },
+  {
+   "id": "bofa-home-login",
+   "file": "frozen/bofa-home-login.html",
+   "url": "https://www.bankofamerica.com/",
+   "sha256": "8e286181a3a8d8670fd82b784690fd6a262a1ae9687ec02139400721b843ecac",
+   "bytes": 2080,
+   "source": "modeled"
+  },
+  {
+   "id": "chase-shadow-login",
+   "file": "frozen/chase-shadow-login.html",
+   "url": "https://secure.chase.com/web/auth/dashboard",
+   "sha256": "5767eacf6e5b0923579cd6b7cffef57267bb2db1aca6ea7323ac3fc1c9421a25",
+   "bytes": 1326,
+   "source": "modeled"
+  },
+  {
+   "id": "clerk-signin",
+   "file": "frozen/clerk-signin.html",
+   "url": "https://accounts.acme.dev/sign-in",
+   "sha256": "89c4a85386e40d6d8a1a5c28741f276a80e1f25be42fd8e1dc840afa3c823880",
+   "bytes": 1406,
+   "source": "modeled"
+  },
+  {
+   "id": "closed-shadow-login",
+   "file": "frozen/closed-shadow-login.html",
+   "url": "https://login.acme-bank.example.com/signin",
+   "sha256": "9d01fd5848f203d305b85e83d24d510f7e549edbb93af9560bfeb13de26b5021",
+   "bytes": 950,
+   "source": "modeled"
+  },
+  {
+   "id": "cloudflare-login",
+   "file": "frozen/cloudflare-login.html",
+   "url": "https://dash.cloudflare.com/login",
+   "sha256": "b7b7bd34f8b03dd562189d1d002d6fff1584a081ebbc322fd7e12a2462b182e4",
+   "bytes": 1250,
+   "source": "modeled"
+  },
+  {
+   "id": "coinbase-signin",
+   "file": "frozen/coinbase-signin.html",
+   "url": "https://login.coinbase.com/signin",
+   "sha256": "4a2cf832a35845ea9b2014bca65b955415c09931d594f2160d2ee4c1d8996d4a",
+   "bytes": 1022,
+   "source": "modeled"
+  },
+  {
+   "id": "coinbase-sms-code",
+   "file": "frozen/coinbase-sms-code.html",
+   "url": "https://login.coinbase.com/signin/step-2",
+   "sha256": "7bc3bd8509b6a4608b3f5f656a76f75702848ddc56b969f5a01f18d284f7f289",
+   "bytes": 731,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-admin-user-edit",
+   "file": "frozen/decoy-admin-user-edit.html",
+   "url": "https://cms.example.com/wp-admin/user-edit.php",
+   "sha256": "7553e0340d3f1e54affc77dcf38d423650b69836203bfe78f865cc8fe93b051f",
+   "bytes": 1968,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-api-keys",
+   "file": "frozen/decoy-api-keys.html",
+   "url": "https://dashboard.stripe.com/test/apikeys",
+   "sha256": "72e032f1c522555acc71e1dcf2cac2bc7c5d8eee39e14cba75c38e98049e7673",
+   "bytes": 978,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-author-hostname",
+   "file": "frozen/decoy-author-hostname.html",
+   "url": "https://author.example.com/posts/hello-world",
+   "sha256": "84d6c4095fdb701846b0b9e88bac515071babee675204a3fe39ce30ea8dcd8c7",
+   "bytes": 1376,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-bank-transfer-pin",
+   "file": "frozen/decoy-bank-transfer-pin.html",
+   "url": "https://secure.examplebank.com/transfers/new",
+   "sha256": "ccce4bc17c65d36e0ec9f9f05b524826f751872a2e5a8b4d8384b1f3102d3641",
+   "bytes": 1666,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-blog-comment",
+   "file": "frozen/decoy-blog-comment.html",
+   "url": "https://blog.example.org/2026/11/notes",
+   "sha256": "9b2ff0aff3e15921e3deff984079bb7ad614f87863c1fd92fe68b0b1c8dfe0e9",
+   "bytes": 1604,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-cart-promo-giftcard",
+   "file": "frozen/decoy-cart-promo-giftcard.html",
+   "url": "https://www.target.com/cart",
+   "sha256": "bff4db963eeee72444146d74d643f991487cf6c1a3d13b9ea06ee4f512c725e2",
+   "bytes": 1072,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-chat-widget",
+   "file": "frozen/decoy-chat-widget.html",
+   "url": "https://www.example.com/pricing",
+   "sha256": "e064be5f1fcc05c5928960ab89f243290649c22269b36f85a00f4e2279435392",
+   "bytes": 799,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-claim-username",
+   "file": "frozen/decoy-claim-username.html",
+   "url": "https://linktr.ee/",
+   "sha256": "2011d83eb02e385dfe9bfe66bc07fe5148d637af2ebcd91e6d6d1443b07c2ba9",
+   "bytes": 683,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-cms-general-settings",
+   "file": "frozen/decoy-cms-general-settings.html",
+   "url": "https://cms.example.com/wp-admin/options-general.php",
+   "sha256": "a58991f0ee546c4fec870cbdfeb8b77c648fda88e26e8350637040eb78a61566",
+   "bytes": 1579,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-coupon-six-digits",
+   "file": "frozen/decoy-coupon-six-digits.html",
+   "url": "https://shop.example.com/checkout/coupon",
+   "sha256": "b9eb20c0a02981f55a1ff11fa5d3c8de410c2c01affe8085e59126857aa778f9",
+   "bytes": 593,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-delete-account",
+   "file": "frozen/decoy-delete-account.html",
+   "url": "https://www.example.com/settings/account/delete",
+   "sha256": "072949385995be11db9786cd0dedeac714086bb5c2ed75c7d436d5dbfab97b8a",
+   "bytes": 874,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-docs-search",
+   "file": "frozen/decoy-docs-search.html",
+   "url": "https://developer.mozilla.org/en-US/",
+   "sha256": "6d4e3b6d39d4ca99b6d55b5ac6386f5599520058d699dd1e275f9f49eb2a0bcd",
+   "bytes": 988,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-dual-sent-codes",
+   "file": "frozen/decoy-dual-sent-codes.html",
+   "url": "https://www.example.com/account/verify-contact",
+   "sha256": "8e11a500a0283efe337565535d2a6ec8a436340c63c6138a06d6839391dfe4c3",
+   "bytes": 2479,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-flight-search",
+   "file": "frozen/decoy-flight-search.html",
+   "url": "https://www.kayak.com/flights",
+   "sha256": "39d14b8210b7db848c3ffff917c7d3606d82d08e1a83a03fa5663d3b3000b013",
+   "bytes": 1339,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-gift-card-balance",
+   "file": "frozen/decoy-gift-card-balance.html",
+   "url": "https://www.starbucks.com/gift/balance",
+   "sha256": "d4327a68a1712b3a40c67bb0e59195493f6d44b6b1ae2f66934b6ee6275cfb9c",
+   "bytes": 749,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-invite-teammates",
+   "file": "frozen/decoy-invite-teammates.html",
+   "url": "https://linear.app/acme/settings/members",
+   "sha256": "cd74be4ff6d458e0c1ee2eafec991c1fdce02630a98de905f2793c9b48ccf1b8",
+   "bytes": 1106,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-job-application",
+   "file": "frozen/decoy-job-application.html",
+   "url": "https://boards.greenhouse.io/acme/jobs/123",
+   "sha256": "7cb1ba1da31104f0e105c948827b65a06eae28f2dd44ad76cabc9125491348e1",
+   "bytes": 1527,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-mortgage-calculator",
+   "file": "frozen/decoy-mortgage-calculator.html",
+   "url": "https://www.bankrate.com/calculators/mortgages/mortgage-calculator.aspx",
+   "sha256": "650fd15ac71246b8738ce1811220d9336615d4049de6e234ac46e587d5b0eaad",
+   "bytes": 1097,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-news-search-header",
+   "file": "frozen/decoy-news-search-header.html",
+   "url": "https://www.nytimes.com/",
+   "sha256": "e1b91b19af5bb91abee5d0fe18bcff39d5311938e691e5d7677bdd47c2ae67c8",
+   "bytes": 997,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-newsletter-footer",
+   "file": "frozen/decoy-newsletter-footer.html",
+   "url": "https://www.theverge.com/",
+   "sha256": "a779f7deb256b0e39d4f14534449ebd44178654866544b3e7622a8fbb4928395",
+   "bytes": 812,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-newsletter-signup-modal",
+   "file": "frozen/decoy-newsletter-signup-modal.html",
+   "url": "https://www.patagonia.com/home/",
+   "sha256": "2cdb059f5934226fa6c39af5f9faebfa502223fec5a6abd1c173bf2393c05081",
+   "bytes": 939,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-org-invite-member",
+   "file": "frozen/decoy-org-invite-member.html",
+   "url": "https://github.com/orgs/acme/people",
+   "sha256": "1cf68754eca6a9f979fb4f21f4112c4d18c85fc3b09fce03a687d2b4f7a61ccc",
+   "bytes": 826,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-package-tracking",
+   "file": "frozen/decoy-package-tracking.html",
+   "url": "https://www.ups.com/track",
+   "sha256": "9a7f2ccdd368d542c64a51811985daf7916494440df942ac3e815724e68e4732",
+   "bytes": 601,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-refer-friend",
+   "file": "frozen/decoy-refer-friend.html",
+   "url": "https://www.example.com/refer",
+   "sha256": "6807150bd63514b6b0c8d60ab7fa7dc5959bc70c5b551a84924e0fe57be33ffa",
+   "bytes": 604,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-store-locator",
+   "file": "frozen/decoy-store-locator.html",
+   "url": "https://www.starbucks.com/store-locator",
+   "sha256": "910d4192df4e09b6fb3d3bc65e184e50c956a57c92a6236c53b87177f4fa3426",
+   "bytes": 819,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-store-search-zip",
+   "file": "frozen/decoy-store-search-zip.html",
+   "url": "https://www.homedepot.com/",
+   "sha256": "707c05ff81c5a2ab01a94b37908d8f32bbf27cb0e8c68c02d37dcc287b91a46e",
+   "bytes": 999,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-support-request",
+   "file": "frozen/decoy-support-request.html",
+   "url": "https://support.example.com/hc/en-us/requests/new",
+   "sha256": "eeb66453fd98266c08e91062805fcf8711d12d61484e6d1f985d529fbb89bdad",
+   "bytes": 1294,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-warranty-code",
+   "file": "frozen/decoy-warranty-code.html",
+   "url": "https://www.example-appliances.com/register",
+   "sha256": "b14d40b1096584e7fa8d9f7e330eb5b7cbdbe98629ff00318d189fb8aa4ac0de",
+   "bytes": 1017,
+   "source": "modeled"
+  },
+  {
+   "id": "discord-login",
+   "file": "frozen/discord-login.html",
+   "url": "https://discord.com/login",
+   "sha256": "a13b0131cd7d12e2d6ca699de50f1529da2ea9d1c3d7c38d3684c1650ecb59d8",
+   "bytes": 1201,
+   "source": "modeled"
+  },
+  {
+   "id": "dropbox-signup-modal",
+   "file": "frozen/dropbox-signup-modal.html",
+   "url": "https://www.dropbox.com/register",
+   "sha256": "5ab1860c5b57319d8699977f07086668a6daf101a0dcd762d8aedcc5c60bbfbb",
+   "bytes": 1269,
+   "source": "modeled"
+  },
+  {
+   "id": "ebay-signin-phone",
+   "file": "frozen/ebay-signin-phone.html",
+   "url": "https://signin.ebay.com/signin/",
+   "sha256": "acc9fd1d9931894c1038ae0e631543a0cd4bec84a6c00362cdb6b1906b3f61d2",
+   "bytes": 1074,
+   "source": "modeled"
+  },
+  {
+   "id": "facebook-login",
+   "file": "frozen/facebook-login.html",
+   "url": "https://www.facebook.com/",
+   "sha256": "9753139d13f3afba0b632a3310a7562521152abb38f424c875aadbd811d9bab2",
+   "bytes": 1392,
+   "source": "modeled"
+  },
+  {
+   "id": "github-2fa-app",
+   "file": "frozen/github-2fa-app.html",
+   "url": "https://github.com/sessions/two-factor/app",
+   "sha256": "957fbcef4bbb32e515ab1bec28ca29fbd87032db63d76efa53b35b56f8386e1c",
+   "bytes": 1147,
+   "source": "modeled"
+  },
+  {
+   "id": "github-change-password",
+   "file": "frozen/github-change-password.html",
+   "url": "https://github.com/settings/security",
+   "sha256": "322ef9c930eaf620a67ae24b23c4704fcd7e4e27b238e5dee63dc33aaa062dc1",
+   "bytes": 1656,
+   "source": "modeled"
+  },
+  {
+   "id": "github-login",
+   "file": "frozen/github-login.html",
+   "url": "https://github.com/login",
+   "sha256": "42430f3d65d6e0b29e5447c07c1818fe2a3d36927aaa49965ce4724cf471feda",
+   "bytes": 1673,
+   "source": "modeled"
+  },
+  {
+   "id": "github-password-reset",
+   "file": "frozen/github-password-reset.html",
+   "url": "https://github.com/password_reset",
+   "sha256": "1e3874ba8f0befa9d34b1cc6c341bd96c66fa562130f503a2f4c68de87716690",
+   "bytes": 726,
+   "source": "modeled"
+  },
+  {
+   "id": "github-signup",
+   "file": "frozen/github-signup.html",
+   "url": "https://github.com/signup",
+   "sha256": "62842f8a1a9c10384050fa7401d79d3a815135b964cf4f2b6bc743fd2a70ce8e",
+   "bytes": 2367,
+   "source": "modeled"
+  },
+  {
+   "id": "gitlab-signup",
+   "file": "frozen/gitlab-signup.html",
+   "url": "https://gitlab.com/users/sign_up",
+   "sha256": "28757eab5e5509eab379e57eea0fc4e5c7d4a1d62eb33d98e967cb629d7b426d",
+   "bytes": 1932,
+   "source": "modeled"
+  },
+  {
+   "id": "google-change-password",
+   "file": "frozen/google-change-password.html",
+   "url": "https://myaccount.google.com/signinoptions/password",
+   "sha256": "fcda446411920fd91bd36c05f4badc78aec8c9a4133a9e1f6fc1a7c1c2e42f59",
+   "bytes": 982,
+   "source": "modeled"
+  },
+  {
+   "id": "google-identifier",
+   "file": "frozen/google-identifier.html",
+   "url": "https://accounts.google.com/v3/signin/identifier",
+   "sha256": "cad91e7d3dcedce5d5ae8344fc1e5eba6d9416b0fec9db9eb41bc346b20b60f3",
+   "bytes": 1256,
+   "source": "modeled"
+  },
+  {
+   "id": "google-password",
+   "file": "frozen/google-password.html",
+   "url": "https://accounts.google.com/v3/signin/challenge/pwd",
+   "sha256": "c016bfb7b03822e349f0113582758165917e3f89c573f196d537806e5f462dd1",
+   "bytes": 1105,
+   "source": "modeled"
+  },
+  {
+   "id": "google-sms-code",
+   "file": "frozen/google-sms-code.html",
+   "url": "https://accounts.google.com/v3/signin/challenge/ipp/verify",
+   "sha256": "b7395392fea68c925cc008a60a17bed4d7168f8c5c7526f17f2cd4f70b02dcb0",
+   "bytes": 960,
+   "source": "modeled"
+  },
+  {
+   "id": "google-totp",
+   "file": "frozen/google-totp.html",
+   "url": "https://accounts.google.com/v3/signin/challenge/totp",
+   "sha256": "8c03b63d2f5f8f6a8242bbd1922b1da1c0760ae3d5144018b64b9f41168cb3d9",
+   "bytes": 1114,
+   "source": "modeled"
+  },
+  {
+   "id": "linear-email-code",
+   "file": "frozen/linear-email-code.html",
+   "url": "https://linear.app/login/verify",
+   "sha256": "2a19c1937a4539c7d29c62d8746cd5c8b1eef8f354fd4b76a9c207395f9aff41",
+   "bytes": 678,
+   "source": "modeled"
+  },
+  {
+   "id": "linear-login",
+   "file": "frozen/linear-login.html",
+   "url": "https://linear.app/login",
+   "sha256": "6dfa5f9a426a9e3998453b0b4d73390647d208202c0b41db87bd0f2a2d6e5ee6",
+   "bytes": 933,
+   "source": "modeled"
+  },
+  {
+   "id": "linkedin-login",
+   "file": "frozen/linkedin-login.html",
+   "url": "https://www.linkedin.com/login",
+   "sha256": "67a0248d22efadcdddb2c771730de907cf816ff65a950f6ca3a4e50bcc736fbf",
+   "bytes": 1757,
+   "source": "modeled"
+  },
+  {
+   "id": "microsoft-email",
+   "file": "frozen/microsoft-email.html",
+   "url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+   "sha256": "b04f36140da27c594712938bdad4105ffcd80c44a83fa02f732166742e8d9e3c",
+   "bytes": 1266,
+   "source": "modeled"
+  },
+  {
+   "id": "microsoft-password",
+   "file": "frozen/microsoft-password.html",
+   "url": "https://login.microsoftonline.com/common/login",
+   "sha256": "b20c0c321d428c62568c1d9031e43cb37ded8df8558382da9b1faf0285bd1255",
+   "bytes": 1127,
+   "source": "modeled"
+  },
+  {
+   "id": "netflix-login",
+   "file": "frozen/netflix-login.html",
+   "url": "https://www.netflix.com/login",
+   "sha256": "9fb07af850a808368d49d813808e41c897b48694d244e39f739d6cdd5748a48e",
+   "bytes": 1242,
+   "source": "modeled"
+  },
+  {
+   "id": "okta-identifier",
+   "file": "frozen/okta-identifier.html",
+   "url": "https://acme.okta.com/oauth2/default/v1/authorize",
+   "sha256": "358ec31cedc76499a2f99c33836a2d4bdb08913edd5a42422df99b9ab68dabf2",
+   "bytes": 1148,
+   "source": "modeled"
+  },
+  {
+   "id": "okta-password",
+   "file": "frozen/okta-password.html",
+   "url": "https://acme.okta.com/signin/verify/okta/password",
+   "sha256": "73f7bd7cfd7da7b36a9eecb1cc1a13e2b255b9bade94bf423478a58f0b28b64a",
+   "bytes": 1116,
+   "source": "modeled"
+  },
+  {
+   "id": "okta-verify-code",
+   "file": "frozen/okta-verify-code.html",
+   "url": "https://acme.okta.com/signin/verify/okta/totp",
+   "sha256": "102f1355ab2bb15f3ed9f963b7605be0b2a233aaed359fd0acbfc983186b1ac3",
+   "bytes": 852,
+   "source": "modeled"
+  },
+  {
+   "id": "paypal-login",
+   "file": "frozen/paypal-login.html",
+   "url": "https://www.paypal.com/signin",
+   "sha256": "b856b7f4d5c384677fc861073b9b789c9a9c4cd36b6c3e9e1be98d742ae78cc1",
+   "bytes": 1515,
+   "source": "modeled"
+  },
+  {
+   "id": "robinhood-login",
+   "file": "frozen/robinhood-login.html",
+   "url": "https://robinhood.com/login",
+   "sha256": "18b24a72f28e9f5aec824c3a74f428e6bcd8031ceaf3afdf89b6dd9e00330141",
+   "bytes": 1177,
+   "source": "modeled"
+  },
+  {
+   "id": "shopify-card-frame",
+   "file": "frozen/shopify-card-frame.html",
+   "url": "https://checkout.pci.shopifyinc.com/build/a1/number-ltr.html",
+   "sha256": "adf2736a8d6fd82013670d219ef5fd32344e90434457b0957da77a792fc9a61f",
+   "bytes": 529,
+   "source": "modeled"
+  },
+  {
+   "id": "shopify-checkout",
+   "file": "frozen/shopify-checkout.html",
+   "url": "https://acme-store.myshopify.com/checkouts/cn/c1",
+   "sha256": "5e3f3c381ebde810e9222ffefb0e31e334369fe60825568acc1801db6978a510",
+   "bytes": 4465,
+   "source": "modeled"
+  },
+  {
+   "id": "slack-workspace-signin",
+   "file": "frozen/slack-workspace-signin.html",
+   "url": "https://slack.com/signin",
+   "sha256": "0261c11e9a5840ecda6f0af63d838b5eb13e7495ea0216321d55272dfc66754f",
+   "bytes": 935,
+   "source": "modeled"
+  },
+  {
+   "id": "stripe-checkout",
+   "file": "frozen/stripe-checkout.html",
+   "url": "https://checkout.stripe.com/c/pay/cs_test_a1",
+   "sha256": "e7fd9812ca08888462f3dbe2387b206134097e35d85b2ee015404038aa553221",
+   "bytes": 2730,
+   "source": "modeled"
+  },
+  {
+   "id": "stripe-dashboard-login",
+   "file": "frozen/stripe-dashboard-login.html",
+   "url": "https://dashboard.stripe.com/login",
+   "sha256": "6b6f326d0886d69f49b3882bd7b95ddfd35c7f75702e615ea794d6e25aa75c44",
+   "bytes": 1377,
+   "source": "modeled"
+  },
+  {
+   "id": "vercel-totp-boxes",
+   "file": "frozen/vercel-totp-boxes.html",
+   "url": "https://vercel.com/login/verify",
+   "sha256": "b404d941c98efbe8d7978ee9f0f2777bd49331e940e8f30e80cbcbc893d41600",
+   "bytes": 1493,
+   "source": "modeled"
+  },
+  {
+   "id": "wellsfargo-login",
+   "file": "frozen/wellsfargo-login.html",
+   "url": "https://connect.secure.wellsfargo.com/auth/login/present",
+   "sha256": "d9472748cd26a7fc236cd788f7d08e54843d45eddc3c6879c6b14f84f13e938e",
+   "bytes": 1182,
+   "source": "modeled"
+  },
+  {
+   "id": "x-login-flow",
+   "file": "frozen/x-login-flow.html",
+   "url": "https://x.com/i/flow/login",
+   "sha256": "05d46af1ac2a85a15d14cbeb1114336295acec71e739d280b77f2785ba2fea78",
+   "bytes": 1035,
+   "source": "modeled"
+  }
+ ]
+}
