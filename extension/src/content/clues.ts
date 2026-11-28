@@ -166,19 +166,33 @@ export interface FieldFacts {
 
 export const ROLES = Object.keys(FIELD_CLUES) as FieldRole[]
 
+/**
+ * Every field clue, made ready once: what to look for in display text (as
+ * hasPhrase would), and in code text, if it's long enough to match there.
+ * scoreField runs for every field of every scan.
+ */
+const COMPILED = ROLES.flatMap((role) =>
+  FIELD_CLUES[role].map(([phrase, value]) => {
+    const compact = squash(phrase)
+    return {
+      role,
+      value,
+      display: NON_SPACED.test(phrase) ? phrase : ` ${phrase} `,
+      code: compact.length >= 4 || SHORT_CODE_TOKENS.has(compact) ? compact : null,
+    }
+  }),
+)
+
 export function scoreField(f: FieldFacts): Record<FieldRole, number> {
   const score = Object.fromEntries(ROLES.map((r) => [r, 0])) as Record<FieldRole, number>
   // Whether the label itself names a login field: a question that doesn't is a security question.
   let named = false
-  for (const role of ROLES) {
-    for (const [phrase, value] of FIELD_CLUES[role]) {
-      if (hasPhrase(f.display, phrase)) {
-        score[role] += value
-        if (value > 0 && role !== "captcha") named = true
-      }
-      const compact = squash(phrase)
-      if ((compact.length >= 4 || SHORT_CODE_TOKENS.has(compact)) && f.code.includes(compact)) score[role] += value * 0.8
+  for (const clue of COMPILED) {
+    if (f.display.includes(clue.display)) {
+      score[clue.role] += clue.value
+      if (clue.value > 0 && clue.role !== "captcha") named = true
     }
+    if (clue.code !== null && f.code.includes(clue.code)) score[clue.role] += clue.value * 0.8
   }
 
   for (const token of f.autocomplete) {

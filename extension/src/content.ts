@@ -9,6 +9,7 @@ import { SIGNIN_SETTING, signInOn } from "./auth-state"
 import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
+import { scanGraph } from "./content/graph"
 import { readSubmitted } from "./content/formfill"
 import { manualFields, withManual } from "./content/manual"
 import { ownValue, rendered, trackUserInput } from "./content/fill"
@@ -89,7 +90,9 @@ function refresh() {
   const roots = openRoots(document, undefined, true)
   scannedRoots = roots
   watchShadowRoots(roots)
-  const result = scanPage(roots)
+  // One read of every control's box, style and label, shared by both scans below.
+  const graph = scanGraph(roots)
+  const result = scanPage(graph)
   kind = result.kind
   provider = result.provider
   // A reset form's email box isn't something to fill. Fields the user asked
@@ -103,7 +106,7 @@ function refresh() {
   fields = next
   submitControl = kind ? result.submit : undefined
   // A field a login form claims (its email box) is the login's.
-  const forms = scanForms(roots).filter((f) => !fields.some((l) => l.el === f.el))
+  const forms = scanForms(graph).filter((f) => !fields.some((l) => l.el === f.el))
   const same = forms.length === formFields.length && forms.every((f, i) => f.el === formFields[i].el && f.role === formFields[i].role && f.section === formFields[i].section && f.form === formFields[i].form && f.parent === formFields[i].parent)
   if (!same) formsId++
   formFields = forms
