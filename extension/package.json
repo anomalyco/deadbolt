@@ -7,9 +7,10 @@
   "scripts": {
     "build": "bun scripts/build.ts",
     "watch": "bun scripts/build.ts --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p corpus",
     "test": "bun test",
-    "check": "tsc --noEmit && bun test",
+    "check": "tsc --noEmit && tsc --noEmit -p corpus && bun test && bun run test:corpus",
+    "test:corpus": "bun corpus/score.ts --gate",
     "e2e": "bun e2e/run.ts",
     "e2e:parallel": "bun scripts/e2e-parallel.ts"
   },

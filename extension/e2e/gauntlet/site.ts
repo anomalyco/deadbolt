@@ -6,6 +6,7 @@
 // own. Every account, code and answer here is made up.
 
 import { createHmac, randomBytes } from "node:crypto"
+import { TRAP_PAGES, trapPages } from "./traps"
 
 export interface Account {
   /** What the login is saved under: an email or a plain username. */
@@ -37,7 +38,7 @@ export interface GauntletOptions {
 
 export interface PageInfo {
   slug: string
-  group: "Sign-in" | "Codes and MFA" | "Identity" | "Tricky DOM" | "Other flows"
+  group: "Sign-in" | "Codes and MFA" | "Identity" | "Tricky DOM" | "Other flows" | "Traps"
   title: string
   blurb: string
 }
@@ -90,6 +91,7 @@ export const PAGES: PageInfo[] = [
   { slug: "change-password", group: "Other flows", title: "Change password", blurb: "Current, new and confirm." },
   { slug: "reset", group: "Other flows", title: "Password reset", blurb: "Email, link, new password." },
   { slug: "checkout", group: "Other flows", title: "Checkout", blurb: "Card and billing address." },
+  ...TRAP_PAGES,
 ]
 
 // ---- One-time codes ---------------------------------------------------------------
@@ -419,6 +421,9 @@ window.__gauntletClosed={value:(id)=>root.getElementById(id).value,rect:(id)=>ro
     )
 
   const pages: Record<string, (req: Request, u: URL, rest: string, form: () => Promise<Record<string, string>>) => Response | Promise<Response>> = {
+    // ---- Traps (traps.ts) ----
+    ...trapPages({ h, url, login, find, ticket, signedIn, errorLine, esc, savedProfile, plainFields: () => plainFields(), clientLogin, regions: REGIONS.US, smsCode: SMS_CODE, codeOk }),
+
     // ---- Sign-in ----
     basic: async (req, _u, _r, form) => {
       if (req.method !== "POST") return h("Sign in", `<h1>Sign in</h1><p class="lede">Use your Gauntlet account.</p>${loginForm(url("basic"), { extra: `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="remember"> Remember me</label>` })}<p class="muted"><a href="${url("reset")}">Forgot your password?</a></p>`, "basic")

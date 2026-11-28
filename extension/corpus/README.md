@@ -2,8 +2,8 @@
 
 Crawls real sites' sign-in pages and runs the extension's form detector
 (`src/content/detect.ts`) on them, to see how login forms look in the wild and
-where detection disagrees with what the pages declare. Not part of
-`bun run check`.
+where detection disagrees with what the pages declare. The crawl is not part
+of `bun run check`; the frozen corpus gate below is.
 
 ```sh
 bun corpus/crawl.ts --top 50            # shake-out run
@@ -80,3 +80,64 @@ Needs Playwright's Chromium (`bunx playwright-core install chromium`).
   failure patterns with example sites, the worst pages, and `contact.html`, a
   sheet of screenshots with each field boxed and tagged `label→role`. With
   step-2 results it adds their tables and `step2.html` (step 1 and 2 side by side).
+
+## The detection gate (frozen corpus)
+
+`bun run test:corpus` (in `bun run check`) scores the detector on a frozen
+corpus with no network and no browser, in well under a second:
+
+```sh
+bun corpus/score.ts --gate            # what CI runs
+bun corpus/score.ts --verbose         # every miss, field by field
+bun corpus/score.ts --only github     # some pages
+bun corpus/score.ts --update-gate     # after an improvement: raise the floors
+```
+
+- `frozen/`: one script-free HTML file per page, with the layout Chromium gave
+  every control (`data-db-box="x,y,w,h,vis"`) and its shadow roots as
+  `<template shadowrootmode>`. The starter set is 77 pages: 49 modeled on
+  the structure of real sign-in, sign-up, code, change-password and
+  checkout pages (GitHub, Google's email-first step with its
+  `hiddenPassword`, Microsoft's off-screen boxes, Apple, Amazon, Stripe's
+  React sign-in, Okta, Auth0, Clerk, Shopify, PayPal, Coinbase, banks, open
+  and closed shadow roots, six-box codes) and 28 decoys (searches, promo and
+  gift cards, newsletters, an `author.` host, invites, admin and settings
+  forms, comments, support, a transfer PIN, two sent-code groups, a
+  delete-account confirmation). Every address in them is reserved
+  (`example.com`); none holds a value.
+- `frozen.lock.json`: each page's URL and SHA-256. `score.ts` refuses a page
+  that doesn't match.
+- `gold-labels.jsonl`: per page, the kind the login detector should give it
+  and the role of each control it should claim (`login`), and the identity
+  and payment fields (`forms`), by `controlKey` (`replay.ts`: `#id`,
+  `tag[name=…]`, `host >> #id` in a shadow root). `decoy: true` marks a page
+  on which no login menu should open.
+- `gate.json`: the baseline the gate holds, written by `--update-gate`:
+  per-role precision and recall floors, the page-kind floor, the decoy
+  false-trigger ceilings (each 0.5 points past what was measured), and the
+  pages that scored exactly, each of which must stay exact. `--update-gate`
+  only ratchets; `--allow-regress` is for a deliberate trade, said so in the
+  PR. The target is 98% precision, 95% recall and at most 2% decoy false
+  triggers.
+
+`score.ts` reports precision, recall and F1 for username/email, password,
+new password, one-time code, card and address; how often the page's kind is
+right; the decoy false-trigger rate (decoys on which the login detector
+claims a field, so a menu would open) and decoys offered a card or address.
+It scores the corpus twice and fails if the two runs' predictions differ.
+
+New pages come from `freeze.ts`, which opens each page once in headless
+Chromium, measures it, strips scripts, styles, frame sources, images, event
+handlers, query strings and every value, and updates the lock:
+
+```sh
+bun corpus/freeze.ts --in $TMPDIR/opencode/deadbolt-corpus   # what crawl.ts saved
+bun corpus/freeze.ts --urls corpus/decoy-urls.txt --decoy    # live pages (network, once)
+bun corpus/freeze.ts --html <dir>                            # pages written by hand (<meta name="db-url">)
+bun corpus/freeze.ts --relock                                # after editing a frozen page by hand
+```
+
+A page without a gold label gets a proposed one in
+`gold-labels.proposed.jsonl` (from its autocomplete tokens and input types);
+check it, set its kind and move it into `gold-labels.jsonl`. Keep the corpus
+small: under 500 KB in all.
