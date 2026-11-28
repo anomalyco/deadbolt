@@ -244,13 +244,49 @@ export function scanForms(source: ScanSource = openRoots()): FormField[] {
   }
   // After the selects: an expiry in month and year dropdowns counts.
   notACard(found, graph)
+  outOfContext(found, graph)
   const fields = sectionsOf(found.filter((c): c is Candidate & { role: FormRole } => c.role !== null))
   // One lone box guessed from its text (a newsletter's email, a phone
   // number on its own) isn't an address form; one the site marked is.
   const tokened = new Set(found.filter((c) => autocompleteRole(c.el) !== null).map((c) => c.el))
   const size = new Map<string, number>()
   for (const f of fields) size.set(f.section, (size.get(f.section) ?? 0) + 1)
-  return fields.filter((f) => f.kind === "card" || size.get(f.section)! > 1 || tokened.has(f.el))
+  // A newsletter's one email box is a subscription, autocomplete or not.
+  const newsletter = (f: FormField) => f.role === "email" && NEWSLETTER.test(plain(`${graph.label(f.el)} ${codeOf(f.el)} ${graph.context(graph.clusterOf(f.el))}`))
+  return fields.filter((f) => f.kind === "card" || size.get(f.section)! > 1 || (tokened.has(f.el) && !newsletter(f)))
+}
+
+/** A newsletter's or an updates list's words, around a lone email box. */
+const NEWSLETTER = w(/\b(newsletters?|subscribe|subscription|mailing list|sign ?up for|get (the )?(latest|updates)|email updates|stay (in touch|updated|informed)|join our|inbox|emails? sign ?up)\b/)
+/** Words that put a lone expiry or security code on a card: a payment's, not a texted code's or a link's. */
+const PAYMENT_CONTEXT = w(/\b(card|credit|debit|cc|payment|pay|billing|checkout|kreditkarte|tarjeta|carte|carta|cartao|kaart|zahlung|paiement|pago|pagamento|カード|卡|支付)\b/)
+/** An address's own boxes, beside which a region or city is one. */
+const ADDRESS_ROLES: ReadonlySet<FormRole | null> = new Set(["street-address", "address-line1", "address-line2", "address-line3", "postal-code", "address-level2", "address-level1", "country"])
+const COUNTRY = w(/\b(country|nation|pais|pays|paese|land|国|страна)\b/)
+const ADDRESS_CONTEXT = w(/\b(address|shipping|billing|delivery|ship to|deliver to|street|postal|zip|adresse|direccion|indirizzo|endereco|liefer\w*|livraison|envio|住所|地址)\b/)
+
+/**
+ * Roles guessed from text that their cluster gives no reason for: a
+ * security code or expiry with no card number, name or type beside it and
+ * no word of a card or payment (a texted code's "Verification code", a share
+ * link's "Link expires"); a region or city with no other address box and no
+ * word of an address (an SSO form's "Data region"). A role the site marked
+ * by autocomplete stays.
+ */
+function outOfContext(found: Candidate[], graph: FormGraph) {
+  for (const cluster of new Set(found.map((c) => graph.clusterOf(c.el)))) {
+    const own = found.filter((c) => graph.clusterOf(c.el) === cluster && autocompleteRole(c.el) === null)
+    const all = found.filter((c) => graph.clusterOf(c.el) === cluster)
+    let text: string | undefined
+    const says = (re: RegExp) => re.test((text ??= plain(graph.context(cluster)) + all.map((c) => c.display + c.code).join(" ")))
+    const card = own.filter((c) => c.role?.startsWith("cc-"))
+    if (card.length && !all.some((c) => c.role === "cc-number" || c.role === "cc-name" || c.role === "cc-type") && !says(PAYMENT_CONTEXT))
+      for (const c of card) c.role = null
+    // "Country/Region" is a country's box, which needs no address beside it.
+    const region = own.filter((c) => (c.role === "address-level1" || c.role === "address-level2") && !COUNTRY.test(c.display + c.code))
+    if (region.length && !all.some((c) => ADDRESS_ROLES.has(c.role) && !region.includes(c)) && !says(ADDRESS_CONTEXT))
+      for (const c of region) c.role = null
+  }
 }
 
 const formOf = (el: Element): HTMLFormElement | null => (el as FormControl).form ?? el.closest("form")

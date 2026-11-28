@@ -256,6 +256,32 @@ export function scanGraph(roots: Array<Document | ShadowRoot> = openRoots()): Fo
     if (v === undefined) visibleCache.set(el, (v = shown(el.getBoundingClientRect(), () => style(el))))
     return v
   }
+  // Opacity isn't inherited, so a box inside a faded-out wrapper reads opacity 1
+  // itself; and a box inside a clipping wrapper too thin to show it is drawn
+  // nowhere (unless it's fixed to the viewport, out of the wrapper's reach).
+  // Each ancestor is read once per scan, so the walks cost one style read per element.
+  const fadedCache = new WeakMap<Element, boolean>()
+  const clippedCache = new WeakMap<Element, boolean>()
+  const up = (el: Element, cache: WeakMap<Element, boolean>, test: (el: Element) => boolean): boolean => {
+    const cached = cache.get(el)
+    if (cached !== undefined) return cached
+    const parent = composedParent(el)
+    const out = test(el) || (!!parent && parent !== document.body && parent !== document.documentElement && up(parent, cache, test))
+    cache.set(el, out)
+    return out
+  }
+  const fadedOut = (el: Element) => Number(style(el).opacity || 1) <= 0.05
+  const clips = (el: Element) => {
+    const s = style(el)
+    if (![s.overflow, s.overflowX, s.overflowY].some((o) => o === "hidden" || o === "clip")) return false
+    const r = el.getBoundingClientRect()
+    return r.width < 2 || r.height < 2
+  }
+  const hiddenByAncestor = (el: Element) => {
+    const parent = composedParent(el)
+    if (!parent || parent === document.body || parent === document.documentElement) return false
+    return up(parent, fadedCache, fadedOut) || (style(el).position !== "fixed" && up(parent, clippedCache, clips))
+  }
   // A box in a web component inside a <form> is the form's, though the DOM doesn't associate it.
   const formOf = (el: FormControl) => el.form ?? (composedClosest(el, "form") as HTMLFormElement | null)
   const skipped = (el: FormControl) => {
@@ -271,7 +297,7 @@ export function scanGraph(roots: Array<Document | ShadowRoot> = openRoots()): Fo
   if (!optedOut(document.body))
     for (const el of deepQueryAll<FormControl>("input, select, textarea", roots).slice(0, MAX_CONTROLS)) {
       if (el instanceof HTMLInputElement && NOT_TEXT.has((el.getAttribute("type") || "text").toLowerCase())) continue
-      if (!visible(el) || skipped(el) || concealed(el, style)) continue
+      if (!visible(el) || skipped(el) || concealed(el, style) || hiddenByAncestor(el)) continue
       controls.push(el)
     }
 

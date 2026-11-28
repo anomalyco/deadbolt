@@ -31,12 +31,14 @@ const textual = (f: ScannedField) => f.facts.type === "text" || f.facts.type ===
 
 /**
  * Before roles: a password box after another in the same cluster is its
- * confirmation, unless it's a PIN or token box.
+ * confirmation, unless it's a PIN or token box. A masked box that no
+ * password score claims (a bank's masked "User ID") isn't a first password.
  */
 export function confirmations(fields: ScannedField[]) {
   const seen = new Set<FormCluster | undefined>()
   for (const f of fields) {
     if (f.facts.type !== "password" || f.score.otp >= FIELD_THRESHOLD) continue
+    if (f.score.password < FIELD_THRESHOLD && f.score["new-password"] < FIELD_THRESHOLD) continue
     if (seen.has(f.cluster)) {
       f.score["new-password"] += 4
       f.score.password -= 4
@@ -63,6 +65,10 @@ export function rationalize(fields: ScannedField[]) {
   }
   for (const cluster of new Set(fields.map((f) => f.cluster))) {
     const own = fields.filter((f) => f.cluster === cluster)
+    // A masked user ID beside a plain box for who you are (a bank's national ID): a second
+    // identifier the saved login doesn't hold apart from the username, so neither is filled into it.
+    if (own.some((f) => IDENTIFIER.includes(f.role) && f.facts.type !== "password"))
+      for (const f of own) if (f.facts.type === "password" && IDENTIFIER.includes(f.role)) f.role = null
     const passwords = own.filter((f) => f.role === "password")
     if (passwords.length !== 1 || own.some((f) => f.role === "new-password" || IDENTIFIER.includes(f.role))) continue
     const before = own.slice(0, own.indexOf(passwords[0])).reverse()
@@ -137,6 +143,7 @@ const GROUPS: Array<[string, string[]]> = (
     ["offer", ["gift card", "promo code", "coupon", "voucher", "discount code", "redeem", "balance"]],
     ["file", ["encrypt", "pdf", "upload", "document", "file"]],
     ["payroll", ["direct deposit", "routing number", "payroll", "payee", "withholding"]],
+    ["game-code", ["room code", "game code", "game pin", "join code", "party code", "join game", "join a game", "join room"]],
   ] as Array<[string, string[]]>
 ).map(([name, list]) => [name, list.map((p) => words(p).trim())])
 
