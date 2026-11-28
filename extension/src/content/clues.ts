@@ -171,35 +171,42 @@ export interface FieldFacts {
 
 export const ROLES = Object.keys(FIELD_CLUES) as FieldRole[]
 
+interface Compiled {
+  role: FieldRole
+  value: number
+  /** What to look for in display text, as hasPhrase would. */
+  display: string
+  /** What to look for in an id or name, squashed; null when too short to match there, or when a stronger phrase owns it. */
+  code: string | null
+  /** What to look for in class names, word by word: the display text of every phrase sharing `code`. */
+  classes: string[]
+}
+
 /**
- * Every field clue, made ready once: what to look for in display text (as
- * hasPhrase would), and in code text, if it's long enough to match there.
- * Phrases that squash to the same code ("username" and "user name") match
- * an id once, at the strongest weight among them. scoreField runs for every
- * field of every scan.
+ * Every field clue, made ready once. Phrases that squash to the same code
+ * ("username" and "user name") match an id or class once, at the strongest
+ * weight among them; the class names may spell any of them ("user-name",
+ * "userName", "username"). scoreField runs for every field of every scan.
  */
-const COMPILED = ROLES.flatMap((role) => {
-  const clues = FIELD_CLUES[role].map(([phrase, value]) => {
+const COMPILED: Compiled[] = ROLES.flatMap((role) => {
+  const clues: Compiled[] = FIELD_CLUES[role].map(([phrase, value]) => {
     const compact = squash(phrase)
-    return {
-      role,
-      value,
-      display: NON_SPACED.test(phrase) ? phrase : ` ${phrase} `,
-      code: compact.length >= 4 || SHORT_CODE_TOKENS.has(compact) ? (compact as string | null) : null,
-    }
+    const display = NON_SPACED.test(phrase) ? phrase : ` ${phrase} `
+    return { role, value, display, code: compact.length >= 4 || SHORT_CODE_TOKENS.has(compact) ? compact : null, classes: [] }
   })
-  const strongest = new Map<string, (typeof clues)[number]>()
+  const strongest = new Map<string, Compiled>()
   for (const c of clues) {
     if (c.code === null) continue
     const kept = strongest.get(c.code)
     if (!kept || Math.abs(c.value) > Math.abs(kept.value)) strongest.set(c.code, c)
   }
+  for (const c of clues) if (c.code !== null) strongest.get(c.code)!.classes.push(c.display)
   for (const c of clues) if (c.code !== null && strongest.get(c.code) !== c) c.code = null
   return clues
 })
 
 /** Whether a clue matches the field's code: its ids as one squashed string, or its class names word by word. */
-const inCode = (f: FieldFacts, clue: (typeof COMPILED)[number]) => clue.code !== null && (f.code.includes(clue.code) || (!!f.classes && f.classes.includes(clue.display)))
+const inCode = (f: FieldFacts, clue: Compiled) => clue.code !== null && (f.code.includes(clue.code) || (!!f.classes && clue.classes.some((d) => f.classes!.includes(d))))
 
 /** Clues of a user id strong enough to say a masked box holds who you are, not a secret. */
 const USER_ID = 4

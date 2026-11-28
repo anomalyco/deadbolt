@@ -10,8 +10,8 @@
 
 import type { FieldRole, SurfaceKind } from "../messages"
 import { bestRole, FORM_KINDS, hasPhrase, namesRole, providerFromLabel, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind, type Provider } from "./clues"
-import { graphOf, innerText, isVisible, within, type FormCluster, type FormGraph, type ScanSource } from "./graph"
-import { clusterFeatures, confirmations, decoyCluster, LOGIN_TOKENS, loginOdds, notLogin, rationalize, unclaimedBoxes, type PageFacts, type ScannedField } from "./rationalize"
+import { composedParent, graphOf, innerText, isVisible, within, type FormCluster, type FormGraph, type ScanSource } from "./graph"
+import { clusterFeatures, confirmations, decoyCluster, LOGIN_TOKENS, loginOdds, notLogin, ownText, rationalize, saysNewsletter, unclaimedBoxes, type PageFacts, type ScannedField } from "./rationalize"
 import { deepQueryAll, openRoots } from "./shadow"
 
 export { ignored, isVisible, labelText, type FormControl } from "./graph"
@@ -85,7 +85,7 @@ function factsFor(el: HTMLInputElement, graph: FormGraph, isMasked: boolean): Fi
     .join(" ")
   // Class names are a stylesheet's words: squashed together, a utility like
   // `placeholder:opacity-100` reads "city". They match word by word instead.
-  const classes = (el.getAttribute("class") ?? "").slice(0, 300).replace(/([a-z])([A-Z])/g, "$1 $2")
+  const classes = (el.getAttribute("class") ?? "").slice(0, 300).replace(/([a-z\d])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
   const label = graph.label(el)
   return {
     type: isMasked ? "password" : (el.getAttribute("type") || "text").toLowerCase(),
@@ -277,11 +277,13 @@ function collectControls(cluster: FormCluster | undefined, graph: FormGraph, fie
     candidates.add(el)
   }
   for (const el of candidates) {
-    // A product tile or a listing's link: too much text to be a button. Read before any layout or style.
-    if (!el.hasAttribute("aria-label") && (el.textContent?.length ?? 0) > MAX_CONTROL_TEXT) continue
+    // A product tile or a listing's link: too much text to be a button. Read before any layout or
+    // style, with markup's indentation collapsed; an icon's inline <style> is no text of the button's.
+    const raw = (el.textContent ?? "").replace(/\s+/g, " ").trim()
+    if (!el.hasAttribute("aria-label") && raw.length > MAX_CONTROL_TEXT && !el.querySelector("style")) continue
     // Its label and kind matter only on a page with login fields, and only as the form's own button.
     const own = fields && !(el instanceof HTMLAnchorElement) && (!root || within(root, el))
-    if (!own && (provider && near || !mayNameProvider(el))) continue
+    if (!own && (provider && near || !mayNameProvider(el, raw))) continue
     if (!graph.visible(el)) continue
     const text = controlText(el)
     if ((!provider || !near) && providerForControl(el, text)) {
@@ -312,31 +314,21 @@ function shellOf(root: Element | null): Element | null {
   if (!root) return null
   let shell = root
   for (let depth = 0; depth < SHELL_DEPTH && !shell.matches(SIDE); depth++) {
-    const parent = shell.parentElement
+    const parent = composedParent(shell)
     if (!parent || parent === document.body || parent === document.documentElement) break
     shell = parent
   }
   return shell
 }
 
-/** A cluster's own words and its boxes' labels, not the page's title or headings. */
-const ownText = (cluster: FormCluster, graph: FormGraph) => `${graph.context(cluster)} ${words(cluster.controls.map((el) => graph.label(el)).join(" "))}`
-
-/** Whether a cluster's own words say newsletter and not sign in. */
-function saysNewsletter(cluster: FormCluster | undefined, graph: FormGraph): boolean {
-  if (!cluster?.root) return false
-  const own = scoreFormText(ownText(cluster, graph))
-  return own.newsletter >= FORM_THRESHOLD && own.login < FORM_THRESHOLD
-}
-
 /** Provider names as they may run into other text ("withGoogle"): a cheap first look before a control's layout and text are read. */
 const PROVIDER_HINT = /google|apple|microsoft|outlook|office|azure|entra|github|facebook|twitter|linkedin|gitlab|slack|discord|amazon|okta|sso|single sign|saml|company|work account|organi[sz]ation|(^|[^a-z])x([^a-z]|$)/
 
-/** Whether a control could be a sign-in-provider button, by its attributes and raw text alone. */
-function mayNameProvider(el: Element): boolean {
+/** Whether a control could be a sign-in-provider button, by its attributes and raw text (whitespace collapsed) alone. */
+function mayNameProvider(el: Element, raw: string): boolean {
   if (el.hasAttribute("data-provider") || el.hasAttribute("data-social")) return true
-  const raw = [el.getAttribute("aria-label"), el.textContent, (el as HTMLInputElement).value, el.getAttribute("title")].filter(Boolean).join(" ")
-  return PROVIDER_HINT.test(raw.normalize("NFKD").toLowerCase())
+  const text = [el.getAttribute("aria-label"), raw, (el as HTMLInputElement).value, el.getAttribute("title")].filter(Boolean).join(" ")
+  return PROVIDER_HINT.test(text.normalize("NFKD").toLowerCase())
 }
 
 /** What the cluster around the login fields holds beyond them: boxes only a sign-up asks for (a birthday, a name). */

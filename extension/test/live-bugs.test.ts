@@ -2,9 +2,10 @@
 // up, written small: the detector's fix for it, held in place.
 import { afterEach, describe, expect, test } from "bun:test"
 import { scoreField, type FieldFacts } from "../src/content/clues"
-import { scanPage } from "../src/content/detect"
+import { clusterVerdicts, scanPage } from "../src/content/detect"
 import { scanForms } from "../src/content/forms"
 import { scanGraph } from "../src/content/graph"
+import { WEIGHTS } from "../src/content/weights.gen"
 
 function page(html: string, path = "/login", title = "") {
   history.replaceState(null, "", path)
@@ -190,5 +191,152 @@ describe("controls", () => {
     const result = scanPage()
     expect(result.kind).toBeNull()
     expect(result.provider).toBe(true)
+  })
+})
+
+describe("card and identity fields in context", () => {
+  const setURL = (url: string) => (window as unknown as { happyDOM: { setURL(u: string): void } }).happyDOM.setURL(url)
+  // This window as a frame: its own top's descriptor, wherever happy-dom keeps it, put back after.
+  const owner = (() => {
+    for (let o: object | null = window; o; o = Object.getPrototypeOf(o)) if (Object.getOwnPropertyDescriptor(o, "top")) return o
+    return window
+  })()
+  const topDescriptor = Object.getOwnPropertyDescriptor(owner, "top")
+  afterEach(() => {
+    delete (window as { top?: unknown }).top
+    if (owner === window && topDescriptor) Object.defineProperty(window, "top", topDescriptor)
+    setURL("https://example.com/login")
+  })
+
+  test("a payment provider's frame keeps its one security code or expiry box", () => {
+    Object.defineProperty(window, "top", { configurable: true, get: () => ({}) })
+    setURL("https://js.stripe.com/v3/elements-inner-cvc.html")
+    document.body.innerHTML = `<form><label for="sc">Security code</label><input id="sc" maxlength="4"></form>`
+    expect(formRoles()).toEqual({ sc: "cc-csc" })
+    document.body.innerHTML = `<form><label for="ex">Expiration date</label><input id="ex" placeholder="MM / YY"></form>`
+    expect(formRoles()).toEqual({ ex: "cc-exp" })
+  })
+
+  test("the same lone security code box outside a payment frame has no card role", () => {
+    page(`<form><label for="sc">Security code</label><input id="sc" maxlength="4"></form>`, "/verify")
+    expect(scanForms()).toEqual([])
+  })
+
+  test("a saved card's CVV prompt stands alone", () => {
+    page(`<form><h2>Confirm your purchase</h2><label for="cvv">CVV</label><input id="cvv" maxlength="4"><button>Confirm</button></form>`, "/confirm")
+    expect(formRoles()).toEqual({ cvv: "cc-csc" })
+  })
+
+  test("a guest checkout's email beside a newsletter checkbox stays", () => {
+    page(`<form><h2>Guest checkout</h2><label for="em">Email</label><input id="em" type="email" autocomplete="email">
+      <label><input type="checkbox" name="news"> Subscribe to our newsletter</label><button>Continue to shipping</button></form>`, "/checkout")
+    expect(formRoles()).toEqual({ em: "email" })
+  })
+})
+
+describe("controls with markup inside", () => {
+  // An icon's stylesheet, 250 characters of it: no text of the button's.
+  const style = `<style>
+            .a { fill: #4285f4; } .b { fill: #34a853; } .c { fill: #fbbc05; } .d { fill: #ea4335; }
+            .e { stroke: none; opacity: 1; } .f { fill-rule: evenodd; clip-rule: evenodd; } .g { transform: scale(1); }
+          </style>`
+  const indent = "\n" + " ".repeat(60)
+
+  test("an indented button with an icon's inline style is still a provider's, and another still the submit", () => {
+    page(`<main><form><label for="e">Email</label><input id="e" type="email">
+        <button type="submit">${indent}<svg viewBox="0 0 24 24"><path d="M0 0h24v24H0z"></path></svg>${indent}Sign in${indent}${indent}</button>
+        <button type="button">${indent}${style}${indent}<svg viewBox="0 0 24 24"><path d="M0 0h24v24H0z"></path></svg>${indent}Continue with Google${indent}</button>
+      </form></main>`, "/start")
+    expect(document.querySelector("button[type=submit]")!.textContent!.length).toBeGreaterThan(160)
+    const result = scanPage()
+    expect(result.provider).toBe(true)
+    expect(result.submit?.textContent).toContain("Sign in")
+  })
+
+  test("an SSO link written over several lines is a provider's", () => {
+    page(`<main><a href="https://example.com/sso/start">
+        Single
+        Sign-On
+      </a></main>`, "/")
+    expect(scanPage().provider).toBe(true)
+  })
+})
+
+describe("clipping ancestors, as CSS positions boxes", () => {
+  const ids = () => scanGraph().controls.map((c) => c.id)
+
+  test("an absolute box escapes a collapsed wrapper that isn't its containing block", () => {
+    page(`<div id="w" style="overflow:hidden"><form><input id="e" type="email" style="position:absolute"></form></div>`)
+    thin("w", 240, 0)
+    expect(ids()).toEqual(["e"])
+  })
+
+  test("a collapsed wrapper that is an absolute box's containing block clips it", () => {
+    page(`<div id="w" style="overflow:hidden;position:relative"><form><input id="e" type="email" style="position:absolute"></form></div>`)
+    thin("w", 240, 0)
+    expect(ids()).toEqual([])
+  })
+
+  test("a box in a fixed modal escapes a collapsed wrapper around the modal", () => {
+    page(`<div id="w" style="overflow:hidden"><div style="position:fixed"><form><input id="e" type="email"></form></div></div>`)
+    thin("w", 240, 0)
+    expect(ids()).toEqual(["e"])
+  })
+
+  test("a display: contents wrapper clips nothing", () => {
+    page(`<div id="w" style="display:contents;overflow:hidden"><form><input id="e" type="email"></form></div>`)
+    thin("w", 0, 0)
+    expect(ids()).toEqual(["e"])
+  })
+
+  test("a fixed honeypot in a transformed one-pixel wrapper is clipped by it", () => {
+    page(`<form><input id="u" autocomplete="username"><input id="p" type="password" autocomplete="current-password">
+      <div id="hp" style="transform:translateY(0);overflow:hidden"><input id="hp2" type="password" style="position:fixed"></div></form>`)
+    thin("hp", 240, 1)
+    expect(ids()).toEqual(["u", "p"])
+  })
+})
+
+describe("class names that share a code", () => {
+  const facts = (classes: string): FieldFacts => ({ type: "text", autocomplete: [], display: " ", code: "", classes, maxLength: 0, inputMode: "" })
+
+  test("user-name, userName and username each score a username once", () => {
+    // What factsFor makes of class="user-name", class="userName" and class="username".
+    for (const classes of [" user name ", " username "]) expect(scoreField(facts(classes)).username).toBeCloseTo(4)
+  })
+
+  test("userid scores a user id once", () => {
+    expect(scoreField(facts(" userid ")).username).toBeCloseTo(3.2)
+    expect(scoreField(facts(" user id ")).username).toBeCloseTo(3.2)
+  })
+
+  test("zip-code counts against a login field once", () => {
+    expect(scoreField(facts(" zip code ")).username).toBeCloseTo(-4.8)
+    expect(scoreField(facts(" zipcode ")).username).toBeCloseTo(-4.8)
+  })
+
+  test("camelCase and acronym class names split into their words", () => {
+    page(`<form><input id="a" class="userName"><input id="b" type="password"><button>Sign in</button></form>`)
+    expect(byId(scanPage())).toEqual({ a: "username", b: "password" })
+    page(`<form><input id="c" class="OTPInput" maxlength="6"><button>Verify</button></form>`, "/verify")
+    expect(byId(scanPage())).toEqual({ c: "otp" })
+  })
+})
+
+describe("a newsletter's features", () => {
+  test("a magic-link sign-in on /login keeps its path and title, well above the threshold", () => {
+    page(`<header><h1>Acme</h1></header><main><form><label for="e">Email</label><input id="e" type="email"><button>Send magic link</button></form></main>`, "/login", "Log in – Acme")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    const [verdict] = clusterVerdicts()
+    expect(verdict.features).toContain("path:login")
+    expect(verdict.features).toContain("title:login")
+    expect(verdict.odds).toBeGreaterThan(WEIGHTS.threshold + 1)
+  })
+
+  test("a footer newsletter box on /login doesn't take the page's path or title", () => {
+    page(`<main><h1>Welcome back!</h1></main><footer><form><input id="news" type="email" placeholder="Enter your email to subscribe to our newsletter"><button>Sign up</button></form></footer>`, "/login", "Login - Example")
+    const features = clusterVerdicts().flatMap((v) => v.features)
+    expect(features.some((f) => f.startsWith("path:") || f.startsWith("title:"))).toBe(false)
   })
 })

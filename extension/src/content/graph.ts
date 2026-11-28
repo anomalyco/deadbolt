@@ -76,6 +76,18 @@ export function concealed(el: Element, style: (el: Element) => CSSStyleDeclarati
   return false
 }
 
+/** A style whose box is the containing block of fixed boxes inside it (and so of absolute ones), as fill.ts reads it. */
+function holdsFixed(s: CSSStyleDeclaration): boolean {
+  const set = (p: string, none = "none") => (s.getPropertyValue(p) || none) !== none
+  return (
+    ["transform", "translate", "rotate", "scale", "offset-path", "perspective", "filter", "backdrop-filter"].some((p) => set(p)) ||
+    /paint|layout|strict|content/.test(s.getPropertyValue("contain")) ||
+    /transform|translate|rotate|scale|offset-path|perspective|filter|contain/.test(s.getPropertyValue("will-change")) ||
+    set("container-type", "normal") ||
+    s.getPropertyValue("content-visibility") === "auto"
+  )
+}
+
 export const innerText = (el: Element | null | undefined) => ((el as HTMLElement | null)?.innerText ?? el?.textContent ?? "").trim()
 
 /** Closest preceding text when a field has no <label>, e.g. a <span> above it. */
@@ -109,7 +121,7 @@ export function labelText(el: FormControl, labels: ArrayLike<HTMLLabelElement> =
 }
 
 /** The element's parent, or its shadow root's host. */
-const composedParent = (el: Element): Element | null => el.parentElement ?? ((el.getRootNode() as ShadowRoot).host ?? null)
+export const composedParent = (el: Element): Element | null => el.parentElement ?? ((el.getRootNode() as ShadowRoot).host ?? null)
 
 /** The nearest element around `el` matching `selector`, through shadow hosts. */
 function composedClosest(el: Element, selector: string): Element | null {
@@ -258,29 +270,53 @@ export function scanGraph(roots: Array<Document | ShadowRoot> = openRoots()): Fo
   }
   // Opacity isn't inherited, so a box inside a faded-out wrapper reads opacity 1
   // itself; and a box inside a clipping wrapper too thin to show it is drawn
-  // nowhere (unless it's fixed to the viewport, out of the wrapper's reach).
-  // Each ancestor is read once per scan, so the walks cost one style read per element.
+  // nowhere, unless it escapes the wrapper as CSS has it (fill.ts, clippedBox):
+  // an absolute box escapes the ancestors below its containing block (the
+  // nearest positioned one), a fixed box every ancestor below one that holds
+  // fixed boxes (a transformed one). Each ancestor is read once per scan, so
+  // the walks cost one style read per element.
   const fadedCache = new WeakMap<Element, boolean>()
   const clippedCache = new WeakMap<Element, boolean>()
-  const up = (el: Element, cache: WeakMap<Element, boolean>, test: (el: Element) => boolean): boolean => {
-    const cached = cache.get(el)
+  const top = (el: Element | null): el is null => !el || el === document.body || el === document.documentElement
+  const faded = (el: Element): boolean => {
+    const cached = fadedCache.get(el)
     if (cached !== undefined) return cached
     const parent = composedParent(el)
-    const out = test(el) || (!!parent && parent !== document.body && parent !== document.documentElement && up(parent, cache, test))
-    cache.set(el, out)
+    const out = Number(style(el).opacity || 1) <= 0.05 || (!top(parent) && faded(parent))
+    fadedCache.set(el, out)
     return out
   }
-  const fadedOut = (el: Element) => Number(style(el).opacity || 1) <= 0.05
   const clips = (el: Element) => {
     const s = style(el)
+    // A box with no box of its own (display: contents, inline) clips nothing.
+    if (s.display === "contents" || s.display === "inline") return false
     if (![s.overflow, s.overflowX, s.overflowY].some((o) => o === "hidden" || o === "clip")) return false
     const r = el.getBoundingClientRect()
     return r.width < 2 || r.height < 2
   }
+  type Escape = "none" | "absolute" | "fixed"
+  const escapeOf = (s: CSSStyleDeclaration): Escape => (s.position === "fixed" ? "fixed" : s.position === "absolute" ? "absolute" : "none")
+  // Whether a box that reaches `el` in flow (escaping nothing) is clipped by it or above it.
+  const clippedFrom = (el: Element): boolean => {
+    const cached = clippedCache.get(el)
+    if (cached !== undefined) return cached
+    const parent = composedParent(el)
+    const out = clips(el) || (!top(parent) && clippedAbove(parent, escapeOf(style(el))))
+    clippedCache.set(el, out)
+    return out
+  }
+  // Whether a box escaping as `escape` is clipped by `el` or an ancestor of it.
+  const clippedAbove = (el: Element | null, escape: Escape): boolean => {
+    for (let node = el; !top(node); node = composedParent(node)) {
+      const s = style(node)
+      if (escape === "none" || holdsFixed(s) || (escape === "absolute" && (s.position || "static") !== "static")) return clippedFrom(node)
+    }
+    return false
+  }
   const hiddenByAncestor = (el: Element) => {
     const parent = composedParent(el)
-    if (!parent || parent === document.body || parent === document.documentElement) return false
-    return up(parent, fadedCache, fadedOut) || (style(el).position !== "fixed" && up(parent, clippedCache, clips))
+    if (top(parent)) return false
+    return faded(parent) || clippedAbove(parent, escapeOf(style(el)))
   }
   // A box in a web component inside a <form> is the form's, though the DOM doesn't associate it.
   const formOf = (el: FormControl) => el.form ?? (composedClosest(el, "form") as HTMLFormElement | null)
