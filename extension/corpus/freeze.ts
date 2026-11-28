@@ -25,7 +25,7 @@ import { chromium, type Browser, type Page } from "playwright-core"
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, relative } from "node:path"
-import type { Gold, Lock, LockPage } from "./score"
+import { siteOf, splitFor, type Gold, type Lock, type LockPage } from "./score"
 
 const here = import.meta.dir
 const args = process.argv.slice(2)
@@ -229,7 +229,7 @@ async function propose(fresh: Array<{ id: string; decoy: boolean; html: string; 
   const lines: string[] = []
   for (const p of todo) {
     load(p.html, p.url)
-    const gold: Gold = { id: p.id, pattern: `TODO: what ${p.url} is`, decoy: p.decoy, kind: null, login: {}, forms: {} }
+    const gold: Gold = { id: p.id, pattern: `TODO: what ${p.url} is`, split: splitFor(siteOf(p.url)), decoy: p.decoy, kind: null, login: {}, forms: {} }
     if (!p.decoy)
       for (const el of deepQueryAll<HTMLInputElement>("input, select, textarea", openRoots())) {
         const tokens = (el.getAttribute("autocomplete") ?? "").toLowerCase().split(/\s+/).filter((t) => t && !/^(section-|shipping|billing|webauthn)/.test(t))

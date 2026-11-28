@@ -11,7 +11,7 @@
 import type { FieldRole, SurfaceKind } from "../messages"
 import { bestRole, FORM_KINDS, hasPhrase, providerFromLabel, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind, type Provider } from "./clues"
 import { graphOf, innerText, isVisible, within, type FormCluster, type FormGraph, type ScanSource } from "./graph"
-import { confirmations, decoyCluster, LOGIN_TOKENS, rationalize, unclaimedBoxes, type ScannedField } from "./rationalize"
+import { clusterFeatures, confirmations, decoyCluster, LOGIN_TOKENS, loginOdds, notLogin, rationalize, unclaimedBoxes, type PageFacts, type ScannedField } from "./rationalize"
 import { deepQueryAll, openRoots } from "./shadow"
 
 export { ignored, isVisible, labelText, type FormControl } from "./graph"
@@ -19,7 +19,7 @@ export { ignored, isVisible, labelText, type FormControl } from "./graph"
 /** A password box that asks for a new password by autocomplete, whatever the detector made of its form: a sign-up, never a sign-in step to submit. */
 export const asksNewPassword = (fields: Field[]) => fields.some((f) => f.el.type === "password" && /\bnew-password\b/.test(f.el.autocomplete))
 
-export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|challenge|mfa|2fa|two-factor|verify|webauthn|passkey/i
+export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|challenge|mfa|2fa|two-factor|two-step|2-step|totp|\botp\b|verify|webauthn|passkey/i
 const SIGNUP_URL = /sign-?up|sign_up|register|registration|join|create-account|onboard/i
 const RESET_URL = /forgot|reset|recover/i
 const CHANGE_PASSWORD_URL = /change-?password|password-?change|update-?password|settings\/security/i
@@ -153,6 +153,52 @@ function collectFields(graph: FormGraph): { fields: ScannedField[]; codeGroups: 
   for (const f of fields) f.role = bestRole(f.score)
   rationalize(fields)
   return { fields, codeGroups: [...boxes.values()].filter((g) => g.length >= 4 && g.length <= 8) }
+}
+
+/** A cluster the rules gave a login role, judged as a whole (rationalize.ts, clusterFeatures). */
+export interface ClusterVerdict {
+  cluster: FormCluster
+  /** Gift card and coupon wording set it aside before the model is asked (decoyCluster). */
+  offer: boolean
+  features: string[]
+  /** The model's log-odds that it's a login form. */
+  odds: number
+}
+
+const BUTTON = "button, [role=button], input[type=submit], input[type=button]"
+const SETTINGS_URL = /settings|preferences|admin|console|dashboard|developers?\b|projects?\b/i
+
+/** What the page says around every cluster: its path and title, and how many of its forms ask for a code. */
+function pageFacts(fields: ScannedField[], codeGroups: HTMLInputElement[][], graph: FormGraph): PageFacts {
+  const url = location.pathname
+  const paths = ([["login", LOGIN_URL], ["signup", SIGNUP_URL], ["reset", RESET_URL], ["change-password", CHANGE_PASSWORD_URL], ["settings", SETTINGS_URL]] as const).filter(([, re]) => re.test(url)).map(([p]) => p)
+  const title = scoreFormText(words(document.title))
+  const codes = new Set([...fields.filter((f) => f.role === "otp").map((f) => f.cluster), ...codeGroups.map((g) => graph.clusterOf(g[0]))])
+  return { paths, title: FORM_KINDS.filter((k) => title[k] >= FORM_THRESHOLD), codeClusters: codes.size }
+}
+
+/** Every cluster in a form or container whose fields the rules gave a login role, with the model's verdict on it. */
+function judge(graph: FormGraph, collected: ReturnType<typeof collectFields>): ClusterVerdict[] {
+  // Nothing claimed in a form or container: no page facts or buttons to read.
+  if (!collected.fields.some((f) => f.role && f.cluster?.root)) return []
+  const page = pageFacts(collected.fields, collected.codeGroups, graph)
+  const buttons = deepQueryAll(BUTTON, graph.roots).slice(0, 500)
+  const out: ClusterVerdict[] = []
+  for (const cluster of graph.clusters) {
+    const root = cluster.root
+    const fields = collected.fields.filter((f) => f.cluster === cluster)
+    if (!root || !fields.some((f) => f.role)) continue
+    const labels = buttons.filter((el) => within(root, el) && graph.visible(el)).map(controlText).filter((t) => t && t.length <= 40)
+    const features = clusterFeatures(cluster, fields, graph, page, labels)
+    out.push({ cluster, offer: decoyCluster(cluster, fields, graph), features, odds: loginOdds(features) })
+  }
+  return out
+}
+
+/** The model's verdict on each of the page's login-like clusters: what corpus/train-weights.ts learns from. */
+export function clusterVerdicts(source: ScanSource = openRoots()): ClusterVerdict[] {
+  const graph = graphOf(source)
+  return judge(graph, collectFields(graph))
 }
 
 /**
@@ -364,8 +410,16 @@ function codePageText(root: Element | null): string {
 export function scanPage(source: ScanSource = openRoots()): ScanResult {
   const graph = graphOf(source)
   const collected = collectFields(graph)
-  // Gift card and coupon forms are set aside first, so one above the real sign-in never stands for it.
-  const decoys = new Set(graph.clusters.filter((c) => decoyCluster(c, collected.fields.filter((f) => f.cluster === c), graph)))
+  // Gift card and coupon forms, and clusters the model says aren't a login
+  // (an environment variable's key and value, a Wi-Fi password), are set
+  // aside first, so one above the real sign-in never stands for it.
+  const verdicts = new Map(judge(graph, collected).map((v) => [v.cluster, v]))
+  const decoys = new Set(
+    graph.clusters.filter((c) => {
+      const v = verdicts.get(c)
+      return v ? v.offer || notLogin(v.odds, v.features) : decoyCluster(c, collected.fields.filter((f) => f.cluster === c), graph)
+    }),
+  )
   const all = collected.fields.filter((f) => !f.cluster || !decoys.has(f.cluster))
   const codeGroups = collected.codeGroups.filter((g) => !decoys.has(graph.clusterOf(g[0])!))
   const cluster = primaryCluster(all, codeGroups, graph)

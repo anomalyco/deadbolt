@@ -1,77 +1,141 @@
-{"id":"github-login","pattern":"GitHub sign-in: username or email and password in one form","decoy":false,"kind":"login","login":{"#login_field":"username","#password":"password"},"forms":{}}
-{"id":"github-signup","pattern":"GitHub sign-up: email, new password, username, country","decoy":false,"kind":"signup","login":{"#email":"email","#password":"new-password","#login":"username"},"forms":{"#country":"country"}}
-{"id":"github-2fa-app","pattern":"GitHub TOTP step: one box, autocomplete=one-time-code","decoy":false,"kind":"mfa","login":{"#app_totp":"otp"},"forms":{}}
-{"id":"github-password-reset","pattern":"GitHub password reset: an email box, nothing to fill","decoy":false,"kind":"reset","login":{},"forms":{}}
-{"id":"github-change-password","pattern":"GitHub change password: old, new and confirm","decoy":false,"kind":"change-password","login":{"#user_old_password":"password","#user_new_password":"new-password","#user_confirm_new_password":"new-password"},"forms":{}}
-{"id":"google-identifier","pattern":"Google email-first step with its hiddenPassword trap (tabindex=-1, aria-hidden, 1 px)","decoy":false,"kind":"login","login":{"#identifierId":"username"},"forms":{}}
-{"id":"google-password","pattern":"Google password step: one password box, the address in a chip","decoy":false,"kind":"login","login":{"#pwd":"password"},"forms":{}}
-{"id":"google-totp","pattern":"Google TOTP step: type=tel code box, authenticator wording","decoy":false,"kind":"mfa","login":{"#totpPin":"otp"},"forms":{}}
-{"id":"google-sms-code","pattern":"Google SMS code: a sent code the user brings, never filled","decoy":false,"kind":"mfa","login":{},"forms":{}}
-{"id":"microsoft-email","pattern":"Microsoft email step with its off-screen 0×0 password box (moveOffScreen)","decoy":false,"kind":"login","login":{"#i0116":"email"},"forms":{}}
-{"id":"microsoft-password","pattern":"Microsoft password step, the address kept in an off-screen email box","decoy":false,"kind":"login","login":{"#i0118":"password"},"forms":{}}
-{"id":"apple-account-signin","pattern":"Apple sign-in: the password box is in the page but collapsed (opacity 0, height 0) until Continue","decoy":false,"kind":"login","login":{"#account_name_text_field":"username"},"forms":{}}
-{"id":"amazon-email","pattern":"Amazon email-or-phone step","decoy":false,"kind":"login","login":{"#ap_email":"email"},"forms":{}}
-{"id":"amazon-password","pattern":"Amazon password step, the email carried in a hidden input","decoy":false,"kind":"login","login":{"#ap_password":"password"},"forms":{}}
-{"id":"amazon-add-address","pattern":"Amazon add-address form with autocomplete tokens","decoy":false,"kind":null,"login":{},"forms":{"#address-ui-widgets-countryCode":"country","#address-ui-widgets-enterAddressFullName":"name","#address-ui-widgets-enterAddressPhoneNumber":"tel","#address-ui-widgets-enterAddressLine1":"address-line1","#address-ui-widgets-enterAddressLine2":"address-line2","#address-ui-widgets-enterAddressCity":"address-level2","#address-ui-widgets-enterAddressStateOrRegion":"address-level1","#address-ui-widgets-enterAddressPostalCode":"postal-code"}}
-{"id":"stripe-dashboard-login","pattern":"Stripe dashboard sign-in, rendered by script into a form with no action (React)","decoy":false,"kind":"login","login":{"#email":"email","#old-password":"password"},"forms":{}}
-{"id":"stripe-checkout","pattern":"Stripe Checkout: email, card, name, country and ZIP","decoy":false,"kind":null,"login":{},"forms":{"#email":"email","#cardNumber":"cc-number","#cardExpiry":"cc-exp","#cardCvc":"cc-csc","#billingName":"cc-name","#billingCountry":"country","#billingPostalCode":"postal-code"}}
-{"id":"linear-login","pattern":"Linear: providers, then email-first with a magic code","decoy":false,"kind":"login","login":{"#email":"email"},"forms":{}}
-{"id":"linear-email-code","pattern":"Linear emailed login code: the user brings it","decoy":false,"kind":"mfa","login":{},"forms":{}}
-{"id":"cloudflare-login","pattern":"Cloudflare dashboard: email and password with a Turnstile widget","decoy":false,"kind":"login","login":{"#email":"username","#password":"password"},"forms":{}}
-{"id":"okta-identifier","pattern":"Okta Identity Engine identifier step (name=identifier, generated ids)","decoy":false,"kind":"login","login":{"#input28":"username"},"forms":{}}
-{"id":"okta-password","pattern":"Okta password challenge","decoy":false,"kind":"login","login":{"#input60":"password"},"forms":{}}
-{"id":"okta-verify-code","pattern":"Okta Verify TOTP challenge","decoy":false,"kind":"mfa","login":{"#input85":"otp"},"forms":{}}
-{"id":"auth0-identifier","pattern":"Auth0 Universal Login identifier step","decoy":false,"kind":"login","login":{"#username":"email"},"forms":{}}
-{"id":"auth0-password","pattern":"Auth0 Universal Login password step","decoy":false,"kind":"login","login":{"#password":"password"},"forms":{}}
-{"id":"clerk-signin","pattern":"Clerk sign-in start: identifier, with an invisible password box kept for password managers","decoy":false,"kind":"login","login":{"#identifier-field":"username"},"forms":{}}
-{"id":"shopify-checkout","pattern":"Shopify one-page checkout: contact, shipping address, card frames, discount code","decoy":false,"kind":null,"login":{},"forms":{"#email":"email","#Select0":"country","#TextField0":"given-name","#TextField1":"family-name","#shipping-address1":"address-line1","#TextField3":"address-line2","#TextField4":"address-level2","#Select1":"address-level1","#TextField5":"postal-code","#TextField6":"tel"}}
-{"id":"shopify-card-frame","pattern":"Shopify's per-field card frame: one card-number box","decoy":false,"kind":null,"login":{},"forms":{"#number":"cc-number"}}
-{"id":"paypal-login","pattern":"PayPal split login: email first, the password section display:none until Next","decoy":false,"kind":"login","login":{"#email":"username"},"forms":{}}
-{"id":"coinbase-signin","pattern":"Coinbase email-first sign-in with passkey and providers","decoy":false,"kind":"login","login":{"#Email":"username"},"forms":{}}
-{"id":"coinbase-sms-code","pattern":"Coinbase SMS code: sent by text, the user brings it","decoy":false,"kind":"mfa","login":{},"forms":{}}
-{"id":"chase-shadow-login","pattern":"Chase: username and password inside design-system web components (open shadow roots)","decoy":false,"kind":"login","login":{"#userId >> #userId-input":"username","#password >> #password-input":"password"},"forms":{}}
-{"id":"bofa-home-login","pattern":"Bank of America home page: log-in widget beside a site search and a ZIP box","decoy":false,"kind":"login","login":{"#onlineId1":"username","#passcode1":"password"},"forms":{}}
-{"id":"wellsfargo-login","pattern":"Wells Fargo sign-on","decoy":false,"kind":"login","login":{"#j_username":"username","#j_password":"password"},"forms":{}}
-{"id":"netflix-login","pattern":"Netflix sign-in: React ids (:r0:), autocomplete=password (not a real token)","decoy":false,"kind":"login","login":{"#:r0:":"username","#:r3:":"password"},"forms":{}}
-{"id":"x-login-flow","pattern":"X login modal, rendered by script: one text box named text, no form","decoy":false,"kind":"login","login":{"input[name=\"text\"]":"username"},"forms":{}}
-{"id":"facebook-login","pattern":"Facebook home page log-in form","decoy":false,"kind":"login","login":{"#email":"username","#pass":"password"},"forms":{}}
-{"id":"linkedin-login","pattern":"LinkedIn sign-in","decoy":false,"kind":"login","login":{"#username":"username","#password":"password"},"forms":{}}
-{"id":"gitlab-signup","pattern":"GitLab sign-up: names, username, email, new password","decoy":false,"kind":"signup","login":{"#new_user_username":"username","#new_user_email":"email","#new_user_password":"new-password"},"forms":{"#new_user_first_name":"given-name","#new_user_last_name":"family-name"}}
-{"id":"aws-signin","pattern":"AWS IAM sign-in: account ID, user name, password","decoy":false,"kind":"login","login":{"#username":"username","#password":"password"},"forms":{}}
-{"id":"vercel-totp-boxes","pattern":"Six one-digit boxes for an authenticator code","decoy":false,"kind":"mfa","login":{"#otp-0":"otp","#otp-1":"otp","#otp-2":"otp","#otp-3":"otp","#otp-4":"otp","#otp-5":"otp"},"forms":{}}
-{"id":"discord-login","pattern":"Discord: autocomplete=off on both boxes","decoy":false,"kind":"login","login":{"#uid_32":"username","#uid_34":"password"},"forms":{}}
-{"id":"closed-shadow-login","pattern":"A login form inside a closed shadow root of a custom element","decoy":false,"kind":"login","login":{"#widget >> #customer-id":"username","#widget >> #customer-password":"password"},"forms":{}}
-{"id":"bestbuy-checkout-below-fold","pattern":"Tall checkout: card and billing address below the fold","decoy":false,"kind":null,"login":{},"forms":{"#number":"cc-number","#expMonth":"cc-exp-month","#expYear":"cc-exp-year","#cvv":"cc-csc","#first-name":"given-name","#last-name":"family-name","#street":"address-line1","#street2":"address-line2","#city":"address-level2","#state":"address-level1","#zipcode":"postal-code"}}
-{"id":"robinhood-login","pattern":"Robinhood log-in","decoy":false,"kind":"login","login":{"#email":"username","#current-password":"password"},"forms":{}}
-{"id":"google-change-password","pattern":"Google change password: new and confirm only (the current one was asked before)","decoy":false,"kind":"change-password","login":{"#new-password":"new-password","#confirm-password":"new-password"},"forms":{}}
-{"id":"dropbox-signup-modal","pattern":"Dropbox sign-up: names, email, one new password","decoy":false,"kind":"signup","login":{"#email":"email","#password":"new-password"},"forms":{"#fname":"given-name","#lname":"family-name"}}
-{"id":"ebay-signin-phone","pattern":"eBay email-or-username first step","decoy":false,"kind":"login","login":{"#userid":"username"},"forms":{}}
-{"id":"slack-workspace-signin","pattern":"Slack email-first sign-in (code by email next)","decoy":false,"kind":"login","login":{"#signup_email":"email"},"forms":{}}
-{"id":"decoy-news-search-header","pattern":"A header search box and a log-in link, no login form","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-docs-search","pattern":"Docs search (type=search) with log-in and sign-up links","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-store-search-zip","pattern":"Product search and a lone ZIP box for picking a store","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-cart-promo-giftcard","pattern":"Cart with a promo code and a gift card whose access number is a password-type box","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-coupon-six-digits","pattern":"A 6-digit coupon box that looks like a one-time code","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-newsletter-footer","pattern":"Footer newsletter: one email box and Subscribe","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-newsletter-signup-modal","pattern":"Newsletter modal worded \"Sign up\"","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-author-hostname","pattern":"A blog on author.example.com (\"auth\" in its host): comment form and subscribe box","decoy":true,"kind":null,"login":{},"forms":{"#comment-name":"name","#comment-email":"email"}}
-{"id":"decoy-invite-teammates","pattern":"Invite teammates: three email boxes and a role","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-org-invite-member","pattern":"Invite a member: a box named identifier for someone else's username","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-admin-user-edit","pattern":"An admin editing another user (WordPress user-edit)","decoy":true,"kind":null,"login":{},"forms":{"#first_name":"given-name","#last_name":"family-name"}}
-{"id":"decoy-cms-general-settings","pattern":"CMS general settings: site title, URLs, an admin email","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-blog-comment","pattern":"WordPress comment form (name=author, email, website)","decoy":true,"kind":null,"login":{},"forms":{"#author":"name","#email":"email"}}
-{"id":"decoy-support-request","pattern":"Support request: email, subject, description, order number","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-bank-transfer-pin","pattern":"Bank transfer: amount, payee details and a transaction PIN","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-dual-sent-codes","pattern":"Two six-box code groups in two forms, both codes sent by email and text","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-delete-account","pattern":"Delete-account confirmation: type your username, type a phrase","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-store-locator","pattern":"Store locator box beside sign-in and join links","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-flight-search","pattern":"Flight search: from, to, dates","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-job-application","pattern":"Job application: name, email, phone; identity fields, no login","decoy":true,"kind":null,"login":{},"forms":{"#first_name":"given-name","#last_name":"family-name","#email":"email","#phone":"tel"}}
-{"id":"decoy-api-keys","pattern":"API keys page: read-only secrets in password-type boxes","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-claim-username","pattern":"Marketing \"claim your username\" box on a home page","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-chat-widget","pattern":"Chat widget: a message and an email for replies","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-warranty-code","pattern":"Product registration with a 6-digit purchase code","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-package-tracking","pattern":"Package tracking box","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-mortgage-calculator","pattern":"Loan calculator","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-gift-card-balance","pattern":"Gift card balance: \"card number\" and \"security code\", not a payment card","decoy":true,"kind":null,"login":{},"forms":{}}
-{"id":"decoy-refer-friend","pattern":"Refer a friend: someone else's email","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"github-login","pattern":"GitHub sign-in: username or email and password in one form","split":"train","decoy":false,"kind":"login","login":{"#login_field":"username","#password":"password"},"forms":{}}
+{"id":"github-signup","pattern":"GitHub sign-up: email, new password, username, country","split":"train","decoy":false,"kind":"signup","login":{"#email":"email","#password":"new-password","#login":"username"},"forms":{"#country":"country"}}
+{"id":"github-2fa-app","pattern":"GitHub TOTP step: one box, autocomplete=one-time-code","split":"train","decoy":false,"kind":"mfa","login":{"#app_totp":"otp"},"forms":{}}
+{"id":"github-password-reset","pattern":"GitHub password reset: an email box, nothing to fill","split":"train","decoy":false,"kind":"reset","login":{},"forms":{}}
+{"id":"github-change-password","pattern":"GitHub change password: old, new and confirm","split":"train","decoy":false,"kind":"change-password","login":{"#user_old_password":"password","#user_new_password":"new-password","#user_confirm_new_password":"new-password"},"forms":{}}
+{"id":"google-identifier","pattern":"Google email-first step with its hiddenPassword trap (tabindex=-1, aria-hidden, 1 px)","split":"train","decoy":false,"kind":"login","login":{"#identifierId":"username"},"forms":{}}
+{"id":"google-password","pattern":"Google password step: one password box, the address in a chip","split":"train","decoy":false,"kind":"login","login":{"#pwd":"password"},"forms":{}}
+{"id":"google-totp","pattern":"Google TOTP step: type=tel code box, authenticator wording","split":"train","decoy":false,"kind":"mfa","login":{"#totpPin":"otp"},"forms":{}}
+{"id":"google-sms-code","pattern":"Google SMS code: a sent code the user brings, never filled","split":"train","decoy":false,"kind":"mfa","login":{},"forms":{}}
+{"id":"microsoft-email","pattern":"Microsoft email step with its off-screen 0×0 password box (moveOffScreen)","split":"holdout","decoy":false,"kind":"login","login":{"#i0116":"email"},"forms":{}}
+{"id":"microsoft-password","pattern":"Microsoft password step, the address kept in an off-screen email box","split":"holdout","decoy":false,"kind":"login","login":{"#i0118":"password"},"forms":{}}
+{"id":"apple-account-signin","pattern":"Apple sign-in: the password box is in the page but collapsed (opacity 0, height 0) until Continue","split":"train","decoy":false,"kind":"login","login":{"#account_name_text_field":"username"},"forms":{}}
+{"id":"amazon-email","pattern":"Amazon email-or-phone step","split":"train","decoy":false,"kind":"login","login":{"#ap_email":"email"},"forms":{}}
+{"id":"amazon-password","pattern":"Amazon password step, the email carried in a hidden input","split":"train","decoy":false,"kind":"login","login":{"#ap_password":"password"},"forms":{}}
+{"id":"amazon-add-address","pattern":"Amazon add-address form with autocomplete tokens","split":"train","decoy":false,"kind":null,"login":{},"forms":{"#address-ui-widgets-countryCode":"country","#address-ui-widgets-enterAddressFullName":"name","#address-ui-widgets-enterAddressPhoneNumber":"tel","#address-ui-widgets-enterAddressLine1":"address-line1","#address-ui-widgets-enterAddressLine2":"address-line2","#address-ui-widgets-enterAddressCity":"address-level2","#address-ui-widgets-enterAddressStateOrRegion":"address-level1","#address-ui-widgets-enterAddressPostalCode":"postal-code"}}
+{"id":"stripe-dashboard-login","pattern":"Stripe dashboard sign-in, rendered by script into a form with no action (React)","split":"train","decoy":false,"kind":"login","login":{"#email":"email","#old-password":"password"},"forms":{}}
+{"id":"stripe-checkout","pattern":"Stripe Checkout: email, card, name, country and ZIP","split":"train","decoy":false,"kind":null,"login":{},"forms":{"#email":"email","#cardNumber":"cc-number","#cardExpiry":"cc-exp","#cardCvc":"cc-csc","#billingName":"cc-name","#billingCountry":"country","#billingPostalCode":"postal-code"}}
+{"id":"linear-login","pattern":"Linear: providers, then email-first with a magic code","split":"holdout","decoy":false,"kind":"login","login":{"#email":"email"},"forms":{}}
+{"id":"linear-email-code","pattern":"Linear emailed login code: the user brings it","split":"holdout","decoy":false,"kind":"mfa","login":{},"forms":{}}
+{"id":"cloudflare-login","pattern":"Cloudflare dashboard: email and password with a Turnstile widget","split":"train","decoy":false,"kind":"login","login":{"#email":"username","#password":"password"},"forms":{}}
+{"id":"okta-identifier","pattern":"Okta Identity Engine identifier step (name=identifier, generated ids)","split":"train","decoy":false,"kind":"login","login":{"#input28":"username"},"forms":{}}
+{"id":"okta-password","pattern":"Okta password challenge","split":"train","decoy":false,"kind":"login","login":{"#input60":"password"},"forms":{}}
+{"id":"okta-verify-code","pattern":"Okta Verify TOTP challenge","split":"train","decoy":false,"kind":"mfa","login":{"#input85":"otp"},"forms":{}}
+{"id":"auth0-identifier","pattern":"Auth0 Universal Login identifier step","split":"train","decoy":false,"kind":"login","login":{"#username":"email"},"forms":{}}
+{"id":"auth0-password","pattern":"Auth0 Universal Login password step","split":"train","decoy":false,"kind":"login","login":{"#password":"password"},"forms":{}}
+{"id":"clerk-signin","pattern":"Clerk sign-in start: identifier, with an invisible password box kept for password managers","split":"train","decoy":false,"kind":"login","login":{"#identifier-field":"username"},"forms":{}}
+{"id":"shopify-checkout","pattern":"Shopify one-page checkout: contact, shipping address, card frames, discount code","split":"train","decoy":false,"kind":null,"login":{},"forms":{"#email":"email","#Select0":"country","#TextField0":"given-name","#TextField1":"family-name","#shipping-address1":"address-line1","#TextField3":"address-line2","#TextField4":"address-level2","#Select1":"address-level1","#TextField5":"postal-code","#TextField6":"tel"}}
+{"id":"shopify-card-frame","pattern":"Shopify's per-field card frame: one card-number box","split":"holdout","decoy":false,"kind":null,"login":{},"forms":{"#number":"cc-number"}}
+{"id":"paypal-login","pattern":"PayPal split login: email first, the password section display:none until Next","split":"train","decoy":false,"kind":"login","login":{"#email":"username"},"forms":{}}
+{"id":"coinbase-signin","pattern":"Coinbase email-first sign-in with passkey and providers","split":"train","decoy":false,"kind":"login","login":{"#Email":"username"},"forms":{}}
+{"id":"coinbase-sms-code","pattern":"Coinbase SMS code: sent by text, the user brings it","split":"train","decoy":false,"kind":"mfa","login":{},"forms":{}}
+{"id":"chase-shadow-login","pattern":"Chase: username and password inside design-system web components (open shadow roots)","split":"train","decoy":false,"kind":"login","login":{"#userId >> #userId-input":"username","#password >> #password-input":"password"},"forms":{}}
+{"id":"bofa-home-login","pattern":"Bank of America home page: log-in widget beside a site search and a ZIP box","split":"train","decoy":false,"kind":"login","login":{"#onlineId1":"username","#passcode1":"password"},"forms":{}}
+{"id":"wellsfargo-login","pattern":"Wells Fargo sign-on","split":"holdout","decoy":false,"kind":"login","login":{"#j_username":"username","#j_password":"password"},"forms":{}}
+{"id":"netflix-login","pattern":"Netflix sign-in: React ids (:r0:), autocomplete=password (not a real token)","split":"train","decoy":false,"kind":"login","login":{"#:r0:":"username","#:r3:":"password"},"forms":{}}
+{"id":"x-login-flow","pattern":"X login modal, rendered by script: one text box named text, no form","split":"holdout","decoy":false,"kind":"login","login":{"input[name=\"text\"]":"username"},"forms":{}}
+{"id":"facebook-login","pattern":"Facebook home page log-in form","split":"holdout","decoy":false,"kind":"login","login":{"#email":"username","#pass":"password"},"forms":{}}
+{"id":"linkedin-login","pattern":"LinkedIn sign-in","split":"holdout","decoy":false,"kind":"login","login":{"#username":"username","#password":"password"},"forms":{}}
+{"id":"gitlab-signup","pattern":"GitLab sign-up: names, username, email, new password","split":"holdout","decoy":false,"kind":"signup","login":{"#new_user_username":"username","#new_user_email":"email","#new_user_password":"new-password"},"forms":{"#new_user_first_name":"given-name","#new_user_last_name":"family-name"}}
+{"id":"aws-signin","pattern":"AWS IAM sign-in: account ID, user name, password","split":"train","decoy":false,"kind":"login","login":{"#username":"username","#password":"password"},"forms":{}}
+{"id":"vercel-totp-boxes","pattern":"Six one-digit boxes for an authenticator code","split":"holdout","decoy":false,"kind":"mfa","login":{"#otp-0":"otp","#otp-1":"otp","#otp-2":"otp","#otp-3":"otp","#otp-4":"otp","#otp-5":"otp"},"forms":{}}
+{"id":"discord-login","pattern":"Discord: autocomplete=off on both boxes","split":"train","decoy":false,"kind":"login","login":{"#uid_32":"username","#uid_34":"password"},"forms":{}}
+{"id":"closed-shadow-login","pattern":"A login form inside a closed shadow root of a custom element","split":"holdout","decoy":false,"kind":"login","login":{"#widget >> #customer-id":"username","#widget >> #customer-password":"password"},"forms":{}}
+{"id":"bestbuy-checkout-below-fold","pattern":"Tall checkout: card and billing address below the fold","split":"holdout","decoy":false,"kind":null,"login":{},"forms":{"#number":"cc-number","#expMonth":"cc-exp-month","#expYear":"cc-exp-year","#cvv":"cc-csc","#first-name":"given-name","#last-name":"family-name","#street":"address-line1","#street2":"address-line2","#city":"address-level2","#state":"address-level1","#zipcode":"postal-code"}}
+{"id":"robinhood-login","pattern":"Robinhood log-in","split":"train","decoy":false,"kind":"login","login":{"#email":"username","#current-password":"password"},"forms":{}}
+{"id":"google-change-password","pattern":"Google change password: new and confirm only (the current one was asked before)","split":"train","decoy":false,"kind":"change-password","login":{"#new-password":"new-password","#confirm-password":"new-password"},"forms":{}}
+{"id":"dropbox-signup-modal","pattern":"Dropbox sign-up: names, email, one new password","split":"train","decoy":false,"kind":"signup","login":{"#email":"email","#password":"new-password"},"forms":{"#fname":"given-name","#lname":"family-name"}}
+{"id":"ebay-signin-phone","pattern":"eBay email-or-username first step","split":"train","decoy":false,"kind":"login","login":{"#userid":"username"},"forms":{}}
+{"id":"slack-workspace-signin","pattern":"Slack email-first sign-in (code by email next)","split":"holdout","decoy":false,"kind":"login","login":{"#signup_email":"email"},"forms":{}}
+{"id":"decoy-news-search-header","pattern":"A header search box and a log-in link, no login form","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-docs-search","pattern":"Docs search (type=search) with log-in and sign-up links","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-store-search-zip","pattern":"Product search and a lone ZIP box for picking a store","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-cart-promo-giftcard","pattern":"Cart with a promo code and a gift card whose access number is a password-type box","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-coupon-six-digits","pattern":"A 6-digit coupon box that looks like a one-time code","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-newsletter-footer","pattern":"Footer newsletter: one email box and Subscribe","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-newsletter-signup-modal","pattern":"Newsletter modal worded \"Sign up\"","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-author-hostname","pattern":"A blog on author.example.com (\"auth\" in its host): comment form and subscribe box","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{"#comment-name":"name","#comment-email":"email"}}
+{"id":"decoy-invite-teammates","pattern":"Invite teammates: three email boxes and a role","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-org-invite-member","pattern":"Invite a member: a box named identifier for someone else's username","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-admin-user-edit","pattern":"An admin editing another user (WordPress user-edit)","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{"#first_name":"given-name","#last_name":"family-name"}}
+{"id":"decoy-cms-general-settings","pattern":"CMS general settings: site title, URLs, an admin email","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-blog-comment","pattern":"WordPress comment form (name=author, email, website)","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{"#author":"name","#email":"email"}}
+{"id":"decoy-support-request","pattern":"Support request: email, subject, description, order number","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-bank-transfer-pin","pattern":"Bank transfer: amount, payee details and a transaction PIN","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-dual-sent-codes","pattern":"Two six-box code groups in two forms, both codes sent by email and text","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-delete-account","pattern":"Delete-account confirmation: type your username, type a phrase","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-store-locator","pattern":"Store locator box beside sign-in and join links","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-flight-search","pattern":"Flight search: from, to, dates","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-job-application","pattern":"Job application: name, email, phone; identity fields, no login","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{"#first_name":"given-name","#last_name":"family-name","#email":"email","#phone":"tel"}}
+{"id":"decoy-api-keys","pattern":"API keys page: read-only secrets in password-type boxes","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-claim-username","pattern":"Marketing \"claim your username\" box on a home page","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-chat-widget","pattern":"Chat widget: a message and an email for replies","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-warranty-code","pattern":"Product registration with a 6-digit purchase code","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-package-tracking","pattern":"Package tracking box","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-mortgage-calculator","pattern":"Loan calculator","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-gift-card-balance","pattern":"Gift card balance: \"card number\" and \"security code\", not a payment card","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-refer-friend","pattern":"Refer a friend: someone else's email","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"i18n-de-login","pattern":"German sign-in: E-Mail-Adresse and Passwort, Anmelden button","split":"train","decoy":false,"kind":"login","login":{"#email":"email","#passwort":"password"},"forms":{}}
+{"id":"i18n-de-change-password","pattern":"German change password: aktuelles, neues and wiederholtes Passwort","split":"train","decoy":false,"kind":"change-password","login":{"#aktuell":"password","#neu":"new-password","#neu2":"new-password"},"forms":{}}
+{"id":"i18n-fr-login","pattern":"French sign-in: Identifiant and Mot de passe, Se connecter","split":"train","decoy":false,"kind":"login","login":{"#identifiant":"username","#mdp":"password"},"forms":{}}
+{"id":"i18n-fr-totp","pattern":"French two-step code from an authenticator app, no autocomplete","split":"train","decoy":false,"kind":"mfa","login":{"#code":"otp"},"forms":{}}
+{"id":"i18n-es-login","pattern":"Spanish sign-in: Correo electrónico and Contraseña","split":"train","decoy":false,"kind":"login","login":{"#correo":"email","#clave":"password"},"forms":{}}
+{"id":"i18n-es-signup","pattern":"Spanish sign-up: correo, contraseña, confirmar contraseña","split":"train","decoy":false,"kind":"signup","login":{"#correo":"email","#clave":"new-password","#clave2":"new-password"},"forms":{}}
+{"id":"i18n-pt-login","pattern":"Portuguese sign-in: Nome de usuário and Senha","split":"train","decoy":false,"kind":"login","login":{"#usuario":"username","#senha":"password"},"forms":{}}
+{"id":"i18n-pt-totp","pattern":"Portuguese code step: Código de verificação from an authenticator app","split":"train","decoy":false,"kind":"mfa","login":{"#codigo":"otp"},"forms":{}}
+{"id":"i18n-ja-login","pattern":"Japanese sign-in: メールアドレス and パスワード","split":"holdout","decoy":false,"kind":"login","login":{"#mail":"email","#pass":"password"},"forms":{}}
+{"id":"i18n-ja-signup","pattern":"Japanese sign-up: メールアドレス, パスワード, パスワード（確認）","split":"holdout","decoy":false,"kind":"signup","login":{"#mail":"email","#pass":"new-password","#pass2":"new-password"},"forms":{}}
+{"id":"i18n-it-login","pattern":"Italian sign-in: Nome utente and Password, Accedi","split":"holdout","decoy":false,"kind":"login","login":{"#utente":"username","#pw":"password"},"forms":{}}
+{"id":"i18n-nl-login","pattern":"Dutch sign-in: Gebruikersnaam and Wachtwoord","split":"holdout","decoy":false,"kind":"login","login":{"#gebruiker":"username","#wachtwoord":"password"},"forms":{}}
+{"id":"sso-workspace-region","pattern":"Enterprise SSO: workspace, region <select>, work email, Continue","split":"holdout","decoy":false,"kind":"login","login":{"#work-email":"email"},"forms":{}}
+{"id":"bank-customer-dob-postcode","pattern":"Bank step one: customer ID, date of birth, postcode","split":"train","decoy":false,"kind":"login","login":{"#customer-id":"username"},"forms":{"#postcode":"postal-code"}}
+{"id":"passkey-conditional-username","pattern":"Passkey-first sign-in: one box with autocomplete=\"username webauthn\"","split":"holdout","decoy":false,"kind":"login","login":{"#username":"username"},"forms":{}}
+{"id":"magic-link-email","pattern":"Passwordless sign-in: an email box and Send magic link","split":"holdout","decoy":false,"kind":"login","login":{"#email":"email"},"forms":{}}
+{"id":"login-masked-2fa","pattern":"One page: username, password and a masked 2FA box with no maxlength","split":"holdout","decoy":false,"kind":"login","login":{"#user":"username","#password":"password","#token":"otp"},"forms":{}}
+{"id":"signup-two-step-names","pattern":"Two-step sign-up, step one: first name, last name, email, Continue","split":"train","decoy":false,"kind":"signup","login":{"#email":"email"},"forms":{"#first":"given-name","#last":"family-name"}}
+{"id":"signup-two-step-password","pattern":"Two-step sign-up, step two: new password and confirm","split":"train","decoy":false,"kind":"signup","login":{"#pw":"new-password","#pw2":"new-password"},"forms":{}}
+{"id":"shadow-mybutton-login","pattern":"Sign-in whose submit button is a <my-button> web component","split":"train","decoy":false,"kind":"login","login":{"#email":"email","#password":"password"},"forms":{}}
+{"id":"react-obfuscated-login","pattern":"React sign-in with hashed CSS classes, labelled only by aria-label","split":"train","decoy":false,"kind":"login","login":{"input[name=\"username\"]":"username","input[name=\"password\"]":"password"},"forms":{}}
+{"id":"login-modal-homepage","pattern":"Homepage: header recipe search and a login dialog","split":"holdout","decoy":false,"kind":"login","login":{"#login-email":"email","#login-password":"password"},"forms":{}}
+{"id":"login-newsletter-footer","pattern":"Sign-in with a footer newsletter email box","split":"holdout","decoy":false,"kind":"login","login":{"#member":"username","#pin":"password"},"forms":{}}
+{"id":"sms-code-step","pattern":"Texted code step: one six-character box, a code the user brings","split":"train","decoy":false,"kind":"mfa","login":{},"forms":{}}
+{"id":"checkout-select-expiry-giftcard","pattern":"Checkout: pay by credit card or gift card, expiry as two selects","split":"train","decoy":false,"kind":null,"login":{},"forms":{"#cc-number":"cc-number","#cc-name":"cc-name","#cc-month":"cc-exp-month","#cc-year":"cc-exp-year","#cc-cvv":"cc-csc"}}
+{"id":"checkout-billing-shipping","pattern":"Checkout with separate shipping and billing address sections and a card","split":"train","decoy":false,"kind":null,"login":{},"forms":{"#ship-name":"name","#ship-street":"address-line1","#ship-city":"address-level2","#ship-state":"address-level1","#ship-zip":"postal-code","#ship-country":"country","#bill-street":"address-line1","#bill-city":"address-level2","#bill-state":"address-level1","#bill-zip":"postal-code","#card":"cc-number","#exp":"cc-exp","#cvc":"cc-csc"}}
+{"id":"decoy-hotel-confirmation","pattern":"Hotel: find a reservation by 6-character confirmation code and last name","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-flight-booking-reference","pattern":"Airline: manage a booking by booking reference (PNR) and surname","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-hr-badge-pin","pattern":"HR portal: set a door badge PIN (masked), confirm it, employee ID","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-tax-ssn-onboarding","pattern":"Payroll onboarding: masked SSN, employer EIN, filing status","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-recovery-codes-display","pattern":"2FA set-up: read-only secret, recovery codes shown, confirm one code","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-webhook-secret","pattern":"Developer dashboard: webhook URL, description and a signing secret to generate","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-seed-phrase-import","pattern":"Crypto wallet import: twelve masked recovery-phrase word boxes","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-giftcard-balance-email","pattern":"Gift card balance check: card number, PIN and an email for the receipt","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-parcel-tracking-zip","pattern":"Parcel tracking: tracking number and destination ZIP","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-support-ticket-order","pattern":"Support ticket: order ID, email and a message","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-verify-email-and-phone","pattern":"Two forms, each one six-character box: an emailed code and a texted code","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-blog-comment-website","pattern":"Blog comment: name, email, website, comment","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-newsletter-popup-account","pattern":"Account dashboard with a newsletter pop-up: one email box, Subscribe","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-delete-workspace","pattern":"Danger zone: type the workspace name to delete it","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-filter-by-key","pattern":"Secrets list with a \"Filter by key\" box and read-only masked values","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-env-var-secret","pattern":"Add an environment variable: a key box and a masked value box","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-wifi-router-password","pattern":"Router admin: network name (SSID) and Wi-Fi password","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-share-link-password","pattern":"File sharing: protect a link with a password, set an expiry","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-password-strength-checker","pattern":"Article tool: test a password's strength in a masked box","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-guest-wifi-portal","pattern":"Hotel guest Wi-Fi: room number and last name","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-unsubscribe-email","pattern":"Unsubscribe page: one email box","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-direct-deposit-account","pattern":"Payroll direct deposit: routing number and a masked account number, confirmed","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-traveller-national-id","pattern":"Booking traveller details: masked national ID number, date of birth, nationality","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-profile-lock-pin","pattern":"Streaming profile lock: a masked four-digit PIN","split":"holdout","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-alarm-disarm-code","pattern":"Smart home: device name and a masked six-digit alarm code","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-protect-pdf-password","pattern":"Online tool: set and confirm a password to encrypt an uploaded PDF","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-contact-sales","pattern":"Contact sales: work email, phone, company, company size, message","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"decoy-event-rsvp","pattern":"Event RSVP: name, email, number of guests","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
+{"id":"i18n-fr-reset","pattern":"French password reset: one email box, Envoyer le lien","split":"train","decoy":false,"kind":"reset","login":{},"forms":{}}
+{"id":"library-card-login","pattern":"Library sign-in: library card number (username) and a masked PIN","split":"train","decoy":false,"kind":"login","login":{"#cardnum":"username","#pin":"password"},"forms":{}}
+{"id":"plain-email-first-create","pattern":"Plain email-first step: Email address, Continue, a Create account button; no sign-in wording","split":"train","decoy":false,"kind":"login","login":{"#email":"email"},"forms":{}}
+{"id":"plain-span-labels","pattern":"Plain sign-in, no form: span labels and a div role=button Continue","split":"train","decoy":false,"kind":"login","login":{"#email":"username","#password":"password"},"forms":{}}
+{"id":"plain-root-login","pattern":"Plain sign-in on the root path: Email, Password, Continue","split":"train","decoy":false,"kind":"login","login":{"#email":"email","#password":"password"},"forms":{}}
+{"id":"plain-spa-totp","pattern":"SPA code step under a brand title: one box for the authenticator app's 6-digit code","split":"train","decoy":false,"kind":"mfa","login":{"#code":"otp"},"forms":{}}
+{"id":"plain-b2b-signup","pattern":"B2B sign-up, six fields, no autocomplete: names, company, email, password, confirm","split":"train","decoy":false,"kind":"signup","login":{"#email":"email","#password":"new-password","#confirm":"new-password"},"forms":{}}
+{"id":"plain-polish-login","pattern":"Polish sign-in: Nazwa użytkownika and Hasło, Zaloguj się","split":"train","decoy":false,"kind":"login","login":{"#login":"username","#haslo":"password"},"forms":{}}
+{"id":"plain-bank-passcode","pattern":"Bank sign-in: Customer ID and a masked Passcode, Continue","split":"train","decoy":false,"kind":"login","login":{"#customer":"username","#passcode":"password"},"forms":{}}
+{"id":"plain-magic-link","pattern":"Magic-link sign-in under a brand title: Log in, Email, Send magic link","split":"train","decoy":false,"kind":"login","login":{"#email":"email"},"forms":{}}

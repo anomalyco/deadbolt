@@ -125,7 +125,7 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
     ["codigo de verificacion", 6], ["code de verification", 6],
     ["bestatigungscode", 6], ["verifizierungscode", 6], ["確認コード", 6], ["認証コード", 6],
     ["код подтверждения", 6], ["인증번호", 6], ["codigo sms", 6], ["code sms", 6], ["sms kod", 6], ["codice sms", 6],
-    ["codigo de seguranca", 6], ["codigo de acesso", 6], ["codice di verifica", 6], ["verificatiecode", 6],
+    ["codigo de seguranca", 6], ["codigo de acesso", 6], ["codigo de verificacao", 6], ["codice di verifica", 6], ["verificatiecode", 6],
     ["kod weryfikacyjny", 6],
     ["captcha", -6], ["country", -4], ["area code", -6], ["invite", -5], ["tracking", -6],
     ...NOT_A_LOGIN_FIELD,
@@ -242,6 +242,16 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
   return score
 }
 
+/**
+ * Whether a field's own words (label, placeholder, id or name) name one of
+ * the roles: a positive clue of it matches, not just its type. A masked box
+ * labelled "Password", "Hasło" or "Passcode" names one; "Value" or "Social
+ * Security number" doesn't.
+ */
+export function namesRole(f: FieldFacts, roles: readonly FieldRole[]): boolean {
+  return COMPILED.some((c) => c.value > 0 && roles.includes(c.role) && (f.display.includes(c.display) || (c.code !== null && f.code.includes(c.code))))
+}
+
 export const FIELD_THRESHOLD = 3
 
 export function bestRole(score: Record<FieldRole, number>): FieldRole | null {
@@ -256,6 +266,7 @@ export const FORM_CLUES: Record<FormKind, Clue[]> = {
   login: prepare([
     ["sign in", 3], ["signin", 3], ["log in", 3], ["login", 3], ["log on", 2], ["sign on", 2], ["welcome back", 2],
     ["forgot password", 2], ["forgot your password", 2], ["remember me", 2], ["keep me signed in", 2],
+    ["enter your password", 3], ["enter password", 2],
     ["stay signed in", 2], ["don t have an account", 2], ["se connecter", 3], ["connexion", 3], ["anmelden", 3],
     ["einloggen", 3], ["iniciar sesion", 3], ["entrar", 2], ["accedi", 3], ["inloggen", 3], ["ログイン", 3],
     ["サインイン", 3], ["登录", 3], ["登入", 3], ["войти", 3], ["вход", 3], ["로그인", 3],
@@ -288,6 +299,8 @@ export const FORM_CLUES: Record<FormKind, Clue[]> = {
     ["two factor", 3], ["2 step", 3], ["two step", 3], ["verification code", 3], ["enter the code", 3],
     ["enter code", 2], ["sent a code", 3], ["we sent", 2], ["authenticator app", 3], ["verify it s you", 3],
     ["check your phone", 2], ["code de verification", 3], ["bestatigungscode", 3], ["確認コード", 3],
+    ["codigo de verificacao", 3], ["codigo de verificacion", 3], ["verificacao em duas etapas", 3], ["verificacion en dos pasos", 3],
+    ["verification en deux etapes", 3], ["zwei faktor", 3], ["bestatigung in zwei schritten", 3], ["2 段階認証", 3], ["認証コード", 3],
     ["card number", -4], ["checkout", -4], ["pay", -3], ["shipping", -3],
   ]),
   newsletter: prepare([
