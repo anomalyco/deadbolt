@@ -75,6 +75,14 @@
    "source": "modeled"
   },
   {
+   "id": "bank-logon-footer-contact",
+   "file": "frozen/bank-logon-footer-contact.html",
+   "url": "https://ibank.harbourbank.example/ibank/loginPage.action",
+   "sha256": "64dc435896fb6a7a8d6c33be613b6c593a4232e0822f124293b4a98fdcfeaee6",
+   "bytes": 3700,
+   "source": "modeled"
+  },
+  {
    "id": "bank-two-masked-zh-login",
    "file": "frozen/bank-two-masked-zh-login.html",
    "url": "https://www.harborbank.example/MyBank",
@@ -96,6 +104,14 @@
    "url": "https://www.bankofamerica.com/",
    "sha256": "8e286181a3a8d8670fd82b784690fd6a262a1ae9687ec02139400721b843ecac",
    "bytes": 2080,
+   "source": "modeled"
+  },
+  {
+   "id": "button-beside-form-username",
+   "file": "frozen/button-beside-form-username.html",
+   "url": "https://nas.storagebox.example/",
+   "sha256": "57241de1f1abd3217dd72e6c91e3454aff1e214f0f0e71980dabb6b4a2e429c9",
+   "bytes": 615,
    "source": "modeled"
   },
   {
@@ -184,6 +200,14 @@
    "url": "https://dashboard.stripe.com/test/apikeys",
    "sha256": "72e032f1c522555acc71e1dcf2cac2bc7c5d8eee39e14cba75c38e98049e7673",
    "bytes": 978,
+   "source": "modeled"
+  },
+  {
+   "id": "decoy-aside-signup-lead",
+   "file": "frozen/decoy-aside-signup-lead.html",
+   "url": "https://www.startupjobs.example/jobs",
+   "sha256": "47a6224594536b79dd30adc57cb246fed52ec4c50d13dc2f7ba829f39ba0b1bf",
+   "bytes": 2350,
    "source": "modeled"
   },
   {
@@ -515,6 +539,14 @@
    "source": "modeled"
   },
   {
+   "id": "decoy-promo-email-sms-modal",
+   "file": "frozen/decoy-promo-email-sms-modal.html",
+   "url": "https://www.homegoods-store.example/",
+   "sha256": "8f024b7e1411f076e00826539b4ed0ad4cc4b06740a7c4bd7ab7b11995403f03",
+   "bytes": 2206,
+   "source": "modeled"
+  },
+  {
    "id": "decoy-protect-pdf-password",
    "file": "frozen/decoy-protect-pdf-password.html",
    "url": "https://www.pdfkit-tools.example/protect-pdf",
@@ -659,6 +691,22 @@
    "source": "modeled"
   },
   {
+   "id": "dual-id-or-phone-login",
+   "file": "frozen/dual-id-or-phone-login.html",
+   "url": "https://id.portal-kr.example/login",
+   "sha256": "4cb6953116c6124b5374f495127f53bbd99961d054c4795f6c380a934e1e671e",
+   "bytes": 881,
+   "source": "modeled"
+  },
+  {
+   "id": "dual-phone-or-login-ru",
+   "file": "frozen/dual-phone-or-login-ru.html",
+   "url": "https://my.autoboard.example/sign",
+   "sha256": "fecd931e47c68baa0f6adcd9bd72a7c485b24fc6639e56a93823b3c79c8fd67f",
+   "bytes": 1086,
+   "source": "modeled"
+  },
+  {
    "id": "ebay-signin-phone",
    "file": "frozen/ebay-signin-phone.html",
    "url": "https://signin.ebay.com/signin/",
@@ -672,6 +720,22 @@
    "url": "https://www.facebook.com/",
    "sha256": "9753139d13f3afba0b632a3310a7562521152abb38f424c875aadbd811d9bab2",
    "bytes": 1392,
+   "source": "modeled"
+  },
+  {
+   "id": "fixed-layout-clipped-wrapper-login",
+   "file": "frozen/fixed-layout-clipped-wrapper-login.html",
+   "url": "https://auth.creativesuite.example/en/start",
+   "sha256": "76709842e0c786c8e9453dffb11529572d47c259b72574315b1c737f880993a1",
+   "bytes": 977,
+   "source": "modeled"
+  },
+  {
+   "id": "form-attribute-submit-email",
+   "file": "frozen/form-attribute-submit-email.html",
+   "url": "https://www.videohub.example/us",
+   "sha256": "7d55cd01016e1adc8361177eab2b4c48fa5f44ce07f398060b747a3ab540739d",
+   "bytes": 940,
    "source": "modeled"
   },
   {
@@ -867,11 +931,35 @@
    "source": "modeled"
   },
   {
+   "id": "idp-proceed-mat-title",
+   "file": "frozen/idp-proceed-mat-title.html",
+   "url": "https://login.portal.example/idp/Consumer/",
+   "sha256": "b28a541064f3806fa496c5ec98a7fee5e25da7fbb3a511fad80615dddc40ebaa",
+   "bytes": 1663,
+   "source": "modeled"
+  },
+  {
    "id": "library-card-login",
    "file": "frozen/library-card-login.html",
    "url": "https://catalog.cityreads.example/patron/login",
    "sha256": "ffd0d656756348e62a0a65b00d1ccaeb4fbf0c24f2b8502a569de5be1c7db7fe",
    "bytes": 731,
+   "source": "modeled"
+  },
+  {
+   "id": "library-image-submit-pin",
+   "file": "frozen/library-image-submit-pin.html",
+   "url": "https://catalog.townlibrary.example/patroninfo",
+   "sha256": "1d9e838a5ac9a1af594b5712b81babfdcf3767f7b901db011d51593317a93cb5",
+   "bytes": 2318,
+   "source": "modeled"
+  },
+  {
+   "id": "library-name-card-number-pin",
+   "file": "frozen/library-name-card-number-pin.html",
+   "url": "https://catalog.countylibrary.example/patroninfo",
+   "sha256": "9d704d324b724a697e7e5d54b45a6359a8afecc663cfb709da51a382b3285fe0",
+   "bytes": 2309,
    "source": "modeled"
   },
   {
@@ -1107,6 +1195,14 @@
    "source": "modeled"
   },
   {
+   "id": "signup-before-login-dual-cluster",
+   "file": "frozen/signup-before-login-dual-cluster.html",
+   "url": "https://www.versehub.example/login/",
+   "sha256": "b21541c8a5099668dc8e7cbb9193b814ec77df6b2df65e97e34dd9786c517410",
+   "bytes": 2258,
+   "source": "modeled"
+  },
+  {
    "id": "signup-create-password-bday",
    "file": "frozen/signup-create-password-bday.html",
    "url": "https://www.pinboard-ideas.example/",
@@ -1176,6 +1272,14 @@
    "url": "https://links.shortly.example/a/sign_in",
    "sha256": "a5e9cc3b2772036197285eaa23ab8ece9a5d283fe788f35fd6f8af3b113f4507",
    "bytes": 1331,
+   "source": "modeled"
+  },
+  {
+   "id": "tel-webkit-masked-password",
+   "file": "frozen/tel-webkit-masked-password.html",
+   "url": "https://accounts.examplemobile.example/customer/login",
+   "sha256": "b897cf5b9fbe44471853d79a42332b0da2437c12a0d17d6cbd4d53488a0b6bca",
+   "bytes": 1096,
    "source": "modeled"
   },
   {

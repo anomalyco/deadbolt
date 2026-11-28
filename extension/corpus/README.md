@@ -95,7 +95,7 @@ bun corpus/score.ts --update-gate     # after an improvement: raise the floors
 
 - `frozen/`: one script-free HTML file per page, with the layout Chromium gave
   every control (`data-db-box="x,y,w,h,vis"`) and its shadow roots as
-  `<template shadowrootmode>`. 150 pages. The first 77: 49 modeled on
+  `<template shadowrootmode>`. 163 pages. The first 77: 49 modeled on
   the structure of real sign-in, sign-up, code, change-password and
   checkout pages (GitHub, Google's email-first step with its
   `hiddenPassword`, Microsoft's off-screen boxes, Apple, Amazon, Stripe's
@@ -122,7 +122,17 @@ bun corpus/score.ts --update-gate     # after an improvement: raise the floors
   and a password, a sign-up asking to create a password beside a birthday;
   and as decoys a login portal whose only box is its footer newsletter, a
   party game's room code, a basket's footer email sign-up and a store page
-  of product cards. Every address in
+  of product cards. Then 11 more, from a blind audit of unseen live pages: a
+  bank's Logon form wrapping the page and its footer, an IdP username step
+  with a Proceed button and a card title, two library catalogue sign-ins
+  with a masked bar code or card number, a PIN and an image submit button,
+  a sign-up beside the sign-in on `/login`, a PIN in a tel box masked with
+  CSS, an ID-or-phone box in English and Russian, and an email box in a
+  fixed layout inside zero-height clipping wrappers; and as decoys a job
+  board's sidebar sign-up beside "Sign up with Google" and a store's email
+  and text-message discount popup. Then 2 found replaying live pages after
+  retraining: an email-first form whose Continue button names it with
+  `form=`, and a one-box form whose Sign In button sits beside it. Every address in
   them is reserved (`example.com`, `.example`); none holds a value.
 - `frozen.lock.json`: each page's URL and SHA-256. `score.ts` refuses a page
   that doesn't match.

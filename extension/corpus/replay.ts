@@ -116,6 +116,8 @@ export function load(html: string, url: string) {
   // A frame is kept as an element of its own name: happy-dom would try to
   // load even an empty <iframe>. Its source is in data-db-src (freeze.ts).
   html = html.replace(/<(\/?)iframe\b/gi, "<$1db-frame")
+  // A datalist id React made (":r85:") is no selector happy-dom can look up: the list goes, the box stays.
+  html = html.replace(/\slist="[^"]*:[^"]*"/g, "")
   ;(window as unknown as { happyDOM: { setURL(u: string): void } }).happyDOM.setURL(url)
   const head = /<head[^>]*>([\s\S]*?)<\/head>/i.exec(html)?.[1] ?? ""
   const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html)?.[1] ?? html

@@ -30,14 +30,27 @@ const DECOY_WORDS = ["gift card", "gift cards", "giftcard", "promo code", "promo
 const textual = (f: ScannedField) => f.facts.type === "text" || f.facts.type === "email" || f.facts.type === "tel" || f.facts.type === ""
 
 /**
+ * A short masked box whose words name no password, in a cluster with a
+ * masked box that its words call the password (a bank's "Security Number"
+ * beside its "Internet Password"): a second secret the saved login doesn't
+ * hold, never the password or its confirmation.
+ */
+function secondSecret(f: ScannedField, fields: ScannedField[]): boolean {
+  if (f.facts.type !== "password" || !f.facts.maxLength || f.facts.maxLength > MAX_CODE_LENGTH) return false
+  if (namesRole(f.facts, ["password", "new-password"])) return false
+  return fields.some((g) => g !== f && g.cluster === f.cluster && g.facts.type === "password" && namesRole(g.facts, ["password"]) && !namesRole(g.facts, ["new-password"]))
+}
+
+/**
  * Before roles: a password box after another in the same cluster is its
  * confirmation, unless it's a PIN or token box. A masked box that no
- * password score claims (a bank's masked "User ID") isn't a first password.
+ * password score claims (a bank's masked "User ID") isn't a first password,
+ * nor is a second secret beside the named one (secondSecret).
  */
 export function confirmations(fields: ScannedField[]) {
   const seen = new Set<FormCluster | undefined>()
   for (const f of fields) {
-    if (f.facts.type !== "password" || f.score.otp >= FIELD_THRESHOLD) continue
+    if (f.facts.type !== "password" || f.score.otp >= FIELD_THRESHOLD || secondSecret(f, fields)) continue
     if (f.score.password < FIELD_THRESHOLD && f.score["new-password"] < FIELD_THRESHOLD) continue
     if (seen.has(f.cluster)) {
       f.score["new-password"] += 4
@@ -56,12 +69,14 @@ export function confirmations(fields: ScannedField[]) {
  * "Online ID").
  */
 export function rationalize(fields: ScannedField[]) {
+  for (const f of fields) if ((f.role === "password" || f.role === "new-password") && secondSecret(f, fields)) f.role = null
   for (const [i, f] of fields.entries()) {
     if (f.facts.type !== "password" || f.role !== "otp" || f.facts.autocomplete.includes("one-time-code")) continue
     // A masked code box beside a password is the second factor (a PIN or 2FA code), never another password.
     if (fields.some((g) => g.cluster === f.cluster && (g.role === "password" || g.role === "new-password"))) continue
     const long = f.facts.maxLength ? f.facts.maxLength > MAX_CODE_LENGTH : f.score.password > MASKED_BASELINE
-    if (long && fields.slice(0, i).some((g) => g.cluster === f.cluster && textual(g))) f.role = "password"
+    // After a box for who you are: a plain one, or a masked one its words name (a library's bar code).
+    if (long && fields.slice(0, i).some((g) => g.cluster === f.cluster && (textual(g) || IDENTIFIER.includes(g.role)))) f.role = "password"
   }
   for (const cluster of new Set(fields.map((f) => f.cluster))) {
     const own = fields.filter((f) => f.cluster === cluster)
@@ -148,7 +163,7 @@ const GROUPS: Array<[string, string[]]> = (
 ).map(([name, list]) => [name, list.map((p) => words(p).trim())])
 
 /** A button that moves a sign-in along without naming it: Continue, Next, Verify, Send magic link. */
-const PROCEED = ["continue", "next", "verify", "submit", "confirm", "go", "magic link", "send link", "email me a link", "send me a link", "login link", "sign in link", "weiter", "suivant", "continuer", "valider", "verifier", "confirmer", "continuar", "siguiente", "confirmar", "verificar", "bestatigen", "prufen", "avanti", "verder", "volgende", "次へ", "続行", "确认", "下一步"].map((p) => words(p).trim())
+const PROCEED = ["continue", "next", "proceed", "verify", "submit", "confirm", "go", "magic link", "send link", "email me a link", "send me a link", "login link", "sign in link", "weiter", "suivant", "continuer", "valider", "verifier", "confirmer", "continuar", "siguiente", "confirmar", "продолжить", "далее", "verificar", "bestatigen", "prufen", "avanti", "verder", "volgende", "次へ", "続行", "确认", "下一步"].map((p) => words(p).trim())
 const KINDS: FormKind[] = ["login", "signup", "change-password", "reset", "mfa", "newsletter"]
 const kindsOf = (text: string, min: number) => {
   const score = scoreFormText(text)

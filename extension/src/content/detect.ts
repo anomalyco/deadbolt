@@ -19,12 +19,12 @@ export { ignored, isVisible, labelText, type FormControl } from "./graph"
 /** A password box that asks for a new password by autocomplete, whatever the detector made of its form: a sign-up, never a sign-in step to submit. */
 export const asksNewPassword = (fields: Field[]) => fields.some((f) => f.el.type === "password" && /\bnew-password\b/.test(f.el.autocomplete))
 
-export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|challenge|mfa|2fa|two-factor|two-step|2-step|totp|\botp\b|verify|webauthn|passkey/i
+export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|\bidp\b|session|identifier|challenge|mfa|2fa|two-factor|two-step|2-step|totp|\botp\b|verify|webauthn|passkey/i
 const SIGNUP_URL = /sign-?up|sign_up|register|registration|join|create-account|onboard/i
 const RESET_URL = /forgot|reset|recover/i
 const CHANGE_PASSWORD_URL = /change-?password|password-?change|update-?password|settings\/security/i
-const SUBMIT_TEXT = /^\s*(sign ?in|log ?in|login|sign ?on|continue|next|submit|verify|confirm|go)\b/i
-const PROCEED_TEXT = /^\s*(continue|next)\b/i
+const SUBMIT_TEXT = /^\s*(sign ?in|log ?in|login|log ?on|sign ?on|continue|next|proceed|submit|verify|confirm|go)\b/i
+const PROCEED_TEXT = /^\s*(continue|next|proceed)\b/i
 const AUTH_HREF = /oauth|auth|login|signin|sign_in|sso|saml|connect/i
 const PROVIDER_ATTR = /\b(google|apple|microsoft|github|facebook|twitter|linkedin|gitlab|slack|discord|amazon|okta)\b/i
 /** Embedded provider widgets: Google Identity Services and Sign in with Apple. */
@@ -49,7 +49,8 @@ const FORM_THRESHOLD = 3
 
 /** Label of a button. Matched against vocabularies only, never stored. */
 export function controlText(el: Element): string {
-  const input = el instanceof HTMLInputElement && (el.type === "submit" || el.type === "button") ? el.value : ""
+  // An image button (a library catalogue's) says what it does in its alt text or value.
+  const input = !(el instanceof HTMLInputElement) ? "" : el.type === "submit" || el.type === "button" ? el.value : el.type === "image" ? el.alt || el.value : ""
   const text = el.getAttribute("aria-label") || innerText(el) || input || el.getAttribute("title") || ""
   return text.replace(/\s+/g, " ").trim().slice(0, 120)
 }
@@ -68,13 +69,16 @@ export function visibleLabel(el: Element): string {
 
 // ---- Field facts ---------------------------------------------------------------
 
+/** Boxes that take typed text a page may mask with CSS: a PIN in a tel box shows a number pad and dots. */
+const MASKABLE = new Set(["text", "tel", "number", "email"])
+
 /**
  * A password box, or a text box the page masks with CSS
  * (`-webkit-text-security`) to keep the browser's own password handling away.
  */
 export function masked(el: HTMLInputElement, style: (el: Element) => CSSStyleDeclaration = getComputedStyle): boolean {
   if (el.type === "password") return true
-  if (el.type !== "text") return false
+  if (!MASKABLE.has(el.type)) return false
   const security = style(el).getPropertyValue("-webkit-text-security")
   return !!security && security !== "none"
 }
@@ -177,7 +181,7 @@ export interface ClusterVerdict {
   odds: number
 }
 
-const BUTTON = "button, [role=button], input[type=submit], input[type=button]"
+const BUTTON = "button, [role=button], input[type=submit], input[type=button], input[type=image]"
 const SETTINGS_URL = /settings|preferences|admin|console|dashboard|developers?\b|projects?\b/i
 
 /** What the page says around every cluster: its path and title, and how many of its forms ask for a code. */
@@ -187,6 +191,29 @@ function pageFacts(fields: ScannedField[], codeGroups: HTMLInputElement[][], gra
   const title = scoreFormText(words(document.title))
   const codes = new Set([...fields.filter((f) => f.role === "otp").map((f) => f.cluster), ...codeGroups.map((g) => graph.clusterOf(g[0]))])
   return { paths, title: FORM_KINDS.filter((k) => title[k] >= FORM_THRESHOLD), codeClusters: codes.size }
+}
+
+/** How far above a form with no button of its own the button beside it may be. */
+const BESIDE_DEPTH = 2
+
+/** A button outside the form that submits it all the same (`<button form="…">`). */
+const submitsForm = (root: Element, el: Element) => root instanceof HTMLFormElement && (el as HTMLButtonElement).form === root
+
+/**
+ * A cluster's buttons: its own, and any that name its form (`form="…"`);
+ * with none, the buttons just beside it (a sign-in card's "Sign In" after
+ * its form), a level or two up, while that holds no other boxes.
+ */
+function formButtons(root: Element, buttons: Element[], graph: FormGraph): Element[] {
+  const own = buttons.filter((el) => (within(root, el) || submitsForm(root, el)) && graph.visible(el))
+  if (own.length) return own
+  let node = root.parentElement
+  for (let depth = 0; node && depth < BESIDE_DEPTH && node !== document.body; depth++, node = node.parentElement) {
+    if (Array.from(node.querySelectorAll("input:not([type=hidden]), select, textarea")).some((el) => !root.contains(el))) return []
+    const beside = buttons.filter((el) => node!.contains(el) && !root.contains(el) && graph.visible(el))
+    if (beside.length) return beside
+  }
+  return []
 }
 
 /** Every cluster in a form or container whose fields the rules gave a login role, with the model's verdict on it. */
@@ -200,7 +227,7 @@ function judge(graph: FormGraph, collected: ReturnType<typeof collectFields>): C
     const root = cluster.root
     const fields = collected.fields.filter((f) => f.cluster === cluster)
     if (!root || !fields.some((f) => f.role)) continue
-    const labels = buttons.filter((el) => within(root, el) && graph.visible(el)).map(controlText).filter((t) => t && t.length <= 40)
+    const labels = formButtons(root, buttons, graph).map(controlText).filter((t) => t && t.length <= 40)
     const features = clusterFeatures(cluster, fields, graph, page, labels)
     out.push({ cluster, offer: decoyCluster(cluster, fields, graph), features, odds: loginOdds(features) })
   }
@@ -213,17 +240,54 @@ export function clusterVerdicts(source: ScanSource = openRoots()): ClusterVerdic
   return judge(graph, collectFields(graph))
 }
 
+/** How much a field says its cluster is the login form: a password most, then who you are, then a code. */
+const anchorRank = (f: ScannedField) =>
+  f.role === "password" || f.role === "new-password" ? 3 : f.role === "username" || f.role === "email" || f.role === "phone" ? 2 : f.role === "otp" ? 1 : 0
+
+/**
+ * Of clusters that ask for as much, how well each fits the page: one whose
+ * words, buttons or new password say what the path does (sign-up on
+ * /signup, else sign-in) fits best, one that says both next, then one that
+ * says neither, and one that says the other (or a reset, off a reset path)
+ * worst. Off a
+ * sign-up path, one with no boxes a login role leaves unclaimed (a sign-up's
+ * names) fits better. Ties keep page order: the model's odds only set decoys
+ * aside, they don't rank sign-in forms.
+ */
+function fit(cluster: FormCluster | undefined, verdicts: ReadonlyMap<FormCluster, ClusterVerdict>, signupPage: boolean): number[] {
+  const v = cluster && verdicts.get(cluster)
+  const features = v ? v.features : ["unclaimed:0"]
+  const says = (kind: string) => features.includes(`button:${kind}`) || features.includes(`words:${kind}`)
+  const login = says("login")
+  const signup = says("signup") || features.includes("role:new-password")
+  const reset = says("reset") && !login && !signup && !RESET_URL.test(location.pathname)
+  // One that says both ("Sign in or create account") fits either path better than one that says neither.
+  const intent = signupPage ? (signup && !login ? 2 : signup ? 1 : login || reset ? -1 : 0) : login && !signup ? 2 : login ? 1 : signup || reset ? -1 : 0
+  return [intent, !signupPage && features.includes("unclaimed:0") ? 1 : 0]
+}
+
 /**
  * The cluster that holds the most important field: a password, else who
- * you are, else a code; else the first group of one-digit code boxes whose
- * code Deadbolt holds, else the first such group.
+ * you are, else a code; of several, the one that best fits the page (a
+ * sign-in beside a sign-up on /login), else the first. Else the first group
+ * of one-digit code boxes whose code Deadbolt holds, else the first such group.
  */
-function primaryCluster(fields: ScannedField[], codeGroups: HTMLInputElement[][], graph: FormGraph): FormCluster | undefined {
-  const anchor =
-    fields.find((f) => f.role === "password" || f.role === "new-password") ??
-    fields.find((f) => f.role === "username" || f.role === "email" || f.role === "phone") ??
-    fields.find((f) => f.role === "otp")
-  if (anchor) return anchor.cluster
+function primaryCluster(fields: ScannedField[], codeGroups: HTMLInputElement[][], graph: FormGraph, verdicts: ReadonlyMap<FormCluster, ClusterVerdict>): FormCluster | undefined {
+  const rank = new Map<FormCluster | undefined, number>()
+  for (const f of fields) rank.set(f.cluster, Math.max(rank.get(f.cluster) ?? 0, anchorRank(f)))
+  const top = Math.max(0, ...rank.values())
+  if (top) {
+    const candidates = [...rank].filter(([, r]) => r === top).map(([c]) => c)
+    if (candidates.length === 1) return candidates[0]
+    const signupPage = SIGNUP_URL.test(location.pathname)
+    const scored = candidates.map((c) => ({ c, key: fit(c, verdicts, signupPage) }))
+    // Highest first; a tie keeps page order.
+    scored.sort((a, b) => {
+      for (let i = 0; i < a.key.length; i++) if (a.key[i] !== b.key[i]) return b.key[i] - a.key[i]
+      return 0
+    })
+    return scored[0].c
+  }
   const clusterOf = (group: HTMLInputElement[]) => graph.clusterOf(group[0])
   const held = codeGroups.find((g) => heldCode(words(graph.label(g[0])), () => codePageText(clusterOf(g)?.root ?? null)))
   return (held ?? codeGroups[0]) && clusterOf(held ?? codeGroups[0])
@@ -254,17 +318,25 @@ export function providerForControl(el: Element, text: string): Provider | null {
   return match.provider
 }
 
+/** Whether a provider button's own words make a new account with it ("Sign up with Google"): no sign-in's. */
+const signsUp = (text: string) => !!providerFromLabel(text)?.signup
+
 /**
  * The page's buttons as the login form sees them: its submit button, its
  * buttons' labels, and whether a sign-in-provider button shows on the page
  * (`provider`, what the scan reports) and beside the form (`near`, what
  * judges its kind): a "Sign in with SSO" link in the page's main column says
- * nothing of a newsletter box in its footer.
+ * nothing of a newsletter box in its footer. `nearSignup`: every provider
+ * button beside the form signs up with it, none signs in.
  */
 function collectControls(cluster: FormCluster | undefined, graph: FormGraph, fields: boolean) {
   let submit: Element | undefined
+  // A submit button that names no sign-in step ("E-mail a login link"), taken when no button does.
+  let fallback: Element | undefined
   let provider = false
   let near = false
+  let signupNear = 0
+  let signinNear = 0
   const buttonText: string[] = []
   const root = cluster?.root ?? null
   const form = cluster?.form ?? null
@@ -282,28 +354,37 @@ function collectControls(cluster: FormCluster | undefined, graph: FormGraph, fie
     const raw = (el.textContent ?? "").replace(/\s+/g, " ").trim()
     if (!el.hasAttribute("aria-label") && raw.length > MAX_CONTROL_TEXT && !el.querySelector("style")) continue
     // Its label and kind matter only on a page with login fields, and only as the form's own button.
-    const own = fields && !(el instanceof HTMLAnchorElement) && (!root || within(root, el))
-    if (!own && (provider && near || !mayNameProvider(el, raw))) continue
+    const own = fields && !(el instanceof HTMLAnchorElement) && (!root || within(root, el) || submitsForm(root, el))
+    const named = mayNameProvider(el, raw)
+    if (!own && (provider && signinNear > 0 || !named)) continue
     if (!graph.visible(el)) continue
     const text = controlText(el)
-    if ((!provider || !near) && providerForControl(el, text)) {
+    // Every provider button is one, however many came before: a second one ("Continue with Apple") is never the submit.
+    if (named && providerForControl(el, text)) {
       provider = true
-      near ||= beside(el)
+      if (beside(el)) {
+        near = true
+        if (signsUp(text)) signupNear++
+        else signinNear++
+      }
       continue
     }
     if (!text || text.length > 40 || el instanceof HTMLAnchorElement) continue
-    // Through shadow hosts: a form's button may be inside a web component (<my-button>).
-    if (root && !within(root, el)) continue
+    // Through shadow hosts: a form's button may be inside a web component (<my-button>), or outside it, naming it.
+    if (root && !within(root, el) && !submitsForm(root, el)) continue
     buttonText.push(text)
-    const isSubmitType = (el as HTMLButtonElement).type === "submit"
-    if (!submit && (SUBMIT_TEXT.test(text) || (isSubmitType && form))) submit = el
+    const isSubmitType = (el as HTMLButtonElement).type === "submit" || (el as HTMLInputElement).type === "image"
+    if (!submit && SUBMIT_TEXT.test(text)) submit = el
+    else if (!fallback && isSubmitType && form) fallback = el
   }
-  if (!provider || !near) {
+  if (!provider || signinNear === 0) {
     const widgets = deepQueryAll(PROVIDER_WIDGETS, graph.roots)
     provider ||= widgets.length > 0
-    near ||= widgets.some(beside)
+    const nearWidgets = widgets.filter(beside).length
+    near ||= nearWidgets > 0
+    signinNear += nearWidgets
   }
-  return { submit, buttonText, provider, near }
+  return { submit: submit ?? fallback, buttonText, provider, near, nearSignup: near && signinNear === 0 && signupNear > 0 }
 }
 
 /**
@@ -370,7 +451,8 @@ function decideKind(fields: ScannedField[], otpBoxes: number, text: string, cont
   // (sites use it to block autofill on logins); wording has to confirm it.
   const single = pw + npw === 1
   if (npw > 0 && !single && !ac.has("current-password") && !saysLogin) score.login -= 3
-  if (provider) score.login += 2
+  // "Sign up with Google" beside a box makes an account; it says nothing of signing in.
+  if (provider && !controls.nearSignup) score.login += 2
   // An email-first step: an identifier and a Continue button.
   if (pw + npw === 0 && ident > 0 && buttonText.some((t) => PROCEED_TEXT.test(t))) score.login += 2
   if (ac.has("webauthn")) score.login += 3
@@ -509,7 +591,7 @@ export function scanPage(source: ScanSource = openRoots()): ScanResult {
   )
   const all = collected.fields.filter((f) => !f.cluster || !decoys.has(f.cluster))
   const codeGroups = collected.codeGroups.filter((g) => !decoys.has(graph.clusterOf(g[0])!))
-  const cluster = primaryCluster(all, codeGroups, graph)
+  const cluster = primaryCluster(all, codeGroups, graph, verdicts)
   // Judge and report the primary cluster only, so a sign-up form or newsletter
   // box elsewhere on the page doesn't change what the login form is.
   const inScope = (el: Element) => !cluster || graph.clusterOf(el) === cluster
