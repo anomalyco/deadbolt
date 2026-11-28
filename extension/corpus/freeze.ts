@@ -2,7 +2,8 @@
 // in headless Chromium at 1280×800, every control and button gets the box
 // Chromium laid it out in (data-db-box="x,y,w,h,vis"), the few computed
 // styles the detector reads (display, visibility, opacity,
-// -webkit-text-security) are written inline, shadow roots are kept as
+// -webkit-text-security, and position inside a wrapper too thin to show
+// what it clips) are written inline, shadow roots are kept as
 // <template shadowrootmode> markup (closed ones too: attachShadow is made
 // to record them), and then scripts, styles, frames' sources, images,
 // event handlers, query strings and every value a field held are stripped.
@@ -111,6 +112,16 @@ function freezeInPage(): string {
     }
   // The computed styles the detector reads, inline; every other style goes with the stylesheets.
   const shown = () => [document.body, ...roots.slice(1)].flatMap((r) => Array.from(r.querySelectorAll("*")))
+  // Wrappers too thin to show what they clip, found first: inside one, how each box is positioned says
+  // whether it escapes the clip (graph.ts), so their boxes keep their position and what holds fixed boxes.
+  const thin = (el: Element) => {
+    const cs = getComputedStyle(el)
+    if (![cs.overflow, cs.overflowX, cs.overflowY].some((o) => o === "hidden" || o === "clip")) return false
+    const r = el.getBoundingClientRect()
+    return r.width < 2 || r.height < 2
+  }
+  const clipping = shown().filter(thin)
+  const inClip = (el: Element) => clipping.some((w) => w === el || w.contains(el))
   for (const el of shown()) {
     const cs = getComputedStyle(el)
     const parent = el.parentElement ? getComputedStyle(el.parentElement) : null
@@ -128,6 +139,10 @@ function freezeInPage(): string {
         keep.push(`overflow:${clip}`)
         el.setAttribute("data-db-box", [r.x, r.y, r.width, r.height].map((n) => Math.round(n)).join(",") + ",0")
       }
+    }
+    if (inClip(el)) {
+      if (cs.position !== "static") keep.push(`position:${cs.position}`)
+      if (cs.transform !== "none") keep.push("transform:translateZ(0)")
     }
     if (keep.length) el.setAttribute("style", keep.join(";"))
     else el.removeAttribute("style")
