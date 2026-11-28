@@ -20,7 +20,7 @@ import { formFailed, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { chainActive, initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
-import { holdNativeSubmit, SETTLE_MS, submitPlan, type SubmitPlan } from "./content/signin-submit"
+import { SETTLE_MS, submitPlan, type SubmitPlan } from "./content/signin-submit"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 import { paymentProvider } from "./payments"
 
@@ -531,7 +531,6 @@ async function sessionSubmit(message: Extract<ToContent, { type: "db:signin-subm
   sessionSubmitted = formId
   captured()
   stepSubmitted()
-  if (after.form && after.scripted) holdNativeSubmit(after.form)
   if (!after.form || submittedForm !== after.form) after.button.click()
   return true
 }
