@@ -142,8 +142,10 @@ export class Autofill {
   private lastState: string
   /** A picked login was filled in `tabId` on `site` (bg/site-icons.ts reads the site's icon then). */
   filled?: (tabId: number, site: string) => void
-  /** A pick filled form `form` in `target` with login `ref`: a form taught there is kept on it (bg/recipes.ts). */
+  /** A pick in a teaching menu filled form `form` in `target` with login `ref`: the form taught there is kept on it (bg/recipes.ts). */
   taught?: (target: FrameTarget, ref: string, form: number) => void
+  /** Whether `target` may be taught a form now: the browser just raised a fill door there (bg/recipes.ts). Unset, nothing teaches. */
+  mayTeach?: (target: FrameTarget) => boolean
   /**
    * Whether the top page in `target` looks signed out now: a fresh probe,
    * and no sign-in remembered there lately (bg/universal.ts). Unset, no
@@ -213,6 +215,11 @@ export class Autofill {
     const each = IDENTIFIER_ROLES.includes(t.focused) ? oneRowEach(reply.accounts, t.origin) : reply.accounts
     const accounts = menuAccounts(each, t.focused, t.roles).filter((a) => !t.only || t.only.includes(a.ref))
     return menuRowCount(accounts, t.focused) + passkeys
+  }
+
+  /** Drops an origin's cached logins: one of them changed here (bg/recipes.ts). */
+  forgetList(origin: string) {
+    this.lists.delete(origin)
   }
 
   async list(origin: string, fresh = false): Promise<ListReply> {
@@ -360,6 +367,8 @@ export class Autofill {
     if (!rows) return { rows: 0 }
     this.sweep()
     const token = newToken()
+    // Teaching takes the browser's own fill door, raised in this top page just now: never a content script's word alone.
+    teach = teach && !owner && !!this.mayTeach?.(target)
     const step = kind === "login" ? { kind: "login" as const, ...(asksNew === true ? { asksNew: true } : {}) } : {}
     this.tokens.set(token, { ...target, ...(owner ? { owner } : {}), roles: clean, focused: focused as FieldRole, form: form as number, ...step, createdAt: Date.now(), ...(generate ? { generate } : {}), ...(only ? { only } : {}), ...(teach ? { teach: true as const } : {}) })
     if (!owner || !at) return { token, rows }
@@ -413,7 +422,12 @@ export class Autofill {
     // bound to the extension's own menu document (see token), which sends a
     // pick only after its dwell and fresh visibility check.
     if ((await this.signInAllowed(t, account)) && (await this.signsInHere(t))) return this.startAutomatic(t, account, { form: t.form, roles: t.roles })
-    if (!t.owner) return this.fillAndArm(t, account, t.roles, t.form)
+    if (!t.owner) {
+      const reply = await this.fillAndArm(t, account, t.roles, t.form)
+      // A menu on fields the user asked to fill by hand teaches the form, to the login it filled (bg/recipes.ts).
+      if (reply.ok && t.teach === true) this.taught?.(t, account.ref, t.form)
+      return reply
+    }
     // A frame's fields: only those that show through every frame above, checked now and again once the values are in hand.
     const framed = await this.measured(t.tabId, () => shownInPage(t, t.form, true), null)
     if (!framed) return { ok: false, message: NOT_SHOWN }
@@ -674,7 +688,6 @@ export class Autofill {
     if (next !== undefined) await this.serial(target.tabId, () => this.arm(target.tabId, generation, next))
     const site = siteOf(new URL(target.origin).hostname)
     if (reply.ok && site) this.filled?.(target.tabId, site)
-    if (reply.ok) this.taught?.(target, account.ref, form)
     return reply
   }
 

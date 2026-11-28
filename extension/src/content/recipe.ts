@@ -11,7 +11,7 @@
 // field is filled by a stale guess.
 
 import type { FormCluster, FormGraph } from "./graph"
-import { concealed, ignored } from "./graph"
+import { concealed, ignored, isVisible } from "./graph"
 import { masked } from "./detect"
 import type { FieldRole } from "../messages"
 
@@ -145,23 +145,80 @@ function slotField(cluster: FormCluster, slot: RecipeSlot): RecipeField | null {
   return { el, role: slot.role }
 }
 
+/** Controls that submit a form: what a learned form's own submit button may be. */
+const SUBMITS = 'button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]'
+
+/**
+ * A learned form's submit control: the one visible submit button inside its
+ * cluster's container, never one elsewhere on the page (a search's "Next",
+ * a newsletter's "Go"). None for a cluster that's the whole page, or with
+ * no such button or more than one.
+ */
+export function recipeSubmit(cluster: FormCluster): HTMLElement | undefined {
+  if (!cluster.root) return undefined
+  const buttons = Array.from(cluster.root.querySelectorAll<HTMLElement>(SUBMITS)).filter((b) => isVisible(b) && !concealed(b))
+  return buttons.length === 1 ? buttons[0] : undefined
+}
+
+export interface LearnedForm {
+  fields: RecipeField[]
+  /** The cluster the fields are in, when they were found. */
+  cluster?: FormCluster
+  /** A recipe was for this page, but no one cluster has its shape and fields now: nothing of it is used. */
+  stale: boolean
+}
+
 /**
  * The fields `recipes` (JSON, as the host lists them) locate on the page at
  * `origin` and `pathname` in `graph`: those of the first recipe for this
- * exact origin and path whose cluster is on the page with the same
- * fingerprint, and whose every slot is still its field (see slotField).
- * `stale`: a recipe was for this page but its form changed shape, and
- * nothing of it is used.
+ * exact origin and path that exactly one cluster on the page matches, with
+ * the same fingerprint and every slot still its field (see slotField). A
+ * search box of the same shape above the login form doesn't match; two
+ * forms that both match are ambiguous, and nothing is filled (stale).
  */
-export function applySiteRecipes(graph: Pick<FormGraph, "clusters">, origin: string, pathname: string, recipes: readonly unknown[]): { fields: RecipeField[]; stale: boolean } {
+export function applySiteRecipes(graph: Pick<FormGraph, "clusters">, origin: string, pathname: string, recipes: readonly unknown[]): LearnedForm {
   let stale = false
   for (const raw of recipes) {
     const recipe = parseRecipe(raw)
     if (!recipe || recipe.origin !== origin || !pathMatches(recipe.pathPattern, pathname)) continue
-    const cluster = graph.clusters.find((c) => c.fingerprint === recipe.clusterFingerprint)
-    const fields = cluster ? recipe.slots.map((s) => slotField(cluster, s)) : []
-    if (cluster && fields.every((f) => f !== null)) return { fields: fields as RecipeField[], stale: false }
+    const matches = graph.clusters
+      .filter((c) => c.fingerprint === recipe.clusterFingerprint)
+      .map((cluster) => ({ cluster, fields: recipe.slots.map((s) => slotField(cluster, s)) }))
+      .filter((m): m is { cluster: FormCluster; fields: RecipeField[] } => m.fields.every((f) => f !== null))
+    if (matches.length === 1) return { fields: matches[0].fields, cluster: matches[0].cluster, stale: false }
     stale = true
   }
   return { fields: [], stale }
+}
+
+/** How long a page that couldn't read its recipes (locked) waits before it asks again. */
+export const RECIPES_RETRY_MS = 30_000
+
+/**
+ * When a frame asks the background for its page's recipes: once per page
+ * (origin and path), again after the page changes in place (a single-page
+ * app's navigation: one may have been taught since), and after a failed ask
+ * only once `RECIPES_RETRY_MS` have passed.
+ */
+export class RecipeAsks {
+  private asked = ""
+  private retryAt = 0
+
+  /** Whether `page` should ask now. */
+  due(page: string, now = Date.now()): boolean {
+    return this.asked !== page && now >= this.retryAt
+  }
+  /** It asked, or was told (db:recipes-set), for `page`. */
+  asking(page: string) {
+    this.asked = page
+  }
+  /** The ask got no answer it could use (locked, not connected). */
+  failed(now = Date.now()) {
+    this.asked = ""
+    this.retryAt = now + RECIPES_RETRY_MS
+  }
+  /** The URL changed in place. */
+  navigated() {
+    this.asked = ""
+  }
 }

@@ -24,8 +24,9 @@ const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId)
 const signInWith = new SignInWith(host)
 const providers = new ProviderChain(host, passkeys, signInWith)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith, providers)
-const recipes = new Recipes(host, (origin, fresh) => autofill.list(origin, fresh))
+const recipes = new Recipes(host, (origin, fresh) => autofill.list(origin, fresh), (origin) => autofill.forgetList(origin))
 autofill.taught = (target, ref, form) => void recipes.filled(target, ref, form)
+autofill.mayTeach = (target) => recipes.allowed(target)
 const learner = new Learner(host, { badgeUnder: (tabId) => (saver.pending(tabId) || passkeys.prompt(tabId) ? "1" : "") })
 saver.badge = (tabId, text) => learner.badge(tabId, text)
 learner.listen()
@@ -47,7 +48,7 @@ saver.signedIn = (tabId, site) => {
 // After a fill (or a sign-in, above), the site's own icon, kept for the rows (bg/site-icons.ts).
 autofill.filled = (tabId, site) => void siteIcons.used(tabId, site)
 passkeys.listen()
-listenFillDoors()
+listenFillDoors((tabId, frameId) => recipes.allow(tabId, frameId))
 
 function title(status: Status): string {
   switch (status.state) {

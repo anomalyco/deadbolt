@@ -2043,6 +2043,12 @@ fn browser_host_keeps_and_clears_taught_forms() {
         elsewhere["accounts"][0].get("recipe").is_none(),
         "{elsewhere}"
     );
+    // `show` leaves the browser's bookkeeping out unless asked to reveal everything.
+    let show = a.run(&["show", "bank.example"]);
+    assert!(!show.contains("autofill-recipe"), "{show}");
+    assert!(show.contains("sam"), "{show}");
+    let revealed = a.run(&["show", "--reveal", "bank.example"]);
+    assert!(revealed.contains("autofill-recipe"), "{revealed}");
 
     let reply = host.ask(serde_json::json!({
         "type": "save-recipe", "origin": origin, "ref": other, "recipe": recipe,

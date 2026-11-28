@@ -1,9 +1,13 @@
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Autofill } from "../src/bg/autofill"
 import { Recipes } from "../src/bg/recipes"
 import { scanPage } from "../src/content/detect"
 import { scanGraph } from "../src/content/graph"
-import { applySiteRecipes, buildSiteRecipe, MAX_RECIPE_BYTES, parseRecipe, pathMatches, pathPattern } from "../src/content/recipe"
+import { applySiteRecipes, buildSiteRecipe, MAX_RECIPE_BYTES, parseRecipe, pathMatches, pathPattern, RecipeAsks, RECIPES_RETRY_MS, recipeSubmit } from "../src/content/recipe"
+import { withManual } from "../src/content/manual"
+import { ownerOf } from "../src/content/detect"
+import { DOOR_MS } from "../src/bg/recipes"
+import { fillCommand, fillMenuClicked, listenFillDoors } from "../src/bg/doors"
 import type { RequestBody } from "../src/protocol"
 import { ACCOUNTS, fakeHost, installChrome, menuSender, pageSender, SITE, type FakeChrome, type FakeHost } from "./chrome"
 
@@ -54,7 +58,9 @@ describe("learned forms", () => {
     // Visit 2: a fresh page, another account number in the path.
     page(PORTAL)
     const found = applySiteRecipes(scanGraph(), ORIGIN, "/banking/77001/signon", [recipe])
-    expect(found).toEqual({ fields: [{ el: input("#m"), role: "username" }], stale: false })
+    expect(found.fields).toEqual([{ el: input("#m"), role: "username" }])
+    expect(found.stale).toBe(false)
+    expect(found.cluster?.controls.includes(input("#m"))).toBe(true)
   })
 
   test("a masked pair finds both boxes, and the password only goes into the box that masks it", () => {
@@ -126,6 +132,73 @@ describe("learned forms", () => {
     expect(new TextEncoder().encode(recipe).length).toBeLessThanOrEqual(MAX_RECIPE_BYTES)
     expect(applySiteRecipes(graph, ORIGIN, PATH, [recipe]).fields).toHaveLength(4)
   })
+
+  /** The portal's login in a section, with a search section of the very same shape above it. */
+  const SEARCH = '<section id="search"><span>Find a branch</span><input type="text" name="q"></section>'
+  const LOGIN = '<section id="login"><span>Member no.</span><input type="text" name="txt1" id="m"></section>'
+
+  test("a search box of the same shape above the taught form doesn't make it stale: the taught one is found", () => {
+    page(SEARCH + LOGIN)
+    const graph = scanGraph()
+    const search = graph.clusterOf(input("[name=q]"))!
+    const login = graph.clusterOf(input("#m"))!
+    expect(search.fingerprint).toBe(login.fingerprint)
+    const recipe = buildSiteRecipe(ORIGIN, PATH, login, [{ el: input("#m"), role: "username" }])!
+    page(SEARCH + LOGIN)
+    const found = applySiteRecipes(scanGraph(), ORIGIN, PATH, [recipe])
+    expect(found.stale).toBe(false)
+    expect(found.fields.map((f) => f.el.id)).toEqual(["m"])
+    expect((found.cluster?.root as Element).id).toBe("login")
+  })
+
+  test("two forms that both match are ambiguous: nothing is filled", () => {
+    page(LOGIN)
+    const recipe = buildSiteRecipe(ORIGIN, PATH, scanGraph().clusterOf(input("#m"))!, [{ el: input("#m"), role: "username" }])!
+    page(LOGIN + LOGIN.replace('id="login"', 'id="again"'))
+    expect(applySiteRecipes(scanGraph(), ORIGIN, PATH, [recipe])).toEqual({ fields: [], stale: true })
+  })
+
+  test("a learned form's submit is only a button inside its own container, never the page's", () => {
+    page('<section id="login"><input type="text" name="txt1"></section><div><button id="next">Next</button></div>')
+    const graph = scanGraph()
+    expect(recipeSubmit(graph.clusterOf(input("[name=txt1]"))!)).toBeUndefined()
+    page('<section id="login"><input type="text" name="txt1"><button id="go">Sign on</button></section><div><button id="next">Next</button></div>')
+    expect(recipeSubmit(scanGraph().clusterOf(input("[name=txt1]"))!)?.id).toBe("go")
+    // Two of its own: which is the submit is a guess, so none.
+    page('<section><input type="text" name="txt1"><button>Sign on</button><button>Help</button></section>')
+    expect(recipeSubmit(scanGraph().clusterOf(input("[name=txt1]"))!)).toBeUndefined()
+    // Controls in no container: the page is no form's own.
+    page('<input type="text" name="txt1"><button id="next">Next</button>')
+    expect(recipeSubmit(scanGraph().clusterOf(input("[name=txt1]"))!)).toBeUndefined()
+  })
+
+  test("a single-page app back on a page asks again; a failed ask waits", () => {
+    const asks = new RecipeAsks()
+    expect(asks.due("/login", 0)).toBe(true)
+    asks.asking("/login")
+    expect(asks.due("/login", 0)).toBe(false)
+    // /login -> /dashboard -> /login, in place: asked again, for a form taught meanwhile.
+    asks.navigated()
+    expect(asks.due("/dashboard", 0)).toBe(true)
+    asks.asking("/dashboard")
+    asks.navigated()
+    expect(asks.due("/login", 0)).toBe(true)
+    asks.failed(1000)
+    expect(asks.due("/login", 1000 + RECIPES_RETRY_MS - 1)).toBe(false)
+    expect(asks.due("/login", 1000 + RECIPES_RETRY_MS)).toBe(true)
+  })
+
+  test("a form taught one field still takes the pair the user asks for on its next", () => {
+    page(PAIR)
+    const [u, p] = [input("[name=txt1]"), input("[name=txt2]")]
+    const learned = [{ el: u, role: "username" as const, owner: ownerOf(u) }]
+    const pair = [learned[0], { el: p, role: "password" as const, owner: ownerOf(p) }]
+    // ⌘⇧L on the code box: the pair stands, though the recipe's username is in it.
+    expect(withManual(learned, pair, p).fields).toEqual(pair)
+    // Back in the username box, or a scan that takes both: the scan's.
+    expect(withManual(learned, pair, u).fields).toBe(learned)
+    expect(withManual(pair.slice(), pair, p).manual).toEqual([])
+  })
 })
 
 describe("teaching and resetting a form (bg/recipes.ts)", () => {
@@ -156,35 +229,94 @@ describe("teaching and resetting a form (bg/recipes.ts)", () => {
       return send(req as never)
     }) as typeof host.host.send
     autofill = new Autofill(host.host)
-    recipes = new Recipes(host.host, (origin, fresh) => autofill.list(origin, fresh))
+    recipes = new Recipes(host.host, (origin, fresh) => autofill.list(origin, fresh), (origin) => autofill.forgetList(origin))
     autofill.taught = (target, ref, form) => void recipes.filled(target, ref, form)
+    autofill.mayTeach = (target) => recipes.allowed(target)
   })
+  const top = { tabId: 1, frameId: 0, documentId: "top-doc", origin: SITE }
+  /** ⌘⇧L, then the user picks the first login in the menu it opened: what a hand fill does (`teach` as the content script asks). */
+  async function handFill(form: number, teach = true) {
+    const { token } = await autofill.query(pageSender(), ["username"], "username", form, true, undefined, true, null, undefined, undefined, undefined, undefined, teach)
+    const loaded = await autofill.menuLoad(token!, menuSender(), SITE)
+    expect(await autofill.menuPick(token!, ACCOUNTS[0].ref, menuSender())).toMatchObject({ ok: true })
+    await new Promise((r) => setTimeout(r, 0))
+    return loaded
+  }
+  const told = () => fake.delivered.filter((d) => d.message.type === "db:recipes-set").map((d) => d.message.recipes)
 
   const recipeFor = (origin = SITE) => JSON.stringify({ v: 1, origin, pathPattern: "/login", clusterFingerprint: "3dc018f4", slots: [{ role: "username", name: "txt1", nthInput: 0 }] })
 
-  test("a hand fill teaches the form to the login picked, which lists it for the page; reset forgets it", async () => {
+  test("a hand fill teaches the form to the login picked, the page hears it at once, and reset forgets it", async () => {
     expect(await recipes.forFrame(pageSender())).toEqual([])
-    // ⌘⇧L on a field the scan passed over: the content script's recipe for it, then the user picks a login.
+    // The browser raised ⌘⇧L; the content script sends the recipe of the fields it opened on, then the user picks a login.
+    recipes.allow(1)
     await recipes.learned(pageSender(), recipeFor(), 4)
     expect(saved()).toEqual([])
-    const { token } = await autofill.query(pageSender(), ["username"], "username", 4, true, undefined, true, null, undefined, undefined, undefined, undefined, true)
     // Its footer says the pick teaches the form.
-    expect(await autofill.menuLoad(token!, menuSender(), SITE)).toMatchObject({ kind: "accounts", teach: true })
-    expect(await autofill.menuPick(token!, ACCOUNTS[0].ref, menuSender())).toMatchObject({ ok: true })
-    await new Promise((r) => setTimeout(r, 0))
+    expect(await handFill(4)).toMatchObject({ kind: "accounts", teach: true })
     expect(saved()).toEqual([{ type: "save-recipe", origin: SITE, ref: ACCOUNTS[0].ref, recipe: recipeFor() }])
-    // The daemon says its items changed (the cached lists go), and the next visit asks for its recipes: that one.
-    host.setStatus({ state: "ready", version: "0.0.0" })
+    // The page hears its recipes right away (a single-page app back on the form needs no reload), and the cached list went.
+    expect(told()).toEqual([[recipeFor()]])
     expect(await recipes.forFrame(pageSender())).toEqual([recipeFor()])
-    // "Reset learned form": the login forgets it, and the page is told.
+    // "Reset learned form": the login forgets it, the cache goes, and the page is told.
     expect(await recipes.reset(1)).toBe(true)
     expect(saved().at(-1)).toEqual({ type: "save-recipe", origin: SITE, ref: ACCOUNTS[0].ref })
-    expect(fake.delivered.filter((d) => d.message.type === "db:recipes-set").map((d) => d.message.recipes)).toEqual([[]])
-    host.setStatus({ state: "ready", version: "0.0.0" })
+    expect(told()).toEqual([[recipeFor()], []])
     expect(await recipes.forFrame(pageSender())).toEqual([])
   })
 
+  test("without the browser's own fill door, a content script's recipe is ignored and its menu doesn't teach", async () => {
+    await recipes.learned(pageSender(), recipeFor(), 4)
+    expect(await handFill(4)).not.toHaveProperty("teach")
+    expect(saved()).toEqual([])
+    // A door only lasts a moment.
+    const now = Date.now()
+    const clock = spyOn(Date, "now").mockReturnValue(now)
+    recipes.allow(1)
+    clock.mockReturnValue(now + DOOR_MS + 1)
+    await recipes.learned(pageSender(), recipeFor(), 5)
+    expect(await handFill(5)).not.toHaveProperty("teach")
+    clock.mockRestore()
+    expect(saved()).toEqual([])
+    // Only a top page is taught: the context menu's door in a frame below teaches nothing.
+    recipes.forgetTab(1)
+    recipes.allow(1, 2)
+    expect(recipes.allowed({ ...top, frameId: 2 })).toBe(false)
+    expect(recipes.allowed(top)).toBe(false)
+  })
+
+  test("the doors grant it: the shortcut to the tab, the context menu to its frame", async () => {
+    const opened: Array<[number, number | undefined]> = []
+    listenFillDoors((tabId, frameId) => opened.push([tabId, frameId]))
+    await fillCommand("fill", { id: 1 } as chrome.tabs.Tab)
+    await fillMenuClicked({ menuItemId: "deadbolt-fill", frameId: 3 }, { id: 1 } as chrome.tabs.Tab)
+    await fillCommand("other", { id: 1 } as chrome.tabs.Tab)
+    expect(opened).toEqual([[1, undefined], [1, 3]])
+    listenFillDoors()
+  })
+
+  test("an ordinary pick never saves a recipe, even with one waiting", async () => {
+    recipes.allow(1)
+    await recipes.learned(pageSender(), recipeFor(), 4)
+    // The menu the scan's own form opened (no teach), on the same form snapshot.
+    await handFill(4, false)
+    expect(saved()).toEqual([])
+  })
+
+  test("a reset that clears nothing says so", async () => {
+    recipes.allow(1)
+    await recipes.learned(pageSender(), recipeFor(), 4)
+    await handFill(4)
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: RequestBody) => {
+      if (req.type === "save-recipe") throw new Error("failed")
+      return send(req as never)
+    }) as typeof host.host.send
+    expect(await recipes.reset(1)).toBe(false)
+  })
+
   test("nothing is taught without a hand fill of that form, for another origin, or by a host that keeps no recipes", async () => {
+    recipes.allow(1)
     // A pick with no recipe waiting.
     await recipes.filled({ tabId: 1, frameId: 0, documentId: "top-doc", origin: SITE }, ACCOUNTS[0].ref, 1)
     // A recipe for another form snapshot than the one filled.

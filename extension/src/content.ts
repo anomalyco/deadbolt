@@ -10,12 +10,12 @@ import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
 import { scanGraph, type FormGraph } from "./content/graph"
-import { applySiteRecipes, buildSiteRecipe } from "./content/recipe"
+import { applySiteRecipes, buildSiteRecipe, RecipeAsks, recipeSubmit } from "./content/recipe"
 import { readSubmitted } from "./content/formfill"
 import { manualFields, withManual } from "./content/manual"
 import { ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
-import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
+import { closeMenu, initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
 import { formFailed, noteSubmitShell, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
@@ -79,12 +79,9 @@ let formsSubmission = 0
 let cardFrames = false
 /** The forms taught on this origin (content/recipe.ts), as the host lists them, and the page they were asked for. */
 let recipes: string[] = []
-let recipesAsked = ""
-let recipesRetryAt = 0
+const recipeAsks = new RecipeAsks()
 /** The last scan's graph: a taught recipe locates its fields in it. */
 let graph: FormGraph | undefined
-/** How long a frame that couldn't read its recipes (locked) waits before it asks again. */
-const RECIPES_RETRY_MS = 30_000
 /** How long a submitted identity or card form is watched for going away or being turned down. */
 const FORM_WATCH_MS = 60_000
 
@@ -106,12 +103,15 @@ function refresh() {
   provider = result.provider
   // A form the scan passed over that the user taught Deadbolt (content/recipe.ts) is a login form here.
   let scanned = kind && kind !== "reset" ? result.fields : []
+  let submit = result.submit
   // One whose form changed shape since (stale) gives nothing: the scan decides alone.
   if (!kind && recipes.length) {
     const learned = applySiteRecipes(graph, location.origin, location.pathname, recipes)
-    if (learned.fields.length) {
+    if (learned.fields.length && learned.cluster) {
       scanned = learned.fields.map((f) => ({ el: f.el, role: f.role, owner: ownerOf(f.el) }))
       kind = learned.fields.some((f) => f.role === "new-password") ? "signup" : "login"
+      // Only its own form's button: never one the scan found elsewhere on the page.
+      submit = recipeSubmit(learned.cluster)
     }
   }
   // A reset form's email box isn't something to fill. Fields the user asked
@@ -123,7 +123,7 @@ function refresh() {
   if (manual.length) kind = null
   if (!sameFields(fields, next)) formId++
   fields = next
-  submitControl = kind ? result.submit : undefined
+  submitControl = kind ? submit : undefined
   // A field a login form claims (its email box) is the login's.
   const forms = scanForms(graph).filter((f) => !fields.some((l) => l.el === f.el))
   const same = forms.length === formFields.length && forms.every((f, i) => f.el === formFields[i].el && f.role === formFields[i].role && f.section === formFields[i].section && f.form === formFields[i].form && f.parent === formFields[i].parent)
@@ -165,14 +165,10 @@ function askAboutSignIn() {
  */
 function askRecipes() {
   const page = location.origin + location.pathname
-  if (kind || manual.length || !graph?.controls.length || recipesAsked === page || Date.now() < recipesRetryAt) return
-  recipesAsked = page
+  if (kind || manual.length || !graph?.controls.length || !recipeAsks.due(page)) return
+  recipeAsks.asking(page)
   void send<string[] | null>({ type: "db:recipes-ask" }).then((reply) => {
-    if (!Array.isArray(reply)) {
-      recipesAsked = ""
-      recipesRetryAt = Date.now() + RECIPES_RETRY_MS
-      return
-    }
+    if (!Array.isArray(reply)) return recipeAsks.failed()
     recipes = reply.filter((r): r is string => typeof r === "string")
     if (recipes.length) scheduleScan()
   })
@@ -193,6 +189,8 @@ function scan() {
     lastUrl = location.href
     lastSignature = ""
     manual = []
+    // A single-page app back on a page asks for its taught forms again (one may be new since).
+    recipeAsks.navigated()
   }
   refresh()
   askRecipes()
@@ -281,7 +279,11 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
   }
   if (message?.type === "db:recipes-set") {
     recipes = Array.isArray(message.recipes) ? message.recipes.filter((r): r is string => typeof r === "string") : []
+    recipeAsks.asking(location.origin + location.pathname)
+    const before = fields
     refresh()
+    // The fields a forgotten form gave are no login form now: a menu open on one of them goes.
+    if (!sameFields(before, fields)) closeMenu()
     void report(false)
     return void respond(true)
   }
@@ -662,6 +664,8 @@ function adopt(el: HTMLInputElement): boolean {
  */
 function teach() {
   teachable = false
+  // Only a top page is taught (bg/recipes.ts).
+  if (!isTop) return
   const cluster = manual[0] && graph?.clusterOf(manual[0].el)
   if (!cluster || !manual.every((f) => graph?.clusterOf(f.el) === cluster)) return
   const recipe = buildSiteRecipe(location.origin, location.pathname, cluster, manual)

@@ -432,18 +432,25 @@ daemon again.
   identity or card field opens its own menu; a right-click anywhere but a
   field opens nothing. Going back to the page's own login form ends it. Only the browser raises either, from the user's
   own key or click.
-  A pick in that menu teaches Deadbolt the form, and its footer says so: the
-  fields' roles, their places among the form's controls, their `id`, `name`
-  and `autocomplete` and a fingerprint of the form's shape (never a value,
-  at most 512 bytes) are kept on the login picked as its `autofill-recipe`
-  field (`save-recipe`), so it syncs to every paired device. On the next
-  visit to that exact origin and path, a page where the scan finds no login
-  form gets the menu on those fields as on any login form, if the form still
-  has the same fingerprint and every field is still where the recipe says,
-  enabled, editable, reachable and not opted out (a password only into a
-  box that masks it). A form that changed shape gets nothing from it: the
-  scan decides alone, and teaching it again replaces the recipe. "Reset
-  learned form" in the popup clears it.
+  In a top page, a pick in that menu teaches Deadbolt the form, and its
+  footer says so: the fields' roles, their places among the form's
+  controls, their `id`, `name` and `autocomplete` and a fingerprint of the
+  form's shape (never a value, at most 512 bytes) are kept on the login
+  picked as its `autofill-recipe` field (`save-recipe`), so it syncs to
+  every paired device. Only within ten seconds of the browser raising the
+  shortcut or the context menu in that tab, and only on that menu's pick:
+  a content script can't teach a form on its own, and an ordinary pick or
+  the popup's Fill never does. The app and `deadbolt show` (without
+  `--reveal`) leave the field out. On the next visit to that exact origin
+  and path (a single-page app coming back to it included), a page where the
+  scan finds no login form gets the menu on those fields as on any login
+  form, if exactly one form on the page has the same fingerprint with every
+  field still where the recipe says, enabled, editable, reachable and not
+  opted out. A password only goes into a box that masks it, checked again
+  right before it's written. Its submit is the one submit button inside that
+  form's own container, or none. Two matching forms, or a form that changed
+  shape, get nothing from it: the scan decides alone, and teaching it again
+  replaces the recipe. "Reset learned form" in the popup clears it.
   Inside, the rows are a listbox that takes focus itself and points at the
   active row (`aria-activedescendant`); "Filled", "Saved" and why a pick
   didn't go ahead are said through a live region in the frame. None of it,

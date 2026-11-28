@@ -62,11 +62,12 @@ export function manualFields(el: HTMLInputElement): Field[] {
 /**
  * The login form a scan gives, with the fields the user asked to fill
  * (`manual`): those, while they last and the scan's own login form isn't
- * where the user is (`active`) or doesn't take them in; else what the scan
- * found, and `manual` is done with.
+ * where the user is (`active`) or doesn't take them all in; else what the
+ * scan found, and `manual` is done with. A form taught one field (a
+ * username) doesn't swallow the pair the user asks for on its next field.
  */
 export function withManual(scanned: Field[], manual: Field[], active: Element | null): { fields: Field[]; manual: Field[] } {
   const live = manual.filter((f) => f.el.isConnected)
-  const done = !live.length || scanned.some((f) => f.el === active || live.some((m) => m.el === f.el))
+  const done = !live.length || scanned.some((f) => f.el === active) || live.every((m) => scanned.some((f) => f.el === m.el))
   return done ? { fields: scanned, manual: [] } : { fields: live, manual: live }
 }

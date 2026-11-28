@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use clap::Subcommand;
+use deadbolt_core::site::recipe::RECIPE_FIELD;
 use deadbolt_core::{FieldType, schema, schemas};
 use zeroize::Zeroizing;
 
@@ -311,6 +312,8 @@ fn show(item: &ItemInfo, reveal: bool, code: Option<String>, account: Option<Str
                 }
             }
             None if sign_in && field.name == "sign-in-account" && account.is_some() => continue,
+            // The browser's taught form: JSON for the extension, not for reading.
+            None if sign_in && field.name == RECIPE_FIELD && !reveal => continue,
             None if reveal => field.value.clone(),
             None => mask(item, field),
         };

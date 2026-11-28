@@ -162,6 +162,8 @@ export function holdNativeSubmit(form: HTMLFormElement) {
 function formScope(form: HTMLFormElement, fields: Field[], button: HTMLElement): Refusal | null {
   if (!fields.every((f) => f.el.form === form && form.contains(f.el))) return "scope"
   const control = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button : null
+  // The button submits this form itself: its own control, or inside it.
+  if (control ? control.form !== form : !form.contains(button)) return "scope"
   const method = control?.hasAttribute("formmethod") ? control.formMethod : form.method
   // The browsing context it goes to: the submitter's, the form's, else the document's <base target>.
   const target = button.getAttribute("formtarget") ?? form.getAttribute("target") ?? document.querySelector("base[target]")?.getAttribute("target") ?? ""

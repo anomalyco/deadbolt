@@ -8,7 +8,7 @@
 // value differ from what it last rendered and runs its change handler.
 
 import { IDENTIFIER_ROLES, phoneLike, type Box, type FieldRole, type FillValues } from "../messages"
-import { inPlace, type Field, type FormControl } from "./detect"
+import { inPlace, masked as isMasked, type Field, type FormControl } from "./detect"
 import { eventTarget, isOwnHost, openRoots, shadowRootOf } from "./shadow"
 import { tag, tagKey } from "./tag"
 import { pasteText } from "./typing"
@@ -912,7 +912,10 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
   const write = (field: Field, value: string, group: Field[] = [field]) => {
     const f = group.length === 1 ? now(field) : field
     const all = group.length === 1 ? [f] : group
-    const ok = (el: HTMLInputElement) => all.every(inPlace) && checkField(el)
+    // A password goes only into a box that masks it, checked again after the
+    // focus and keydown a page may answer by unmasking it.
+    const secret = f.role === "password" || f.role === "new-password"
+    const ok = (el: HTMLInputElement) => all.every(inPlace) && checkField(el) && (!secret || isMasked(el))
     if (!ok(f.el)) return false
     liveAtLastWrite = new Set([...was.keys()].filter((el) => el.isConnected))
     if (!setInputValue(f.el, value, ok)) return false
