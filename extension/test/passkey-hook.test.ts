@@ -126,3 +126,39 @@ test("options the hook can't read are the browser's to refuse", async () => {
   // Not iterable, or not an object: passed on as given, for the browser's TypeError.
   for (const allowCredentials of [{ length: 1, 0: { type: "public-key", id: id(1) } }, "AQID", 5]) expect(await credentials.get({ publicKey: { challenge: CHALLENGE, allowCredentials } }).catch((e: unknown) => e)).toBeInstanceOf(TypeError)
 })
+
+test("a page can assign over a Deadbolt credential's methods, not its fields, as on a browser's", async () => {
+  const { credentials, native, offer } = await hooked()
+  const port = offer()
+  port.onmessage = (e) => {
+    if (e.data.op === "ack") return
+    const bytes = (n: number) => b64(new Uint8Array(n))
+    const result =
+      e.data.op === "create"
+        ? { credentialId: b64(id(1)), clientDataJSON: bytes(8), authenticatorData: bytes(37), publicKey: bytes(91), attestationObject: bytes(16) }
+        : { credentialId: b64(id(1)), clientDataJSON: bytes(8), authenticatorData: bytes(37), signature: bytes(70), userHandle: b64(id(9)) }
+    port.postMessage({ id: e.data.id, ok: true, result })
+  }
+  const made: any = await credentials.create({ publicKey: { challenge: CHALLENGE, rp: { id: "example.com" }, user, pubKeyCredParams: [{ type: "public-key", alg: -7 }] } })
+  const used: any = await credentials.get({ publicKey: { challenge: CHALLENGE } })
+  port.close()
+  expect(native).toEqual([])
+  // A browser's credential keeps its methods on the prototype, so pages
+  // (GitHub's passkey sign-up among them) replace them, in strict mode.
+  const page = () => "the page's"
+  for (const cred of [made, used]) {
+    cred.toJSON = page
+    cred.getClientExtensionResults = page
+    expect([cred.toJSON(), cred.getClientExtensionResults()]).toEqual([page(), page()])
+  }
+  made.response.getTransports = page
+  expect(made.response.getTransports()).toBe(page())
+  // Its fields are getter-only accessors on a browser's: assigning to them throws in strict mode, and nothing changes.
+  for (const [target, key] of [[made, "id"], [made, "rawId"], [made, "type"], [made, "response"], [used, "authenticatorAttachment"], [made.response, "clientDataJSON"], [made.response, "attestationObject"], [used.response, "signature"]] as const) {
+    const before = target[key]
+    expect(() => {
+      target[key] = "the page's"
+    }).toThrow(TypeError)
+    expect(target[key]).toBe(before)
+  }
+})
