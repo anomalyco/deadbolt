@@ -84,7 +84,8 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
 
 export type HostMessage =
   | { kind: "reply"; id: number | string | null; reply: Reply }
-  | { kind: "changed"; change: Change }
+  /** `touchIdReady`: on `locked`, Touch ID can unlock it now. */
+  | { kind: "changed"; change: Change; touchIdReady?: true }
 
 /** A check for a member of a generated union. Each set must name every member, so a new one in crates/proto fails the typecheck until it's listed here. */
 const memberOf =
@@ -207,7 +208,7 @@ function signInOf(v: unknown): { signIn?: SignIn } {
 export function parseHostMessage(raw: unknown): HostMessage | null {
   if (!isObject(raw) || typeof raw.type !== "string") return null
   if (raw.type === "changed") {
-    return isChange(raw.change) ? { kind: "changed", change: raw.change } : null
+    return isChange(raw.change) ? { kind: "changed", change: raw.change, ...(raw.touchIdReady === true ? { touchIdReady: true as const } : {}) } : null
   }
   const id = typeof raw.id === "number" || typeof raw.id === "string" ? raw.id : raw.id === null ? null : undefined
   if (id === undefined) return null

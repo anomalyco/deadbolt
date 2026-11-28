@@ -10,8 +10,6 @@ import { HostError, type VaultBackend } from "./backend"
 
 /** How long the menu waits for the vault to unlock (the passphrase, typed in Deadbolt's window) before it stops waiting. */
 export const UNLOCK_WAIT_MS = 2 * 60_000
-/** Touch ID's prompt waits on the user; the host answers once it's done. */
-const PROMPT_TIMEOUT_MS = 90_000
 
 /** The open menu that asked to unlock: the tab and frame it's in, and its token. */
 export interface PendingUnlock {
@@ -44,7 +42,7 @@ export class Unlocker {
     if (!this.host.capabilities.includes("unlock-prompt")) return { ok: false, message: "Unlock Deadbolt in its app, then come back." }
     this.pending = { ...target, at: Date.now() }
     try {
-      const reply = await this.host.send({ type: "unlock-prompt" }, { timeout: PROMPT_TIMEOUT_MS })
+      const reply = await this.host.unlockPrompt()
       return { ok: true, app: reply.app }
     } catch (err) {
       if (this.pending?.token === target.token) this.pending = null

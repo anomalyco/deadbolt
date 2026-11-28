@@ -59,10 +59,21 @@ pub(super) async fn watch(
 ) {
     let push = |change: Change| {
         let frames = frames.clone();
+        let paths = paths.clone();
         async move {
+            // Whether Touch ID can unlock it now, for the menu's unlock row.
+            // A status, never a hello: a daemon that's stopping (`locked`
+            // comes just before `stopped`) mustn't be started again.
+            let touch_id_ready = change == Change::Locked
+                && client::status(&paths)
+                    .await
+                    .is_some_and(|s| !s.unlocked && s.touch_id_ready);
             let envelope = Envelope {
                 id: None,
-                body: Body::Changed { change },
+                body: Body::Changed {
+                    change,
+                    touch_id_ready,
+                },
             };
             match encode(&envelope) {
                 Ok(frame) => frames.send(frame).await.is_ok(),

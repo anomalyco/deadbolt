@@ -300,8 +300,13 @@ pub enum Body {
         message: String,
     },
     /// Pushed when the daemon locks, unlocks, stops, starts or its items change.
+    #[serde(rename_all = "camelCase")]
     Changed {
         change: Change,
+        /// On `locked`: Touch ID can unlock it now, as hello's says.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        touch_id_ready: bool,
     },
     #[serde(rename_all = "camelCase")]
     Forms {

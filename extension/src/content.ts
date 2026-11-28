@@ -92,8 +92,13 @@ function refresh() {
   const result = scanPage(roots)
   kind = result.kind
   provider = result.provider
-  // A reset form's email box isn't something to fill.
-  const next = withManual(kind && kind !== "reset" ? result.fields : [], manual)
+  // A reset form's email box isn't something to fill. Fields the user asked
+  // to fill by hand stand in for it until they go back to it (see withManual);
+  // they're no kind of form the background may sign in with.
+  const taken = withManual(kind && kind !== "reset" ? result.fields : [], manual, deepActiveElement())
+  manual = taken.manual
+  const next = taken.fields
+  if (manual.length) kind = null
   if (!sameFields(fields, next)) formId++
   fields = next
   submitControl = kind ? result.submit : undefined

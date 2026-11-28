@@ -62,6 +62,19 @@ describe("unlocking from the locked menu", () => {
     expect(await autofill.menuLoad(token, menuSender(), SITE)).toMatchObject({ kind: "accounts", site: "example.com", accounts: ACCOUNTS })
   })
 
+  test("a site with nothing saved lists that in place, and keeps focus in its field", async () => {
+    const token = await lockedMenu()
+    await autofill.menuLoad(token, menuSender(), SITE)
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: RequestBody, options?: unknown) =>
+      req.type === "list" ? (host.requests.push(req), { type: "list", site: "example.com", accounts: [] }) : send(req as never, options as never)) as typeof host.host.send
+    expect(await autofill.menuUnlock(token, menuSender())).toEqual({ ok: true, app: false })
+    host.setStatus({ state: "ready", version: "0" })
+    await settle()
+    expect(fake.sent).toContainEqual({ type: "db:menu-refresh", token })
+    expect(delivered("db:menu-resumed")).toEqual([])
+  })
+
   test("without Touch ID the row says Unlock Deadbolt, and the vault's later unlock still resumes it", async () => {
     host.setStatus({ state: "locked" })
     const token = await lockedMenu()

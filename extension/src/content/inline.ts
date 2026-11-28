@@ -513,6 +513,7 @@ export const menuHost = (): HTMLElement | null => host
 
 export function closeMenu(refocus = false, dismissed = false) {
   cancelAnimationFrame(raf)
+  stopResume()
   guard.reset()
   reveal = null
   revealAnim = null
@@ -1028,9 +1029,10 @@ export function initMenu(page: PageState) {
         // The shortcut goes to every frame: only the one with focus takes it.
         // The context menu's goes to the frame it opened in, about its field.
         if (message.context !== true && !document.hasFocus()) return
-        const context = message.context === true && contextTarget && Date.now() - contextTarget.at < CONTEXT_MS ? contextTarget.el : null
+        const fromContext = message.context === true
+        const context = fromContext && contextTarget && Date.now() - contextTarget.at < CONTEXT_MS ? contextTarget.el : null
         contextTarget = null
-        return void respond(manualOpen(context))
+        return void respond(manualOpen(context, fromContext))
       }
       case "db:menu-resumed":
         return void respond(resumed(String(message.token)))
@@ -1084,9 +1086,17 @@ function moveAt(t: string, box: Box): boolean {
  * Autofill.query). The browser's shortcut and context menu are the user's
  * own gesture: a page can make neither, nor send this message.
  */
-function manualOpen(at: EventTarget | null): boolean {
-  const el = isControl(at) ? at : deepActiveElement()
-  if (!(el instanceof HTMLInputElement) || learning() || !state.manual?.(el)) return false
+function manualOpen(at: EventTarget | null, fromContext: boolean): boolean {
+  // The context menu's ask is about the field it opened on, and only that:
+  // never whatever has focus (a right-click in a contenteditable, say).
+  if (fromContext && !isControl(at)) return false
+  const el = fromContext ? at : deepActiveElement()
+  if (!isControl(el) || learning()) return false
+  // Something on top of the field, Deadbolt's own surface aside: no menu, as for a click.
+  if (!fillable(el, host)) return false
+  // An identity or card field opens its own menu, never one of logins.
+  const forms = state.formFields().some((f) => f.el === el)
+  if (!forms && !(el instanceof HTMLInputElement && state.manual?.(el))) return false
   // The focus's own focusin isn't this ask: it opens nothing on its own.
   if (deepActiveElement() !== el) {
     lastGestureAt = 0
@@ -1095,7 +1105,7 @@ function manualOpen(at: EventTarget | null): boolean {
   lastGestureAt = Date.now()
   dismissedFor = null
   quiet.delete(el)
-  byHand.delete(formOf(el))
+  if (el instanceof HTMLInputElement) byHand.delete(formOf(el))
   emptyUntil.delete(el)
   void maybeOpen(el, "again")
   return true
@@ -1112,11 +1122,32 @@ function onContextMenu(event: MouseEvent) {
  */
 function resumed(t: string): boolean {
   if (!host || t !== token || mode !== "accounts" || closing) return false
-  port?.postMessage({ type: "db:menu-enter" })
-  frame?.focus()
-  frame?.contentWindow?.focus()
+  const enter = () => {
+    port?.postMessage({ type: "db:menu-enter" })
+    frame?.focus()
+    frame?.contentWindow?.focus()
+  }
+  if (document.hasFocus()) return enter(), true
+  // Deadbolt's own window came forward for the passphrase: focus goes in
+  // once the user is back in this window, or the menu's window for Enter
+  // (see Entry) would be over before they are.
+  stopResume()
+  // The window's own focus: an element's doesn't bubble up to it.
+  const back = (event: FocusEvent) => {
+    if (event.target instanceof Node) return
+    stopResume()
+    if (host && token === t && mode === "accounts" && !closing) enter()
+  }
+  window.addEventListener("focus", back)
+  stopResume = () => {
+    window.removeEventListener("focus", back)
+    stopResume = () => {}
+  }
   return true
 }
+
+/** Stops waiting for this window's focus to resume the menu (see resumed). */
+let stopResume = () => {}
 
 /** Called after each page scan: offer the menu on an already-focused field. */
 export function refreshMenu(focused: HTMLInputElement) {

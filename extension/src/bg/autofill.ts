@@ -330,15 +330,25 @@ export class Autofill {
   /**
    * The vault is ready for the menu that asked to unlock, if it's still
    * open and unpicked: the site's logins, fetched now, and the menu loads
-   * them in place (db:menu-refresh), with keyboard focus in it so Enter
-   * picks the first (db:menu-resumed).
+   * them in place (db:menu-refresh). With a row to pick there, keyboard
+   * focus goes into it so Enter picks the first (db:menu-resumed); a site
+   * with nothing saved keeps focus in its field.
    */
   private async resumeUnlock(p: PendingUnlock): Promise<void> {
     const t = this.tokens.get(p.token)
     if (!t || t.picked || t.tabId !== p.tabId || Date.now() - t.createdAt > TOKEN_TTL_MS) return
-    await this.list(t.origin, true).catch(() => null)
+    const reply = await this.list(t.origin, true).catch(() => null)
     await chrome.runtime.sendMessage({ type: "db:menu-refresh", token: p.token } satisfies MenuRefresh).catch(() => {})
-    await sendToFrame(t.owner ?? t, { type: "db:menu-resumed", token: p.token })
+    if (t.generate || this.menuRows(t, reply) > 0) await sendToFrame(t.owner ?? t, { type: "db:menu-resumed", token: p.token })
+  }
+
+  /** How many rows menu `t` lists from `reply`, as menuLoad shows them. */
+  private menuRows(t: MenuToken, reply: ListReply | null): number {
+    const passkeys = this.passkeys?.menuPasskeys(t, t.focused).length ?? 0
+    if (!reply) return passkeys
+    const each = IDENTIFIER_ROLES.includes(t.focused) ? oneRowEach(reply.accounts, t.origin) : reply.accounts
+    const accounts = menuAccounts(each, t.focused, t.roles).filter((a) => !t.only || t.only.includes(a.ref))
+    return menuRowCount(accounts, t.focused) + passkeys
   }
 
   private async list(origin: string, fresh = false): Promise<ListReply> {

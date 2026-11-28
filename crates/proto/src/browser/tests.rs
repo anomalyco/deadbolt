@@ -365,8 +365,16 @@ fn replies() {
         (
             Body::Changed {
                 change: Change::Items,
+                touch_id_ready: false,
             },
             json!({"type": "changed", "change": "items"}),
+        ),
+        (
+            Body::Changed {
+                change: Change::Locked,
+                touch_id_ready: true,
+            },
+            json!({"type": "changed", "change": "locked", "touchIdReady": true}),
         ),
         (
             Body::Forms {
@@ -508,6 +516,7 @@ fn envelopes() {
             id: None,
             body: Body::Changed {
                 change: Change::Started,
+                touch_id_ready: false,
             },
         },
         json!({"type": "changed", "change": "started"}),

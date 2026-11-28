@@ -74,6 +74,7 @@ fn replies_have_the_documented_shapes() {
         id: None,
         body: Body::Changed {
             change: HostChange::Locked,
+            touch_id_ready: false,
         },
     };
     assert_eq!(
@@ -259,6 +260,8 @@ async fn a_daemon_that_goes_away_is_announced_when_back() {
                     change: Change::Locked,
                 },
             ],
+            // `locked` asks the daemon's status for Touch ID; this one hangs up.
+            vec![],
             vec![watching()],
         ],
         false,
@@ -893,6 +896,17 @@ async fn unlock_prompt_asks_touch_id_else_opens_the_app() {
         ),
         (
             biometric(refused(ErrorCode::Cancelled)),
+            serde_json::json!({"id": 1, "type": "error", "code": "cancelled",
+                               "message": "Touch ID was cancelled"}),
+            0,
+        ),
+        // Left unanswered for a minute: the daemon calls that a cancel, and
+        // nothing comes forward for a user who walked away.
+        (
+            biometric(Message::Error {
+                code: ErrorCode::Cancelled,
+                message: crate::daemon::biometric::prompt_timed_out().to_string(),
+            }),
             serde_json::json!({"id": 1, "type": "error", "code": "cancelled",
                                "message": "Touch ID was cancelled"}),
             0,

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { FILL_MENU, fillCommand, fillMenuClicked, listenFillDoors } from "../src/bg/doors"
 import { scanPage, type Field } from "../src/content/detect"
+import type { FormField } from "../src/content/forms"
 import { closeMenu, initMenu, menuHost, type PageState } from "../src/content/inline"
 import { manualFields, withManual } from "../src/content/manual"
 import type { ToContent } from "../src/messages"
@@ -34,6 +35,8 @@ const open = new WeakSet<Element>()
 // finds, or the fields the user asked to fill where it found none.
 let fields: Field[] = []
 let manual: Field[] = []
+/** Identity and card fields, as content/forms.ts would find them. */
+let formFields: FormField[] = []
 let formId = 0
 const state: PageState = {
   targets: () => fields,
@@ -41,11 +44,13 @@ const state: PageState = {
   kind: () => null,
   rescan() {
     const r = scanPage()
-    const next = withManual(r.kind && r.kind !== "reset" ? r.fields : [], manual)
+    const taken = withManual(r.kind && r.kind !== "reset" ? r.fields : [], manual, document.activeElement)
+    manual = taken.manual
+    const next = taken.fields
     if (next.length !== fields.length || next.some((f, i) => f.el !== fields[i].el)) formId++
     fields = next
   },
-  formFields: () => [],
+  formFields: () => formFields,
   formsForm: () => 0,
   manual(el) {
     state.rescan()
@@ -114,12 +119,17 @@ afterAll(() => {
   Element.prototype.matches = hit.matches
 })
 
-beforeEach(() => {
+beforeEach(async () => {
+  // A new visit: no gesture, query or menu is left from the test before.
+  await settle()
+  window.dispatchEvent(new Event("pagehide"))
   closeMenu()
   fake.sent.length = 0
   fake.delivered.length = 0
   fields = []
   manual = []
+  formFields = []
+  document.hasFocus = () => true
   // A plain text box with no label, name or form the scan can read anything from: it abstains.
   document.body.innerHTML = `<div><input type="text" name="txt1" data-box="20 400 240 32"><input type="checkbox" data-box="20 440 16 16"></div>`
 })
@@ -188,5 +198,127 @@ describe("the fill shortcut and \"Fill with Deadbolt\"", () => {
     const [user, pass] = ["user", "pass"].map((n) => document.querySelector<HTMLInputElement>(`input[name="${n}"]`)!)
     expect(manualFields(user).map((f) => [f.el, f.role])).toEqual([[user, "username"], [pass, "password"]])
     expect(manualFields(pass).map((f) => [f.el, f.role])).toEqual([[user, "username"], [pass, "password"]])
+  })
+})
+
+const trusted = <T extends Event>(event: T): T => (Object.defineProperty(event, "isTrusted", { value: true }), event)
+const input = (name: string) => document.querySelector<HTMLInputElement>(`[name="${name}"]`)!
+const pairOf = (name: string) => manualFields(input(name)).map((f) => f.el.name)
+
+describe("the box a field the user asked to fill pairs with", () => {
+  test("only one on screen as it stands: a password scrolled out of sight in a container is no partner", () => {
+    document.body.innerHTML = `<form><input type="text" name="user" data-box="20 400 240 32">
+      <div style="overflow-x:hidden;overflow-y:auto" data-box="0 440 400 60"><input type="password" name="trap" data-box="20 700 240 32"></div></form>`
+    expect(pairOf("user")).toEqual(["user"])
+  })
+
+  test("only one of its own form, \`form=\` owners included", () => {
+    document.body.innerHTML = `<form><input type="text" name="user" data-box="20 400 240 32"></form><form><input type="password" name="pass" data-box="20 440 240 32"></form>`
+    expect(pairOf("user")).toEqual(["user"])
+    expect(pairOf("pass")).toEqual(["pass"])
+    document.body.innerHTML = `<form id="f1"><input type="text" name="user" data-box="20 400 240 32"></form><input type="password" name="pass" form="f1" data-box="20 440 240 32">`
+    expect(pairOf("user")).toEqual(["user", "pass"])
+  })
+
+  test("never one the site asked password managers to leave alone", () => {
+    document.body.innerHTML = `<form><input type="text" name="user" data-box="20 400 240 32"><input type="password" name="pass" data-deadbolt-ignore data-box="20 440 240 32"></form>`
+    expect(pairOf("user")).toEqual(["user"])
+  })
+
+  test("only the box right beside it: a password behind other text boxes is no partner", () => {
+    document.body.innerHTML = `<form><input type="text" name="user" data-box="20 400 240 32"><input type="text" name="memo" data-box="20 440 240 32"><input type="password" name="pass" data-box="20 480 240 32"></form>`
+    expect(pairOf("user")).toEqual(["user"])
+    // The password's own neighbour is the box before it, not the username two boxes up.
+    expect(pairOf("pass")).toEqual(["memo", "pass"])
+    // A checkbox between them isn't a login box: the password still pairs.
+    document.body.innerHTML = `<form><input type="text" name="user" data-box="20 400 240 32"><input type="checkbox" name="keep" data-box="20 440 16 16"><input type="password" name="pass" data-box="20 480 240 32"></form>`
+    expect(pairOf("user")).toEqual(["user", "pass"])
+  })
+})
+
+describe("what the shortcut and the context menu open on", () => {
+  test("a right-click outside a field (a contenteditable) never falls back to the focused field", async () => {
+    document.body.innerHTML = `<input type="text" name="txt1" data-box="20 400 240 32"><div contenteditable="true" id="note" data-box="20 500 240 80">Notes</div>`
+    input("txt1").focus()
+    document.getElementById("note")!.dispatchEvent(trusted(new MouseEvent("contextmenu", { bubbles: true, composed: true })))
+    expect(await toContent({ type: "db:manual-open", context: true })).toBe(false)
+    expect(queries()).toEqual([])
+    expect(menuHost()).toBeNull()
+    // Nor with no recent context menu at all.
+    expect(await toContent({ type: "db:manual-open", context: true })).toBe(false)
+  })
+
+  test("⌘⇧L on a card field opens the card menu, not a login one", async () => {
+    document.body.innerHTML = `<form><input type="text" name="cc" autocomplete="cc-number" data-box="20 400 240 32"></form>`
+    formFields = [{ el: input("cc"), role: "cc-number", kind: "card", section: "card", form: input("cc").form, parent: input("cc").parentNode }]
+    input("cc").focus()
+    expect(await toContent({ type: "db:manual-open" })).toBe(true)
+    await settle()
+    expect(queries()).toEqual([])
+    expect(manual).toEqual([])
+    expect(fake.sent).toContainEqual(expect.objectContaining({ type: "db:forms-query", kind: "card", section: "card", roles: ["cc-number"], explicit: true }))
+  })
+
+  test("⌘⇧L on a covered login field the scan found opens nothing", async () => {
+    document.body.innerHTML = `<form><input type="email" name="email" autocomplete="username" data-box="20 400 240 32"><input type="password" name="pw" data-box="20 440 240 32"></form><div data-box="0 380 400 120"></div>`
+    state.rescan()
+    expect(fields.map((f) => f.el.name)).toEqual(["email", "pw"])
+    input("email").focus()
+    expect(await toContent({ type: "db:manual-open" })).toBe(false)
+    expect(queries()).toEqual([])
+  })
+
+  test("⌘⇧L on a search box leaves the page's real login form to its own fields once the user goes back to it", async () => {
+    document.body.innerHTML = `<input type="text" name="q" data-box="20 40 240 32">
+      <form><input type="email" name="email" autocomplete="username" data-box="20 400 240 32"><input type="password" name="pw" data-box="20 440 240 32"></form>`
+    input("q").focus()
+    expect(await toContent({ type: "db:manual-open" })).toBe(true)
+    await settle()
+    expect(fields.map((f) => f.el.name)).toEqual(["q"])
+    closeMenu()
+    fake.sent.length = 0
+    // The user clicks into the login form's email box.
+    input("email").dispatchEvent(trusted(new PointerEvent("pointerdown", { bubbles: true, composed: true })))
+    input("email").focus()
+    await settle()
+    expect(fields.map((f) => f.el.name)).toEqual(["email", "pw"])
+    expect(manual).toEqual([])
+    expect(queries()).toEqual([expect.objectContaining({ roles: ["email", "password"], focused: "email" })])
+  })
+})
+
+describe("the menu after unlocking from it", () => {
+  test("focus goes into it once this window has focus again, once", async () => {
+    let focused = 0
+    const own = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "focus")
+    HTMLIFrameElement.prototype.focus = function () {
+      focused++
+    }
+    try {
+      box().focus()
+      expect(await toContent({ type: "db:manual-open" })).toBe(true)
+      await settle()
+      expect(menuHost()).not.toBeNull()
+      // Deadbolt's window is in front, for the passphrase.
+      document.hasFocus = () => false
+      expect(await toContent({ type: "db:menu-resumed", token: "tok-1" })).toBe(true)
+      expect(focused).toBe(0)
+      document.hasFocus = () => true
+      window.dispatchEvent(new FocusEvent("focus"))
+      expect(focused).toBe(1)
+      window.dispatchEvent(new FocusEvent("focus"))
+      expect(focused).toBe(1)
+      // A menu closed meanwhile takes no focus.
+      document.hasFocus = () => false
+      expect(await toContent({ type: "db:menu-resumed", token: "tok-1" })).toBe(true)
+      closeMenu()
+      window.dispatchEvent(new FocusEvent("focus"))
+      expect(focused).toBe(1)
+      // Another menu's word does nothing.
+      expect(await toContent({ type: "db:menu-resumed", token: "other" })).toBe(false)
+    } finally {
+      if (own) Object.defineProperty(HTMLIFrameElement.prototype, "focus", own)
+      else delete (HTMLIFrameElement.prototype as { focus?: unknown }).focus
+    }
   })
 })

@@ -371,6 +371,8 @@ export type Body =
   | {
       type: "changed"
       change: Change
+      /** On `locked`: Touch ID can unlock it now, as hello's says. */
+      touchIdReady?: boolean
     }
   | {
       type: "forms"

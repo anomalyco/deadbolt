@@ -396,8 +396,9 @@ shows one row, "Unlock Deadbolt · Touch ID" (or "Unlock Deadbolt" when Touch
 ID can't unlock it now), a pick like any other. Picking it sends
 `unlock-prompt`: the host raises Touch ID, or brings Deadbolt's own window
 forward for the passphrase. The menu stays open, and once the vault is ready
-it lists the site's logins in place with keyboard focus in it, so ⏎ fills
-the first. A passphrase is never typed into the browser. A `stopped` push
+it lists the site's logins in place with keyboard focus in it (once the
+browser window has focus again), so ⏎ fills the first. With nothing saved
+for the site, focus stays in the field. A passphrase is never typed into the browser. A `stopped` push
 shows Deadbolt as not running without sending hello, which would start the
 daemon again.
 
@@ -417,8 +418,11 @@ daemon again.
   ⌘⇧L (Ctrl+Shift+L elsewhere, the `fill` command) or "Fill with Deadbolt"
   in a field's context menu opens it on that field even where the scan
   found no login form: the field as the username (or the password, when
-  it's masked) and the box of the other kind beside it, only boxes that
-  show, on top and enabled. Only the browser raises either, from the user's
+  it's masked) and the box of the other kind right beside it in its own
+  form, if the next box that shows is of that kind and the site didn't opt
+  it out. Only boxes on screen as they stand, on top and enabled. An
+  identity or card field opens its own menu; a right-click anywhere but a
+  field opens nothing. Going back to the page's own login form ends it. Only the browser raises either, from the user's
   own key or click.
   Inside, the rows are a listbox that takes focus itself and points at the
   active row (`aria-activedescendant`); "Filled", "Saved" and why a pick
@@ -2559,7 +2563,8 @@ holds no values and only the extension reaches the host.
 Sent only when the user picks "Unlock Deadbolt" in the locked menu
 (capability `unlock-prompt`). With Touch ID ready, the host asks the daemon
 to unlock with it (`app` false), and requests behind it wait while the user
-is at the prompt; a cancelled prompt is `cancelled`. Without it, or when
+is at the prompt; a prompt cancelled, or left unanswered until it times out
+after a minute, is `cancelled`, and nothing comes forward. Without it, or when
 Touch ID fails any other way, the host brings Deadbolt's window forward
 (`deadbolt app`) for the passphrase (`app` true), and `unlocked` follows
 once it's typed there. An unlocked vault answers `app` false at once.
@@ -2573,7 +2578,9 @@ A burst of three, then one every two seconds; past that it's `rate_limited`.
 
 `change` is one of:
 
-- `locked` or `unlocked`.
+- `locked` or `unlocked`. `locked` may carry `"touchIdReady": true`, as hello
+  does: the host reads the daemon's status for it (never a hello, which
+  would start a daemon that's stopping).
 - `items`: logins or vaults changed, here or by sync.
 - `stopped`: the daemon stopped, which locks it.
 - `started`: a daemon is running again after the one watched went away, or
