@@ -20,15 +20,19 @@ pub(super) const RECONNECT: Duration = Duration::from_secs(2);
 /// Starts the daemon if none runs, never unlocking it.
 /// Also whether a daemon answered.
 pub(super) async fn hello(paths: &Paths) -> (Body, bool) {
+    let mut touch_id_ready = false;
     let (status, detail) = match client::ensure_running(paths).await {
         Ok(status) if !status.initialized => (
             HostStatus::NotSetUp,
             Some("Set up Deadbolt to fill passwords: run `deadbolt init`".to_string()),
         ),
-        Ok(status) if !status.unlocked => (
-            HostStatus::Locked,
-            Some("Unlock Deadbolt to fill passwords".to_string()),
-        ),
+        Ok(status) if !status.unlocked => {
+            touch_id_ready = status.touch_id_ready;
+            (
+                HostStatus::Locked,
+                Some("Unlock Deadbolt to fill passwords".to_string()),
+            )
+        }
         Ok(_) => (HostStatus::Ready, None),
         Err(error) => (HostStatus::Unavailable, Some(format!("{error:#}"))),
     };
@@ -38,6 +42,7 @@ pub(super) async fn hello(paths: &Paths) -> (Body, bool) {
         status,
         detail,
         capabilities: CAPABILITIES.map(String::from).to_vec(),
+        touch_id_ready,
     };
     (body, status != HostStatus::Unavailable)
 }

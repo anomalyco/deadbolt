@@ -1893,7 +1893,8 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
             "learn",
             "learn-files",
             "forms",
-            "save-form"
+            "save-form",
+            "unlock-prompt"
         ])
     );
 
