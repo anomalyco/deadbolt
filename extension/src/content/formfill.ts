@@ -14,6 +14,7 @@ import { formFieldInPlace, sectionFields, type FormField } from "./forms"
 import { withAddressParts } from "./address"
 import { cardBrand } from "../payments"
 import { chooseOption, isCombobox } from "./combobox"
+import { holds, typeChars } from "./typing"
 import { CHOICE_ROLES, choiceFor, countryOf, monthOf, readBirthday, readBirthdayParts, readCardNumber, readExpiry, readExpiryParts, readPhone, shownText, shows, splitName, splitNumber, valueFor } from "./transform"
 
 export interface FormsState {
@@ -125,6 +126,21 @@ const approveCheck = (kind: FormKind, ours?: Element | null) => (el: FormControl
 /** A select with nothing to choose yet: disabled, or only placeholder options (no value). */
 const unloaded = (el: FormControl) => el instanceof HTMLSelectElement && (el.disabled || !Array.from(el.options).some((o) => o.value))
 
+/** Roles a mask often formats as they're typed, turning a whole value written at once down (see typeChars). */
+const MASKED = new Set<FormRole>(["cc-number", "cc-exp", "tel", "tel-national"])
+
+/**
+ * Writes `value` (see setFormValue); a masked field that didn't keep it is
+ * typed into a character at a time instead, through the same check, and
+ * what it then holds is what Deadbolt filled there.
+ */
+function writeValue(f: FormField, value: string, guard: (el: FormControl) => boolean): boolean {
+  if (!setFormValue(f.el, value, guard)) return false
+  const el = f.el
+  if (MASKED.has(f.role) && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !holds(el, value) && typeChars(el, value, () => guard(el))) noteFilled(el, el.value)
+  return true
+}
+
 /** How long a select waits for its options after the rest of the fill (a country's states loading). */
 const DEPENDENT_WAIT_MS = 2500
 
@@ -207,7 +223,7 @@ async function fillAll(fields: FormField[], given: FormValues, check: (el: FormC
     if (!(f.el instanceof HTMLSelectElement) && (await typedByUser(f.el, f.el.value))) continue
     // A beat between fields for pages that react to each one (a country that redraws the region list).
     if (filled.length) await sleep(30)
-    if (setFormValue(f.el, value, ok([f]))) {
+    if (writeValue(f, value, ok([f]))) {
       filled.push(f.role)
       last = f.el
     }
