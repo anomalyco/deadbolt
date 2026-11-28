@@ -2,7 +2,7 @@
 // up, written small: the detector's fix for it, held in place.
 import { afterEach, describe, expect, test } from "bun:test"
 import { scoreField, type FieldFacts } from "../src/content/clues"
-import { clusterVerdicts, scanPage } from "../src/content/detect"
+import { clusterVerdicts, masked, scanPage } from "../src/content/detect"
 import { scanForms } from "../src/content/forms"
 import { scanGraph } from "../src/content/graph"
 import { WEIGHTS } from "../src/content/weights.gen"
@@ -338,5 +338,224 @@ describe("a newsletter's features", () => {
     page(`<main><h1>Welcome back!</h1></main><footer><form><input id="news" type="email" placeholder="Enter your email to subscribe to our newsletter"><button>Sign up</button></form></footer>`, "/login", "Login - Example")
     const features = clusterVerdicts().flatMap((v) => v.features)
     expect(features.some((f) => f.startsWith("path:") || f.startsWith("title:"))).toBe(false)
+  })
+})
+
+describe("buttons, verbs and headings a sign-in may use", () => {
+  const library = `<h1>Login</h1><div><form name="patform" method="POST"><fieldset><legend>Please enter the following information:</legend>
+    <label for="code">Bar Code</label><input autocomplete="off" name="code" id="code" type="PASSWORD" maxlength="40">
+    <label for="pin">Enter your 4-digit PIN</label><input autocomplete="off" name="pin" id="pin" type="PASSWORD" maxlength="64">
+    <input type="image" name="submit" value="submit"></fieldset></form></div>`
+
+  test("a library's masked bar code and PIN with an image submit button are a sign-in", () => {
+    page(library, "/patroninfo", "Town Library / All Locations")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ code: "username", pin: "password" })
+    expect((result.submit as HTMLInputElement).type).toBe("image")
+    const [verdict] = clusterVerdicts()
+    expect(verdict.features).not.toContain("button:none")
+    expect(verdict.features).toContain("button:proceed")
+  })
+
+  test("a generic legend inside the form doesn't hide the Login heading above it", () => {
+    page(library, "/patroninfo")
+    const graph = scanGraph()
+    expect(graph.context(graph.clusters[0])).toContain(" login ")
+  })
+
+  test("a masked library card number, a PIN and a name are a sign-in", () => {
+    page(`<form><label for="name">Your Name:</label><input name="name" id="name" maxlength="40">
+      <label for="card">Library Card Number:</label><input autocomplete="off" name="code" id="card" type="PASSWORD" maxlength="40">
+      <label for="pin">Enter your PIN:</label><input autocomplete="off" name="pin" id="pin" type="PASSWORD" maxlength="64">
+      <input type="image" name="submit" value="submit"></form>`, "/patroninfo")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ card: "username", pin: "password" })
+  })
+
+  test("a bank's Logon page wrapped in one form, its footer's Contact Us inside it, is a sign-in", () => {
+    page(`<form id="logonAction" method="POST" autocomplete="off"><header><a href="#">Close Window</a></header><section><h1>Internet Banking Logon</h1>
+      <label for="access">Card / Customer access number</label><input id="access" name="userId" maxlength="19" aria-label="Enter your Card or Access Number">
+      <label for="sec">Security Number</label><input id="sec" name="securityNumber" type="password" maxlength="6">
+      <label><input type="checkbox" name="rememberMe"> Remember me</label>
+      <label for="pw">Internet Password</label><input id="pw" name="password" type="password" maxlength="12">
+      <input type="submit" id="logon" value="Logon"></section>
+      <footer><a href="#">Help</a> | <a href="#">Contact Us</a> | <a href="#">FAQs</a></footer></form>`, "/ibank/loginPage.action", "Example Bank Internet Banking - Logon")
+    const [verdict] = clusterVerdicts()
+    expect(verdict.features).not.toContain("words:non-login")
+    expect(verdict.features).toContain("button:login")
+    expect(verdict.features).toContain("title:login")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ access: "username", sec: "password", pw: "password" })
+    expect(result.submit?.id).toBe("logon")
+  })
+
+  test("a card's own footer inside a section still speaks for its form", () => {
+    page(`<section><form><input id="e" type="email"><input id="p" type="password"><footer>Need help? Contact us</footer><button>Log in</button></form></section>`)
+    expect(clusterVerdicts()[0].features).toContain("words:contact")
+  })
+
+  test("an IdP's username step with a Proceed button under /idp/ and a card titled User Login is a sign-in", () => {
+    page(`<header><h1>Member Portal</h1></header><mat-card><mat-card-header><div><mat-card-title><span>User Login</span></mat-card-title></div></mat-card-header>
+      <mat-card-content><div><div><form autocomplete="off"><label for="mat-input-0">Username</label><input id="mat-input-0" name="loginName" autocomplete="off" aria-label="Username">
+      <button type="submit"> Proceed </button><a role="button" tabindex="0">Trouble signing in?</a></form></div></div></mat-card-content></mat-card>`, "/idp/members/", "Member Portal")
+    const [verdict] = clusterVerdicts()
+    expect(verdict.features).toEqual(expect.arrayContaining(["button:proceed", "path:login", "words:login"]))
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ "mat-input-0": "username" })
+    expect(result.submit?.textContent?.trim()).toBe("Proceed")
+  })
+
+  test("a card title over some other form says nothing of a login form elsewhere", () => {
+    page(`<div class="product-card"><div class="card-title">Log in to save</div><form><input id="q" type="search"></form></div>
+      <form><input id="e" type="email"><button>Continue</button></form>`, "/")
+    const graph = scanGraph()
+    expect(graph.context(graph.clusterOf(document.getElementById("e")!))).not.toContain("log in")
+  })
+})
+
+describe("which form is the page's", () => {
+  test("a sign-up above the sign-in on /login: the sign-in is the login form", () => {
+    page(`<main><section><h2>Create an Account</h2><form><input id="fn" name="first_name"><input id="ln" name="last_name">
+      <label for="se">Email</label><input id="se" type="email"><label for="sp">Password</label><input id="sp" type="password"><button type="submit">Create an Account</button></form></section>
+      <section><h2>Log In</h2><form><label for="le">Email</label><input id="le" type="email"><label for="lp">Password</label><input id="lp" type="password">
+      <label><input type="checkbox"> Remember me</label><button type="submit">Log In</button></form></section></main>`, "/login/")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ le: "email", lp: "password" })
+    expect(result.submit?.textContent).toBe("Log In")
+  })
+
+  test("a sign-in above the sign-up on /signup: the sign-up is the form", () => {
+    page(`<header><form><input id="le" type="email"><input id="lp" type="password"><button type="submit">Log in</button></form></header>
+      <main><h1>Create your account</h1><form><input id="se" type="email" autocomplete="email"><input id="sp" type="password" autocomplete="new-password">
+      <input id="sc" type="password" autocomplete="new-password"><button type="submit">Sign up</button></form></main>`, "/signup")
+    const result = scanPage()
+    expect(result.kind).toBe("signup")
+    expect(byId(result)).toEqual({ se: "email", sp: "new-password", sc: "new-password" })
+  })
+
+  test("a login link button before Log in: Log in is the submit button", () => {
+    page(`<form><input id="e" type="email" autocomplete="username"><input id="p" type="password" autocomplete="current-password">
+      <button type="submit" id="onetime">E-mail a login link</button><button type="submit" id="login">Log in</button></form>`)
+    expect(scanPage().submit?.id).toBe("login")
+  })
+})
+
+describe("Sign up with a provider", () => {
+  test("a sidebar's one-box sign-up beside Sign up with Google is no sign-in", () => {
+    page(`<main><a href="/jobs/1">Revenue Analyst</a><button type="button">Apply</button></main>
+      <aside><div><div><form action="/jobs/signup" method="GET"><input name="email" maxlength="100" placeholder="Your Email"><input type="submit" value="Sign up"></form>
+      <span>or</span><a href="https://www.example.com/auth/google_oauth2/with_callback"><span>Sign up with Google</span></a></div>
+      <div>Already have an account? <button type="button">Log In</button></div></div></aside>`, "/jobs", "Startup jobs")
+    const result = scanPage()
+    expect(result.kind).toBeNull()
+    expect(result.provider).toBe(true)
+  })
+
+  test("an email-first step beside Sign in with Google is still a sign-in", () => {
+    page(`<main><div><form><label for="e">Email</label><input id="e" type="email"><button>Continue</button></form>
+      <a href="https://www.example.com/auth/google">Sign in with Google</a></div></main>`, "/start")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ e: "email" })
+  })
+
+  test("a full sign-up page with Sign up with Google stays a sign-up", () => {
+    page(`<main><h1>Create your account</h1><form><label for="e">Email</label><input id="e" type="email" autocomplete="email">
+      <label for="p">Create a password</label><input id="p" type="password" autocomplete="new-password"><button type="submit">Sign up</button>
+      <a href="https://www.example.com/auth/google">Sign up with Google</a></form></main>`, "/signup")
+    const result = scanPage()
+    expect(result.kind).toBe("signup")
+    expect(byId(result)).toEqual({ e: "email", p: "new-password" })
+  })
+})
+
+describe("email and text marketing popups", () => {
+  test("a 10%-off popup's email and mobile number are no identity form", () => {
+    page(`<div role="dialog"><form><h2>Take 10% off your first order*</h2><div>Be the first to hear about new arrivals.</div>
+      <label for="email">Email Address</label><input id="email" name="email" type="text"><label for="cell">Mobile Phone Number</label><input id="cell" name="cellPhone" type="tel">
+      <div>By signing up via text, you agree to receive recurring automated marketing text messages.</div><button type="submit">Continue</button></form></div>`, "/")
+    expect(scanForms()).toEqual([])
+  })
+
+  test("a newsletter's email and phone boxes marked by autocomplete are no identity form either", () => {
+    page(`<footer><form><h2>Subscribe for exclusive offers</h2><input id="em" autocomplete="email"><input id="tel" autocomplete="tel"><button>Subscribe</button></form></footer>`, "/")
+    expect(scanForms()).toEqual([])
+  })
+
+  test("a contact form's email and phone stay", () => {
+    page(`<form><h2>Contact details</h2><label for="em">Email</label><input id="em" type="email"><label for="tel">Phone</label><input id="tel" type="tel"><button>Save</button></form>`, "/account")
+    expect(formRoles()).toEqual({ em: "email", tel: "tel" })
+  })
+
+  test("a checkout's email and phone beside a text-offers checkbox stay", () => {
+    page(`<form><h2>Checkout: contact for delivery</h2><label for="em">Email</label><input id="em" type="email"><label for="tel">Phone</label><input id="tel" type="tel">
+      <label><input type="checkbox"> Text me exclusive offers</label><button>Continue to shipping</button></form>`, "/checkout")
+    expect(formRoles()).toEqual({ em: "email", tel: "tel" })
+  })
+})
+
+describe("masked boxes and boxes for either", () => {
+  const style = (security: string) => () => ({ getPropertyValue: (name: string) => (name === "-webkit-text-security" ? security : "") }) as unknown as CSSStyleDeclaration
+  const input = (type: string) => Object.assign(document.createElement("input"), { type })
+
+  test("a tel, number or email box masked with -webkit-text-security is masked; a checkbox never is", () => {
+    for (const type of ["text", "tel", "number", "email"]) expect(masked(input(type), style("disc"))).toBe(true)
+    expect(masked(input("tel"), style("none"))).toBe(false)
+    expect(masked(input("checkbox"), style("disc"))).toBe(false)
+  })
+
+  test("a PIN in a tel box masked with CSS is the sign-in's password, not a code", () => {
+    // happy-dom drops vendor-prefixed properties: the inline declaration stands in for the computed one, as Chromium reads it.
+    const computed = globalThis.getComputedStyle
+    const withSecurity = (el: Element) => {
+      const s = computed(el)
+      const security = /-webkit-text-security:\s*(\w+)/.exec(el.getAttribute("style") ?? "")?.[1]
+      return security ? new Proxy(s, { get: (t, k) => (k === "getPropertyValue" ? (n: string) => (n === "-webkit-text-security" ? security : t.getPropertyValue(n)) : Reflect.get(t, k)) }) : s
+    }
+    globalThis.getComputedStyle = withSecurity as typeof getComputedStyle
+    try {
+      maskedPin()
+    } finally {
+      globalThis.getComputedStyle = computed
+    }
+  })
+
+  const maskedPin = () => {
+    page(`<main><h1>Sign In to your account</h1><form id="login-form"><label for="u">Mobile service or account number</label><input id="u" name="user_name" type="tel">
+      <label for="pw">PIN</label><input id="pw" name="user_password" type="tel" maxlength="6" placeholder="******" style="-webkit-text-security:disc">
+      <button type="submit">SIGN IN</button><p>Forgot your PIN?</p></form></main>`, "/customer/login", "Secure PIN Entry")
+    const result = scanPage()
+    expect(result.kind).toBe("login")
+    expect(byId(result)).toEqual({ u: "phone", pw: "password" })
+  }
+
+  test("a plain text box labelled Password, unmasked, is never the password", () => {
+    page(`<form><label for="u">Username</label><input id="u" name="username"><label for="pw">Password</label><input id="pw" name="password" type="text" autocomplete="off"><button>Log in</button></form>`)
+    expect(byId(scanPage()).pw).toBeUndefined()
+  })
+
+  test("ID or phone number, and Телефон / Логин, are one box for either: a username", () => {
+    page(`<form><input id="id" name="id" placeholder="ID or phone number"><input id="pw" type="password" placeholder="Password"><button>Sign in</button></form>`)
+    expect(byId(scanPage())).toEqual({ id: "username", pw: "password" })
+    page(`<form><label for="sign">Телефон / Логин</label><input id="sign" name="sign"><label for="pw">Пароль</label><input id="pw" type="password"><button>Войти с паролем</button></form>`, "/sign")
+    expect(byId(scanPage())).toEqual({ sign: "username", pw: "password" })
+  })
+
+  test("a phone number box alone stays a phone box", () => {
+    page(`<form><label for="ph">Phone number</label><input id="ph" name="phone"><button>Continue</button></form>`)
+    expect(byId(scanPage())).toEqual({ ph: "phone" })
+  })
+
+  test("an access number or library card is who you are; a payment card's number is no username", () => {
+    const facts = (display: string, type = "text"): FieldFacts => ({ type, autocomplete: [], display, code: "", maxLength: 0, inputMode: "" })
+    expect(scoreField(facts(" card customer access number ")).username).toBeGreaterThanOrEqual(3)
+    expect(scoreField(facts(" library card number ", "password")).username).toBeGreaterThanOrEqual(3)
+    expect(scoreField(facts(" library card number ", "password")).password).toBeLessThan(3)
+    expect(scoreField(facts(" card number ")).username).toBeLessThan(0)
   })
 })

@@ -198,10 +198,20 @@ function labelMap(root: Document | ShadowRoot): Map<string, HTMLLabelElement[]> 
   return map
 }
 
-/** The heading that names a container: its own first one, else one just before it, a few levels up. */
+/**
+ * The heading that names a container: its own first one, else one just
+ * before it, a few levels up, else the title of the card around it. A
+ * fieldset's legend ("Please enter the following information") names a
+ * group of boxes, not the form: the heading outside still counts beside it.
+ */
 function headingFor(root: Element): string {
   const own = root.querySelector(HEADING)
-  if (own) return innerText(own)
+  if (own && own.localName !== "legend") return innerText(own)
+  const outside = headingBefore(root) || cardTitle(root)
+  return own ? `${innerText(own)} \n ${outside}` : outside
+}
+
+function headingBefore(root: Element): string {
   let node: Element | null = root
   for (let depth = 0; node && depth < 3; depth++, node = node.parentElement) {
     let sibling = node.previousElementSibling
@@ -212,6 +222,25 @@ function headingFor(root: Element): string {
   }
   return ""
 }
+
+/** A card component's title element (Angular Material's, or a `card-title` class). */
+const CARD_TITLE = "mat-card-title, [class*=card-title]"
+/** How far above a form its card may be. */
+const CARD_DEPTH = 6
+
+/** The title of the card around a form: an ancestor a few levels up holding no other boxes, and its title outside the form. */
+function cardTitle(root: Element): string {
+  let node = root.parentElement
+  for (let depth = 0; node && depth < CARD_DEPTH && node !== document.body; depth++, node = node.parentElement) {
+    if (Array.from(node.querySelectorAll("input:not([type=hidden]), select, textarea")).some((el) => !root.contains(el))) return ""
+    const title = node.querySelector(CARD_TITLE)
+    if (title && !root.contains(title)) return innerText(title)
+  }
+  return ""
+}
+
+/** The page's own footer (one in no article, section, aside, main, nav or dialog): its links are the site's, never a form's words. */
+const pageFooter = (el: Element) => (el.localName === "footer" || el.getAttribute("role") === "contentinfo") && !el.parentElement?.closest("article, section, aside, main, nav, dialog, [role=dialog]")
 
 /** A select's options are a list of countries or months, not what the form says; the rest never show as text. */
 const SKIP_TEXT = new Set(["script", "style", "noscript", "template", "svg", "option", "optgroup", "datalist"])
@@ -239,7 +268,7 @@ function spacedText(root: Element, style: (el: Element) => CSSStyleDeclaration, 
         }
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         const el = child as Element
-        if (SKIP_TEXT.has(el.localName) || el.hasAttribute("hidden")) continue
+        if (SKIP_TEXT.has(el.localName) || el.hasAttribute("hidden") || pageFooter(el)) continue
         const s = style(el)
         if (s.display !== "none" && s.visibility !== "hidden") walk(el)
       }

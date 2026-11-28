@@ -72,7 +72,8 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
   username: prepare([
     ["username", 5], ["user name", 5], ["user id", 4], ["userid", 4], ["login id", 4], ["login", 2], ["log in", 1],
     ["sign in", 1], ["account name", 3], ["account", 1], ["identifier", 3], ["member id", 3], ["member number", 3],
-    ["customer number", 2], ["customer id", 3], ["cust id", 3], ["handle", 1], ["email or username", 3], ["username or email", 3], ["email or phone", 2],
+    ["customer number", 2], ["customer id", 3], ["cust id", 3], ["access number", 5], ["library card", 5], ["bar code", 4], ["barcode", 4],
+    ["handle", 1], ["email or username", 3], ["username or email", 3], ["email or phone", 2],
     ["benutzername", 5], ["benutzer", 3], ["nombre de usuario", 5], ["usuario", 3], ["nom d utilisateur", 5],
     ["identifiant", 4], ["nome utente", 5], ["utente", 3], ["gebruikersnaam", 5], ["nome de usuario", 5],
     ["ユーザー名", 5], ["ユーザーid", 4], ["用户名", 5], ["账号", 4], ["帳號", 4],
@@ -210,6 +211,14 @@ const inCode = (f: FieldFacts, clue: Compiled) => clue.code !== null && (f.code.
 
 /** Clues of a user id strong enough to say a masked box holds who you are, not a secret. */
 const USER_ID = 4
+/** A code clue this weak ("code", "token") is no secret by itself: a library's "Bar code" is who you are. */
+const SECRET_CODE = 3
+/** A library card's or bank's access number: who you are, not a payment card, whatever "card" says. */
+const MEMBER_CARD = ["library card", "access number", "bar code", "barcode"].map((p) => words(p).trim())
+const PAYMENT_CARD = new Set(["card", "card number"].map((p) => ` ${words(p).trim()} `))
+/** Words that say a box takes who you are (not a number only), beside one that says it takes a phone number: either one. */
+const ACCOUNT_WORDS = ["email", "e mail", "id", "user id", "username", "user name", "login", "логин", "account"]
+const PHONE_WORDS = ["phone", "mobile", "телефон"]
 
 export function scoreField(f: FieldFacts): Record<FieldRole, number> {
   const score = Object.fromEntries(ROLES.map((r) => [r, 0])) as Record<FieldRole, number>
@@ -218,7 +227,9 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
   // Whether its own words name a user id, or a secret.
   let user = false
   let secret = false
+  const member = MEMBER_CARD.some((p) => hasPhrase(f.display, p) || f.code.includes(squash(p)))
   for (const clue of COMPILED) {
+    if (member && PAYMENT_CARD.has(clue.display)) continue
     const shown = f.display.includes(clue.display)
     const coded = inCode(f, clue)
     if (shown) {
@@ -227,7 +238,7 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
     }
     if (coded) score[clue.role] += clue.value * 0.8
     if ((shown || coded) && clue.role === "username" && clue.value >= USER_ID) user = true
-    if ((shown || coded) && (clue.role === "password" || clue.role === "new-password" || clue.role === "otp") && clue.value > 0) secret = true
+    if ((shown || coded) && (clue.role === "password" || clue.role === "new-password" || (clue.role === "otp" && clue.value >= SECRET_CODE)) && clue.value > 0) secret = true
   }
 
   for (const token of f.autocomplete) {
@@ -245,10 +256,13 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
     score.username -= 10
     score.email -= 10
     score.phone -= 10
-    // A bank's masked "User ID" box: who you are, typed blind, never a password to save or confirm.
+    // A bank's masked "User ID" box, a library's masked bar code: who you are, typed blind, never a
+    // password to save or confirm, nor a code.
     if (user && !secret) {
       score.password -= 8
       score["new-password"] -= 8
+      score.otp -= 8
+      score.username += 10
     }
   } else {
     score.password -= 10
@@ -263,8 +277,8 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
     score.phone += 5
     score.otp += 1
   }
-  // "Email or phone number": one box for either, an identifier like a username, not a phone box (which takes only a number).
-  if (!isPassword && f.type !== "tel" && ["email", "e mail"].some((p) => hasPhrase(f.display, p)) && ["phone", "mobile"].some((p) => hasPhrase(f.display, p)))
+  // "Email or phone number", "ID or phone number": one box for either, an identifier like a username, not a phone box (which takes only a number).
+  if (!isPassword && f.type !== "tel" && ACCOUNT_WORDS.some((p) => hasPhrase(f.display, p)) && PHONE_WORDS.some((p) => hasPhrase(f.display, p)))
     score.username = Math.max(score.username, score.email, score.phone) + 1
   if (f.inputMode === "email") score.email += 3
   if (f.inputMode === "tel") score.phone += 3
@@ -304,7 +318,7 @@ export function bestRole(score: Record<FieldRole, number>): FieldRole | null {
 
 export const FORM_CLUES: Record<FormKind, Clue[]> = {
   login: prepare([
-    ["sign in", 3], ["signin", 3], ["log in", 3], ["login", 3], ["log on", 2], ["sign on", 2], ["welcome back", 2],
+    ["sign in", 3], ["signin", 3], ["log in", 3], ["login", 3], ["logon", 3], ["log on", 2], ["sign on", 2], ["welcome back", 2],
     ["forgot password", 2], ["forgot your password", 2], ["remember me", 2], ["keep me signed in", 2],
     ["enter your password", 3], ["enter password", 2],
     ["stay signed in", 2], ["don t have an account", 2], ["se connecter", 3], ["connexion", 3], ["anmelden", 3],
@@ -389,6 +403,9 @@ const CONNECTORS = [
   .map((c) => words(c).trim())
   .sort((a, b) => b.length - a.length)
 
+/** Connectors that make a new account with the provider, not sign in with it. */
+const SIGNUP_CONNECTORS = new Set(["sign up with", "signup with", "register with", "s inscrire avec"].map((c) => words(c).trim()))
+
 const FILLER = ["your", "my", "an", "a", "the", "account", "id", "workspace", "entra", "anmelden", "einloggen"]
 const DENY = [
   "share", "follow", "tweet", "like us", "post", "download", "app store", "play", "get it on", "watch",
@@ -406,7 +423,7 @@ function removeOnce(text: string, phrase: string): string {
  * "Se connecter avec Apple"). Sentences that merely mention a provider
  * ("Sign in with Google to sync your calendar") leave too much text behind.
  */
-export function providerFromLabel(label: string): { provider: Provider; connector: boolean } | null {
+export function providerFromLabel(label: string): { provider: Provider; connector: boolean; signup: boolean } | null {
   const text = words(label)
   if (squash(text).length > 48 || DENY.some((d) => hasPhrase(text, words(d).trim()))) return null
   for (const [provider, names] of PROVIDER_NAMES) {
@@ -418,7 +435,7 @@ export function providerFromLabel(label: string): { provider: Provider; connecto
     for (const filler of FILLER) while (hasPhrase(rest, filler)) rest = removeOnce(rest, filler)
     // A bare "X" is a close button far more often than a Twitter button.
     if (provider === "x" && name === "x" && !connector) continue
-    if (squash(rest).length <= 3) return { provider, connector: !!connector }
+    if (squash(rest).length <= 3) return { provider, connector: !!connector, signup: !!connector && SIGNUP_CONNECTORS.has(connector) }
   }
   return null
 }

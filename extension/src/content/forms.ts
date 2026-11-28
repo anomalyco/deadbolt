@@ -259,8 +259,21 @@ export function scanForms(source: ScanSource = openRoots()): FormField[] {
     const text = plain(`${graph.label(f.el)} ${codeOf(f.el)} ${graph.context(graph.clusterOf(f.el))}`)
     return NEWSLETTER.test(text) && !PAYMENT_CONTEXT.test(text) && !saysAddress(text)
   }
-  return fields.filter((f) => f.kind === "card" || size.get(f.section)! > 1 || (tokened.has(f.el) && !newsletter(f)))
+  // An email and a phone box under a discount or text-alerts offer (a store's "Save 10%" popup) is a
+  // marketing sign-up, not a contact form: neither box is filled. A contact form asks for a name too.
+  const section = new Map<string, FormField[]>()
+  for (const f of fields) section.set(f.section, [...(section.get(f.section) ?? []), f])
+  const marketing = (own: FormField[]) => {
+    if (own.length !== 2 || !own.some((f) => f.role === "email") || !own.every((f) => f.role === "email" || f.role === "tel")) return false
+    const text = plain(`${own.map((f) => `${graph.label(f.el)} ${codeOf(f.el)}`).join(" ")} ${graph.context(graph.clusterOf(own[0].el))}`)
+    return (NEWSLETTER.test(text) || OPT_IN.test(text)) && !PAYMENT_CONTEXT.test(text) && !saysAddress(text)
+  }
+  const promo = new Set([...section].filter(([, own]) => marketing(own)).map(([s]) => s))
+  return fields.filter((f) => f.kind === "card" || (!promo.has(f.section) && (size.get(f.section)! > 1 || (tokened.has(f.el) && !newsletter(f)))))
 }
+
+/** A store's offer for an email and a phone number: a discount for signing up, or alerts by text. */
+const OPT_IN = w(/\b(save \d+|\d+ off|exclusive (offers?|deals?)|(text|sms) (updates|alerts|messages|offers)|marketing (text )?messages|email and text|get alerts|sign(ing)? up (via|by|for) texts?)\b/)
 
 /** A newsletter's or an updates list's words, around a lone email box. */
 const NEWSLETTER = w(/\b(newsletters?|subscribe|subscription|mailing list|sign ?up for|get (the )?(latest|updates)|email updates|stay (in touch|updated|informed)|join our|inbox|emails? sign ?up)\b/)

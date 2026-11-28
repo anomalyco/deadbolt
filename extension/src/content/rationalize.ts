@@ -61,7 +61,8 @@ export function rationalize(fields: ScannedField[]) {
     // A masked code box beside a password is the second factor (a PIN or 2FA code), never another password.
     if (fields.some((g) => g.cluster === f.cluster && (g.role === "password" || g.role === "new-password"))) continue
     const long = f.facts.maxLength ? f.facts.maxLength > MAX_CODE_LENGTH : f.score.password > MASKED_BASELINE
-    if (long && fields.slice(0, i).some((g) => g.cluster === f.cluster && textual(g))) f.role = "password"
+    // After a box for who you are: a plain one, or a masked one its words name (a library's bar code).
+    if (long && fields.slice(0, i).some((g) => g.cluster === f.cluster && (textual(g) || IDENTIFIER.includes(g.role)))) f.role = "password"
   }
   for (const cluster of new Set(fields.map((f) => f.cluster))) {
     const own = fields.filter((f) => f.cluster === cluster)
@@ -148,7 +149,7 @@ const GROUPS: Array<[string, string[]]> = (
 ).map(([name, list]) => [name, list.map((p) => words(p).trim())])
 
 /** A button that moves a sign-in along without naming it: Continue, Next, Verify, Send magic link. */
-const PROCEED = ["continue", "next", "verify", "submit", "confirm", "go", "magic link", "send link", "email me a link", "send me a link", "login link", "sign in link", "weiter", "suivant", "continuer", "valider", "verifier", "confirmer", "continuar", "siguiente", "confirmar", "verificar", "bestatigen", "prufen", "avanti", "verder", "volgende", "次へ", "続行", "确认", "下一步"].map((p) => words(p).trim())
+const PROCEED = ["continue", "next", "proceed", "verify", "submit", "confirm", "go", "magic link", "send link", "email me a link", "send me a link", "login link", "sign in link", "weiter", "suivant", "continuer", "valider", "verifier", "confirmer", "continuar", "siguiente", "confirmar", "verificar", "bestatigen", "prufen", "avanti", "verder", "volgende", "次へ", "続行", "确认", "下一步"].map((p) => words(p).trim())
 const KINDS: FormKind[] = ["login", "signup", "change-password", "reset", "mfa", "newsletter"]
 const kindsOf = (text: string, min: number) => {
   const score = scoreFormText(text)
