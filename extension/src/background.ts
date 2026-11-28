@@ -3,6 +3,7 @@
 // content scripts, the inline menu and the popup.
 
 import { Autofill } from "./bg/autofill"
+import { listenFillDoors } from "./bg/doors"
 import { Forms } from "./bg/forms"
 import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
@@ -43,6 +44,7 @@ saver.signedIn = (tabId, site) => {
 // After a fill (or a sign-in, above), the site's own icon, kept for the rows (bg/site-icons.ts).
 autofill.filled = (tabId, site) => void siteIcons.used(tabId, site)
 passkeys.listen()
+listenFillDoors()
 
 function title(status: Status): string {
   switch (status.state) {
@@ -125,6 +127,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return autofill.menuPick(message.token, String(message.ref), sender)
     case "db:menu-generate":
       return autofill.menuGenerate(message.token, sender)
+    case "db:menu-unlock":
+      return autofill.menuUnlock(String(message.token), sender)
     case "db:menu-signin":
       if (universal.owns(message.token)) return universal.provider(message.token, String(message.ref), sender)
       return autofill.menuSignIn(message.token, String(message.ref), sender)

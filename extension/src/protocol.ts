@@ -31,6 +31,7 @@ export type PasskeyCancelledReply = ReplyOf<"passkey-cancelled">
 export type LearnedReply = ReplyOf<"learned">
 export type LearnTextReply = ReplyOf<"learn-text">
 export type LearnDeletedReply = ReplyOf<"learn-deleted">
+export type UnlockPromptReply = ReplyOf<"unlock-prompt">
 export type ErrorReply = ReplyOf<"error">
 
 /** What a request of each type is answered with, besides an error. */
@@ -54,6 +55,7 @@ export interface ReplyFor {
   learn: LearnedReply
   "learn-read": LearnTextReply
   "learn-delete": LearnDeletedReply
+  "unlock-prompt": UnlockPromptReply
 }
 
 /** The reply type each request expects. */
@@ -77,6 +79,7 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   learn: "learned",
   "learn-read": "learn-text",
   "learn-delete": "learn-deleted",
+  "unlock-prompt": "unlock-prompt",
 }
 
 export type HostMessage =
@@ -223,6 +226,7 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
         status: raw.status,
         detail: str(raw.detail, 1000),
         capabilities: strings(raw.capabilities),
+        ...(raw.touchIdReady === true ? { touchIdReady: true } : {}),
       }
     }
     case "list": {
@@ -288,6 +292,8 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
       return typeof raw.text === "string" ? { type: "learn-text", text: raw.text, next: typeof raw.next === "number" && raw.next > 0 ? raw.next : null } : null
     case "learn-deleted":
       return { type: "learn-deleted", found: raw.found === true }
+    case "unlock-prompt":
+      return { type: "unlock-prompt", app: raw.app === true }
     case "error": {
       return { type: "error", code: isCode(raw.code) ? raw.code : "failed", message: str(raw.message, 1000) ?? "" }
     }

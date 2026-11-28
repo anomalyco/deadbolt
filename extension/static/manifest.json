@@ -11,7 +11,7 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["storage", "webNavigation", "favicon"],
+  "permissions": ["storage", "webNavigation", "favicon", "contextMenus"],
   "background": {
     "service_worker": "background.js"
   },
@@ -43,6 +43,10 @@
     "record": {
       "suggested_key": { "default": "Alt+Shift+D", "mac": "Alt+Shift+R" },
       "description": "Start or stop recording this tab"
+    },
+    "fill": {
+      "suggested_key": { "default": "Ctrl+Shift+L", "mac": "Command+Shift+L" },
+      "description": "Fill login or form on this page"
     }
   },
   "incognito": "not_allowed",

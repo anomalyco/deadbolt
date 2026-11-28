@@ -84,6 +84,13 @@ describe("Host", () => {
     expect(host.status).toEqual({ state: "locked", detail: "Unlock Deadbolt" })
   })
 
+  test("a locked hello that says Touch ID is ready marks the status, for the menu's unlock row", async () => {
+    const ready = host.connect()
+    ports[0].push(hello(1, "locked", { detail: "Unlock Deadbolt", touchIdReady: true }))
+    await ready
+    expect(host.status).toEqual({ state: "locked", detail: "Unlock Deadbolt", touchId: true })
+  })
+
   test("a different protocol version is unavailable, not ready", async () => {
     const ready = host.connect()
     ports[0].push(hello(1, "ready", { protocol: PROTOCOL + 1 }))

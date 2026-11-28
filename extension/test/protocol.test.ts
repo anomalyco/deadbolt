@@ -13,6 +13,15 @@ describe("parseHostMessage", () => {
     })
   })
 
+  test("hello says when Touch ID can unlock, and unlock-prompt says whether the app came forward", () => {
+    const hello = parseHostMessage({ id: 1, type: "hello", protocol: 3, version: "x", status: "locked", capabilities: ["unlock-prompt"], touchIdReady: true })
+    expect(hello).toMatchObject({ kind: "reply", reply: { status: "locked", touchIdReady: true } })
+    const off = parseHostMessage({ id: 1, type: "hello", protocol: 3, version: "x", status: "locked", capabilities: [], touchIdReady: "yes" })
+    expect(off?.kind === "reply" && "touchIdReady" in off.reply).toBe(false)
+    expect(parseHostMessage({ id: 2, type: "unlock-prompt", app: true })).toEqual({ kind: "reply", id: 2, reply: { type: "unlock-prompt", app: true } })
+    expect(parseHostMessage({ id: 2, type: "unlock-prompt" })).toEqual({ kind: "reply", id: 2, reply: { type: "unlock-prompt", app: false } })
+  })
+
   test("hello with an unknown status is rejected", () => {
     expect(parseHostMessage({ id: 1, type: "hello", protocol: 1, version: "x", status: "sleepy", capabilities: [] })).toBeNull()
   })

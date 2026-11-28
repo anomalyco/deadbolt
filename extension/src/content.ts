@@ -10,6 +10,7 @@ import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
 import { readSubmitted } from "./content/formfill"
+import { manualFields, withManual } from "./content/manual"
 import { ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
@@ -39,6 +40,8 @@ const FAILED_AFTER_MS = 5000
 
 /** Live fields of the current login form. Never sent anywhere. */
 let fields: Field[] = []
+/** Fields the user asked to fill where the scan found no login (see content/manual.ts), until they go or the page moves on. */
+let manual: Field[] = []
 let submitControl: Element | undefined
 let kind: SurfaceKind | null = null
 /** The page shows a sign-in-provider button. */
@@ -90,7 +93,7 @@ function refresh() {
   kind = result.kind
   provider = result.provider
   // A reset form's email box isn't something to fill.
-  const next = kind && kind !== "reset" ? result.fields : []
+  const next = withManual(kind && kind !== "reset" ? result.fields : [], manual)
   if (!sameFields(fields, next)) formId++
   fields = next
   submitControl = kind ? result.submit : undefined
@@ -142,6 +145,7 @@ function scan() {
   if (location.href !== lastUrl) {
     lastUrl = location.href
     lastSignature = ""
+    manual = []
   }
   refresh()
   void report(false)
@@ -584,7 +588,16 @@ function onKeydown(event: KeyboardEvent) {
 
 // First, while it's still document_start: the hook is waiting for its port.
 initPasskeyChannel(send)
-const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh, formFields: () => formFields, formsForm: () => formsId }
+/** The user asked to fill `el` (see content/manual.ts): whether it's a login field now. */
+function adopt(el: HTMLInputElement): boolean {
+  refresh()
+  if (fields.some((f) => f.el === el)) return true
+  manual = manualFields(el)
+  refresh()
+  return fields.some((f) => f.el === el)
+}
+
+const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh, formFields: () => formFields, formsForm: () => formsId, manual: adopt }
 initMenu(state)
 initFrameChecks(state)
 // A provider sign-in chain's submit: what db:signin-submit does after its checks.

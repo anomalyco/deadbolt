@@ -121,7 +121,8 @@ export type Status =
   | { state: "connecting" }
   | { state: "not-installed" }
   | { state: "disconnected"; message: string }
-  | { state: Exclude<HostStatus, "ready">; detail?: string }
+  /** `touchId`: locked, and Touch ID can unlock it now. */
+  | { state: Exclude<HostStatus, "ready">; detail?: string; touchId?: boolean }
   | { state: "ready"; version: string }
 
 /** Value-free provider step; its opaque handle fixes the controls before an RPC. */
@@ -209,6 +210,8 @@ export type ToBackground =
   | { type: "db:menu-load"; token: string; parent: string }
   | { type: "db:menu-pick"; token: string; ref: string }
   | { type: "db:menu-generate"; token: string }
+  /** The user picked "Unlock Deadbolt" in the locked menu (see bg/unlock.ts). Answers with a PickReply. */
+  | { type: "db:menu-unlock"; token: string }
   /** The user picked a "Sign in with …" row: point at the site's button for it (see SignInReply). */
   | { type: "db:menu-signin"; token: string; ref: string }
   | { type: "db:menu-dismiss"; token: string }
@@ -285,6 +288,14 @@ export type ToContent =
   | { type: "db:report" }
   | { type: "db:close-menu"; token: string }
   | { type: "db:resize-menu"; token: string; height: number; width?: number; mode?: SurfaceMode }
+  /**
+   * The user asked for the account menu (the fill shortcut, or with
+   * `context`, "Fill with Deadbolt" in a field's context menu; see
+   * bg/doors.ts): on the focused field, or the one the context menu was for.
+   */
+  | { type: "db:manual-open"; context?: boolean }
+  /** The vault unlocked from the open menu `token` (bg/unlock.ts): keyboard focus goes into it, so Enter picks its first login. */
+  | { type: "db:menu-resumed"; token: string }
   /**
    * Open the menu under `box` (in this page's viewport), for a login,
    * identity or card field in a frame below; with `mode` "pill", a sign-in
@@ -418,6 +429,15 @@ export interface StatusChanged {
   change?: Change
 }
 
+/**
+ * Broadcast to open menus once the vault unlocked from menu `token` and
+ * its site's logins are in hand (bg/unlock.ts): that menu loads again, in place.
+ */
+export interface MenuRefresh {
+  type: "db:menu-refresh"
+  token: string
+}
+
 export interface QueryReply {
   token?: string
   /** Rows the menu will show, so the frame can be sized before it loads. */
@@ -446,13 +466,17 @@ export type MenuLoadReply =
   | { kind: "forms"; form: FormKind; site: string; identities: FormIdentity[]; cards: FormCard[]; into?: string; verify: boolean; passphrase?: boolean; fills?: Record<string, string[]> }
   /** A pill on a field a sign-in session's step just filled ("Password filled"). */
   | { kind: "notice"; label: string; title: string }
-  | { kind: "status"; status: Status }
+  /** `unlock`: the row unlocks from here ("Unlock Deadbolt", see bg/unlock.ts) rather than only saying it's locked. */
+  | { kind: "status"; status: Status; unlock?: boolean }
   /**
    * The save offer's surface: what it may show. Never the password, a card's
    * number beyond its last four digits, or its code. `what`: a card or an
    * identity typed into a form, with `username` its label ("Visa •••• 4242").
    */
   | { kind: "offer"; site: string; username: string; update: boolean; what?: SaveWhat; changes?: string; change?: string; saveNew?: boolean }
+
+/** The answer to "Unlock Deadbolt": `app` when Deadbolt's window came forward for the passphrase, rather than Touch ID. */
+export type UnlockReply = { ok: true; app: boolean } | { ok: false; message: string }
 
 /** `submitted`: the pick signed in (see Autofill.startAutomatic) and its form went on, beyond a fill. */
 export type PickReply = { ok: true; submitted?: boolean } | { ok: false; message: string }

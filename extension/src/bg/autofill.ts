@@ -5,7 +5,7 @@
 // Ryan Vogel), and so is the start of the sign-in session (its email-first
 // continuation), which here follows a login through every step of a sign-in.
 
-import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, phoneLike, type ToContent, type SignInReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, phoneLike, type MenuRefresh, type ToContent, type SignInReply, type UnlockReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { boxesInTop, cleanApproved, cleanBox, LOGIN_FRAME_PLACE, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type VaultBackend } from "./backend"
@@ -16,6 +16,7 @@ import { siteOf } from "./site"
 import { iconKey, iconSettings, storedIcon, type StoredIcon } from "../ui/icon-store"
 import { hostHash } from "./site-icons"
 import { exactSignInOrigin, SIGNIN_SETTING, signInEnabled, signInOn, type AuthReport } from "../auth-state"
+import { Unlocker, type PendingUnlock } from "./unlock"
 
 const TOKEN_TTL_MS = 2 * 60_000
 const LIST_TTL_MS = 30_000
@@ -307,6 +308,37 @@ export class Autofill {
       // Locked or gone: no session goes on, including ones kept from before a service worker restart.
       if (status.state !== "ready") void this.endAll()
     })
+    // After the listener above, so a menu that unlocked lists afresh.
+    this.unlocker = new Unlocker(host, (p) => this.resumeUnlock(p))
+  }
+
+  /** The menu waiting on an unlock it asked for (see bg/unlock.ts). */
+  readonly unlocker: Unlocker
+
+  /** The user picked "Unlock Deadbolt" in a locked menu: Touch ID, or Deadbolt's window (see bg/unlock.ts). */
+  async menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<UnlockReply> {
+    const t = await this.token(token, sender)
+    if (!t || t.notice) return { ok: false, message: "This menu has expired." }
+    // The menu waits on the user, at Touch ID or in Deadbolt's window: its token lasts from now.
+    t.createdAt = Date.now()
+    const pending = { tabId: t.tabId, frameId: (t.owner ?? t).frameId, token }
+    if (this.host.status.state !== "ready") return this.unlocker.prompt(pending)
+    await this.resumeUnlock({ ...pending, at: Date.now() })
+    return { ok: true, app: false }
+  }
+
+  /**
+   * The vault is ready for the menu that asked to unlock, if it's still
+   * open and unpicked: the site's logins, fetched now, and the menu loads
+   * them in place (db:menu-refresh), with keyboard focus in it so Enter
+   * picks the first (db:menu-resumed).
+   */
+  private async resumeUnlock(p: PendingUnlock): Promise<void> {
+    const t = this.tokens.get(p.token)
+    if (!t || t.picked || t.tabId !== p.tabId || Date.now() - t.createdAt > TOKEN_TTL_MS) return
+    await this.list(t.origin, true).catch(() => null)
+    await chrome.runtime.sendMessage({ type: "db:menu-refresh", token: p.token } satisfies MenuRefresh).catch(() => {})
+    await sendToFrame(t.owner ?? t, { type: "db:menu-resumed", token: p.token })
   }
 
   private async list(origin: string, fresh = false): Promise<ListReply> {
@@ -464,7 +496,7 @@ export class Autofill {
   async menuLoad(token: string, sender: chrome.runtime.MessageSender, parent: string): Promise<MenuLoadReply | null> {
     const t = await this.token(token, sender, parent)
     if (!t) return null
-    if (this.host.status.state !== "ready") return { kind: "status", status: this.host.status }
+    if (this.host.status.state !== "ready") return { kind: "status", status: this.host.status, ...(this.host.status.state === "locked" && this.host.capabilities.includes("unlock-prompt") ? { unlock: true } : {}) }
     if (t.notice) return { kind: "notice", ...t.notice }
     if (t.generate) return { kind: "generate", site: new URL(t.origin).hostname }
     try {

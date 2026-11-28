@@ -77,7 +77,7 @@ export class Host implements VaultBackend {
         const detail = `This extension speaks protocol ${PROTOCOL}, but Deadbolt speaks ${reply.protocol}. Update both.`
         this.setStatus({ state: "unavailable", detail }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
-      else this.setStatus({ state: reply.status, detail: reply.detail }, change)
+      else this.setStatus({ state: reply.status, detail: reply.detail, ...(reply.touchIdReady ? { touchId: true } : {}) }, change)
     } catch (err) {
       if (err instanceof HostError && err.code === "disconnected") return
       this.setStatus({ state: "unavailable", detail: (err as Error).message }, change)
