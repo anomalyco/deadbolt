@@ -201,6 +201,37 @@ function headingFor(root: Element): string {
   return ""
 }
 
+const SKIP_TEXT = new Set(["script", "style", "noscript", "template", "svg"])
+
+/**
+ * An element's text with a space at every element edge, hidden subtrees left
+ * out: innerText runs inline elements together ("Code" in a label and
+ * "Verify" on the button after it read "codeverify"), and a page rendered
+ * without whitespace between tags (React's) is all inline edges.
+ */
+function spacedText(root: Element, style: (el: Element) => CSSStyleDeclaration, max: number): string {
+  const parts: string[] = []
+  let length = 0
+  const walk = (node: Node) => {
+    for (let child = node.firstChild; child && length < max; child = child.nextSibling) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = child.nodeValue ?? ""
+        if (text.trim()) {
+          parts.push(text)
+          length += text.length + 1
+        }
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const el = child as Element
+        if (SKIP_TEXT.has(el.localName) || el.hasAttribute("hidden")) continue
+        const s = style(el)
+        if (s.display !== "none" && s.visibility !== "hidden") walk(el)
+      }
+    }
+  }
+  walk(root)
+  return parts.join(" ").slice(0, max)
+}
+
 /** Walks the page once and splits its controls into clusters. */
 export function scanGraph(roots: Array<Document | ShadowRoot> = openRoots()): FormGraph {
   const labels = new Map<Document | ShadowRoot, Map<string, HTMLLabelElement[]>>()
@@ -286,7 +317,7 @@ export function scanGraph(roots: Array<Document | ShadowRoot> = openRoots()): Fo
     context(cluster) {
       if (!cluster?.root) return ""
       let text = contextCache.get(cluster)
-      if (text === undefined) contextCache.set(cluster, (text = words(`${headingFor(cluster.root)} \n ${innerText(cluster.root).slice(0, 2000)}`)))
+      if (text === undefined) contextCache.set(cluster, (text = words(`${headingFor(cluster.root)} \n ${spacedText(cluster.root, style, 2000)}`)))
       return text
     },
   }

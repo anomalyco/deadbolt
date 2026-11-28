@@ -5,6 +5,11 @@
 //
 //   bun corpus/score.ts [--gate] [--update-gate [--allow-regress]] [--verbose] [--json <file>] [--only <id substring>]
 //
+// Every page is in one split, by its site (registrable domain): "train",
+// which corpus/train-weights.ts fits the cluster model on, or "holdout",
+// which nothing is fit on. A site in both splits fails the run. The report
+// gives every metric for the whole corpus and for the holdout alone.
+//
 // It checks every page's SHA-256 against corpus/frozen.lock.json first, scores
 // the corpus twice and requires the same predictions (by SHA-256) both
 // times, then prints per-role precision, recall and F1, how often the page's
@@ -18,6 +23,7 @@
 import { createHash } from "node:crypto"
 import { readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { getDomain } from "tldts"
 import { controlKey, load, register } from "./replay"
 
 const here = import.meta.dir
@@ -30,7 +36,7 @@ const opt = (name: string) => {
 const LOCK = opt("--lock") ?? join(here, "frozen.lock.json")
 const LABELS = opt("--labels") ?? join(dirname(LOCK), "gold-labels.jsonl")
 const GATE = opt("--gate-file") ?? join(dirname(LOCK), "gate.json")
-const MAX_SECONDS = 8
+const MAX_SECONDS = 2
 
 export const ROLE_CLASSES = ["identifier", "password", "new-password", "otp", "card", "address"] as const
 export type RoleClass = (typeof ROLE_CLASSES)[number]
@@ -50,10 +56,13 @@ export interface Lock {
   viewport: string
   pages: LockPage[]
 }
+export type Split = "train" | "holdout"
 export interface Gold {
   id: string
   /** What the page is modeled on, or what it tests. */
   pattern: string
+  /** Whether the cluster model may learn from the page (train) or only be measured on it (holdout). Every page of a site is in the same one. */
+  split: Split
   decoy: boolean
   /** The login detector's kind for the page (scanPage), null for none. */
   kind: string | null
@@ -62,7 +71,7 @@ export interface Gold {
   /** Identity and payment controls (scanForms), by controlKey, with their roles. */
   forms: Record<string, string>
 }
-interface Prediction {
+export interface Prediction {
   id: string
   kind: string | null
   login: Record<string, string>
@@ -87,7 +96,7 @@ const classOf = (p: { login: Record<string, string>; forms: Record<string, strin
 const sha = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex")
 const sorted = (o: Record<string, string>) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 
-function readLock(): { lock: Lock; html: Map<string, string>; problems: string[] } {
+export function readLock(): { lock: Lock; html: Map<string, string>; problems: string[] } {
   const lock = JSON.parse(readFileSync(LOCK, "utf8")) as Lock
   const html = new Map<string, string>()
   const problems: string[] = []
@@ -106,14 +115,44 @@ function readLock(): { lock: Lock; html: Map<string, string>; problems: string[]
   return { lock, html, problems }
 }
 
-function readGold(): Gold[] {
+/** The site a page belongs to, for the split: its registrable domain (www.shop.example.com and shop.example.com are one). */
+export const siteOf = (url: string) => getDomain(url) ?? new URL(url).hostname
+
+/** Of the sites, the share whose pages are holdout. */
+export const HOLDOUT_SHARE = 0.35
+/** A new site's split, by a hash of its name: the same for every page of it, and no one's choice. */
+export function splitFor(site: string): Split {
+  return parseInt(sha(`deadbolt-corpus-split:${site}`).slice(0, 8), 16) / 2 ** 32 < HOLDOUT_SHARE ? "holdout" : "train"
+}
+
+/** Pages without a label, labels without a page, a split that isn't one, and sites in both splits. */
+export function corpusProblems(lock: Lock, gold: Gold[]): string[] {
+  const problems: string[] = []
+  const goldIds = new Set(gold.map((g) => g.id))
+  const lockIds = new Set(lock.pages.map((p) => p.id))
+  for (const id of lockIds) if (!goldIds.has(id)) problems.push(`${id}: frozen but has no gold label`)
+  for (const id of goldIds) if (!lockIds.has(id)) problems.push(`${id}: labelled but not in the lock`)
+  const url = new Map(lock.pages.map((p) => [p.id, p.url]))
+  const splits = new Map<string, Set<Split>>()
+  for (const g of gold) {
+    if (g.split !== "train" && g.split !== "holdout") problems.push(`${g.id}: split is ${JSON.stringify(g.split)}, not "train" or "holdout"`)
+    const u = url.get(g.id)
+    if (!u) continue
+    const site = siteOf(u)
+    splits.set(site, (splits.get(site) ?? new Set()).add(g.split))
+  }
+  for (const [site, s] of splits) if (s.size > 1) problems.push(`${site}: has pages in both splits; a holdout site must never be trained on`)
+  return problems
+}
+
+export function readGold(): Gold[] {
   return readFileSync(LABELS, "utf8")
     .split("\n")
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l) as Gold)
 }
 
-type Detector = {
+export type Detector = {
   scanPage: typeof import("../src/content/detect").scanPage
   scanForms: typeof import("../src/content/forms").scanForms
   scanGraph: typeof import("../src/content/graph").scanGraph
@@ -121,7 +160,7 @@ type Detector = {
 }
 
 /** What the extension makes of the page (content.ts, refresh): the login's fields, and the identity and payment fields the login doesn't claim. */
-function predict(d: Detector, id: string): Prediction {
+export function predict(d: Detector, id: string): Prediction {
   const graph = d.scanGraph(d.openRoots(document, undefined, true))
   const result = d.scanPage(graph)
   const fields = result.kind && result.kind !== "reset" ? result.fields : []
@@ -132,14 +171,25 @@ function predict(d: Detector, id: string): Prediction {
   return { id, kind: result.kind, login: sorted(login), forms: sorted(forms) }
 }
 
-function runAll(d: Detector, lock: Lock, html: Map<string, string>, only?: string): Prediction[] {
+export function runAll(d: Detector, lock: Lock, html: Map<string, string>, only?: (id: string) => boolean): Prediction[] {
   const out: Prediction[] = []
   for (const p of lock.pages) {
-    if (only && !p.id.includes(only)) continue
+    if (only && !only(p.id)) continue
     load(html.get(p.id) ?? "", p.url)
     out.push(predict(d, p.id))
   }
   return out
+}
+
+/** The detector the gate scores, set up in the replay window. */
+export async function loadDetector(): Promise<Detector> {
+  register()
+  return {
+    ...(await import("../src/content/detect")),
+    ...(await import("../src/content/forms")),
+    ...(await import("../src/content/graph")),
+    ...(await import("../src/content/shadow")),
+  }
 }
 
 interface Counts {
@@ -227,6 +277,8 @@ interface GateFile {
   margin: number
   floors: { micro: { precision: number; recall: number }; roles: Partial<Record<RoleClass, { precision: number; recall: number }>>; pageKind: number }
   ceilings: { decoyFalseTrigger: number; decoyFormsFalseTrigger: number }
+  /** The same, for the holdout pages alone: what the cluster model makes of sites it never saw. */
+  holdout?: { precision: number; recall: number; pageKind: number; decoyFalseTrigger: number }
   /** Pages whose kind and every role were right at the baseline: each must stay so. */
   exactPages: string[]
 }
@@ -235,7 +287,7 @@ const round = (n: number) => Math.round(n * 10000) / 10000
 const down = (n: number, m: number) => round(Math.max(0, n - m))
 const up = (n: number, m: number) => round(Math.min(1, n + m))
 
-function gateFrom(s: Scores, margin: number, old?: GateFile, allowRegress = false): GateFile {
+function gateFrom(s: Scores, h: Scores, margin: number, old?: GateFile, allowRegress = false): GateFile {
   const pick = (now: number, before: number | undefined, higher: boolean) => (before === undefined || allowRegress ? now : higher ? Math.max(now, before) : Math.min(now, before))
   const roles: GateFile["floors"]["roles"] = {}
   for (const c of ROLE_CLASSES) {
@@ -258,11 +310,17 @@ function gateFrom(s: Scores, margin: number, old?: GateFile, allowRegress = fals
       decoyFalseTrigger: pick(up(s.decoyFalseTrigger, margin), old?.ceilings.decoyFalseTrigger, false),
       decoyFormsFalseTrigger: pick(up(s.decoyFormsFalseTrigger, margin), old?.ceilings.decoyFormsFalseTrigger, false),
     },
+    holdout: {
+      precision: pick(down(h.micro.precision, margin), old?.holdout?.precision, true),
+      recall: pick(down(h.micro.recall, margin), old?.holdout?.recall, true),
+      pageKind: pick(down(h.pageKind, margin), old?.holdout?.pageKind, true),
+      decoyFalseTrigger: pick(up(h.decoyFalseTrigger, margin), old?.holdout?.decoyFalseTrigger, false),
+    },
     exactPages: allowRegress || !old ? s.exactPages : [...new Set([...old.exactPages, ...s.exactPages])].sort(),
   }
 }
 
-function checkGate(s: Scores, gate: GateFile): string[] {
+function checkGate(s: Scores, h: Scores, gate: GateFile): string[] {
   const fails: string[] = []
   const below = (what: string, got: number, floor: number) => {
     if (got + 1e-9 < floor) fails.push(`${what} ${pct(got)} is under its floor ${pct(floor)}`)
@@ -276,6 +334,12 @@ function checkGate(s: Scores, gate: GateFile): string[] {
   below("page kind", s.pageKind, gate.floors.pageKind)
   if (s.decoyFalseTrigger > gate.ceilings.decoyFalseTrigger + 1e-9) fails.push(`decoy false-trigger rate ${pct(s.decoyFalseTrigger)} is over its ceiling ${pct(gate.ceilings.decoyFalseTrigger)}`)
   if (s.decoyFormsFalseTrigger > gate.ceilings.decoyFormsFalseTrigger + 1e-9) fails.push(`decoy forms false-trigger rate ${pct(s.decoyFormsFalseTrigger)} is over its ceiling ${pct(gate.ceilings.decoyFormsFalseTrigger)}`)
+  if (gate.holdout) {
+    below("holdout precision", h.micro.precision, gate.holdout.precision)
+    below("holdout recall", h.micro.recall, gate.holdout.recall)
+    below("holdout page kind", h.pageKind, gate.holdout.pageKind)
+    if (h.decoyFalseTrigger > gate.holdout.decoyFalseTrigger + 1e-9) fails.push(`holdout decoy false-trigger rate ${pct(h.decoyFalseTrigger)} is over its ceiling ${pct(gate.holdout.decoyFalseTrigger)}`)
+  }
   const exact = new Set(s.exactPages)
   for (const id of gate.exactPages) if (!exact.has(id)) fails.push(`${id} was exact at the baseline and now isn't: ${s.misses.find((m) => m.id === id)?.why.join("; ") ?? "not scored"}`)
   return fails
@@ -283,10 +347,19 @@ function checkGate(s: Scores, gate: GateFile): string[] {
 
 // ---- Report ----------------------------------------------------------------------
 
-const pct = (n: number) => `${(n * 100).toFixed(1)}%`
+export const pct = (n: number) => `${(n * 100).toFixed(1)}%`
 
-function print(s: Scores, shaHex: string, seconds: number, verbose: boolean, gate?: GateFile) {
-  console.log(`corpus: ${s.pages} frozen pages (${s.decoys} decoys), scored twice in ${seconds.toFixed(2)} s, predictions sha256 ${shaHex.slice(0, 16)}`)
+/** One line per split: micro precision, recall and F1, page kind, decoy false triggers. */
+export function splitTable(rows: Array<[string, Scores]>) {
+  console.log("split      pages decoys  precision  recall     f1  page kind  decoy trigger")
+  for (const [name, s] of rows)
+    console.log(`${name.padEnd(9)} ${String(s.pages).padStart(6)} ${String(s.decoys).padStart(6)}  ${pct(s.micro.precision).padStart(9)}  ${pct(s.micro.recall).padStart(6)}  ${pct(s.micro.f1).padStart(5)}  ${pct(s.pageKind).padStart(9)}  ${pct(s.decoyFalseTrigger).padStart(13)}`)
+}
+
+function print(s: Scores, h: Scores, shaHex: string, seconds: number, verbose: boolean, gate?: GateFile) {
+  console.log(`corpus: ${s.pages} frozen pages (${s.decoys} decoys, ${h.pages} of them holdout), scored twice in ${seconds.toFixed(2)} s, predictions sha256 ${shaHex.slice(0, 16)}`)
+  console.log("")
+  splitTable([["all", s], ["holdout", h]])
   console.log("")
   console.log("role            precision  recall     f1   tp  fp  fn")
   const row = (name: string, r: { precision: number; recall: number; f1: number } & Counts) =>
@@ -303,35 +376,30 @@ function print(s: Scores, shaHex: string, seconds: number, verbose: boolean, gat
   if (!s.misses.length) return
   console.log("")
   console.log(`misses (${s.misses.length} pages):`)
-  for (const miss of s.misses) console.log(`  ${miss.id}: ${verbose || miss.why.length <= 3 ? miss.why.join("; ") : `${miss.why.slice(0, 3).join("; ")} (+${miss.why.length - 3})`}`)
+  const held = new Set(h.misses.map((m) => m.id))
+  for (const miss of s.misses) console.log(`  ${miss.id}${held.has(miss.id) ? " (holdout)" : ""}: ${verbose || miss.why.length <= 3 ? miss.why.join("; ") : `${miss.why.slice(0, 3).join("; ")} (+${miss.why.length - 3})`}`)
 }
 
 async function main() {
   const start = performance.now()
   const { lock, html, problems } = readLock()
   const gold = readGold()
-  const goldIds = new Set(gold.map((g) => g.id))
-  const lockIds = new Set(lock.pages.map((p) => p.id))
-  for (const id of lockIds) if (!goldIds.has(id)) problems.push(`${id}: frozen but has no gold label`)
-  for (const id of goldIds) if (!lockIds.has(id)) problems.push(`${id}: labelled but not in the lock`)
+  problems.push(...corpusProblems(lock, gold))
   if (problems.length) {
     for (const p of problems) console.error(`corpus: ${p}`)
     process.exit(1)
   }
 
-  register()
-  const d: Detector = {
-    ...(await import("../src/content/detect")),
-    ...(await import("../src/content/forms")),
-    ...(await import("../src/content/graph")),
-    ...(await import("../src/content/shadow")),
-  }
+  const d = await loadDetector()
   const only = opt("--only")
-  const first = runAll(d, lock, html, only)
-  const second = runAll(d, lock, html, only)
+  const pick = only ? (id: string) => id.includes(only) : undefined
+  const first = runAll(d, lock, html, pick)
+  const second = runAll(d, lock, html, pick)
   const [a, b] = [sha(JSON.stringify(first)), sha(JSON.stringify(second))]
   const seconds = (performance.now() - start) / 1000
   const scores = score(gold, first)
+  const holdoutIds = new Set(gold.filter((g) => g.split === "holdout").map((g) => g.id))
+  const holdout = score(gold, first.filter((p) => holdoutIds.has(p.id)))
 
   let gate: GateFile | undefined
   try {
@@ -339,21 +407,21 @@ async function main() {
   } catch {
     gate = undefined
   }
-  print(scores, a, seconds, flag("--verbose"), gate)
+  print(scores, holdout, a, seconds, flag("--verbose"), gate)
   const json = opt("--json")
-  if (json) writeFileSync(json, JSON.stringify({ scores, predictions: first }, null, 2))
+  if (json) writeFileSync(json, JSON.stringify({ scores, holdout, predictions: first }, null, 2))
 
   const fails: string[] = []
   if (a !== b) fails.push(`the two runs disagree (sha256 ${a.slice(0, 12)}… then ${b.slice(0, 12)}…): scoring isn't deterministic`)
   if (seconds > MAX_SECONDS) fails.push(`scoring took ${seconds.toFixed(1)} s, over ${MAX_SECONDS} s`)
   if (flag("--update-gate")) {
     if (only) throw new Error("--update-gate scores the whole corpus; drop --only")
-    const next = gateFrom(scores, gate?.margin ?? 0.005, gate, flag("--allow-regress"))
+    const next = gateFrom(scores, holdout, gate?.margin ?? 0.005, gate, flag("--allow-regress"))
     writeFileSync(GATE, JSON.stringify(next, null, 2) + "\n")
     console.log(`\nwrote ${GATE}`)
   } else if (flag("--gate")) {
     if (!gate) fails.push(`no ${GATE}: run with --update-gate first`)
-    else if (!only) fails.push(...checkGate(scores, gate))
+    else if (!only) fails.push(...checkGate(scores, holdout, gate))
   }
   if (fails.length) {
     console.error("")

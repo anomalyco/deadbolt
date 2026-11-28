@@ -5,8 +5,9 @@
 // form itself, never one site's markup.
 
 import type { FieldRole } from "../messages"
-import { FIELD_THRESHOLD, hasPhrase, words, type FieldFacts } from "./clues"
+import { FIELD_THRESHOLD, hasPhrase, scoreFormText, words, type FieldFacts, type FormKind } from "./clues"
 import type { FormCluster, FormGraph } from "./graph"
+import { WEIGHTS, type Weights } from "./weights.gen"
 
 export interface ScannedField {
   el: HTMLInputElement
@@ -94,4 +95,127 @@ export function unclaimedBoxes(cluster: FormCluster | undefined, fields: Scanned
   if (!cluster?.root) return 0
   const claimed = new Set<Element>(fields.filter((f) => f.role).map((f) => f.el))
   return cluster.controls.filter((el) => !claimed.has(el) && !(el instanceof HTMLInputElement && (el.maxLength === 1 || el.type === "search"))).length
+}
+
+// ---- Is the cluster a login at all? ------------------------------------------------
+//
+// A cluster the rules gave a login role is still judged as a whole: a
+// sparse linear model (weights.gen.ts, fit by corpus/train-weights.ts on the
+// frozen corpus's train split) adds up the weights of the value-free facts it
+// shows, below, into the log-odds that it's a sign-in, sign-up, code or
+// change-password form. Under the model's threshold it's set aside like a
+// gift card form. The facts are the shape of the form, its own words and
+// buttons, and the page's path; never a site's name or markup.
+
+/** What the page around a cluster says, read once per scan (detect.ts). */
+export interface PageFacts {
+  /** Which kinds of page the path names: "login", "signup", "reset", "change-password", "settings". */
+  paths: string[]
+  /** Which form kinds the page's title names (scoreFormText). */
+  title: FormKind[]
+  /** How many clusters on the page ask for a code. */
+  codeClusters: number
+}
+
+/** Wording a cluster can show that says what else it's for, each group one feature. */
+const GROUPS: Array<[string, string[]]> = (
+  [
+    ["secret", ["secret", "secrets", "api key", "api keys", "token", "tokens", "webhook", "signing secret", "environment variable", "environment variables", "variable"]],
+    ["settings", ["settings", "preferences", "save changes"]],
+    ["booking", ["reservation", "booking", "booking reference", "confirmation code", "confirmation number", "itinerary", "tracking", "tracking number", "order number", "order id"]],
+    ["identity-document", ["social security", "ssn", "tax", "ein", "passport", "national id", "driver s license"]],
+    ["badge", ["badge", "employee", "door"]],
+    ["wallet", ["recovery phrase", "seed phrase", "wallet", "mnemonic"]],
+    ["network", ["wi fi", "wifi", "ssid", "router", "network name"]],
+    ["share-link", ["share", "link settings", "protect this link", "link expires", "shared link"]],
+    ["strength", ["strength", "how strong", "crack"]],
+    ["delete", ["delete", "danger zone", "deactivate"]],
+    ["contact", ["comment", "reply", "message", "support", "contact us", "feedback", "how can we help"]],
+    ["invite", ["invite", "teammate", "teammates", "refer", "friend", "colleague"]],
+    ["sent-code", ["we sent", "we texted", "sent a code", "resend", "resend code"]],
+    ["offer", ["gift card", "promo code", "coupon", "voucher", "discount code", "redeem", "balance"]],
+  ] as Array<[string, string[]]>
+).map(([name, list]) => [name, list.map((p) => words(p).trim())])
+
+/** A button that moves a sign-in along without naming it: Continue, Next, Verify. */
+const PROCEED = ["continue", "next", "verify", "submit", "confirm", "go", "weiter", "suivant", "continuer", "valider", "verifier", "confirmer", "continuar", "siguiente", "confirmar", "verificar", "bestatigen", "prufen", "avanti", "verder", "volgende", "次へ", "続行", "确认", "下一步"].map((p) => words(p).trim())
+const KINDS: FormKind[] = ["login", "signup", "change-password", "reset", "mfa", "newsletter"]
+const kindsOf = (text: string, min: number) => {
+  const score = scoreFormText(text)
+  return KINDS.filter((k) => score[k] >= min)
+}
+/** Kinds a form's words or button name that say it's part of signing in. */
+const SIGN_IN_KINDS = new Set(["login", "signup", "change-password", "reset", "mfa"])
+const bucket = (n: number, edges: number[]) => {
+  const i = edges.findIndex((e) => n <= e)
+  return i < 0 ? `${edges[edges.length - 1] + 1}+` : i === 0 || edges[i - 1] + 1 === edges[i] ? String(edges[i]) : `${edges[i - 1] + 1}-${edges[i]}`
+}
+
+/**
+ * The cluster's features, as sorted ids: the roles the rules gave its fields
+ * and their shape, its autocomplete tokens, how many boxes it has and how
+ * many no role claims, the form kinds its words and buttons name, the
+ * wording groups above, and the page's path and title.
+ */
+export function clusterFeatures(cluster: FormCluster, fields: ScannedField[], graph: FormGraph, page: PageFacts, buttons: string[]): string[] {
+  const out = new Set<string>()
+  const claimed = fields.filter((f) => f.role)
+  const has = (...roles: FieldRole[]) => claimed.some((f) => roles.includes(f.role!))
+  if (has("password")) out.add("role:password")
+  if (has("new-password")) out.add("role:new-password")
+  if (has("username", "email", "phone")) out.add("role:identifier")
+  if (has("otp")) out.add("role:otp")
+  if (has("username", "email", "phone") && has("password", "new-password")) out.add("shape:identifier+password")
+  if (claimed.length === 1) out.add("shape:one-field")
+  if (claimed.filter((f) => f.facts.type === "password").length >= 3) out.add("shape:masked-3+")
+  if (claimed.some((f) => f.role === "otp" && f.facts.maxLength >= 4 && f.facts.maxLength <= 8)) out.add("shape:code-length")
+  if (has("otp") && page.codeClusters >= 2) out.add("page:other-code-forms")
+  const tokens = new Set(claimed.flatMap((f) => f.facts.autocomplete))
+  if (LOGIN_TOKENS.some((t) => tokens.has(t))) out.add("autocomplete:login")
+  if (tokens.has("off")) out.add("autocomplete:off")
+  out.add(`controls:${bucket(cluster.controls.length, [1, 3, 7])}`)
+  out.add(`unclaimed:${bucket(unclaimedBoxes(cluster, fields), [0, 1])}`)
+  const text = graph.context(cluster)
+  for (const k of kindsOf(text, 3)) out.add(`words:${k}`)
+  for (const [name, list] of GROUPS) if (list.some((p) => hasPhrase(text, p))) out.add(`words:${name}`)
+  let named = false
+  for (const label of buttons) {
+    const w = words(label)
+    // A button is a word or two: "Entrar" counts though it scores under a form's threshold.
+    const kinds = kindsOf(w, 2).filter((k) => k === "login" || k === "signup")
+    for (const k of kinds) out.add(`button:${k}`)
+    const proceed = PROCEED.some((p) => hasPhrase(w, p))
+    if (proceed) out.add("button:proceed")
+    named ||= kinds.length > 0 || proceed
+  }
+  out.add(!buttons.length ? "button:none" : named ? "button:named" : "button:other")
+  for (const p of page.paths) out.add(`path:${p}`)
+  for (const k of page.title) out.add(`title:${k}`)
+  // Nothing anywhere says sign-in: not its words, buttons, autocomplete, path or title.
+  const said = [...out].some((f) => /^(button:(login|signup)|autocomplete:login)$/.test(f) || (/^(words|path|title):/.test(f) && SIGN_IN_KINDS.has(f.split(":")[1])))
+  if (!said) out.add("signal:none")
+  return [...out].sort()
+}
+
+let model: Weights = WEIGHTS
+
+/** The log-odds that a cluster with these features is a login form. */
+export function loginOdds(features: readonly string[], weights: Weights = model): number {
+  let odds = weights.bias
+  for (const f of features) odds += weights.features[f]?.[0] ?? 0
+  return odds
+}
+
+/** Whether a cluster's log-odds fall under the model's threshold: it isn't a login, whatever its fields look like. */
+export const notLogin = (odds: number, weights: Weights = model) => odds < weights.threshold
+
+/** Runs `run` with other weights in place of weights.gen.ts: for the trainer, which scores candidates before writing one. */
+export function withWeights<T>(weights: Weights, run: () => T): T {
+  const before = model
+  model = weights
+  try {
+    return run()
+  } finally {
+    model = before
+  }
 }

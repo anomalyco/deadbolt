@@ -84,7 +84,7 @@ Needs Playwright's Chromium (`bunx playwright-core install chromium`).
 ## The detection gate (frozen corpus)
 
 `bun run test:corpus` (in `bun run check`) scores the detector on a frozen
-corpus with no network and no browser, in well under a second:
+corpus with no network and no browser, in under two seconds:
 
 ```sh
 bun corpus/score.ts --gate            # what CI runs
@@ -95,7 +95,7 @@ bun corpus/score.ts --update-gate     # after an improvement: raise the floors
 
 - `frozen/`: one script-free HTML file per page, with the layout Chromium gave
   every control (`data-db-box="x,y,w,h,vis"`) and its shadow roots as
-  `<template shadowrootmode>`. The starter set is 77 pages: 49 modeled on
+  `<template shadowrootmode>`. 133 pages. The first 77: 49 modeled on
   the structure of real sign-in, sign-up, code, change-password and
   checkout pages (GitHub, Google's email-first step with its
   `hiddenPassword`, Microsoft's off-screen boxes, Apple, Amazon, Stripe's
@@ -103,22 +103,66 @@ bun corpus/score.ts --update-gate     # after an improvement: raise the floors
   and closed shadow roots, six-box codes) and 28 decoys (searches, promo and
   gift cards, newsletters, an `author.` host, invites, admin and settings
   forms, comments, support, a transfer PIN, two sent-code groups, a
-  delete-account confirmation). Every address in them is reserved
-  (`example.com`); none holds a value.
+  delete-account confirmation). Then 56 more, all on reserved `.example`
+  hosts: sign-ins, sign-ups, code steps, a reset and a change of password
+  in German, French, Spanish, Portuguese, Japanese, Italian and Dutch; SSO
+  with a workspace and region, a bank's customer ID with date of birth and
+  postcode, a passkey-first box, a magic link, a masked 2FA box with no
+  maxlength, a two-step sign-up, a `<my-button>` submit, hashed React
+  classes, a login dialog over a search, card expiry in selects, split
+  billing and shipping; and 28 decoys (a hotel confirmation code, a flight
+  booking reference, a badge PIN, a masked SSN, a national ID, a direct
+  deposit account, recovery codes, a webhook secret, an environment
+  variable, a seed phrase, a Wi-Fi password, a link password, a PDF
+  password, a strength meter, a profile PIN, an alarm code, contact-sales,
+  an RSVP, a filter-by-key box, a delete-workspace box…). Every address in
+  them is reserved (`example.com`, `.example`); none holds a value.
 - `frozen.lock.json`: each page's URL and SHA-256. `score.ts` refuses a page
   that doesn't match.
 - `gold-labels.jsonl`: per page, the kind the login detector should give it
   and the role of each control it should claim (`login`), and the identity
   and payment fields (`forms`), by `controlKey` (`replay.ts`: `#id`,
   `tag[name=…]`, `host >> #id` in a shadow root). `decoy: true` marks a page
-  on which no login menu should open.
+  on which no login menu should open. `split` is `train` or `holdout`, by
+  site (registrable domain): every page of a site is in the same split, and
+  `score.ts` fails if one isn't. A new site's split is a hash of its name
+  (`splitFor`, 35% holdout); `freeze.ts` proposes it.
 - `gate.json`: the baseline the gate holds, written by `--update-gate`:
   per-role precision and recall floors, the page-kind floor, the decoy
   false-trigger ceilings (each 0.5 points past what was measured), and the
   pages that scored exactly, each of which must stay exact. `--update-gate`
   only ratchets; `--allow-regress` is for a deliberate trade, said so in the
   PR. The target is 98% precision, 95% recall and at most 2% decoy false
-  triggers.
+  triggers. `holdout` holds the same floors for the holdout pages alone.
+
+## The cluster model (`train-weights.ts`)
+
+The rules in `clues.ts` give each field a role; then every cluster (a form
+or container, `graph.ts`) holding a login role is judged as a whole by a
+sparse linear model in `src/content/weights.gen.ts`. `clusterFeatures`
+(`rationalize.ts`) lists the cluster's value-free facts: the roles the
+rules gave it and their shape, its autocomplete tokens, how many boxes it
+has and how many no role claims, the form kinds its words and buttons name
+(in every language `clues.ts` knows), wording groups (secrets, bookings,
+identity numbers, wallets, networks, sharing, deletion, sent codes,
+offers…), the page's path and title, and `signal:none` when nothing says
+sign-in. Never a site's name: `test/weights.test.ts` checks. The summed
+weights are the log-odds that it's a login form; under the threshold it's
+set aside, as a gift card form is.
+
+```sh
+bun corpus/train-weights.ts            # fit on the train split, print train and holdout scores, write weights.gen.ts
+bun corpus/train-weights.ts --check    # fail unless weights.gen.ts is what training writes (test/weights.test.ts runs it)
+bun corpus/train-weights.ts --dry-run  # fit and print only
+```
+
+It fits L1- and L2-regularised logistic regression on the train pages'
+clusters only (a cluster is a login when it holds a gold login field, or
+it's the code or reset step of a page with nothing to fill), deterministic
+from zero, drops weights under 0.05 and features seen on fewer than two
+clusters, and puts the threshold under every train login, halfway to the
+highest non-login below it. Retrain after changing `clusterFeatures` or
+the corpus, and commit the diff with the gate.
 
 `score.ts` reports precision, recall and F1 for username/email, password,
 new password, one-time code, card and address; how often the page's kind is

@@ -125,7 +125,7 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
     ["codigo de verificacion", 6], ["code de verification", 6],
     ["bestatigungscode", 6], ["verifizierungscode", 6], ["確認コード", 6], ["認証コード", 6],
     ["код подтверждения", 6], ["인증번호", 6], ["codigo sms", 6], ["code sms", 6], ["sms kod", 6], ["codice sms", 6],
-    ["codigo de seguranca", 6], ["codigo de acesso", 6], ["codice di verifica", 6], ["verificatiecode", 6],
+    ["codigo de seguranca", 6], ["codigo de acesso", 6], ["codigo de verificacao", 6], ["codice di verifica", 6], ["verificatiecode", 6],
     ["kod weryfikacyjny", 6],
     ["captcha", -6], ["country", -4], ["area code", -6], ["invite", -5], ["tracking", -6],
     ...NOT_A_LOGIN_FIELD,
@@ -288,6 +288,8 @@ export const FORM_CLUES: Record<FormKind, Clue[]> = {
     ["two factor", 3], ["2 step", 3], ["two step", 3], ["verification code", 3], ["enter the code", 3],
     ["enter code", 2], ["sent a code", 3], ["we sent", 2], ["authenticator app", 3], ["verify it s you", 3],
     ["check your phone", 2], ["code de verification", 3], ["bestatigungscode", 3], ["確認コード", 3],
+    ["codigo de verificacao", 3], ["codigo de verificacion", 3], ["verificacao em duas etapas", 3], ["verificacion en dos pasos", 3],
+    ["verification en deux etapes", 3], ["zwei faktor", 3], ["bestatigung in zwei schritten", 3], ["2 段階認証", 3], ["認証コード", 3],
     ["card number", -4], ["checkout", -4], ["pay", -3], ["shipping", -3],
   ]),
   newsletter: prepare([
