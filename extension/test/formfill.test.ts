@@ -8,6 +8,8 @@ import { scanForms } from "../src/content/forms"
 // computed overflow is empty unless set, which counts as a clip: the forms
 // here say visible.
 let scrolled = 0
+/** The options each scroll was asked with: scrollIntoView's, then the window's scrollTo. */
+let scrolls: Array<ScrollIntoViewOptions | ScrollToOptions> = []
 const saved = {
   rect: Element.prototype.getBoundingClientRect,
   into: Element.prototype.scrollIntoView,
@@ -37,10 +39,16 @@ beforeAll(() => {
     const placed = this.closest("[data-y]")
     return placed ? box(placed) : saved.rect.call(this)
   }
-  Element.prototype.scrollIntoView = function (this: Element) {
+  Element.prototype.scrollIntoView = function (this: Element, options?: boolean | ScrollIntoViewOptions) {
+    if (typeof options === "object") scrolls.push(options)
     scrolled = Math.max(0, Number(this.closest("[data-y]")?.getAttribute("data-y") ?? 0) - 400)
   }
-  window.scrollTo = ((x: number, y: number) => void (scrolled = y)) as typeof window.scrollTo
+  window.scrollTo = ((options: ScrollToOptions | number, y?: number) => {
+    if (typeof options === "object") {
+      scrolls.push(options)
+      scrolled = options.top ?? scrolled
+    } else scrolled = y ?? scrolled
+  }) as typeof window.scrollTo
   document.elementFromPoint = ((x: number, y: number) => at(x, y)) as typeof document.elementFromPoint
   document.elementsFromPoint = ((x: number, y: number) => [at(x, y)].filter((h) => !!h)) as typeof document.elementsFromPoint
 })
@@ -53,6 +61,8 @@ afterAll(() => {
 /** A checkout whose name shows, its address below the fold, and beside it every way of hiding a field. */
 function checkout() {
   scrolled = 0
+  scrolls = []
+  for (const el of [document.documentElement, document.body]) el.removeAttribute("style")
   document.body.innerHTML = `<form id="ship" style="overflow-x:visible;overflow-y:visible">
     <label for="name">Full name</label><input id="name" autocomplete="shipping name" data-y="700">
     <label for="line1">Address</label><input id="line1" autocomplete="shipping address-line1" data-y="1200">
@@ -87,6 +97,29 @@ describe("offScreen", () => {
     expect(offScreen($("line1"), $("name"))).toBe(false)
   })
 
+  test("not on a page whose root won't scroll: a field below the fold there is out of the user's reach", () => {
+    for (const style of ["overflow-y:hidden", "overflow-y:clip"]) {
+      checkout()
+      document.documentElement.setAttribute("style", style)
+      expect(offScreen($("line1"), $("name"))).toBe(false)
+      checkout()
+      document.body.setAttribute("style", style)
+      expect(offScreen($("line1"), $("name"))).toBe(false)
+    }
+    // A body that scrolls on its own inside a root that does: the body's box clips.
+    checkout()
+    document.documentElement.setAttribute("style", "overflow-y:auto")
+    document.body.setAttribute("style", "overflow-y:auto")
+    document.body.setAttribute("data-y", "0")
+    document.body.setAttribute("data-h", "800")
+    try {
+      expect(offScreen($("line1"), $("name"))).toBe(false)
+    } finally {
+      document.body.removeAttribute("data-y")
+      document.body.removeAttribute("data-h")
+    }
+  })
+
   test("a field outside any form is never reached", () => {
     scrolled = 0
     document.body.innerHTML = `<input id="name" autocomplete="name" data-y="100"><input id="city" autocomplete="address-level2" data-y="1200">`
@@ -115,6 +148,22 @@ describe("an identity pick on a tall checkout", () => {
     expect(["name", "line1", "city", "zip"].map((id) => $(id).value)).toEqual(["Alex Mercer", "123 Main St", "Brooklyn", "11201"])
     for (const id of [...TRAPS, "foreign"]) expect([id, $(id).value]).toEqual([id, ""])
     expect(scrolled).toBe(0)
+    // Instant both ways, whatever the page's scroll-behavior: each field is checked right after it's brought into view.
+    expect(scrolls.length).toBeGreaterThan(1)
+    expect(scrolls.every((o) => o.behavior === "instant")).toBe(true)
+  })
+
+  test("a root with overflow hidden: nothing below the fold is scrolled to or filled", async () => {
+    checkout()
+    document.documentElement.setAttribute("style", "overflow-y:hidden")
+    const s = state()
+    const approved = (await approveForms(s, 1, "identity", section(), false))!
+    expect(approved.roles).toEqual(["name"])
+    const targets = takeApproved(s, approved.approval, 1)!
+    const { filled } = await fillForm(targets, values, (el) => fillCheck("identity")(el), (el) => offScreen(el))
+    expect(filled).toEqual(["name"])
+    expect(["line1", "city", "zip"].map((id) => $(id).value)).toEqual(["", "", ""])
+    expect(scrolls).toEqual([])
   })
 
   test("without reach, only what shows fills, as before", async () => {

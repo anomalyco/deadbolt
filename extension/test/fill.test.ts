@@ -396,7 +396,11 @@ describe("fillFields", () => {
 
   test("code boxes that take a code only as a paste get it pasted into the first box", async () => {
     const { fields, pastes } = pasteOnly()
-    expect((await fillFields(fields, { totp: "492039" }, () => true)).filled).toEqual(["otp"])
+    const done = await fillFields(fields, { totp: "492039" }, () => true)
+    expect(done.filled).toEqual(["otp"])
+    // The step's pill goes on the last box, not over the boxes after the first.
+    expect(done.last).toBe(fields[5].el)
+    expect(done.written.filter((el) => el === fields[0].el)).toHaveLength(1)
     expect(fields.map((f) => f.el.value).join("")).toBe("492039")
     expect(pastes()).toBe(1)
   })
@@ -561,13 +565,24 @@ describe("form values", () => {
     expect([n.value, inputs]).toEqual(["4242 4242 4242 4242", 1])
   })
 
-  test("a masked field that fails its check partway through typing stops there", async () => {
+  test("a masked field that fails its check partway through typing stops there, and isn't said to be filled", async () => {
     document.body.innerHTML = `<form><label for="n">Card number</label><input id="n" autocomplete="cc-number"></form>`
     const n = document.getElementById("n") as HTMLInputElement
     strictMask(n, (d) => d)
     let checks = 0
-    await fillForm(scanForms(), card, () => ++checks < 8)
+    const { filled } = await fillForm(scanForms(), card, () => ++checks < 8)
     expect(n.value.length).toBeLessThan(16)
+    expect(filled).not.toContain("cc-number")
+  })
+
+  test("a mask that formats a whole value written at once: what it shows is what Deadbolt filled", async () => {
+    document.body.innerHTML = `<form><label for="n">Card number</label><input id="n" autocomplete="cc-number"></form>`
+    const n = document.getElementById("n") as HTMLInputElement
+    n.addEventListener("input", () => void (n.value = n.value.replace(/\D/g, "").replace(/(\d{4})(?=\d)/g, "$1 ")))
+    await fillForm(scanForms(), { ...card }, () => true)
+    expect(n.value).toBe("4242 4242 4242 4242")
+    expect(await filledByDeadbolt(n, n.value)).toBe(true)
+    expect(await ownValue(n, n.value)).toBe(n.value)
   })
 
   test("split card boxes fill only as a whole", async () => {

@@ -72,9 +72,11 @@ export function onScreen(el: FormControl, ours?: Element | null, disabledSelect 
  * taken out of the tab order, within the page's width (never pushed off to
  * one side), and not cut by any scrolling or clipping box of the page (an
  * overflow box that hides a trap): only the window's scroll keeps it from
- * view. And in a form, the same one as the field the user picked from
- * (`anchor`), if given. It's written only once it's scrolled into view and
- * passes onScreen there (see fillForm).
+ * view, and the window can be scrolled (no `overflow: hidden` or `clip` on
+ * the page's root, which would keep a field below the fold out of the
+ * user's reach). And in a form, the same one as the field the user picked
+ * from (`anchor`), if given. It's written only once it's scrolled into view
+ * and passes onScreen there (see fillForm).
  */
 export function offScreen(el: FormControl, anchor?: FormControl): boolean {
   if (!el.isConnected || el.disabled || ("readOnly" in el && el.readOnly) || el.tabIndex < 0) return false
@@ -84,8 +86,18 @@ export function offScreen(el: FormControl, anchor?: FormControl): boolean {
   const r = el.getBoundingClientRect()
   if (r.width < MIN_IDENTITY.width || r.height < MIN_IDENTITY.height || hiddenByStyle(el)) return false
   if (r.left < 0 || r.right > innerWidth || r.top + scrollY < 0) return false
-  const box = clippedBox(el, false)
-  return !!box && (box.right - box.left) * (box.bottom - box.top) >= 0.95 * r.width * r.height
+  const rootOverflow = getComputedStyle(document.documentElement).overflowY
+  const bodyOverflow = document.body ? getComputedStyle(document.body).overflowY : "visible"
+  // With the root's overflow visible, the body's is the viewport's.
+  const viewport = rootOverflow === "visible" ? bodyOverflow : rootOverflow
+  if (viewport === "hidden" || viewport === "clip") return false
+  let box = clippedBox(el, false)
+  // A root that scrolls itself and a body that scrolls (or clips) on its own: the body's box clips too.
+  if (box && rootOverflow !== "visible" && bodyOverflow && bodyOverflow !== "visible") {
+    const b = document.body.getBoundingClientRect()
+    box = { left: Math.max(box.left, b.left), top: Math.max(box.top, b.top), right: Math.min(box.right, b.right), bottom: Math.min(box.bottom, b.bottom) }
+  }
+  return !!box && box.right > box.left && box.bottom > box.top && (box.right - box.left) * (box.bottom - box.top) >= 0.95 * r.width * r.height
 }
 
 /**
@@ -100,13 +112,13 @@ class ScrollKeeper {
   bring(el: Element) {
     if (!this.kept.has(window)) this.kept.set(window, [scrollX, scrollY])
     for (let node = el.parentElement; node; node = node.parentElement) if (!this.kept.has(node) && (node.scrollTop || node.scrollLeft || node.scrollHeight > node.clientHeight)) this.kept.set(node, [node.scrollLeft, node.scrollTop])
-    el.scrollIntoView?.({ block: "center", inline: "nearest" })
+    // Instant, whatever the page's scroll-behavior: the field is checked right after.
+    el.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "instant" })
   }
 
   restore() {
     for (const [node, [left, top]] of this.kept) {
-      if (node === window) window.scrollTo(left, top)
-      else Object.assign(node as Element, { scrollLeft: left, scrollTop: top })
+      ;(node as Window | Element).scrollTo?.({ left, top, behavior: "instant" })
     }
     this.kept.clear()
   }
@@ -132,12 +144,16 @@ const MASKED = new Set<FormRole>(["cc-number", "cc-exp", "tel", "tel-national"])
 /**
  * Writes `value` (see setFormValue); a masked field that didn't keep it is
  * typed into a character at a time instead, through the same check, and
- * what it then holds is what Deadbolt filled there.
+ * counts as written only if it then holds the value. What a masked field
+ * holds, formatted, is what Deadbolt filled there.
  */
 function writeValue(f: FormField, value: string, guard: (el: FormControl) => boolean): boolean {
   if (!setFormValue(f.el, value, guard)) return false
   const el = f.el
-  if (MASKED.has(f.role) && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !holds(el, value) && typeChars(el, value, () => guard(el))) noteFilled(el, el.value)
+  if (!MASKED.has(f.role) || !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return true
+  if (!holds(el, value) && !typeChars(el, value, () => guard(el))) return false
+  // As the mask formatted it ("4242 4242 4242 4242"): that's what Deadbolt filled.
+  noteFilled(el, el.value)
   return true
 }
 

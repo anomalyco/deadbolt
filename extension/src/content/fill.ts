@@ -968,7 +968,7 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
         const shows = () => boxes.map((b) => b.el.value).join("") === code
         if (i === boxes.length && !shows() && boxes.every((b) => inPlace(b) && checkField(b.el))) {
           boxes[0].el.focus({ preventScroll: true })
-          if (checkField(boxes[0].el) && pasteText(boxes[0].el, code) && shows()) written.push(boxes[0].el)
+          if (checkField(boxes[0].el)) pasteText(boxes[0].el, code)
         }
         if (i === boxes.length && shows()) {
           filled.push("otp")
