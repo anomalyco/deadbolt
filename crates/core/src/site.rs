@@ -16,6 +16,13 @@
 //!   (port included, so `localhost:3000` isn't `localhost:5173`), then its
 //!   host, then a parent or child of it or a host sharing a parent below the
 //!   site, then the rest of the site; see [`Closeness`].
+//! - A page is also offered the logins of sites that share its credentials
+//!   by Apple's list (`apple/password-manager-resources`), such as
+//!   `envato.com` on `themeforest.net` or `twitter.com` on `x.com` (see
+//!   [`shared`]), when they were saved for https. They come after every
+//!   login of the page's own site.
+
+pub mod shared;
 
 use url::Url;
 
@@ -74,9 +81,24 @@ impl Site {
         urls.into_iter().any(|url| self.matches_url(url))
     }
 
+    /// Whether `url` is on this site, or on one that shares its
+    /// credentials (see [`shared`]).
     pub fn matches_url(&self, url: &str) -> bool {
+        self.owns_url(url) || parse_url(url).is_some_and(|saved| shares(&self.domain, &saved))
+    }
+
+    /// Whether `url` is on this site itself, leaving out sites that only
+    /// share its credentials.
+    pub fn owns_url(&self, url: &str) -> bool {
         url_host(url).is_some_and(|host| host_matches(&host, &self.domain))
     }
+}
+
+/// Whether the login saved at `saved` is offered on the site `domain` by a
+/// shared-credentials group: only for https, never another scheme.
+fn shares(domain: &str, saved: &Url) -> bool {
+    saved.scheme() == "https"
+        && host_of(saved).is_some_and(|host| shared::offered(domain, &registrable_domain(&host)))
 }
 
 /// A URL's host as WHATWG URL parsing gives it (lowercase, IDNs in
@@ -118,9 +140,12 @@ pub enum Closeness {
     Parent,
     /// Elsewhere on the page's site.
     Site,
+    /// On another site that shares the page's credentials (see [`shared`]).
+    Shared,
 }
 
-/// How closely `url` matches the page at `origin`, if it's on its site.
+/// How closely `url` matches the page at `origin`, if it's on its site or
+/// one sharing its credentials.
 pub fn closeness(origin: &str, url: &str) -> Option<Closeness> {
     let page = Url::parse(origin).ok()?;
     let page_host = host_of(&page)?;
@@ -128,7 +153,7 @@ pub fn closeness(origin: &str, url: &str) -> Option<Closeness> {
     let host = host_of(&saved)?;
     let site = registrable_domain(&page_host);
     if !host_matches(&host, &site) {
-        return None;
+        return (page.scheme() == "https" && shares(&site, &saved)).then_some(Closeness::Shared);
     }
     let trim = |h: &str| h.strip_suffix('.').unwrap_or(h).to_string();
     let (page_host, host) = (trim(&page_host), trim(&host));
@@ -727,5 +752,152 @@ mod tests {
             ]),
             ["gist.github.com", "github.com", "xn--bcher-kva.de"]
         );
+    }
+
+    #[test]
+    fn sites_sharing_credentials_match_each_others_logins() {
+        // {"shared": ["3docean.net", ..., "envato.com", ..., "themeforest.net", ...]}
+        let themeforest = site("https://www.themeforest.net/login");
+        for url in [
+            "https://envato.com",
+            "https://account.envato.com/sign_in",
+            "envato.com",
+            "https://codecanyon.net:8443/",
+            "https://ENVATO.com.",
+        ] {
+            assert!(themeforest.matches_url(url), "{url}");
+            assert!(!themeforest.owns_url(url), "{url}");
+        }
+        assert!(site("https://account.envato.com").matches_url("https://themeforest.net"));
+        assert!(themeforest.owns_url("https://themeforest.net"));
+
+        for url in [
+            // Lookalikes and unrelated sites.
+            "https://evil-envato.com",
+            "https://envato.com.evil.com",
+            "https://envato.co",
+            "https://evil.com/envato.com",
+            "https://envato.com@evil.com",
+            "https://github.com",
+            // Never another scheme than https, and never a downgrade.
+            "http://envato.com",
+            "ftp://envato.com",
+            "ssh://git@envato.com",
+        ] {
+            assert!(
+                !themeforest.matches_url(url),
+                "{url} must not match themeforest.net"
+            );
+        }
+    }
+
+    #[test]
+    fn moved_sites_match_one_way_and_not_each_other() {
+        // {"from": ["twitter.com"], "to": ["x.com"], "fromDomainsAreObsoleted": true}
+        assert!(site("https://x.com/i/flow/login").matches_url("https://twitter.com/login"));
+        assert!(site("https://x.com").matches_url("https://mobile.twitter.com"));
+        assert!(!site("https://twitter.com").matches_url("https://x.com"));
+        // {"from": ["hbo.com", "hbomax.com", "hbonow.com"], "to": ["max.com"], ...}
+        let max = site("https://play.max.com");
+        assert!(max.matches(["https://hbo.com"]) && max.matches(["https://hbomax.com"]));
+        assert!(!site("https://hbo.com").matches_url("https://hbomax.com"));
+        assert!(!site("https://hbomax.com").matches_url("https://hbonow.com"));
+        assert!(!site("https://hbomax.com").matches_url("https://max.com"));
+    }
+
+    #[test]
+    fn addresses_local_hosts_and_suffixes_share_nothing() {
+        for origin in [
+            "https://192.168.1.10",
+            "http://localhost:3000",
+            "http://127.0.0.1",
+            "http://app.test",
+            "https://alice.github.io",
+        ] {
+            let page = site(origin);
+            for url in ["https://envato.com", "https://twitter.com", "https://x.com"] {
+                assert!(!page.matches_url(url), "{origin} {url}");
+                assert_eq!(closeness(origin, url), None, "{origin} {url}");
+            }
+        }
+        assert!(!site("https://x.com").matches_url("https://127.0.0.1"));
+        assert!(!site("https://x.com").matches_url("https://[::1]"));
+    }
+
+    #[test]
+    fn shared_logins_rank_after_the_whole_site() {
+        use Closeness::*;
+        let page = "https://www.themeforest.net/login";
+        for (url, want) in [
+            ("https://www.themeforest.net", Some(Origin)),
+            ("http://www.themeforest.net", Some(Host)),
+            ("https://themeforest.net", Some(Parent)),
+            ("https://market.themeforest.net", Some(Site)),
+            ("https://envato.com", Some(Shared)),
+            ("https://www.envato.com/login", Some(Shared)),
+            ("http://envato.com", None),
+            ("https://evil-envato.com", None),
+        ] {
+            assert_eq!(closeness(page, url), want, "{url}");
+        }
+        assert!(Site < Shared);
+        assert_eq!(
+            closeness("https://x.com", "https://twitter.com"),
+            Some(Shared)
+        );
+        assert_eq!(closeness("https://twitter.com", "https://x.com"), None);
+        assert_eq!(
+            closeness("http://themeforest.net", "https://envato.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_pages_own_login_lists_before_a_shared_one() {
+        use crate::vault::testing::{author, vault};
+        use crate::{DataOp, Field, FieldType};
+
+        let secret = author(1);
+        let (mut v, _) = vault(&secret, "personal");
+        let login = |name: &str, url: &str| {
+            DataOp::create(
+                "login",
+                Some(name.into()),
+                [("url".into(), Field::new(FieldType::Url, url))],
+            )
+        };
+        v.create_items(
+            &secret,
+            [
+                // First by title, so only closeness can put it second.
+                login("A Envato", "https://envato.com"),
+                login("B ThemeForest", "https://themeforest.net"),
+                login("C Envato over http", "http://envato.com"),
+                login("D Lookalike", "https://evil-envato.com"),
+                login("E Twitter", "https://twitter.com"),
+                login("F X", "https://x.com"),
+            ],
+        )
+        .unwrap();
+        let listed = |origin: &str| {
+            let page = Site::from_origin(origin).unwrap();
+            let mut items: Vec<_> = v.site_logins(&page).collect();
+            items.sort_by_cached_key(|item| crate::autofill::rank(origin, item, 0));
+            items
+                .into_iter()
+                .map(|item| item.name.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            listed("https://www.themeforest.net/login"),
+            ["B ThemeForest", "A Envato"]
+        );
+        assert_eq!(
+            listed("https://envato.com"),
+            ["A Envato", "C Envato over http", "B ThemeForest"]
+        );
+        assert_eq!(listed("https://x.com"), ["F X", "E Twitter"]);
+        assert_eq!(listed("https://twitter.com"), ["E Twitter"]);
+        assert!(listed("https://evil-envato.com").contains(&"D Lookalike".to_string()));
     }
 }

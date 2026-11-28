@@ -295,7 +295,10 @@ export class ProviderChain {
   private async link(s: Chain, ref: string) {
     const origin = s.home.origin
     const listed = (await this.host.send({ type: "list", origin })).accounts
-    if (listed.some((a) => a.signIn?.provider === s.provider.id && this.sameAccount(a.signIn.account, s.username))) return
+    // Only a link saved for this site itself: one on a site sharing its
+    // credentials is listed here too, but it isn't this site's link.
+    const site = siteOf(new URL(origin).hostname)
+    if (listed.some((a) => a.signIn?.provider === s.provider.id && this.sameAccount(a.signIn.account, s.username) && a.urls.some((u) => siteOfSaved(u) === site))) return
     await this.host.send({ type: "save", origin, entry: { title: new URL(origin).hostname, url: origin, signIn: { provider: s.provider.id, account: ref } } })
   }
 
@@ -436,5 +439,14 @@ export class ProviderChain {
     if (!s || tab !== s.home.tabId || s.phase !== "return") return
     const { target } = await topTarget(tab)
     if (target?.origin === s.home.origin && this.live(s)) this.end(s, "Signed in")
+  }
+}
+
+/** The site of a saved URL, read as https without a scheme. */
+function siteOfSaved(url: string): string | null {
+  try {
+    return siteOf(new URL(url.includes("://") ? url : `https://${url}`).hostname)
+  } catch {
+    return null
   }
 }

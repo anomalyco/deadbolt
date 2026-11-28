@@ -2,6 +2,9 @@
 //! page may have. The daemon decides, not the browser host: every request
 //! names the page's origin, and a login is only listed, filled or updated
 //! for a page on the site of one of its URLs (see [`deadbolt_core::site`]).
+//! A login saved on a site that shares the page's credentials is listed and
+//! filled there too, but a page only ever saves, links or updates logins of
+//! its own site ([`Site::owns_url`]).
 //!
 //! A site's logins are listed closest first (see [`autofill::rank`]), then the
 //! most recently filled on this device, then by title.
@@ -58,6 +61,23 @@ pub fn find(s: &Engine, login: &LoginRef, site: &Site) -> Result<(VaultId, Item)
         ));
     }
     Ok((vault, item))
+}
+
+/// Whether one of `item`'s URLs is on `site` itself, not only on a site
+/// sharing its credentials.
+fn owned(site: &Site, item: &Item) -> bool {
+    urls(item).any(|url| site.owns_url(url))
+}
+
+/// Refuses `item` unless it is saved for `site` itself.
+fn own(site: &Site, item: &Item) -> Result<()> {
+    if owned(site, item) {
+        return Ok(());
+    }
+    Err(fail(
+        ErrorCode::DomainMismatch,
+        format!("{} isn't saved for {}", label(item), site.domain),
+    ))
 }
 
 fn filled_key(login: &LoginRef) -> String {
@@ -149,7 +169,10 @@ pub fn fill(
 }
 
 /// Without a username, a login with any username and the same password is
-/// `same`, and nothing is `update`.
+/// `same`, and nothing is `update`. Only the site's own logins are
+/// matches, closest first: a login of a site sharing its credentials is
+/// never one to update, though one with the same username and password
+/// makes the page `same`, with no matches.
 pub fn check(
     s: &Engine,
     origin: &str,
@@ -157,18 +180,36 @@ pub fn check(
     password: &Secret,
 ) -> Result<(SiteStatus, Vec<LoginRef>)> {
     let site = site(origin)?;
+    let filled = s.filled();
     let mut status = Status::New;
     let mut matches = Vec::new();
+    let mut shared_same = false;
     for (vault, saved) in &s.vaults {
-        let (checked, ids) = autofill::check(saved.site_logins(&site), username, password.expose());
+        let (own, shared): (Vec<Item>, Vec<Item>) = saved
+            .site_logins(&site)
+            .partition(|item| owned(&site, item));
+        let (checked, ids) = autofill::check(own.iter().cloned(), username, password.expose());
         if checked > status {
             status = checked;
             matches.clear();
         }
         if checked == status {
-            matches.extend(ids.iter().map(|id| login_ref(vault, id)));
+            for item in own.iter().filter(|item| ids.contains(&item.id)) {
+                let login = login_ref(vault, &item.id);
+                let used = filled.get(&filled_key(&login)).copied().unwrap_or(0);
+                matches.push((autofill::rank(origin, item, used), login));
+            }
         }
+        shared_same |= autofill::check(shared, username, password.expose()).0 == Status::Same;
     }
+    if status == Status::New && shared_same {
+        status = Status::Same;
+    }
+    matches.sort_by(|(ra, a), (rb, b)| {
+        ra.cmp(rb)
+            .then_with(|| (&a.vault, &a.item).cmp(&(&b.vault, &b.item)))
+    });
+    let matches = matches.into_iter().map(|(_, login)| login).collect();
     let status = match status {
         Status::New => SiteStatus::New,
         Status::Update => SiteStatus::Update,
@@ -195,7 +236,7 @@ pub fn save(s: &mut Engine, save: Save) -> Result<(LoginRef, bool)> {
         return Err(anyhow!("the password is empty"));
     }
     let url = page_url(save.url).map_err(|reason| anyhow!("{reason}"))?;
-    if !site.matches_url(url) {
+    if !site.owns_url(url) {
         return Err(fail(
             ErrorCode::DomainMismatch,
             format!("{url} isn't on {}", site.domain),
@@ -203,6 +244,7 @@ pub fn save(s: &mut Engine, save: Save) -> Result<(LoginRef, bool)> {
     }
     if let Some(login) = save.login {
         let (vault, item) = find(s, login, &site)?;
+        own(&site, &item)?;
         let today = s.today();
         s.update(vault, |v, secret| {
             Ok(v.write(
@@ -255,7 +297,7 @@ pub struct Link<'a> {
 pub fn link(s: &mut Engine, link: Link) -> Result<(LoginRef, bool)> {
     let site = site(link.origin)?;
     let url = page_url(link.url).map_err(|reason| anyhow!("{reason}"))?;
-    if !site.matches_url(url) {
+    if !site.owns_url(url) {
         return Err(fail(
             ErrorCode::DomainMismatch,
             format!("{url} isn't on {}", site.domain),
@@ -285,10 +327,12 @@ pub fn link(s: &mut Engine, link: Link) -> Result<(LoginRef, bool)> {
             ),
         ));
     }
-    // One already links the site to it: that's the link.
+    // One already links the site itself to it: that's the link. One on a
+    // site sharing its credentials isn't.
     let account_id = hex(id.as_bytes());
     if let Some((held, item)) = logins(s, &site).find(|(_, item)| {
-        value(item, "sign-in-with") == Some(provider.as_str())
+        owned(&site, item)
+            && value(item, "sign-in-with") == Some(provider.as_str())
             && value(item, "sign-in-account") == Some(account_id.as_str())
     }) {
         return Ok((login_ref(&held, &item.id), false));

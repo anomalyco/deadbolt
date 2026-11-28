@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 // Refreshes the bundled offline health directories in `crates/core/data/health/`
-// from 2FA Directory, Passkeys Directory, Apple password-manager-resources, and
-// Have I Been Pwned's public breaches list.
+// from 2FA Directory, Passkeys Directory and Have I Been Pwned's public breaches
+// list. Apple's quirks (`change-urls.json`, `shared.json`) come from
+// `scripts/sync-quirks.ts` instead, at a pinned commit.
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const APPLE_COMMIT = "d158201a3c67899494b1beea0a6c016a44d835d5";
 const OUT_DIR = join(import.meta.dir, "../crates/core/data/health");
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -65,20 +65,13 @@ function sortedObject<T>(entries: Iterable<[string, T]>): Record<string, T> {
 async function main() {
   await mkdir(OUT_DIR, { recursive: true });
 
-  const [tfaRaw, passkeysRaw, breachesRaw, changeUrlsRaw, sharedRaw] =
-    await Promise.all([
-      fetchJson<TfaV3Entry[]>("https://api.2fa.directory/v3/tfa.json"),
-      fetchJson<PasskeysV1>(
-        "https://passkeys-api.2fa.directory/v1/supported.json",
-      ),
-      fetchJson<HibpBreach[]>("https://haveibeenpwned.com/api/v3/breaches"),
-      fetchJson<Record<string, string>>(
-        `https://raw.githubusercontent.com/apple/password-manager-resources/${APPLE_COMMIT}/quirks/change-password-URLs.json`,
-      ),
-      fetchJson<unknown[]>(
-        `https://raw.githubusercontent.com/apple/password-manager-resources/${APPLE_COMMIT}/quirks/shared-credentials.json`,
-      ),
-    ]);
+  const [tfaRaw, passkeysRaw, breachesRaw] = await Promise.all([
+    fetchJson<TfaV3Entry[]>("https://api.2fa.directory/v3/tfa.json"),
+    fetchJson<PasskeysV1>(
+      "https://passkeys-api.2fa.directory/v1/supported.json",
+    ),
+    fetchJson<HibpBreach[]>("https://haveibeenpwned.com/api/v3/breaches"),
+  ]);
 
   const tfaMap = new Map<string, string>();
   for (const [, info] of tfaRaw) {
@@ -133,15 +126,6 @@ async function main() {
     }
   }
 
-  const changeMap = new Map<string, string>();
-  for (const [rawDomain, url] of Object.entries(changeUrlsRaw)) {
-    const domain = cleanHost(rawDomain);
-    const target = url.trim();
-    if (domain && target.startsWith("https://")) {
-      changeMap.set(domain, target);
-    }
-  }
-
   await Promise.all([
     writeFile(
       join(OUT_DIR, "2fa.json"),
@@ -155,15 +139,10 @@ async function main() {
       join(OUT_DIR, "breaches.json"),
       JSON.stringify(sortedObject(breachMap)) + "\n",
     ),
-    writeFile(
-      join(OUT_DIR, "change-urls.json"),
-      JSON.stringify(sortedObject(changeMap)) + "\n",
-    ),
-    writeFile(join(OUT_DIR, "shared.json"), JSON.stringify(sharedRaw) + "\n"),
   ]);
 
   console.log(
-    `wrote health data: 2fa=${tfaMap.size}, passkeys=${passkeyMap.size}, breaches=${breachMap.size}, change-urls=${changeMap.size}, shared=${sharedRaw.length}`,
+    `wrote health data: 2fa=${tfaMap.size}, passkeys=${passkeyMap.size}, breaches=${breachMap.size}`,
   );
 }
 

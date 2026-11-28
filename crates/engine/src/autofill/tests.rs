@@ -539,3 +539,146 @@ fn saved_urls_are_secure_pages_on_the_site() {
     let items = s.vault(&vault).items();
     assert_eq!(items[0].fields["url"].value, "https://example.com/login");
 }
+
+/// x.com is twitter.com's `to` site in Apple's shared-credentials list: a
+/// twitter.com login is listed and filled there, but x.com never saves,
+/// links or updates one.
+mod shared_sites {
+    use super::*;
+
+    const X: &str = "https://x.com";
+
+    fn twitter(s: &mut Engine, password: &str) -> LoginRef {
+        login(
+            s,
+            &[
+                ("url", "https://twitter.com/login"),
+                ("username", "alex"),
+                ("password", password),
+            ],
+        )
+    }
+
+    fn checked(s: &Engine, username: Option<&str>, password: &str) -> (SiteStatus, Vec<LoginRef>) {
+        check(s, X, username, &Secret::new(password)).unwrap()
+    }
+
+    fn mismatch(error: anyhow::Error) -> bool {
+        crate::code(&error) == Some(ErrorCode::DomainMismatch)
+    }
+
+    #[test]
+    fn a_shared_login_lists_and_fills_but_is_never_updated() {
+        let mut s = loaded();
+        let bird = twitter(&mut s, "bird-pw");
+        assert_eq!(list(&s, X).unwrap().1[0].login, bird);
+        let values = fill(&s, X, &bird, &[Fill::Password], Duration::ZERO).unwrap();
+        assert_eq!(
+            values.password.as_ref().map(Secret::expose),
+            Some("bird-pw")
+        );
+
+        // A new password for the same username is a new login here, not an
+        // update of twitter.com's; the same password is already saved.
+        assert_eq!(
+            checked(&s, Some("alex"), "other-pw"),
+            (SiteStatus::New, vec![])
+        );
+        assert_eq!(
+            checked(&s, Some("alex"), "bird-pw"),
+            (SiteStatus::Same, vec![])
+        );
+        assert_eq!(checked(&s, None, "bird-pw"), (SiteStatus::Same, vec![]));
+        assert_eq!(
+            checked(&s, Some("sam"), "bird-pw"),
+            (SiteStatus::New, vec![])
+        );
+
+        // Nor can x.com write a new password into it.
+        let password = Secret::new("clobbered");
+        let update = Save {
+            origin: X,
+            login: Some(&bird),
+            ..save("X", "https://x.com/settings", &password)
+        };
+        assert!(mismatch(crate::autofill::save(&mut s, update).unwrap_err()));
+        let values = fill(&s, X, &bird, &[Fill::Password], Duration::ZERO).unwrap();
+        assert_eq!(
+            values.password.as_ref().map(Secret::expose),
+            Some("bird-pw")
+        );
+    }
+
+    #[test]
+    fn updates_go_to_the_sites_own_logins_closest_first() {
+        let mut s = loaded();
+        twitter(&mut s, "bird-pw");
+        // Made farthest first, so item-id order would rarely be rank order.
+        let made: Vec<LoginRef> = ["https://help.x.com", "http://x.com", "https://x.com/login"]
+            .into_iter()
+            .map(|url| {
+                login(
+                    &mut s,
+                    &[("url", url), ("username", "alex"), ("password", "old")],
+                )
+            })
+            .collect();
+        let closest_first: Vec<LoginRef> = made.into_iter().rev().collect();
+        assert_eq!(
+            checked(&s, Some("alex"), "new-pw"),
+            (SiteStatus::Update, closest_first)
+        );
+    }
+
+    #[test]
+    fn a_page_saves_only_urls_of_its_own_site() {
+        let mut s = loaded();
+        let password = Secret::new("pw");
+        let planted = Save {
+            origin: X,
+            ..save("Twitter", "https://twitter.com/login", &password)
+        };
+        assert!(mismatch(
+            crate::autofill::save(&mut s, planted).unwrap_err()
+        ));
+        let own = Save {
+            origin: X,
+            ..save("X", "https://x.com/login", &password)
+        };
+        assert!(crate::autofill::save(&mut s, own).unwrap().1);
+    }
+
+    #[test]
+    fn a_page_links_only_itself_though_a_shared_site_is_linked() {
+        let mut s = loaded();
+        let google = login(
+            &mut s,
+            &[
+                ("url", "https://accounts.google.com"),
+                ("username", "alex@gmail.com"),
+                ("password", "hunter22"),
+            ],
+        );
+        fn linking<'a>(account: &'a LoginRef, origin: &'a str, url: &'a str) -> Link<'a> {
+            Link {
+                origin,
+                title: "",
+                url,
+                provider: "google",
+                account,
+                test_hosts: false,
+            }
+        }
+        let twitter = "https://twitter.com";
+        let (on_twitter, made) = link(&mut s, linking(&google, twitter, twitter)).unwrap();
+        assert!(made);
+        // x.com is offered twitter.com's link, but gets one of its own.
+        assert!(list(&s, X).unwrap().1.iter().any(|l| l.login == on_twitter));
+        assert!(mismatch(
+            link(&mut s, linking(&google, X, "https://twitter.com/login")).unwrap_err()
+        ));
+        let (on_x, made) = link(&mut s, linking(&google, X, X)).unwrap();
+        assert!(made && on_x != on_twitter);
+        assert_eq!(link(&mut s, linking(&google, X, X)).unwrap(), (on_x, false));
+    }
+}

@@ -76,7 +76,7 @@ pub fn rank(origin: &str, item: &Item, used: u64) -> Rank {
         closeness: urls(item)
             .filter_map(|url| closeness(origin, url))
             .min()
-            .unwrap_or(Closeness::Site),
+            .unwrap_or(Closeness::Shared),
         favorite: Reverse(item.favorite),
         used: Reverse(used),
         title: login_title(item).to_lowercase(),
