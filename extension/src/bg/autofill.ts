@@ -17,24 +17,14 @@ import { iconKey, iconSettings, storedIcon, type StoredIcon } from "../ui/icon-s
 import { hostHash } from "./site-icons"
 import { exactSignInOrigin, SIGNIN_SETTING, signInEnabled, signInOn, type AuthReport } from "../auth-state"
 import { Unlocker, type PendingUnlock } from "./unlock"
+import { AUTOMATIC_ENTRY_MS, AUTOMATIC_STEP_MS, AuthFlows, FlowLearner, flowFor, MAX_AUTOMATIC_SUBMITS, sessionStep, signsIn, siteOfUrl, stepLabel, stepRoles, transition, userNavigation, type AuthFlow, type FlowStart } from "./flow"
+
+// provider-chain.ts reads the learned site flows through here.
+export { flowFor }
 
 const TOKEN_TTL_MS = 2 * 60_000
 const LIST_TTL_MS = 30_000
-/** A sign-in session lasts this long from the pick that started it. */
-export const SESSION_TTL_MS = 3 * 60_000
-/** A home/modal entry must reach its first login step promptly, not arm a later task. */
-export const AUTOMATIC_ENTRY_MS = 20_000
-/** An automatic session's next step must show this soon after its last automatic submit. */
-export const AUTOMATIC_STEP_MS = 20_000
-const MAX_AUTOMATIC_SUBMITS = 4
-/** On a site whose steps come by navigation (see Flow), this much longer, for a slow page. */
-const SESSION_GRACE_MS = 60_000
-/** chrome.storage.local: the shape of each site's sign-in (see Flow), by a salted hash of the site. */
-export const FLOWS_KEY = "signinFlows"
-const MAX_FLOWS = 300
 const NOT_SHOWN = "That login form isn't fully visible. Nothing was filled."
-/** Navigations the user started themselves end an email-first sign-in, as does going back or forward (see navigated). */
-const UNRELATED = new Set(["typed", "auto_bookmark", "generated", "keyword", "keyword_generated", "reload", "start_page", "auto_toplevel"])
 
 interface MenuToken extends FrameTarget {
   /**
@@ -63,71 +53,6 @@ interface MenuToken extends FrameTarget {
   picked?: boolean
 }
 
-/**
- * A sign-in session: the login the user picked, followed through the next
- * steps of the sign-in in the same tab. When the top page, or a frame that
- * may have the inline menu (see sameSiteTop), shows the next step (a
- * password, a one-time code, the username asked again beside a password), it
- * fills from the same login without another pick: once per step, only after
- * the user's own submit (see Autofill.page), only on the origin the pick was
- * on or one whose host a saved URL of the login names exactly, only into a
- * frame whose fields show through every frame above, and only for a few
- * minutes.
- */
-interface Session {
-  /**
-   * Auto-submit, with "Offer to sign in" on: set only by startAutomatic, for
-   * a guarded pick in an extension-owned surface (the corner offer, the
-   * inline menu) or the toolbar popup's Fill. Never by a page's own event.
-   */
-  automatic?: boolean
-  /** Submit calls made by this automatic session, carried across its steps. */
-  automaticSubmits?: number
-  /** When a password step of this automatic session was last submitted (by it or the user): a code step may be submitted only soon after. */
-  passwordSubmittedAt?: number
-  ref: string
-  /** The site (registrable domain): leaving it ends the session. */
-  site: string
-  /** The origin the pick was on. Another origin is a step only if a saved URL of the login names its host. */
-  origin: string
-  /** The document the last step filled, and when. */
-  documentId: string
-  filledAt: number
-  /** What the session has filled so far. */
-  filled: FieldRole[]
-  startedAt: number
-  until: number
-}
-
-/**
- * The shape of a site's sign-in, learned from sign-ins that worked (no
- * usernames, no values): whether it asks for the username on a step of its
- * own first, whether a code step usually follows the password, and whether
- * its steps come by navigation or in the same document.
- */
-export interface Flow {
-  identifierFirst: boolean
-  code: boolean
-  navigates: boolean
-  /** How many sign-ins it was learned from, how many had a code step, and when it was last. */
-  seen: number
-  codeSeen: number
-  at: number
-}
-
-/**
- * What a tab's top page, or one of its login frames (see sameSiteTop), has
- * shown of the current sign-in, to learn its Flow from. Each frame has its
- * own: a top page's identifier and a frame's password box aren't one form's
- * steps.
- */
-interface Track {
-  site: string
-  identifierDoc?: string
-  passwordDoc?: string
-  otp: boolean
-}
-
 /** The login forms each tab's frames last reported. Filling from the popup needs one. */
 interface PageReport extends FrameTarget {
   kind: SurfaceKind | null
@@ -135,9 +60,6 @@ interface PageReport extends FrameTarget {
   form: number
   asksNew: boolean
 }
-
-/** What a first step's fill needs of the session it starts (see fillStep). */
-type SessionStart = Pick<Session, "ref" | "origin" | "filled" | "startedAt" | "automatic" | "automaticSubmits">
 
 export function wantFor(roles: FieldRole[], account: Pick<Account, "hasPassword" | "hasTotp">): Want[] {
   const want: Want[] = []
@@ -192,63 +114,6 @@ export function oneRowEach(accounts: Account[], origin: string): Account[] {
 export const menuRowCount = (accounts: Account[], focused: FieldRole) =>
   accounts.reduce((n, a) => n + (a.signIn ? (a.hasPassword && focused !== "otp" ? 2 : 1) : 1), 0)
 
-/** The step a sign-in session waits for after its fills wrote `filled`, if any. */
-export function nextStep(filled: FieldRole[], account: Pick<Account, "hasPassword" | "hasTotp">): "password" | "otp" | undefined {
-  if (filled.includes("otp")) return undefined
-  if (filled.includes("password")) return account.hasTotp ? "otp" : undefined
-  if (filled.some((r) => IDENTIFIER_ROLES.includes(r))) return account.hasPassword ? "password" : account.hasTotp ? "otp" : undefined
-  return undefined
-}
-
-/**
- * What a step's form should get from the session, given the roles it
- * reported: a password step its password (and the username, if the box for
- * it came back empty beside the password); a code step its code, if the
- * login has one. An identifier on its own isn't a step to fill: empty, it's
- * "Use a different account" (see Autofill.page).
- */
-export function stepRoles(roles: FieldRole[], account: Pick<Account, "hasPassword" | "hasTotp">, idEmpty: boolean): FieldRole[] {
-  if (roles.includes("password") && account.hasPassword) return ["password", ...(idEmpty ? roles.filter((r) => IDENTIFIER_ROLES.includes(r)) : [])]
-  if (roles.includes("otp") && account.hasTotp) return ["otp"]
-  return []
-}
-
-/**
- * What a sign-in session's step may fill in a form the content script
- * reported, or "end" when the form says the sign-in turned into something
- * else. Only a sign-in step: on a login form, its current password (never
- * when the form also has a new-password box, or a password box asks for a
- * new password by autocomplete, which may be a sign-up the detector took for
- * a login) and the username beside it; on a code step, the code. A sign-up
- * or change-password form ends the session: its password box wants a new
- * password, never the saved one. Anything else, a login form it can't be
- * sure of included, fills nothing; an explicit pick still can.
- */
-export function sessionStep(kind: SurfaceKind | null, roles: FieldRole[], asksNew: boolean): FieldRole[] | "end" {
-  if (kind === "signup" || kind === "change-password") return "end"
-  if (kind === "mfa") return ["otp"]
-  if (kind !== "login" || roles.includes("new-password") || asksNew) return []
-  return [...IDENTIFIER_ROLES, "password", "otp"]
-}
-
-/**
- * Whether a pick on this form may sign in rather than only fill: a login
- * form with a username box (a first step), never a code step on its own, a
- * sign-up or change-password form, or one whose password box asks for a new
- * password (see sessionStep). A password or code box alone is more often a
- * re-authentication (Confirm access, a withdrawal, turning 2FA off) than a
- * sign-in. The pick also needs the page to look signed out (see startAutomatic).
- */
-export const signsIn = (kind: SurfaceKind | null | undefined, roles: FieldRole[], asksNew = false) =>
-  kind === "login" && !asksNew && !roles.includes("new-password") && roles.some((r) => IDENTIFIER_ROLES.includes(r))
-
-/** The pill's word for a step: what it filled that matters most. */
-export function stepLabel(filled: FieldRole[]): string {
-  if (filled.includes("otp")) return "Code filled"
-  if (filled.includes("password")) return "Password filled"
-  return "Filled"
-}
-
 /** Logins whose username is exactly `identifier`, ignoring case. */
 export function namedBy(accounts: Account[], identifier: string): Account[] {
   const id = identifier.trim().toLowerCase()
@@ -266,15 +131,10 @@ export class Autofill {
   private tokens = new Map<string, MenuToken>()
   private lists = new Map<string, { at: number; reply: ListReply }>()
   private pages = new Map<number, Map<number, PageReport>>()
-  private sessionTimers = new Map<number, ReturnType<typeof setTimeout>>()
-  /** What each tab's top page and login frames have shown of its sign-in, by frame, to learn the site's Flow from. */
-  private tracks = new Map<number, Map<number, Track>>()
-  /** The last time the user themselves submitted a login form in each tab's top page (or same-site login frame), and in which document. */
-  private submits = new Map<number, { documentId: string; at: number }>()
-  /** Each tab's session work runs one piece at a time, so a step is used once. */
-  private queues = new Map<number, Promise<unknown>>()
-  /** Bumped when a tab's sign-in session ends; work started before then arms nothing. */
-  private cancels = new Map<number, number>()
+  /** Each tab's sign-in, step by step (see bg/flow.ts). */
+  private flows = new AuthFlows()
+  /** What each tab's top page and login frames have shown of its sign-in, to learn the site's flow from. */
+  private learner = new FlowLearner()
   /** Sites whose fields already showed the locked row on focus since Deadbolt last locked or unlocked. */
   private lockedShown = new Set<string>()
   private lastState: string
@@ -299,14 +159,14 @@ export class Autofill {
   ) {
     this.lastState = host.status.state
     chrome.storage.onChanged?.addListener((changes, area) => {
-      if (area === "local" && SIGNIN_SETTING in changes && !signInOn(changes[SIGNIN_SETTING].newValue)) void this.stopAllAutomatic()
+      if (area === "local" && SIGNIN_SETTING in changes && !signInOn(changes[SIGNIN_SETTING].newValue)) void this.flows.endAutomatic()
     })
     host.onChange((status) => {
       this.lists.clear()
       if (status.state !== this.lastState) this.lockedShown.clear()
       this.lastState = status.state
       // Locked or gone: no session goes on, including ones kept from before a service worker restart.
-      if (status.state !== "ready") void this.endAll()
+      if (status.state !== "ready") void this.flows.endAll()
     })
     // After the listener above, so a menu that unlocked lists afresh.
     this.unlocker = new Unlocker(host, (p) => this.resumeUnlock(p))
@@ -447,7 +307,7 @@ export class Autofill {
     // list would keep the step's fields from being measured. A click or ↓
     // still opens it. A top page's list never blocks its step.
     if (!explicit && target.frameId !== 0 && (focused === "password" || focused === "otp")) {
-      const s = await this.session(target.tabId)
+      const s = await this.flows.get(target.tabId)
       if (s && !s.filled.includes(focused) && siteOf(new URL(target.origin).hostname) === s.site) return { rows: 0 }
     }
     await this.host.connect()
@@ -783,10 +643,10 @@ export class Autofill {
     form: number,
     generation: number,
     framed?: Approved,
-    session?: SessionStart,
+    session?: FlowStart,
     /** A step's own pill on the field (a pick has the menu's). */
     notice = !!session,
-  ): Promise<{ reply: PickReply; next?: Session | null }> {
+  ): Promise<{ reply: PickReply; next?: AuthFlow | null }> {
     let filled: FieldRole[]
     try {
       filled = await this.fill(target, account, roles, form, generation, framed, notice, session?.automatic)
@@ -796,14 +656,10 @@ export class Autofill {
     if (!filled.length) return { reply: { ok: false, message: "The page changed. Try again." } }
     if (target.frameId !== 0 && !(await sameSiteTop(target))) return { reply: { ok: true } }
     const site = siteOf(new URL(target.origin).hostname)
-    const all = [...new Set([...(session?.ref === account.ref ? session.filled : []), ...filled])]
-    if (!site || !nextStep(all, account)) return { reply: { ok: true }, next: null }
-    const now = Date.now()
-    const flow = await flowFor(site)
-    const startedAt = session?.ref === account.ref ? session.startedAt : now
-    const until = startedAt + SESSION_TTL_MS + (flow?.navigates ? SESSION_GRACE_MS : 0)
-    const origin = session?.ref === account.ref ? session.origin : target.origin
-    return { reply: { ok: true }, next: { ref: account.ref, site, origin, documentId: target.documentId, filledAt: now, filled: all, startedAt, until, ...(session?.automatic ? { automatic: true, automaticSubmits: session.automaticSubmits ?? 0 } : {}) } }
+    if (!site) return { reply: { ok: true }, next: null }
+    const navigates = !!(await flowFor(site))?.navigates
+    const next = transition(session, { type: "filled", account, site, target, filled, now: Date.now(), navigates })
+    return { reply: { ok: true }, next: next ?? null }
   }
 
   /** A fill the user chose (menu or popup), then the sign-in session that follows it. */
@@ -821,42 +677,25 @@ export class Autofill {
    * `generation` or the top page has left the session's site. Call it inside
    * `serial`.
    */
-  private async arm(tabId: number, generation: number, next: Session | null) {
+  private async arm(tabId: number, generation: number, next: AuthFlow | null) {
     if (generation !== this.generation(tabId)) return
     if (next) {
       const top = await chrome.webNavigation.getFrame({ tabId, frameId: 0 }).catch(() => null)
       if (siteOfUrl(top?.url) !== next.site || generation !== this.generation(tabId)) return
     }
-    await this.setSession(tabId, next ?? undefined)
+    await this.flows.set(tabId, next ?? undefined)
   }
 
   private generation(tabId: number): number {
-    return this.cancels.get(tabId) ?? 0
+    return this.flows.generation(tabId)
   }
 
   private serial<T>(tabId: number, work: () => Promise<T>): Promise<T> {
-    const run = (this.queues.get(tabId) ?? Promise.resolve()).then(work)
-    this.queues.set(tabId, run.catch(() => {}))
-    return run
+    return this.flows.serial(tabId, work)
   }
 
-  /** The tab's session, kept in session storage so a service worker restart doesn't lose the step. */
-  private async session(tabId: number): Promise<Session | undefined> {
-    const key = `session:${tabId}`
-    const stored = (await chrome.storage.session.get(key))[key] as Session | undefined
-    if (stored && Date.now() < stored.until) return stored
-    if (stored) await chrome.storage.session.remove(key)
-    return undefined
-  }
-
-  async signingIn(tabId: number): Promise<boolean> { return !!await this.session(tabId) }
-  async stopAutomatic(tabId: number) { if ((await this.session(tabId))?.automatic) await this.cancel(tabId) }
-
-  private async stopAllAutomatic() {
-    const all = await chrome.storage.session.get(null)
-    for (const [key, value] of Object.entries(all))
-      if (key.startsWith("session:") && (value as Session)?.automatic) void this.cancel(Number(key.slice(8)))
-  }
+  async signingIn(tabId: number): Promise<boolean> { return !!await this.flows.get(tabId) }
+  async stopAutomatic(tabId: number) { if ((await this.flows.get(tabId))?.automatic) await this.cancel(tabId) }
 
   /**
    * Whether a pick of `account` in `target` may start an automatic sign-in:
@@ -905,7 +744,7 @@ export class Autofill {
     const action = entry
     const now = Date.now()
     if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return { ok: false, message: "Sign-in stopped." }
-    await this.setSession(target.tabId, { ref: account.ref, site, origin: target.origin, documentId: target.documentId,
+    await this.flows.set(target.tabId, { ref: account.ref, site, origin: target.origin, documentId: target.documentId,
       filled: [], filledAt: now, startedAt: now, until: now + AUTOMATIC_ENTRY_MS, automatic: true, automaticSubmits: 0 })
     if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) {
       await this.cancel(target.tabId)
@@ -943,55 +782,32 @@ export class Autofill {
    * account chip. At most four submits a session. True if the content script
    * submitted. Call inside `serial`.
    */
-  private async submitStep(target: FrameTarget, s: Pick<Session, "site" | "automaticSubmits" | "passwordSubmittedAt">, roles: FieldRole[], form: number, generation: number, next: Session | null | undefined, first = false, account?: string): Promise<boolean> {
+  private async submitStep(target: FrameTarget, s: Pick<AuthFlow, "automaticSubmits" | "passwordSubmittedAt">, roles: FieldRole[], form: number, generation: number, next: AuthFlow | null | undefined, first = false, account?: string): Promise<boolean> {
     // A code box shown later, by anyone, isn't the step after this session's password.
     const now = Date.now()
     const submit = !roles.includes("otp") || now - (s.passwordSubmittedAt ?? -Infinity) <= AUTOMATIC_STEP_MS
     if (generation !== this.generation(target.tabId)) return false
     if (!(await signInEnabled())) {
-      await this.endSession(target.tabId)
+      await this.flows.end(target.tabId)
       return false
     }
     if (generation !== this.generation(target.tabId)) return false
     const automaticSubmits = (s.automaticSubmits ?? 0) + (submit ? 1 : 0)
     // Submitted, the next step has to show promptly; a password step submitted lets a code step follow it.
-    const stepped = (n: Session): Session => ({ ...n, automaticSubmits, until: Math.min(n.until, now + AUTOMATIC_STEP_MS), ...(roles.includes("password") ? { passwordSubmittedAt: now } : {}) })
+    const stepped = (n: AuthFlow) => transition({ ...n, automaticSubmits: s.automaticSubmits ?? 0 }, { type: "step-submitted", roles, now }) ?? null
     if (next !== undefined) await this.arm(target.tabId, generation, next && submit ? stepped(next) : next)
     if (!submit || generation !== this.generation(target.tabId)) return false
-    this.submits.set(target.tabId, { documentId: target.documentId, at: now })
+    this.flows.noteSubmit(target.tabId, target.documentId, now)
     const submitted = await sendToFrame(target, { type: "db:signin-submit", form, ...(first ? { first: true as const } : {}), ...(account ? { account } : {}) })
     if (generation !== this.generation(target.tabId)) return false
     // Four attempts are enough: leave any further step to a fresh user pick.
-    if (!submitted || automaticSubmits >= MAX_AUTOMATIC_SUBMITS) await this.endSession(target.tabId)
+    if (!submitted || automaticSubmits >= MAX_AUTOMATIC_SUBMITS) await this.flows.end(target.tabId)
     return submitted === true
   }
 
-  private async setSession(tabId: number, s: Session | undefined) {
-    const key = `session:${tabId}`
-    clearTimeout(this.sessionTimers.get(tabId))
-    this.sessionTimers.delete(tabId)
-    if (!s) return chrome.storage.session.remove(key)
-    await chrome.storage.session.set({ [key]: s })
-    this.sessionTimers.set(
-      tabId,
-      setTimeout(() => void this.setSession(tabId, undefined), Math.max(0, s.until - Date.now())),
-    )
-  }
-
-  /** The tab's session ends, including fills still on their way. */
+  /** The tab's flow ends, including fills still on their way. */
   private cancel(tabId: number) {
-    this.cancels.set(tabId, this.generation(tabId) + 1)
-    return this.serial(tabId, () => this.setSession(tabId, undefined))
-  }
-
-  /** Every session ends: each one in session storage, whether or not this worker started it. */
-  private async endAll() {
-    const all = (await chrome.storage.session.get(null).catch(() => ({}))) as Record<string, unknown>
-    const tabs = new Set([...this.sessionTimers.keys()])
-    for (const key of Object.keys(all)) if (key.startsWith("session:")) tabs.add(Number(key.slice(8)))
-    await Promise.all([...tabs].map((tabId) => this.cancel(tabId)))
-    const left = Object.keys(all).filter((k) => k.startsWith("session:"))
-    if (left.length) await chrome.storage.session.remove(left).catch(() => {})
+    return this.flows.cancel(tabId)
   }
 
   /**
@@ -1004,11 +820,11 @@ export class Autofill {
     const target = await targetFor(sender)
     if (!target || !(target.frameId === 0 || (await sameSiteTop(target)))) return
     const at = Date.now()
-    this.submits.set(target.tabId, { documentId: target.documentId, at })
-    // The user's own submit of an automatic session's password step lets its code step follow, as an automatic one does.
+    this.flows.noteSubmit(target.tabId, target.documentId, at)
     await this.serial(target.tabId, async () => {
-      const s = await this.session(target.tabId)
-      if (s?.automatic && s.documentId === target.documentId && s.filled.includes("password")) await this.setSession(target.tabId, { ...s, passwordSubmittedAt: at })
+      const s = await this.flows.get(target.tabId)
+      const next = transition(s, { type: "user-submitted", documentId: target.documentId, at })
+      if (s && next !== s) await this.flows.set(target.tabId, next)
     })
   }
 
@@ -1026,7 +842,7 @@ export class Autofill {
     if (!approved?.roles.length || approved.roles.some((r) => !IDENTIFIER_ROLES.includes(r))) return false
     const ack = await sendToFrame<FillAck>(target, { type: "db:fill", values: { username }, form, approval: approved.approval, automatic: true })
     if (!sanitizeRoles(ack?.filled).length || !(await signInEnabled())) return false
-    this.submits.set(target.tabId, { documentId: target.documentId, at: Date.now() })
+    this.flows.noteSubmit(target.tabId, target.documentId)
     return (await sendToFrame(target, { type: "db:signin-submit", form, first: true })) === true
   }
 
@@ -1039,11 +855,11 @@ export class Autofill {
    * this step doesn't ask for. Call inside `serial`.
    */
   private async ssoStep(target: FrameTarget, generation: number) {
-    const s = await this.session(target.tabId)
+    const s = await this.flows.get(target.tabId)
     if (!s?.automatic || !this.providers || target.frameId !== 0 || target.origin !== s.origin || generation !== this.generation(target.tabId)) return
     if (s.filled.some((r) => r === "password" || r === "otp") || !s.filled.some((r) => IDENTIFIER_ROLES.includes(r))) return
     // After this session's own submit of its email, from the document it filled.
-    const sub = this.submits.get(target.tabId)
+    const sub = this.flows.lastSubmit(target.tabId)
     if (!sub || sub.documentId !== s.documentId || sub.at < s.filledAt) return
     const facts = await sendToFrame<AuthReport>(target, { type: "db:auth-probe", fresh: true })
     const ids = [...new Set(Array.isArray(facts?.providers) ? facts.providers : [])].filter((id) => typeof id === "string" && providerOf(id).hosts.length > 0)
@@ -1076,7 +892,7 @@ export class Autofill {
       }
     }
     if (!account || generation !== this.generation(target.tabId) || !(await signInEnabled())) return
-    await this.endSession(target.tabId)
+    await this.flows.end(target.tabId)
     await this.providers.start(target, account, unlinked)
   }
 
@@ -1085,54 +901,14 @@ export class Autofill {
     await this.stopAutomatic(tabId)
   }
 
-  /** What the top page (or its same-site login frame) shows of the sign-in, step by step, to learn the site's Flow from. */
-  private track(tabId: number, target: FrameTarget, roles: FieldRole[]) {
-    const site = siteOf(new URL(target.origin).hostname)
-    if (!site) return
-    const frames = this.tracks.get(tabId) ?? new Map<number, Track>()
-    this.tracks.set(tabId, frames)
-    // Another site's sign-in starts over, in every frame.
-    for (const [id, other] of frames) if (other.site !== site) frames.delete(id)
-    let t = frames.get(target.frameId)
-    if (!t) frames.set(target.frameId, (t = { site, otp: false }))
-    const id = roles.some((r) => IDENTIFIER_ROLES.includes(r))
-    if (roles.includes("password")) t.passwordDoc ??= target.documentId
-    else if (id) t.identifierDoc ??= target.documentId
-    if (roles.includes("otp") && t.passwordDoc) t.otp = true
-  }
-
-  /**
-   * A sign-in in `tabId` on `site` worked (bg/save.ts judged it): remember
-   * its shape (see Flow), from what the top page showed of it.
-   */
+  /** A sign-in in `tabId` on `site` worked (bg/save.ts judged it): remember its shape (see SiteFlow). */
   async learnFlow(tabId: number, site: string) {
-    const frames = [...(this.tracks.get(tabId) ?? new Map<number, Track>())]
-    this.tracks.delete(tabId)
-    // The top page's sign-in if it showed a password, else the login frame's that did.
-    const t = frames.sort(([a], [b]) => a - b).map(([, x]) => x).find((x) => x.site === site && x.passwordDoc)
-    if (!t) return
-    const flows = await readFlows()
-    const key = await flowKey(site)
-    const before = flows[key]
-    const seen = Math.min((before?.seen ?? 0) + 1, 99)
-    const codeSeen = Math.min((before?.codeSeen ?? 0) + (t.otp ? 1 : 0), seen)
-    flows[key] = {
-      identifierFirst: !!t.identifierDoc,
-      // A code step "usually" follows: in more than half the sign-ins seen.
-      code: codeSeen * 2 > seen,
-      codeSeen,
-      navigates: !!t.identifierDoc && t.identifierDoc !== t.passwordDoc,
-      seen,
-      at: Date.now(),
-    }
-    // Keep the most recent sites only.
-    const sites = Object.entries(flows).sort((a, b) => b[1].at - a[1].at).slice(0, MAX_FLOWS)
-    await chrome.storage.local.set({ [FLOWS_KEY]: Object.fromEntries(sites) }).catch(() => {})
+    await this.learner.learn(tabId, site)
   }
 
   /**
    * A content script found a login form: remember it, and fill the tab's
-   * sign-in session's next step into it (see Session).
+   * sign-in flow's next step into it (see AuthFlow, bg/flow.ts).
    */
   async page(sender: chrome.runtime.MessageSender, kind: SurfaceKind | null, roles: unknown, form: unknown, stepped = false, idEmpty = false, asksNew = false) {
     // Taken before any await: a cancel from here on wins, even one queued behind this.
@@ -1153,39 +929,39 @@ export class Autofill {
     // Only frames that may have the inline menu go on with a session (see sameSiteTop).
     const framed = target.frameId !== 0
     if (framed && !(await sameSiteTop(target))) return
-    this.track(target.tabId, target, clean)
+    this.learner.track(target, clean)
 
     await this.serial(target.tabId, async () => {
-      const s = await this.session(target.tabId)
+      const s = await this.flows.get(target.tabId)
       if (!s || generation !== this.generation(target.tabId) || siteOf(new URL(target.origin).hostname) !== s.site) return
       if (s.automatic && (target.frameId !== 0 || target.origin !== s.origin ||
           (kind !== "login" && kind !== "mfa") || (s.automaticSubmits ?? 0) >= MAX_AUTOMATIC_SUBMITS))
-        return this.endSession(target.tabId)
+        return this.flows.end(target.tabId)
       // A form showing up isn't a step by itself: the user has to have
       // submitted the last one themselves. In the same document, content.ts
       // says so (`stepped`: their own click or Enter, never a page's own
       // submit or its taking the fields away). In another document, the
       // user's own submit has to have come from the document the last step
       // filled, after it filled.
-      const sub = this.submits.get(target.tabId)
+      const sub = this.flows.lastSubmit(target.tabId)
       const first = s.automatic && s.filled.length === 0
-      if (first && !signsIn(kind, clean, asksNew)) return this.endSession(target.tabId)
+      if (first && !signsIn(kind, clean, asksNew)) return this.flows.end(target.tabId)
       if (!first && (target.documentId === s.documentId ? !stepped : !sub || sub.documentId !== s.documentId || sub.at < s.filledAt)) return
       // A session fills sign-in steps only (see sessionStep). An address the
       // site doesn't know often gets "Create your account" instead of a
       // password box: a sign-up or change-password form ends the session,
       // and anything else it can't be sure of is left to a pick.
       const allowed = sessionStep(kind, clean, asksNew)
-      if (allowed === "end") return this.endSession(target.tabId)
+      if (allowed === "end") return this.flows.end(target.tabId)
       const identifierOnly = clean.some((r) => IDENTIFIER_ROLES.includes(r)) && !clean.includes("password") && !clean.includes("otp")
       // "Not you? Use a different account": the username box came back
       // empty. The session ends; whoever signs in now picks again.
       if (identifierOnly && !first) {
-        if (idEmpty) return this.endSession(target.tabId)
+        if (idEmpty) return this.flows.end(target.tabId)
         // The email shown back, locked, beside a provider's button (email-first single sign-on).
         return this.ssoStep(target, generation)
       }
-      if (s.automatic && !(await signInEnabled())) return this.endSession(target.tabId)
+      if (s.automatic && !(await signInEnabled())) return this.flows.end(target.tabId)
       if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return
       const reply = await this.list(target.origin).catch(() => null)
       const account = reply?.accounts.find((a) => a.ref === s.ref)
@@ -1211,19 +987,13 @@ export class Autofill {
       // step yet: the frame reports again once more of its fields show.
       if (framed && (!shown || !step.some((r) => shown.roles.includes(r)) || generation !== this.generation(target.tabId))) return
       // Used once: whatever happens next, this step in this document doesn't fill again.
-      await this.setSession(target.tabId, { ...s, documentId: target.documentId })
+      await this.flows.set(target.tabId, { ...s, documentId: target.documentId })
       const { reply: filled, next } = await this.fillStep(target, account, step, form as number, generation, shown ?? undefined, s)
       if (generation !== this.generation(target.tabId)) return
       if (!s.automatic) return void (next !== undefined && (await this.arm(target.tabId, generation, next)))
-      if (!filled.ok) return this.endSession(target.tabId)
+      if (!filled.ok) return this.flows.end(target.tabId)
       await this.submitStep(target, s, clean, form as number, generation, next, first, account.username)
     })
-  }
-
-  /** Ends the tab's session from inside `serial`. */
-  private async endSession(tabId: number) {
-    this.cancels.set(tabId, this.generation(tabId) + 1)
-    await this.setSession(tabId, undefined)
   }
 
   /**
@@ -1237,19 +1007,19 @@ export class Autofill {
     else this.pages.get(d.tabId)?.delete(d.frameId)
     for (const [token, t] of this.tokens) if (t.tabId === d.tabId && (d.frameId === 0 || t.frameId === d.frameId)) this.tokens.delete(token)
     if (d.frameId !== 0) return
-    const tracked = this.tracks.get(d.tabId)
-    if (tracked && [...tracked.values()].some((t) => t.site !== siteOfUrl(d.url))) this.tracks.delete(d.tabId)
-    if (UNRELATED.has(d.transitionType ?? "") || d.transitionQualifiers?.includes("forward_back")) return this.cancel(d.tabId)
-    const s = await this.serial(d.tabId, () => this.session(d.tabId))
-    if (s && siteOfUrl(d.url) !== s.site) await this.cancel(d.tabId)
+    this.learner.navigated(d.tabId, d.url)
+    const event = { type: "navigate" as const, url: d.url, transitionType: d.transitionType, transitionQualifiers: d.transitionQualifiers }
+    // The user's own navigation ends the flow whether or not one is stored yet (a pick's fill may still be on its way).
+    if (userNavigation(event)) return this.cancel(d.tabId)
+    const s = await this.serial(d.tabId, () => this.flows.get(d.tabId))
+    if (s && !transition(s, event)) await this.cancel(d.tabId)
   }
 
   forgetTab(tabId: number) {
     this.pages.delete(tabId)
-    this.tracks.delete(tabId)
-    this.submits.delete(tabId)
+    this.learner.forget(tabId)
     for (const [token, t] of this.tokens) if (t.tabId === tabId) this.tokens.delete(token)
-    void this.cancel(tabId)
+    void this.flows.forget(tabId)
   }
 
   async popupLoad(tabId: number): Promise<PopupReply> {
@@ -1341,14 +1111,6 @@ export function signInHost(saved: string, origin: string): boolean {
   }
 }
 
-function siteOfUrl(url: string | undefined): string | null {
-  try {
-    return url ? siteOf(new URL(url).hostname) : null
-  } catch {
-    return null
-  }
-}
-
 /** The kept site icons for the hosts of `accounts`' first URLs, for the menu (see MenuLoadReply). */
 async function menuIcons(accounts: Account[]): Promise<Record<string, StoredIcon | null>> {
   const hosts = new Set<string>()
@@ -1388,39 +1150,6 @@ export function sameHost(url: string, origin: string): boolean {
   } catch {
     return false
   }
-}
-
-/** chrome.storage.local: a random salt made once per install, for the keys of FLOWS_KEY. */
-export const FLOWS_SALT_KEY = "signinFlowsSalt"
-let flowSalt: Promise<string> | undefined
-
-/**
- * Sites are kept under a salted hash, not by name: the list says how often
- * a site's sign-in was seen, not which sites those are. The salt stays
- * with the install (in local storage), so the hashes match from one
- * browser session to the next.
- */
-async function flowKey(site: string): Promise<string> {
-  flowSalt ??= (async () => {
-    const stored = (await chrome.storage.local.get(FLOWS_SALT_KEY))[FLOWS_SALT_KEY]
-    if (typeof stored === "string" && stored) return stored
-    const made = newToken()
-    await chrome.storage.local.set({ [FLOWS_SALT_KEY]: made })
-    return made
-  })()
-  flowSalt.catch(() => (flowSalt = undefined))
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${await flowSalt}\n${site}`))
-  return Array.from(new Uint8Array(digest).slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")
-}
-
-async function readFlows(): Promise<Record<string, Flow>> {
-  const stored = (await chrome.storage.local.get(FLOWS_KEY).catch(() => ({})) as Record<string, unknown>)[FLOWS_KEY]
-  return stored && typeof stored === "object" ? (stored as Record<string, Flow>) : {}
-}
-
-/** What's been learned of `site`'s sign-in, if anything (see Flow). */
-export async function flowFor(site: string): Promise<Flow | undefined> {
-  return site ? (await readFlows())[await flowKey(site)] : undefined
 }
 
 /** Rate limiting is the host pacing fills, not a fault: say so calmly. */

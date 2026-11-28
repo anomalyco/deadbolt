@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { AUTOMATIC_STEP_MS, Autofill, FLOWS_KEY, menuAccounts, oneRowEach, signInHost, signsIn, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
+import { Autofill, menuAccounts, oneRowEach, signInHost, menuRowCount, namedBy, resizeMessage, sameHost } from "../src/bg/autofill"
+import { AUTOMATIC_STEP_MS, FLOWS_KEY, nextStep, sessionStep, signsIn, stepLabel, stepRoles } from "../src/bg/flow"
 import { HostError } from "../src/bg/backend"
 import { SIGNIN_SETTING } from "../src/auth-state"
 import { SignInWith } from "../src/bg/signinwith"
