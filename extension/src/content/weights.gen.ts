@@ -2,8 +2,8 @@
 // changing clusterFeatures (rationalize.ts) or the corpus, and commit the diff.
 //
 // The cluster model: each feature's log-odds weight and how many train
-// clusters showed it. Fit on 71 clusters of the frozen corpus's train
-// pages (48 logins, 23 not), L1 0.002, L2 0.01, weights under 0.05
+// clusters showed it. Fit on 79 clusters of the frozen corpus's train
+// pages (56 logins, 23 not), L1 0.002, L2 0.01, weights under 0.05
 // dropped. A cluster whose summed odds fall under the threshold isn't a
 // login form.
 
@@ -17,36 +17,39 @@ export interface Weights {
 
 export const WEIGHTS: Weights = {
   version: 1,
-  bias: -1.03,
-  threshold: 0.04,
+  bias: -1.25,
+  threshold: -0.41,
   features: {
-    "autocomplete:login": [1.47, 25],
-    "button:login": [0.53, 17],
-    "button:named": [0.53, 48],
-    "button:other": [-0.34, 22],
-    "button:proceed": [0.36, 25],
-    "button:signup": [-0.32, 7],
-    "controls:2-3": [0.46, 30],
-    "controls:8+": [-0.72, 3],
-    "path:login": [0.45, 34],
-    "path:settings": [-0.07, 4],
-    "path:signup": [-0.06, 6],
-    "role:new-password": [0.33, 10],
-    "shape:code-length": [-0.29, 13],
-    "shape:identifier+password": [0.76, 21],
-    "signal:none": [-1.8, 17],
-    "title:login": [0.95, 25],
-    "title:mfa": [0.87, 4],
-    "title:reset": [0.61, 2],
-    "title:signup": [0.28, 5],
-    "unclaimed:0": [0.42, 50],
-    "unclaimed:2+": [-0.25, 12],
-    "words:change-password": [0.49, 3],
-    "words:login": [0.44, 24],
-    "words:offer": [-0.21, 3],
-    "words:reset": [0.76, 9],
-    "words:secret": [-0.66, 2],
-    "words:sent-code": [-0.94, 4],
-    "words:settings": [-0.14, 2],
+    "autocomplete:login": [1.14, 25],
+    "button:login": [0.23, 17],
+    "button:named": [0.27, 54],
+    "button:other": [-0.11, 24],
+    "button:proceed": [1.07, 30],
+    "controls:1": [0.11, 31],
+    "controls:2-3": [0.32, 34],
+    "controls:4-7": [-0.06, 11],
+    "controls:8+": [-0.38, 3],
+    "path:login": [0.44, 34],
+    "role:identifier": [-0.17, 51],
+    "role:named-password": [0.91, 38],
+    "role:new-password": [0.16, 11],
+    "role:password": [0.05, 35],
+    "shape:identifier+password": [0.87, 26],
+    "signal:none": [-1.18, 18],
+    "title:login": [0.53, 25],
+    "title:mfa": [0.46, 4],
+    "title:reset": [0.38, 2],
+    "unclaimed:0": [0.62, 57],
+    "unclaimed:1": [-0.09, 9],
+    "unclaimed:2+": [-0.32, 13],
+    "words:auth": [0.65, 47],
+    "words:change-password": [0.2, 3],
+    "words:login": [0.5, 27],
+    "words:newsletter": [-0.12, 2],
+    "words:non-login": [-1.75, 17],
+    "words:reset": [0.48, 9],
+    "words:secret": [-0.3, 2],
+    "words:sent-code": [-0.45, 4],
+    "words:settings": [-0.06, 2],
   },
 }

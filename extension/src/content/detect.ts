@@ -19,7 +19,7 @@ export { ignored, isVisible, labelText, type FormControl } from "./graph"
 /** A password box that asks for a new password by autocomplete, whatever the detector made of its form: a sign-up, never a sign-in step to submit. */
 export const asksNewPassword = (fields: Field[]) => fields.some((f) => f.el.type === "password" && /\bnew-password\b/.test(f.el.autocomplete))
 
-export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|challenge|mfa|2fa|two-factor|verify|webauthn|passkey/i
+export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|challenge|mfa|2fa|two-factor|two-step|2-step|totp|\botp\b|verify|webauthn|passkey/i
 const SIGNUP_URL = /sign-?up|sign_up|register|registration|join|create-account|onboard/i
 const RESET_URL = /forgot|reset|recover/i
 const CHANGE_PASSWORD_URL = /change-?password|password-?change|update-?password|settings\/security/i
@@ -179,6 +179,8 @@ function pageFacts(fields: ScannedField[], codeGroups: HTMLInputElement[][], gra
 
 /** Every cluster in a form or container whose fields the rules gave a login role, with the model's verdict on it. */
 function judge(graph: FormGraph, collected: ReturnType<typeof collectFields>): ClusterVerdict[] {
+  // Nothing claimed in a form or container: no page facts or buttons to read.
+  if (!collected.fields.some((f) => f.role && f.cluster?.root)) return []
   const page = pageFacts(collected.fields, collected.codeGroups, graph)
   const buttons = deepQueryAll(BUTTON, graph.roots).slice(0, 500)
   const out: ClusterVerdict[] = []
@@ -415,7 +417,7 @@ export function scanPage(source: ScanSource = openRoots()): ScanResult {
   const decoys = new Set(
     graph.clusters.filter((c) => {
       const v = verdicts.get(c)
-      return v ? v.offer || notLogin(v.odds) : decoyCluster(c, collected.fields.filter((f) => f.cluster === c), graph)
+      return v ? v.offer || notLogin(v.odds, v.features) : decoyCluster(c, collected.fields.filter((f) => f.cluster === c), graph)
     }),
   )
   const all = collected.fields.filter((f) => !f.cluster || !decoys.has(f.cluster))

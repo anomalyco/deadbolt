@@ -947,6 +947,70 @@
    "source": "modeled"
   },
   {
+   "id": "plain-b2b-signup",
+   "file": "frozen/plain-b2b-signup.html",
+   "url": "https://www.acmeworks.example/get-started",
+   "sha256": "a8e8177662285577d08c7c1b0ab7fddd2ae8c969125e7182445808073d7847d8",
+   "bytes": 1163,
+   "source": "modeled"
+  },
+  {
+   "id": "plain-bank-passcode",
+   "file": "frozen/plain-bank-passcode.html",
+   "url": "https://www.acmebank1.example/",
+   "sha256": "3dce8d319e3c9634a2d1feab916aaa60bb36253d6b5543d83da3cf9ad2b11837",
+   "bytes": 620,
+   "source": "modeled"
+  },
+  {
+   "id": "plain-email-first-create",
+   "file": "frozen/plain-email-first-create.html",
+   "url": "https://www.acmeportal.example/start",
+   "sha256": "7e6e3d20f8cf5ed14366c087a470fc9179c103d83944e8de1e9feaf6147e62de",
+   "bytes": 511,
+   "source": "modeled"
+  },
+  {
+   "id": "plain-magic-link",
+   "file": "frozen/plain-magic-link.html",
+   "url": "https://www.acmenotes.example/",
+   "sha256": "795841cc2478cb04f275dbe707f9b4776d4cebdba6cb7cda37acaf0b6f611fe6",
+   "bytes": 446,
+   "source": "modeled"
+  },
+  {
+   "id": "plain-polish-login",
+   "file": "frozen/plain-polish-login.html",
+   "url": "https://www.acmesklep1.example/konto",
+   "sha256": "226a7c359b7a5d899f7fbbb62185ee822f68e4f26d1f0b946aca5996bf49b761",
+   "bytes": 587,
+   "source": "modeled"
+  },
+  {
+   "id": "plain-root-login",
+   "file": "frozen/plain-root-login.html",
+   "url": "https://www.acmehq3.example/",
+   "sha256": "0508be53bc3949ac856c73197d6e7ba2015522203a99c6cd13986173b62b2344",
+   "bytes": 584,
+   "source": "modeled"
+  },
+  {
+   "id": "plain-spa-totp",
+   "file": "frozen/plain-spa-totp.html",
+   "url": "https://www.acmecloud.example/security-check",
+   "sha256": "67d2a1400482c070657984dc12ddf20b18e3d200e45ec375ce375b464c266ead",
+   "bytes": 537,
+   "source": "modeled"
+  },
+  {
+   "id": "plain-span-labels",
+   "file": "frozen/plain-span-labels.html",
+   "url": "https://www.acmeapp.example/",
+   "sha256": "5d6d2aec33d74734ea75117574bd8f463a162ea821b4391084f31414e92ae183",
+   "bytes": 450,
+   "source": "modeled"
+  },
+  {
    "id": "react-obfuscated-login",
    "file": "frozen/react-obfuscated-login.html",
    "url": "https://www.snapgrid.example/accounts/login",

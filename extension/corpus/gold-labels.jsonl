@@ -131,3 +131,11 @@
 {"id":"decoy-event-rsvp","pattern":"Event RSVP: name, email, number of guests","split":"train","decoy":true,"kind":null,"login":{},"forms":{}}
 {"id":"i18n-fr-reset","pattern":"French password reset: one email box, Envoyer le lien","split":"train","decoy":false,"kind":"reset","login":{},"forms":{}}
 {"id":"library-card-login","pattern":"Library sign-in: library card number (username) and a masked PIN","split":"train","decoy":false,"kind":"login","login":{"#cardnum":"username","#pin":"password"},"forms":{}}
+{"id":"plain-email-first-create","pattern":"Plain email-first step: Email address, Continue, a Create account button; no sign-in wording","split":"train","decoy":false,"kind":"login","login":{"#email":"email"},"forms":{}}
+{"id":"plain-span-labels","pattern":"Plain sign-in, no form: span labels and a div role=button Continue","split":"train","decoy":false,"kind":"login","login":{"#email":"username","#password":"password"},"forms":{}}
+{"id":"plain-root-login","pattern":"Plain sign-in on the root path: Email, Password, Continue","split":"train","decoy":false,"kind":"login","login":{"#email":"email","#password":"password"},"forms":{}}
+{"id":"plain-spa-totp","pattern":"SPA code step under a brand title: one box for the authenticator app's 6-digit code","split":"train","decoy":false,"kind":"mfa","login":{"#code":"otp"},"forms":{}}
+{"id":"plain-b2b-signup","pattern":"B2B sign-up, six fields, no autocomplete: names, company, email, password, confirm","split":"train","decoy":false,"kind":"signup","login":{"#email":"email","#password":"new-password","#confirm":"new-password"},"forms":{}}
+{"id":"plain-polish-login","pattern":"Polish sign-in: Nazwa użytkownika and Hasło, Zaloguj się","split":"train","decoy":false,"kind":"login","login":{"#login":"username","#haslo":"password"},"forms":{}}
+{"id":"plain-bank-passcode","pattern":"Bank sign-in: Customer ID and a masked Passcode, Continue","split":"train","decoy":false,"kind":"login","login":{"#customer":"username","#passcode":"password"},"forms":{}}
+{"id":"plain-magic-link","pattern":"Magic-link sign-in under a brand title: Log in, Email, Send magic link","split":"train","decoy":false,"kind":"login","login":{"#email":"email"},"forms":{}}

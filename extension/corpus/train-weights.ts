@@ -16,7 +16,10 @@
 // claims no field; else 0 (decoys, and the footer newsletter beside a real
 // sign-in). The fit is deterministic: full-batch proximal gradient descent
 // on L2-regularised log loss with an L1 penalty, a fixed number of steps
-// from zero, classes weighted equally, and weights rounded to 0.01. Weights
+// from zero, classes weighted equally, and weights rounded to 0.01. Each
+// step projects every weight onto its sign (featureSign): sign-in wording
+// never goes negative and other-purpose wording never positive, however
+// collinear the features. Weights
 // under MIN_WEIGHT are dropped and features seen on fewer than MIN_SUPPORT
 // clusters never enter. The threshold sits under every train login's odds,
 // halfway to the highest non-login below them, so the model gives up no
@@ -24,6 +27,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { featureSign, withWeights } from "../src/content/rationalize"
 import { controlKey, load } from "./replay"
 import { corpusProblems, loadDetector, pct, readGold, readLock, runAll, score, splitTable, type Gold } from "./score"
 import type { Weights } from "../src/content/weights.gen"
@@ -81,6 +85,7 @@ function fit(data: Example[]): Weights {
   const rows = data.map((e) => e.features.map((f) => index.get(f)).filter((i): i is number => i !== undefined))
   const pos = data.filter((e) => e.y).length
   const scale = [data.length / (2 * (data.length - pos)), data.length / (2 * pos)]
+  const signs = vocab.map(featureSign)
   const w = new Float64Array(vocab.length)
   let b = 0
   for (let step = 0; step < STEPS; step++) {
@@ -96,7 +101,8 @@ function fit(data: Example[]): Weights {
     b -= (RATE * gb) / data.length
     for (let i = 0; i < w.length; i++) {
       const next = w[i] - RATE * (grad[i] / data.length + L2 * w[i])
-      w[i] = Math.sign(next) * Math.max(0, Math.abs(next) - RATE * L1)
+      const shrunk = Math.sign(next) * Math.max(0, Math.abs(next) - RATE * L1)
+      w[i] = signs[i] > 0 ? Math.max(0, shrunk) : signs[i] < 0 ? Math.min(0, shrunk) : shrunk
     }
   }
   const features: Record<string, readonly [number, number]> = {}
@@ -151,7 +157,6 @@ async function main() {
     process.exit(1)
   }
   const d = await loadDetector()
-  const { withWeights } = await import("../src/content/rationalize")
   const train = await examples(gold, lock, d)
   const weights = fit(train)
   const text = render(weights, train)

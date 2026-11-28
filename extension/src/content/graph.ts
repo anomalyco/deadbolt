@@ -201,7 +201,10 @@ function headingFor(root: Element): string {
   return ""
 }
 
-const SKIP_TEXT = new Set(["script", "style", "noscript", "template", "svg"])
+/** A select's options are a list of countries or months, not what the form says; the rest never show as text. */
+const SKIP_TEXT = new Set(["script", "style", "noscript", "template", "svg", "option", "optgroup", "datalist"])
+/** Elements read per cluster's text: a page of empty wrappers costs a style read each. */
+const MAX_TEXT_NODES = 1500
 
 /**
  * An element's text with a space at every element edge, hidden subtrees left
@@ -212,8 +215,10 @@ const SKIP_TEXT = new Set(["script", "style", "noscript", "template", "svg"])
 function spacedText(root: Element, style: (el: Element) => CSSStyleDeclaration, max: number): string {
   const parts: string[] = []
   let length = 0
+  let nodes = 0
   const walk = (node: Node) => {
-    for (let child = node.firstChild; child && length < max; child = child.nextSibling) {
+    for (let child = node.firstChild; child && length < max && nodes < MAX_TEXT_NODES; child = child.nextSibling) {
+      nodes++
       if (child.nodeType === Node.TEXT_NODE) {
         const text = child.nodeValue ?? ""
         if (text.trim()) {

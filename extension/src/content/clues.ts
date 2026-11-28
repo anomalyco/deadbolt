@@ -242,6 +242,16 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
   return score
 }
 
+/**
+ * Whether a field's own words (label, placeholder, id or name) name one of
+ * the roles: a positive clue of it matches, not just its type. A masked box
+ * labelled "Password", "Hasło" or "Passcode" names one; "Value" or "Social
+ * Security number" doesn't.
+ */
+export function namesRole(f: FieldFacts, roles: readonly FieldRole[]): boolean {
+  return COMPILED.some((c) => c.value > 0 && roles.includes(c.role) && (f.display.includes(c.display) || (c.code !== null && f.code.includes(c.code))))
+}
+
 export const FIELD_THRESHOLD = 3
 
 export function bestRole(score: Record<FieldRole, number>): FieldRole | null {
@@ -256,6 +266,7 @@ export const FORM_CLUES: Record<FormKind, Clue[]> = {
   login: prepare([
     ["sign in", 3], ["signin", 3], ["log in", 3], ["login", 3], ["log on", 2], ["sign on", 2], ["welcome back", 2],
     ["forgot password", 2], ["forgot your password", 2], ["remember me", 2], ["keep me signed in", 2],
+    ["enter your password", 3], ["enter password", 2],
     ["stay signed in", 2], ["don t have an account", 2], ["se connecter", 3], ["connexion", 3], ["anmelden", 3],
     ["einloggen", 3], ["iniciar sesion", 3], ["entrar", 2], ["accedi", 3], ["inloggen", 3], ["ログイン", 3],
     ["サインイン", 3], ["登录", 3], ["登入", 3], ["войти", 3], ["вход", 3], ["로그인", 3],

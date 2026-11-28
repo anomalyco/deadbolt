@@ -8,13 +8,13 @@
   "margin": 0.005,
   "floors": {
     "micro": {
-      "precision": 0.9763,
-      "recall": 0.9887
+      "precision": 0.9778,
+      "recall": 0.9892
     },
     "roles": {
       "identifier": {
         "precision": 0.995,
-        "recall": 0.9754
+        "recall": 0.9778
       },
       "password": {
         "precision": 0.995,
@@ -37,7 +37,7 @@
         "recall": 0.995
       }
     },
-    "pageKind": 0.9875
+    "pageKind": 0.9879
   },
   "ceilings": {
     "decoyFalseTrigger": 0.005,
@@ -167,6 +167,14 @@
     "okta-verify-code",
     "passkey-conditional-username",
     "paypal-login",
+    "plain-b2b-signup",
+    "plain-bank-passcode",
+    "plain-email-first-create",
+    "plain-magic-link",
+    "plain-polish-login",
+    "plain-root-login",
+    "plain-spa-totp",
+    "plain-span-labels",
     "react-obfuscated-login",
     "robinhood-login",
     "shadow-mybutton-login",
