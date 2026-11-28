@@ -25,9 +25,10 @@
 //!
 //! The rendezvous key in the first frame names the code the dialer resolved. A dialer
 //! holding an older code of this device is refused as `used` without spending the
-//! current one. The first dialer whose confirmation fails ends the code ("burns" it):
-//! the legitimate dialer never fails it, because one that typed a wrong code finds no
-//! device at all, so a failed confirmation means someone is guessing.
+//! current one. The first dialer that reaches the PAKE ends the code ("burns" it):
+//! with a pairing if its confirmation holds, otherwise with the code spent. Dialers
+//! that fail before the PAKE (a malformed first frame, a timeout, another code's
+//! lookup) spend nothing, so they can never be used to deny a pairing.
 
 use std::{convert::Infallible, fmt, sync::Arc, time::Duration};
 
@@ -247,6 +248,31 @@ struct Proven {
     pairing: ProvenPairing,
 }
 
+/// A failed listener-side proof, split by whether the dialer reached the PAKE.
+/// Failing before it spends nothing; anything after it is one guess at the code.
+#[derive(Debug)]
+pub enum ProofError {
+    /// A malformed first frame, a timeout, or another code's lookup: no guess yet.
+    Early(Error),
+    /// The dialer saw this code's PAKE reply and then failed, which spends the code.
+    Late(Error),
+}
+
+impl ProofError {
+    /// The underlying failure, for callers that only need the error.
+    pub fn into_inner(self) -> Error {
+        match self {
+            Self::Early(err) | Self::Late(err) => err,
+        }
+    }
+}
+
+impl From<ProofError> for Error {
+    fn from(err: ProofError) -> Self {
+        err.into_inner()
+    }
+}
+
 /// Pairing over an authenticated stream. `transcript` must bind both identities and
 /// unique transport keying material; iroh obtains it from its TLS exporter.
 /// The adapter owns rendezvous, code expiry, single use and connection cancellation.
@@ -319,25 +345,38 @@ impl PairingStream {
     /// application callback runs and nothing about the vault is sent until this
     /// succeeds. [`Error::PairingCodeUsed`] means the dialer named another code;
     /// [`Error::PairingCodeMismatch`] that it doesn't hold this one.
+    ///
+    /// The returned [`ProofError`] says whether the dialer reached the PAKE: only
+    /// then is its attempt a guess worth spending the code on.
     pub async fn prove(
         self,
         send: &mut (impl AsyncWrite + Unpin),
         recv: &mut (impl AsyncRead + Unpin),
-    ) -> Result<ProvenPairing> {
-        let first = frame::expect(recv, tag::PAKE, MAX_PAKE_FRAME).await?;
+    ) -> std::result::Result<ProvenPairing, ProofError> {
+        let first = frame::expect(recv, tag::PAKE, MAX_PAKE_FRAME)
+            .await
+            .map_err(ProofError::Early)?;
         if first.len() < 32 {
-            return Err(Error::Protocol("short pake frame".into()));
+            return Err(ProofError::Early(Error::Protocol(
+                "short pake frame".into(),
+            )));
         }
         let (lookup, message) = first.split_at(32);
         if lookup != self.lookup {
-            return Err(Error::PairingCodeUsed);
+            return Err(ProofError::Early(Error::PairingCodeUsed));
         }
+        // From here the dialer has seen this code's PAKE reply: the attempt is a guess
+        // even if the rest of the exchange is malformed or abandoned.
         let (spake, reply) = self.start();
-        frame::write(send, tag::PAKE, &reply).await?;
-        let key = session_key(spake, message, &self.transcript)?;
-        let confirm = frame::expect(recv, tag::CONFIRM, 64).await?;
+        frame::write(send, tag::PAKE, &reply)
+            .await
+            .map_err(ProofError::Late)?;
+        let key = session_key(spake, message, &self.transcript).map_err(ProofError::Late)?;
+        let confirm = frame::expect(recv, tag::CONFIRM, 64)
+            .await
+            .map_err(ProofError::Late)?;
         if !verify(&key, DIALER_LABEL, &confirm) {
-            return Err(Error::PairingCodeMismatch);
+            return Err(ProofError::Late(Error::PairingCodeMismatch));
         }
         Ok(ProvenPairing { stream: self, key })
     }
@@ -431,10 +470,19 @@ impl PairingListener {
         self.expires_at
     }
 
+    /// Spends the code: no later dialer can try it and the rendezvous record says so.
+    /// Both halves matter: the gate refuses late connections and the record stops new
+    /// lookups.
+    fn spend(&mut self) {
+        self.node.inner.gate.consume_pairing(self.slot);
+        self.publication.finish(Record::Used);
+    }
+
     /// Waits for an existing device to dial with the code and runs the pairing. Dialers
     /// naming another code, or failing before the PAKE, are dropped without spending
-    /// the code. The first one that completes the PAKE ends it: with a pairing if its
-    /// confirmation holds, with [`Error::PairingCodeMismatch`] if not.
+    /// the code. The first one that reaches the PAKE ends it: with a pairing if its
+    /// confirmation holds, otherwise with the code spent, even when the confirmation is
+    /// malformed or the connection drops.
     pub async fn complete(mut self, joiner: &impl Joiner) -> Result<PairingOutcome> {
         let local = self.node.id();
         let mut proving = JoinSet::new();
@@ -456,19 +504,17 @@ impl PairingListener {
                         proven.conn.close(close::PAIRING_UNAVAILABLE, b"expired");
                         return Err(Error::PairingExpired);
                     }
-                    Ok(Err(Error::PairingCodeMismatch)) => {
-                        self.node.inner.gate.consume_pairing(self.slot);
-                        self.publication.finish(Record::Used);
-                        return Err(Error::PairingCodeMismatch);
+                    Ok(Err(ProofError::Late(err))) => {
+                        self.spend();
+                        return Err(err);
                     }
-                    Ok(Err(err)) => warn!("pairing attempt failed: {err}"),
+                    Ok(Err(ProofError::Early(err))) => warn!("pairing attempt failed: {err}"),
                     Err(err) => warn!("pairing attempt panicked: {err}"),
                 },
             }
         };
         // Single use: nobody else can reach the pairing protocol from here on.
-        self.node.inner.gate.consume_pairing(self.slot);
-        self.publication.finish(Record::Used);
+        self.spend();
         drop(proving);
 
         let Proven {
@@ -504,15 +550,18 @@ async fn listener_prove(
     local: PeerId,
     password: Zeroizing<String>,
     lookup: PeerId,
-) -> Result<Proven> {
+) -> std::result::Result<Proven, ProofError> {
     let remote = *conn.remote_id().as_bytes();
     let (mut send, mut recv) = match n0_future::time::timeout(PROOF_TIMEOUT, conn.accept_bi()).await
     {
         Ok(Ok(streams)) => streams,
-        Ok(Err(e)) => return Err(fail_pairing(&conn, Error::Closed(e.to_string())).await),
+        Ok(Err(e)) => {
+            let err = fail_pairing(&conn, Error::Closed(e.to_string())).await;
+            return Err(ProofError::Early(err));
+        }
         Err(_) => {
             conn.close(close::PROTOCOL, b"timeout");
-            return Err(Error::Timeout);
+            return Err(ProofError::Early(Error::Timeout));
         }
     };
     let attempt = async {
@@ -522,8 +571,8 @@ async fn listener_prove(
             listener: true,
             password,
             lookup,
-            transcript: transcript(&conn, &local, &remote)?,
-            seed: random_seed()?,
+            transcript: transcript(&conn, &local, &remote).map_err(ProofError::Early)?,
+            seed: random_seed().map_err(ProofError::Early)?,
         };
         stream.prove(&mut send, &mut recv).await
     };
@@ -534,11 +583,22 @@ async fn listener_prove(
             recv,
             pairing,
         }),
-        Ok(Err(err)) => Err(fail_pairing(&conn, err).await),
+        Ok(Err(err)) => Err(fail_proof(&conn, err).await),
+        // A stalled proof can't be told apart from one that never reached the PAKE,
+        // so it must not spend the code: an unauthenticated peer would otherwise be
+        // able to burn every pairing by connecting and going quiet.
         Err(_) => {
             conn.close(close::PROTOCOL, b"timeout");
-            Err(Error::Timeout)
+            Err(ProofError::Early(Error::Timeout))
         }
+    }
+}
+
+/// Sends the dialer the close reason for a failed proof, keeping the early/late split.
+async fn fail_proof(conn: &Connection, err: ProofError) -> ProofError {
+    match err {
+        ProofError::Early(err) => ProofError::Early(fail_pairing(conn, err).await),
+        ProofError::Late(err) => ProofError::Late(fail_pairing(conn, err).await),
     }
 }
 
@@ -1051,6 +1111,105 @@ mod tests {
         );
         let late = within(existing.pair(&code, PairingOptions::default(), &Invites)).await;
         assert!(matches!(late, Err(Error::PairingCodeUsed)), "{late:?}");
+    }
+
+    /// A dialer that gets through the PAKE and then sends a malformed confirmation has
+    /// still had its one guess: the code is spent, not left open for another try.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_malformed_confirm_burns_the_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = spawn(dir.path()).await;
+        let attacker = spawn(dir.path()).await;
+        let existing = spawn(dir.path()).await;
+        let code = PairingCode::generate().unwrap();
+        let lookup = Lookup::derive(&code, current_bucket()).unwrap().public;
+        let listener = new
+            .start_pairing(&code, PairingOptions::default())
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move { listener.complete(&Joins).await });
+
+        within(async {
+            let (new_id, attacker_id) = (new.id(), attacker.id());
+            let conn = attacker
+                .inner
+                .endpoint
+                .connect(new.addr().to_endpoint_addr().unwrap(), PAIR_ALPN)
+                .await
+                .unwrap();
+            let (mut send, mut recv) = conn.open_bi().await.unwrap();
+            let stream = PairingStream {
+                local: attacker_id,
+                remote: new_id,
+                listener: false,
+                password: code.text(),
+                lookup,
+                transcript: transcript(&conn, &new_id, &attacker_id).unwrap(),
+                seed: random_seed().unwrap(),
+            };
+            let (_, message) = stream.start();
+            let mut first = lookup.to_vec();
+            first.extend_from_slice(&message);
+            frame::write(&mut send, tag::PAKE, &first).await.unwrap();
+            // The listener's PAKE reply, then a confirmation that cannot be one.
+            frame::expect(&mut recv, tag::PAKE, MAX_PAKE_FRAME)
+                .await
+                .unwrap();
+            frame::write(&mut send, tag::CONFIRM, &[0u8; 65])
+                .await
+                .unwrap();
+            // Stay connected until the listener has read it and closed; dropping the
+            // connection first would look like an abandoned attempt instead.
+            drop(conn.closed().await);
+        })
+        .await;
+
+        let joined = within(waiting).await.unwrap();
+        assert!(
+            matches!(joined, Err(Error::FrameTooLarge { .. })),
+            "{joined:?}"
+        );
+        let late = within(existing.pair(&code, PairingOptions::default(), &Invites)).await;
+        assert!(matches!(late, Err(Error::PairingCodeUsed)), "{late:?}");
+    }
+
+    /// A dialer that fails before the PAKE has not guessed the code, so it must not
+    /// spend it: anyone who can reach the device could otherwise deny every pairing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_malformed_first_frame_does_not_burn_the_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = spawn(dir.path()).await;
+        let attacker = spawn(dir.path()).await;
+        let existing = spawn(dir.path()).await;
+        let code = PairingCode::generate().unwrap();
+        let listener = new
+            .start_pairing(&code, PairingOptions::default())
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move { listener.complete(&Joins).await });
+
+        within(async {
+            let conn = attacker
+                .inner
+                .endpoint
+                .connect(new.addr().to_endpoint_addr().unwrap(), PAIR_ALPN)
+                .await
+                .unwrap();
+            let (mut send, _recv) = conn.open_bi().await.unwrap();
+            // Shorter than the lookup prefix: no PAKE message, so no guess.
+            frame::write(&mut send, tag::PAKE, b"short").await.unwrap();
+        })
+        .await;
+
+        let (joined, invited) = within(async {
+            tokio::join!(
+                waiting,
+                existing.pair(&code, PairingOptions::default(), &Invites)
+            )
+        })
+        .await;
+        assert_eq!(joined.unwrap().unwrap().peer, existing.id());
+        assert_eq!(invited.unwrap().peer, new.id());
     }
 
     /// A dialer naming another code (an old one of this device) is refused without
