@@ -33,7 +33,7 @@ function safeEntry(el: Element): el is HTMLElement {
 
 function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement; providers: string[] } {
   // A Sign out control only: an account menu is uncertainty here, not a sign-in (see signals.accountMenu).
-  const facts = pageFacts(state.kind(), state.targets(), undefined, false, false)
+  const facts = pageFacts(state.kind(), state.targets())
   const signals: AuthSignals = {
     loginForm: state.kind() === "login" && state.targets().some((f) => shown(f.el)),
     loginRoute: LOGIN_URL.test(location.pathname), entry: false,

@@ -16,7 +16,7 @@ import { ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
-import { formFailed, pageFacts } from "./content/outcome"
+import { formFailed, noteSubmitShell, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { chainActive, initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
@@ -254,7 +254,7 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     if (!isTop) return void respond(null)
     try {
       refresh()
-      respond(pageFacts(kind, fields, typeof message.username === "string" ? message.username : undefined, provider))
+      respond(pageFacts(kind, fields, typeof message.username === "string" ? message.username : undefined, provider, message.shell === true))
     } catch {
       respond(null)
     }
@@ -490,6 +490,7 @@ let submitGestureAt = -Infinity
 
 /** What was submitted goes to the background, to offer to save it if the sign-in works. */
 function captured() {
+  noteSubmitShell()
   scheduleScan()
   void submitted()
   settleAfterSubmit()

@@ -537,6 +537,30 @@ describe("new passwords", () => {
 describe("failed and abandoned sign-ins", () => {
   const login = { username: "new@example.com", password: "wrong", title: "", kind: "login", roles: ["email", "password"], submission: 1 }
 
+  const probes = () => fake.delivered.filter((d) => d.message.type === "db:probe").map((d) => d.message)
+
+  test("an app shell may count only in the document that submitted, for a sign-in nothing said failed", async () => {
+    // A single-page app: the same document settles after the submit.
+    await saver.capture(pageSender(), { ...login, password: "right" })
+    await saver.settled(pageSender())
+    expect(probes()[0]).toMatchObject({ type: "db:probe", username: "new@example.com", shell: true })
+    // A page load after the submit: another document, which never asks for it.
+    fake.delivered.length = 0
+    await saver.capture(pageSender(), { ...login, password: "right", submission: 2 })
+    fake.frames["1:0"] = HOME
+    await saver.settled(pageSender(HOME))
+    expect(probes().length).toBeGreaterThan(0)
+    expect(probes().every((m) => !("shell" in m))).toBe(true)
+  })
+
+  test("after a failure, a link to another page doesn't ask for the shell either", async () => {
+    await saver.capture(pageSender(), { ...login, submission: 4 })
+    saver.failed(pageSender(), 4)
+    fake.frames["1:0"] = { url: "https://www.example.com/", documentId: "top-doc" }
+    await saver.settled(pageSender())
+    expect(probes().every((m) => !("shell" in m))).toBe(true)
+  })
+
   test("the form still showing in place offers nothing", async () => {
     await saver.capture(pageSender(), login)
     saver.failed(pageSender(), 1)
