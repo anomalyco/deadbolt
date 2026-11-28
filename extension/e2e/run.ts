@@ -4917,14 +4917,16 @@ async function formsSurface(scheme: Scheme) {
     if (menu) {
       check((await menu.locator(".row .title").allTextContents()).join(",") === "Home,Work", "an address field lists the identities")
       const sub = await menu.locator(".row .sub").first().textContent()
-      check(sub === "Fills name, phone, address · Alex Mercer · 123 Main St, Brooklyn", `with what each fills and its summary (${sub})`)
+      // The email sits below the fold in the same form: the pick scrolls to it (see offScreen), so it counts.
+      check(sub === "Fills name, email, phone, address · Alex Mercer · 123 Main St, Brooklyn", `with what each fills and its summary (${sub})`)
       await shotAround(page, `forms-address-${scheme}`, menu, "#ship-name")
       check((await pickRow(menu, "Home")) === "ok", "picking an identity says Filled")
       const got = await values(page, ["ship-name", "ship-a1", "ship-a2", "ship-city", "ship-state", "ship-zip", "ship-country", "ship-tel"])
       check(JSON.stringify(got) === JSON.stringify(["Alex Mercer", "123 Main St", "Apt 4", "Brooklyn", "NY", "11201", "US", "+14155550123"]), `the whole address fills, selects included (${got.join(" | ")})`)
-      const skipped = await values(page, ["ship-org", "ship-a3", "ship-email"])
-      check(skipped.every((v) => !v), `a tiny field, a covered one and one off screen get nothing (${skipped.join(" | ")})`)
-      check((await page.evaluate(() => scrollY)) === 0, "and the page isn't scrolled to fill")
+      const skipped = await values(page, ["ship-org", "ship-a3"])
+      check(skipped.every((v) => !v), `a tiny field and a covered one get nothing (${skipped.join(" | ")})`)
+      check((await page.inputValue("#ship-email")) === "alex@acme.test", "one below the fold in the same form is scrolled to and filled")
+      check((await page.evaluate(() => scrollY)) === 0, "and the page is scrolled back where it was")
       const asked = (await formFills(run))[0]
       check(!!asked && !asked.fields.includes("number") && !asked.fields.includes("birthday") && asked.fields.includes("phone"), `fill-form asks only for what the fields need (${asked?.fields.join(",")})`)
     }
