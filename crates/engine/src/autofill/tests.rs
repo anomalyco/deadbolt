@@ -713,7 +713,7 @@ fn a_taught_form_lists_only_on_its_own_origin() {
         ],
     );
     let recipe = recipe_for("https://portal.bank.example", "9f2c41d0");
-    assert!(recipe.len() < deadbolt_core::site_recipe::MAX_RECIPE_BYTES);
+    assert!(recipe.len() < deadbolt_core::site::recipe::MAX_RECIPE_BYTES);
     assert!(save_recipe(&mut s, "https://portal.bank.example", &bank, Some(&recipe)).unwrap());
     // The same one again changes nothing.
     assert!(!save_recipe(&mut s, "https://portal.bank.example", &bank, Some(&recipe)).unwrap());

@@ -38,7 +38,6 @@ pub mod recovery;
 pub mod rng;
 pub mod site;
 pub mod site_password;
-pub mod site_recipe;
 pub mod tag;
 pub mod totp;
 pub mod v2;

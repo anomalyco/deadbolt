@@ -178,7 +178,7 @@ pub enum Request {
     /// typed. The browser never asks for the passphrase.
     UnlockPrompt,
     /// Keeps `recipe`, the form the user just taught it on the page
-    /// (`deadbolt_core::site_recipe`, JSON of at most 512 bytes and no
+    /// (`deadbolt_core::site::recipe`, JSON of at most 512 bytes and no
     /// values), on the login `ref` names, or with none clears it. Only a
     /// login of the page's own site, and only a recipe for its exact origin.
     SaveRecipe {

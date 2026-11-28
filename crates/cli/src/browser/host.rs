@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use deadbolt_core::site_recipe::MAX_RECIPE_BYTES;
+use deadbolt_core::site::recipe::MAX_RECIPE_BYTES;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;

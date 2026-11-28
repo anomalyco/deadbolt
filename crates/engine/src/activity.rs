@@ -307,7 +307,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             ..
         } => (
             login(&target.vault, &target.item, origin),
-            vec![deadbolt_core::site_recipe::RECIPE_FIELD.into()],
+            vec![deadbolt_core::site::recipe::RECIPE_FIELD.into()],
         ),
         Command::PasskeyGet {
             origin, passkey, ..

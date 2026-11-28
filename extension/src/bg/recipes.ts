@@ -1,7 +1,7 @@
 // Background side of learned forms (content/recipe.ts): the recipes a
 // frame's page has, a recipe the user teaches by filling a form by hand, and
 // "Reset learned form" in the popup. The daemon keeps each recipe on its
-// login and checks it there (crates/core/src/site_recipe.rs): only a login
+// login and checks it there (crates/core/src/site/recipe.rs): only a login
 // of the page's own site, only a recipe for the page's exact origin.
 
 import type { ListReply } from "../protocol"

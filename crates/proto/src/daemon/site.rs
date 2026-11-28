@@ -136,7 +136,7 @@ pub struct SiteLogin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in: Option<SignIn>,
     /// The form the user taught it for the page's exact origin
-    /// (`deadbolt_core::site_recipe`), as JSON: only a login of the page's
+    /// (`deadbolt_core::site::recipe`), as JSON: only a login of the page's
     /// own site, never one of a site sharing its credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,

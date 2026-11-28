@@ -1,4 +1,4 @@
-// A learned form (a SiteRecipe, see crates/core/src/site_recipe.rs): where a
+// A learned form (a SiteRecipe, see crates/core/src/site/recipe.rs): where a
 // login's fields are on one page, for a form the scan passed over. The user
 // teaches one by asking Deadbolt to fill a field the scan didn't take (the
 // fill shortcut or "Fill with Deadbolt", see content/manual.ts) and picking a

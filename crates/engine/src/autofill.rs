@@ -15,8 +15,8 @@ use anyhow::{Result, anyhow};
 use deadbolt_core::autofill::{self, Status, item_name};
 pub use deadbolt_core::autofill::{otp, urls, value};
 use deadbolt_core::listing::{SIGN_IN_HOSTS, saved_at_provider, sign_in_name, sign_in_provider};
+use deadbolt_core::site::recipe::{RECIPE_FIELD, SiteRecipe, canonical_origin};
 use deadbolt_core::site::{Site, page_url};
-use deadbolt_core::site_recipe::{RECIPE_FIELD, SiteRecipe, canonical_origin};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{DataOp, Field, FieldType, Item, ItemId, VaultId};
 use deadbolt_proto::daemon::{

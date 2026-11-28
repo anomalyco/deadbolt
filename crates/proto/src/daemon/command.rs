@@ -343,7 +343,7 @@ pub enum Command {
         account: LoginRef,
     },
     /// Browser autofill: keeps `recipe`, a form the user taught it on the
-    /// page at `origin` (`deadbolt_core::site_recipe`), on `login`, or with
+    /// page at `origin` (`deadbolt_core::site::recipe`), on `login`, or with
     /// none clears the one it has. Refused unless one of the login's URLs is
     /// on the page's site itself and the recipe is for that exact origin.
     /// Replies `done`.
