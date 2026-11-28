@@ -81,6 +81,7 @@ pub(super) fn list_for_picker(
                     has_otp: otp(&item).is_some_and(|f| !f.value.is_empty()),
                     urls: urls(&item).map(str::to_string).collect(),
                     sign_in: autofill::sign_in(s, &item),
+                    recipe: None,
                 };
                 if !usable_for_picker(&login, for_otp) {
                     continue;
@@ -139,6 +140,7 @@ pub(super) fn list_for_picker(
                         .map(str::to_string)
                         .collect(),
                     sign_in: autofill::sign_in(s, &item),
+                    recipe: None,
                 };
                 if !usable_for_picker(&login, for_otp) {
                     continue;

@@ -51,7 +51,7 @@ pub const MAX_REPLY: usize = 1024 * 1024;
 
 /// What this host does, in `hello`. The extension offers a feature only when
 /// the host names it.
-pub const CAPABILITIES: [&str; 11] = [
+pub const CAPABILITIES: [&str; 12] = [
     "list",
     "fill",
     "check",
@@ -63,6 +63,7 @@ pub const CAPABILITIES: [&str; 11] = [
     "forms",
     "save-form",
     "unlock-prompt",
+    "site-recipe",
 ];
 
 /// A message from the extension, after its `id`.
@@ -176,6 +177,18 @@ pub enum Request {
     /// it's ready, else Deadbolt's own window, where the passphrase is
     /// typed. The browser never asks for the passphrase.
     UnlockPrompt,
+    /// Keeps `recipe`, the form the user just taught it on the page
+    /// (`deadbolt_core::site::recipe`, JSON of at most 512 bytes and no
+    /// values), on the login `ref` names, or with none clears it. Only a
+    /// login of the page's own site, and only a recipe for its exact origin.
+    SaveRecipe {
+        origin: String,
+        #[serde(rename = "ref")]
+        login: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        recipe: Option<String>,
+    },
 }
 
 /// What a page says about a new-password field: its `passwordrules`, length
@@ -348,6 +361,7 @@ pub enum Body {
     UnlockPrompt {
         app: bool,
     },
+    SaveRecipe,
 }
 
 /// Whether the host can serve requests now, in `hello`.
@@ -433,6 +447,12 @@ pub struct Account {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub sign_in: Option<SignIn>,
+    /// The form the user taught it for this exact origin (`save-recipe`), as
+    /// JSON: where its fields are, never a value. Only on the page's own
+    /// site's logins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recipe: Option<String>,
 }
 
 impl From<daemon::SiteLogin> for Account {
@@ -446,6 +466,7 @@ impl From<daemon::SiteLogin> for Account {
             has_totp: l.has_otp,
             urls: l.urls,
             sign_in: l.sign_in,
+            recipe: l.recipe,
         }
     }
 }

@@ -52,9 +52,14 @@ pub struct Nav {
 
 /// Whether the item page shows this field. A passkey shows its site,
 /// username, date and notes; its credential id and user handle are the
-/// site's bookkeeping, and the daemon never sends its private key.
+/// site's bookkeeping, and the daemon never sends its private key. A
+/// login's taught form is the browser's bookkeeping too.
 pub fn shown(kind: &str, field: &str) -> bool {
-    kind != "passkey" || matches!(field, "rp-id" | "username" | "created" | "notes")
+    match kind {
+        "passkey" => matches!(field, "rp-id" | "username" | "created" | "notes"),
+        "login" => field != deadbolt_core::site::recipe::RECIPE_FIELD,
+        _ => true,
+    }
 }
 
 pub(crate) fn plain(ev: &KeyEvent) -> bool {
@@ -512,7 +517,16 @@ fn web_address(value: &str, may_have_scheme: bool) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::web_address;
+    use super::{shown, web_address};
+
+    #[test]
+    fn bookkeeping_fields_are_not_shown() {
+        assert!(!shown("login", "autofill-recipe"));
+        assert!(shown("login", "password") && shown("login", "sign-in-with"));
+        assert!(!shown("passkey", "credential-id"));
+        assert!(shown("passkey", "rp-id"));
+        assert!(shown("note", "autofill-recipe"));
+    }
 
     #[test]
     fn only_web_addresses_open() {

@@ -22,6 +22,7 @@
 //!   [`shared`]), when they were saved for https. They come after every
 //!   login of the page's own site.
 
+pub mod recipe;
 pub mod shared;
 
 use url::Url;

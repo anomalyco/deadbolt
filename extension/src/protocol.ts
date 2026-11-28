@@ -32,6 +32,7 @@ export type LearnedReply = ReplyOf<"learned">
 export type LearnTextReply = ReplyOf<"learn-text">
 export type LearnDeletedReply = ReplyOf<"learn-deleted">
 export type UnlockPromptReply = ReplyOf<"unlock-prompt">
+export type SaveRecipeReply = ReplyOf<"save-recipe">
 export type ErrorReply = ReplyOf<"error">
 
 /** What a request of each type is answered with, besides an error. */
@@ -56,6 +57,7 @@ export interface ReplyFor {
   "learn-read": LearnTextReply
   "learn-delete": LearnDeletedReply
   "unlock-prompt": UnlockPromptReply
+  "save-recipe": SaveRecipeReply
 }
 
 /** The reply type each request expects. */
@@ -80,6 +82,7 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   "learn-read": "learn-text",
   "learn-delete": "learn-deleted",
   "unlock-prompt": "unlock-prompt",
+  "save-recipe": "save-recipe",
 }
 
 export type HostMessage =
@@ -148,6 +151,8 @@ export function account(v: unknown): Account | null {
     hasTotp: v.hasTotp === true,
     urls: strings(v.urls),
     ...signInOf(v.signIn),
+    // A taught form (content/recipe.ts reads it): at most 512 bytes of JSON.
+    ...(str(v.recipe, 512) ? { recipe: v.recipe as string } : {}),
   }
 }
 
@@ -295,6 +300,8 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
       return { type: "learn-deleted", found: raw.found === true }
     case "unlock-prompt":
       return { type: "unlock-prompt", app: raw.app === true }
+    case "save-recipe":
+      return { type: "save-recipe" }
     case "error": {
       return { type: "error", code: isCode(raw.code) ? raw.code : "failed", message: str(raw.message, 1000) ?? "" }
     }

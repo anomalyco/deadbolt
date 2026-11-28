@@ -43,6 +43,16 @@ afterEach(() => {
   document.body.innerHTML = ""
 })
 
+describe("a form's own submit", () => {
+  test("a button outside the form, of no form, never submits it", () => {
+    page(`<form method="post"><input id="u" autocomplete="username"><input id="p" type="password" autocomplete="current-password"></form><button id="next">Next</button>`)
+    fill("#u", "alex")
+    fill("#p", "secret")
+    const scan = scanPage()
+    expect(submitPlan({ kind: scan.kind, fields: scan.fields, submit: document.getElementById("next")!, first: false })).toBe("scope")
+  })
+})
+
 describe("a form-less step (Google's)", () => {
   const email = `<main><h1>Sign in</h1>
     <input type="email" id="identifierId" name="identifier" autocomplete="username webauthn" aria-label="Email or phone">

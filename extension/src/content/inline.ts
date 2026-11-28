@@ -69,6 +69,8 @@ export interface PageState {
   formsForm(): number
   /** The user asked to fill `el` (see manualOpen): take it as a login field if the scan didn't. Whether it is one now. */
   manual?(el: HTMLInputElement): boolean
+  /** The fields are ones the user asked to fill by hand: a pick teaches Deadbolt the form (content/recipe.ts). */
+  teaching?(): boolean
 }
 
 
@@ -652,7 +654,7 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     const reply =
       rules === null
         ? null
-        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}), ...(asksNewPassword(state.targets()) ? { asksNew: true } : {}) })
+        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}), ...(asksNewPassword(state.targets()) ? { asksNew: true } : {}), ...(state.teaching?.() ? { teach: true } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
     else if (!isTop) trackFramed(el)
     else if (reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)

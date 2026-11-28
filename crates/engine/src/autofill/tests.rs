@@ -682,3 +682,139 @@ mod shared_sites {
         assert_eq!(link(&mut s, linking(&google, X, X)).unwrap(), (on_x, false));
     }
 }
+
+fn recipe_for(origin: &str, fingerprint: &str) -> String {
+    format!(
+        r#"{{"v":1,"origin":"{origin}","pathPattern":"/signon","clusterFingerprint":"{fingerprint}","slots":[{{"role":"username","name":"txt1","nthInput":0}},{{"role":"password","name":"txt2","nthInput":1}}]}}"#
+    )
+}
+
+fn listed_recipe(s: &Engine, origin: &str, login: &LoginRef) -> Option<String> {
+    list(s, origin)
+        .unwrap()
+        .1
+        .into_iter()
+        .find(|l| l.login == *login)
+        .and_then(|l| l.recipe)
+}
+
+/// A taught form is kept on the login in the vault, and comes back only on
+/// the exact origin it was taught on: not another host of the site, nor a
+/// port, nor a site sharing the login's credentials.
+#[test]
+fn a_taught_form_lists_only_on_its_own_origin() {
+    let mut s = loaded();
+    let bank = login(
+        &mut s,
+        &[
+            ("url", "https://bank.example"),
+            ("username", "alex"),
+            ("password", "hunter22"),
+        ],
+    );
+    let recipe = recipe_for("https://portal.bank.example", "9f2c41d0");
+    assert!(recipe.len() < deadbolt_core::site::recipe::MAX_RECIPE_BYTES);
+    assert!(save_recipe(&mut s, "https://portal.bank.example", &bank, Some(&recipe)).unwrap());
+    // The same one again changes nothing.
+    assert!(!save_recipe(&mut s, "https://portal.bank.example", &bank, Some(&recipe)).unwrap());
+    let (vault, item) = find(&s, &bank, &site("https://bank.example").unwrap()).unwrap();
+    let stored = item.fields.get(RECIPE_FIELD).unwrap();
+    assert_eq!(stored.kind, FieldType::Text);
+    assert_eq!(stored.value, recipe);
+    for value in ["alex", "hunter22"] {
+        assert!(!stored.value.contains(value), "{value} in {}", stored.value);
+    }
+    assert_eq!(
+        listed_recipe(&s, "https://portal.bank.example", &bank),
+        Some(recipe.clone())
+    );
+    for elsewhere in [
+        "https://bank.example",
+        "https://www.bank.example",
+        "https://portal.bank.example:8443",
+    ] {
+        assert_eq!(listed_recipe(&s, elsewhere, &bank), None, "{elsewhere}");
+    }
+    // Synced like any field: another device folding the vault sees it.
+    assert!(
+        s.vault(&vault)
+            .item(&item.id)
+            .unwrap()
+            .fields
+            .contains_key(RECIPE_FIELD)
+    );
+}
+
+#[test]
+fn oversized_unknown_or_cross_site_forms_are_refused() {
+    let mut s = loaded();
+    let bank = login(
+        &mut s,
+        &[("url", "https://bank.example"), ("password", "pw")],
+    );
+    let other = login(
+        &mut s,
+        &[("url", "https://other.example"), ("password", "pw")],
+    );
+    let origin = "https://bank.example";
+    let good = recipe_for(origin, "9f2c41d0");
+    let oversized = recipe_for(origin, &"a".repeat(600));
+    let unknown = good.replacen(r#""v":1,"#, r#""v":1,"password":"pw","#, 1);
+    for bad in [oversized.as_str(), unknown.as_str()] {
+        assert!(
+            save_recipe(&mut s, origin, &bank, Some(bad)).is_err(),
+            "{bad}"
+        );
+    }
+    // A recipe for another origin of the site than the page saving it.
+    let portal = recipe_for("https://portal.bank.example", "9f2c41d0");
+    assert!(save_recipe(&mut s, origin, &bank, Some(&portal)).is_err());
+    // Another site's recipe, or another site's login.
+    let evil = recipe_for("https://evil.example", "9f2c41d0");
+    assert!(save_recipe(&mut s, origin, &bank, Some(&evil)).is_err());
+    assert!(save_recipe(&mut s, origin, &other, Some(&good)).is_err());
+    let (_, item) = find(&s, &bank, &site(origin).unwrap()).unwrap();
+    assert!(!item.fields.contains_key(RECIPE_FIELD));
+}
+
+/// A login offered on a site that shares its credentials isn't that site's
+/// to teach: it can't save a recipe there, and lists none there.
+#[test]
+fn a_site_sharing_credentials_gets_no_recipe() {
+    let mut s = loaded();
+    let twitter = login(
+        &mut s,
+        &[("url", "https://twitter.com"), ("password", "pw")],
+    );
+    let x = recipe_for("https://x.com", "9f2c41d0");
+    assert!(save_recipe(&mut s, "https://x.com", &twitter, Some(&x)).is_err());
+    let own = recipe_for("https://twitter.com", "9f2c41d0");
+    save_recipe(&mut s, "https://twitter.com", &twitter, Some(&own)).unwrap();
+    assert_eq!(
+        listed_recipe(&s, "https://twitter.com", &twitter),
+        Some(own)
+    );
+    assert_eq!(listed_recipe(&s, "https://x.com", &twitter), None);
+}
+
+#[test]
+fn clearing_a_taught_form_removes_its_field() {
+    let mut s = loaded();
+    let bank = login(
+        &mut s,
+        &[("url", "https://bank.example"), ("password", "pw")],
+    );
+    let origin = "https://bank.example";
+    save_recipe(&mut s, origin, &bank, Some(&recipe_for(origin, "9f2c41d0"))).unwrap();
+    assert!(listed_recipe(&s, origin, &bank).is_some());
+    assert!(save_recipe(&mut s, origin, &bank, None).unwrap());
+    let (_, item) = find(&s, &bank, &site(origin).unwrap()).unwrap();
+    assert!(!item.fields.contains_key(RECIPE_FIELD));
+    assert_eq!(
+        item.fields.get("password").map(|f| f.value.as_str()),
+        Some("pw")
+    );
+    assert_eq!(listed_recipe(&s, origin, &bank), None);
+    // Nothing to clear: nothing written.
+    assert!(!save_recipe(&mut s, origin, &bank, None).unwrap());
+}

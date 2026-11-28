@@ -468,6 +468,18 @@ impl Daemon {
                 }
                 Ok(Reply::SiteSaved { login, created })
             }
+            Command::SiteRecipe {
+                origin,
+                login,
+                recipe,
+            } => {
+                let changed =
+                    self.with(|s| autofill::save_recipe(s, &origin, &login, recipe.as_deref()))?;
+                if changed {
+                    self.sync_now.notify_one();
+                }
+                Ok(Reply::Done)
+            }
             Command::FormItems { origin, kinds } => self.form_items(&origin, &kinds),
             Command::FormFill {
                 origin,

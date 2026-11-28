@@ -9,6 +9,9 @@ import type { ToContent } from "../messages"
 
 declare const DEADBOLT_E2E: boolean | undefined
 
+/** Told each time the browser raises a door, before the content script hears it (bg/recipes.ts allow). */
+let opened: ((tabId: number, frameId?: number) => void) | undefined
+
 export const FILL_COMMAND = "fill"
 export const FILL_MENU = "deadbolt-fill"
 
@@ -25,17 +28,20 @@ export function registerFillMenu(): void {
 /** The shortcut: to every frame of the tab, of which only the one whose field has focus takes it. */
 export async function fillCommand(command: string, tab?: chrome.tabs.Tab): Promise<void> {
   if (command !== FILL_COMMAND || tab?.id === undefined || tab.id < 0) return
+  opened?.(tab.id)
   await chrome.tabs.sendMessage(tab.id, { type: "db:manual-open" } satisfies ToContent).catch(() => {})
 }
 
 /** "Fill with Deadbolt": to the frame the context menu opened in, about the field it opened on. */
 export async function fillMenuClicked(info: Pick<chrome.contextMenus.OnClickData, "menuItemId" | "frameId">, tab?: chrome.tabs.Tab): Promise<void> {
   if (info.menuItemId !== FILL_MENU || tab?.id === undefined || tab.id < 0) return
+  opened?.(tab.id, info.frameId ?? 0)
   await chrome.tabs.sendMessage(tab.id, { type: "db:manual-open", context: true } satisfies ToContent, { frameId: info.frameId ?? 0 }).catch(() => {})
 }
 
-/** Listens for both; a test's chrome without them gets neither. */
-export function listenFillDoors(): void {
+/** Listens for both; a test's chrome without them gets neither. `onOpen` hears each door the browser raises. */
+export function listenFillDoors(onOpen?: (tabId: number, frameId?: number) => void): void {
+  opened = onOpen
   chrome.runtime.onInstalled?.addListener(() => registerFillMenu())
   chrome.contextMenus?.onClicked.addListener((info, tab) => void fillMenuClicked(info, tab))
   chrome.commands?.onCommand.addListener((command, tab) => void fillCommand(command, tab))

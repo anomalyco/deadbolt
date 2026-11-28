@@ -246,9 +246,26 @@ function siteBody(reply: PopupReply): HTMLElement {
     { class: "site" },
     h("div", { class: "section-head" }, h("span", { class: "label" }, "Logins"), h("span", { class: "mono muted" }, site)),
     h("div", { class: "list" }, ...reply.accounts.map((a, i) => accountRow(a, i === 0 && !reply.offer, i))),
+    reply.accounts.some((a) => a.recipe) ? resetLearnedButton() : null,
     error,
     h("p", { class: "note" }, icon("lock"), h("span", {}, "Deadbolt never copies passwords: any app can read the clipboard. Fill puts them straight into the page.")),
   )
+}
+
+/**
+ * A form the user taught Deadbolt on this page (content/recipe.ts): forget
+ * it, and the page is left to the scan again.
+ */
+function resetLearnedButton(): HTMLElement {
+  const b = h("button", { class: "link learned", type: "button", title: "Deadbolt learned this page's sign-in form when you filled it by hand" }, "Reset learned form")
+  b.addEventListener("click", async () => {
+    if (tabId === undefined) return
+    b.setAttribute("disabled", "")
+    const ok = await send<boolean>({ type: "db:popup-recipe-reset", tabId })
+    announce(ok ? "Deadbolt forgot this form" : "Nothing to reset")
+    void render(true)
+  })
+  return b
 }
 
 /** Opens and closes the popup's settings. */

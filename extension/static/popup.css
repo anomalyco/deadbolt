@@ -386,6 +386,14 @@ main {
   font-size: 11px;
 }
 
+/* Reset learned form: quiet, under the logins it was taught with. */
+.site > .link.learned {
+  display: block;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 .done {
   display: flex;
   align-items: center;

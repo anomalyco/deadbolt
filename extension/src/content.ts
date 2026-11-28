@@ -4,17 +4,18 @@
 // submit tracking are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
-import { asksNewPassword, isVisible, scanPage, type Field } from "./content/detect"
+import { asksNewPassword, isVisible, ownerOf, scanPage, type Field } from "./content/detect"
 import { SIGNIN_SETTING, signInOn } from "./auth-state"
 import { authReport, SIGN_OUT, signInSignal, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
-import { scanGraph } from "./content/graph"
+import { scanGraph, type FormGraph } from "./content/graph"
+import { applySiteRecipes, buildSiteRecipe, RecipeAsks, recipeSubmit } from "./content/recipe"
 import { readSubmitted } from "./content/formfill"
 import { manualFields, withManual } from "./content/manual"
 import { ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
-import { initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
+import { closeMenu, initMenu, markSubmitted, menuHost, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
 import { formFailed, noteSubmitShell, pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
@@ -76,6 +77,11 @@ let formsSubmission = 0
  * card typed there, even with no identity or card field of the page's own.
  */
 let cardFrames = false
+/** The forms taught on this origin (content/recipe.ts), as the host lists them, and the page they were asked for. */
+let recipes: string[] = []
+const recipeAsks = new RecipeAsks()
+/** The last scan's graph: a taught recipe locates its fields in it. */
+let graph: FormGraph | undefined
 /** How long a submitted identity or card form is watched for going away or being turned down. */
 const FORM_WATCH_MS = 60_000
 
@@ -91,20 +97,33 @@ function refresh() {
   scannedRoots = roots
   watchShadowRoots(roots)
   // One read of every control's box, style and label, shared by both scans below.
-  const graph = scanGraph(roots)
+  graph = scanGraph(roots)
   const result = scanPage(graph)
   kind = result.kind
   provider = result.provider
+  // A form the scan passed over that the user taught Deadbolt (content/recipe.ts) is a login form here.
+  let scanned = kind && kind !== "reset" ? result.fields : []
+  let submit = result.submit
+  // One whose form changed shape since (stale) gives nothing: the scan decides alone.
+  if (!kind && recipes.length) {
+    const learned = applySiteRecipes(graph, location.origin, location.pathname, recipes)
+    if (learned.fields.length && learned.cluster) {
+      scanned = learned.fields.map((f) => ({ el: f.el, role: f.role, owner: ownerOf(f.el) }))
+      kind = learned.fields.some((f) => f.role === "new-password") ? "signup" : "login"
+      // Only its own form's button: never one the scan found elsewhere on the page.
+      submit = recipeSubmit(learned.cluster)
+    }
+  }
   // A reset form's email box isn't something to fill. Fields the user asked
   // to fill by hand stand in for it until they go back to it (see withManual);
   // they're no kind of form the background may sign in with.
-  const taken = withManual(kind && kind !== "reset" ? result.fields : [], manual, deepActiveElement())
+  const taken = withManual(scanned, manual, deepActiveElement())
   manual = taken.manual
   const next = taken.fields
   if (manual.length) kind = null
   if (!sameFields(fields, next)) formId++
   fields = next
-  submitControl = kind ? result.submit : undefined
+  submitControl = kind ? submit : undefined
   // A field a login form claims (its email box) is the login's.
   const forms = scanForms(graph).filter((f) => !fields.some((l) => l.el === f.el))
   const same = forms.length === formFields.length && forms.every((f, i) => f.el === formFields[i].el && f.role === formFields[i].role && f.section === formFields[i].section && f.form === formFields[i].form && f.parent === formFields[i].parent)
@@ -139,6 +158,22 @@ function askAboutSignIn() {
   if (!chain) void send({ type: "db:provider-check" })
 }
 
+/**
+ * Asks the background once per page for the forms taught on this origin,
+ * only where the scan found no login form but the page has fields: a page
+ * with none, or with a form the scan took, keeps the service worker asleep.
+ */
+function askRecipes() {
+  const page = location.origin + location.pathname
+  if (kind || manual.length || !graph?.controls.length || !recipeAsks.due(page)) return
+  recipeAsks.asking(page)
+  void send<string[] | null>({ type: "db:recipes-ask" }).then((reply) => {
+    if (!Array.isArray(reply)) return recipeAsks.failed()
+    recipes = reply.filter((r): r is string => typeof r === "string")
+    if (recipes.length) scheduleScan()
+  })
+}
+
 /** Tells the background which kinds of form this frame has, when that changes (card fills span frames). */
 function reportForms() {
   const kinds = [...new Set(formFields.map((f) => f.kind))].sort()
@@ -154,8 +189,11 @@ function scan() {
     lastUrl = location.href
     lastSignature = ""
     manual = []
+    // A single-page app back on a page asks for its taught forms again (one may be new since).
+    recipeAsks.navigated()
   }
   refresh()
+  askRecipes()
   void report(false)
   reportForms()
   learnScanned()
@@ -238,6 +276,16 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
   if (message?.type === "db:signin-submit") {
     void sessionSubmit(message).then(respond, () => respond(false))
     return true
+  }
+  if (message?.type === "db:recipes-set") {
+    recipes = Array.isArray(message.recipes) ? message.recipes.filter((r): r is string => typeof r === "string") : []
+    recipeAsks.asking(location.origin + location.pathname)
+    const before = fields
+    refresh()
+    // The fields a forgotten form gave are no login form now: a menu open on one of them goes.
+    if (!sameFields(before, fields)) closeMenu()
+    void report(false)
+    return void respond(true)
   }
   if (message?.type === "db:forms-frames") {
     if (isTop) cardFrames = message.on === true
@@ -604,10 +652,31 @@ function adopt(el: HTMLInputElement): boolean {
   if (fields.some((f) => f.el === el)) return true
   manual = manualFields(el)
   refresh()
-  return fields.some((f) => f.el === el)
+  if (!fields.some((f) => f.el === el)) return false
+  teach()
+  return true
 }
 
-const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh, formFields: () => formFields, formsForm: () => formsId, manual: adopt }
+/**
+ * The fields the user just asked to fill by hand, as a recipe (see
+ * content/recipe.ts): the background keeps it on the login a pick fills
+ * them with, so the next visit finds this form without asking.
+ */
+function teach() {
+  teachable = false
+  // Only a top page is taught (bg/recipes.ts).
+  if (!isTop) return
+  const cluster = manual[0] && graph?.clusterOf(manual[0].el)
+  if (!cluster || !manual.every((f) => graph?.clusterOf(f.el) === cluster)) return
+  const recipe = buildSiteRecipe(location.origin, location.pathname, cluster, manual)
+  if (!recipe) return
+  teachable = true
+  void send({ type: "db:recipe-learn", recipe, form: formId })
+}
+/** The fields the user asked to fill by hand made a recipe (see teach), which a pick on them keeps. */
+let teachable = false
+
+const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh, formFields: () => formFields, formsForm: () => formsId, manual: adopt, teaching: () => teachable && manual.length > 0 && fields === manual }
 initMenu(state)
 initFrameChecks(state)
 // A provider sign-in chain's submit: what db:signin-submit does after its checks.

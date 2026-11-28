@@ -301,6 +301,19 @@ describe("fillFields", () => {
     expect([n1.value, n2.value]).toEqual(["", ""])
   })
 
+  test("a password box the page unmasks as Deadbolt focuses it isn't written", async () => {
+    document.body.innerHTML = `<form><input id="u"><input id="p" type="password"><input id="q" type="password"></form>`
+    const [u, p, q] = ["u", "p", "q"].map((id) => document.getElementById(id) as HTMLInputElement)
+    p.addEventListener("focus", () => (p.type = "text"))
+    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "alex", password: "secret" }, () => true)
+    expect(filled).toEqual(["username"])
+    expect(p.value).toBe("")
+    // Nor one that unmasks on the keydown just before the write.
+    q.addEventListener("keydown", () => (q.type = "text"))
+    expect((await fillFields([field(q, "password")], { password: "secret" }, () => true)).filled).toEqual([])
+    expect(q.value).toBe("")
+  })
+
   test("a value the field can't take isn't written: past its maxlength, or not a phone number in a phone box", async () => {
     document.body.innerHTML = `<form><input id="u" type="tel"><input id="p" type="password" maxlength="6"></form>`
     const [u, p] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)

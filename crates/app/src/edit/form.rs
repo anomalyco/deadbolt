@@ -18,12 +18,14 @@ pub fn editable(kind: &str) -> bool {
 
 /// Fields the form leaves out: a login's sign-in provider and the login it
 /// signs in with, and a card's billing identity, which link to other items
-/// by id and have no picker here yet. The form neither shows nor sends them,
+/// by id and have no picker here yet, and a login's taught form, which the
+/// browser writes (`deadbolt_core::site::recipe`). The form neither shows nor sends them,
 /// so an edit leaves an item's values for them as they are, and saving an
 /// item deleted meanwhile as new carries them over (`Form::changes`).
 pub const LINKS: &[(&str, &str)] = &[
     ("login", "sign-in-with"),
     ("login", "sign-in-account"),
+    ("login", "autofill-recipe"),
     ("card", "billing"),
 ];
 
@@ -695,24 +697,36 @@ mod tests {
 
     /// The links a form leaves out stay on an edit and travel with a save
     /// as new.
+    const RECIPE: &str = r#"{"v":1,"origin":"https://bank.example","pathPattern":"/","clusterFingerprint":"aa","slots":[{"role":"username","nthInput":0}]}"#;
+
     #[test]
     fn links_are_kept_but_not_shown() {
         let login = item(&[
             ("password", "secret", "pw-1"),
             ("sign-in-with", "text", "google"),
             ("sign-in-account", "text", "0a1b2c3d"),
+            ("autofill-recipe", "text", RECIPE),
         ]);
+        let hidden = |name: &str| name.starts_with("sign-in") || name == "autofill-recipe";
         let mut form = Form::new("login", &login.label, Some(&login));
-        assert!(form.fields.iter().all(|f| !f.name.starts_with("sign-in")));
+        assert!(form.fields.iter().all(|f| !hidden(&f.name)));
         set(&mut form, "password", "pw-2");
         let c = form.changes().unwrap();
         assert!(c.unset.is_empty());
-        assert!(c.set.iter().all(|f| !f.name.starts_with("sign-in")));
+        assert!(c.set.iter().all(|f| !hidden(&f.name)));
 
         form.conflict = Some(Conflict::Deleted);
         let c = form.changes().unwrap();
         let sent: Vec<&str> = c.set.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(sent, ["password", "sign-in-with", "sign-in-account"]);
+        assert_eq!(
+            sent,
+            [
+                "password",
+                "sign-in-with",
+                "sign-in-account",
+                "autofill-recipe"
+            ]
+        );
     }
 
     #[test]
