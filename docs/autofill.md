@@ -1043,8 +1043,13 @@ daemon again.
   captcha or bot check (a "Just a moment" page, a visible reCAPTCHA,
   hCaptcha, Turnstile or Arkose frame or widget, or a captcha box on a login
   form); the submitted username, or an email's part before the @, as a whole
-  word of four characters or more; a Sign out control; a sign-in looking
-  URL. Each walk is bounded: 400 elements, error boxes with more than 400
+  word of four characters or more; a Sign out control, or, with no login
+  form, password box, error, code step or challenge showing and off a
+  sign-in looking URL, a signed-in app's shell (a single-page app that
+  signed in without a page load: an account or profile menu's trigger, an
+  avatar button or "Signed in as …" in its header, navigation or sidebar, or
+  on an app path such as `/dashboard` a header menu trigger that's only a
+  picture), which counts as Sign out; a sign-in looking URL. Each walk is bounded: 400 elements, error boxes with more than 400
   characters or a dozen elements skipped, 200 characters read from each, and
   30 ms in all. The judgment, in order:
   - An error with no account or Sign out showing, or with the form back, or

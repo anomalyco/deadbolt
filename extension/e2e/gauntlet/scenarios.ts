@@ -9,7 +9,7 @@
 
 import type { BrowserContext, Frame, Page, Worker } from "playwright-core"
 import { BACKUP_CODES, EMAIL_CODE, PAGES, SMS_CODE, type Account } from "./site"
-import { CONCEALED, DECOYS } from "./traps"
+import { CONCEALED, DECOYS, SPA_PASSWORD, SPA_USER } from "./traps"
 
 export interface GauntletRun {
   context: BrowserContext
@@ -668,7 +668,47 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
       await c.page.click("#submit")
       c.ok(!!(await wait("saved", async () => (await c.page.locator("#result[data-ok]").count()) > 0)), "and the form submits")
     },
+    "paste-otp-boxes": async (c) => {
+      await passwordStep(c, "paste-otp-boxes")
+      await c.page.waitForSelector("#p1")
+      const digits = async () => (await Promise.all([1, 2, 3, 4, 5, 6].map((i) => value(c.page, `#p${i}`)))).join("")
+      c.ok(!!(await wait("the six boxes fill", async () => h.isCode(await digits()))), `boxes that turn a written digit down take the code as a paste (${(await digits()).length} digits)`)
+      c.ok((await codesAsked(c)) === 1, "with one code asked of the vault")
+      await c.page.click("#verify")
+      c.ok((await signedInAs(c.page)) === ALEX, "and the site signs in")
+    },
+    "masked-card": async (c) => {
+      await c.page.goto(g("masked-card"))
+      c.ok(await pickForm(c, "#cc-number", "Visa"), "the card menu fills")
+      const card = await Promise.all(["#cc-name", "#cc-number", "#cc-exp", "#cc-csc"].map((s) => value(c.page, s)))
+      c.ok(card[1] === "4242 4242 4242 4242" && card[2] === "08 / 28", `the masked number and expiry are typed in a character at a time (${card[1]} | ${card[2]})`)
+      c.ok(card[0] === "Alex Mercer" && card[3] === "123", `the name and code too (${card[0]})`)
+      await c.page.click("#submit")
+      c.ok(!!(await wait("saved", async () => (await c.page.locator("#result[data-ok]").count()) > 0)), "and the form submits")
+    },
+    "spa-shell-save": async (c) => {
+      await c.page.goto(g("spa-shell-save"))
+      await reported(c.run, "/gauntlet/spa-shell-save")
+      await typeInto(c, "#username", SPA_USER)
+      await typeInto(c, "#password", "not it")
+      await c.page.click("#submit")
+      await c.page.waitForSelector("#error")
+      c.ok((await offerTitle(c, 5000)) === null, "a wrong password, its alert showing and the form still there, offers nothing")
+      await typeInto(c, "#password", SPA_PASSWORD)
+      await c.page.click("#submit")
+      await c.page.waitForURL("**/spa-shell-save/dashboard")
+      c.ok((await c.page.locator("#password").count()) === 0 && (await c.page.getByText(/sign ?out|log ?out/i).count()) === 0, "the form is gone, with no Sign out anywhere")
+      const title = await offerTitle(c)
+      c.ok(title === "Save login?", `the avatar menu confirms the sign-in: Deadbolt offers to save it (${title ?? "no offer"})`)
+    },
   }
+
+  /** The save offer's title, once one shows in the page (null if none within `timeout`). */
+  const offerTitle = (c: Ctx, timeout = 15_000) =>
+    wait("the save offer shows", async () => {
+      const f = menuFrame(c.page)
+      return f && (await f.locator(".offer-title").count().catch(() => 0)) > 0 ? ((await f.locator(".offer-title").textContent().catch(() => "")) ?? "") : null
+    }, timeout)
 
   /** A code sent by text or email: never filled from the authenticator, Resend included. */
   async function sentCode(c: Ctx, slug: string, code: string) {
@@ -765,6 +805,6 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
   if (missing.length) throw new Error(`gauntlet pages without a scenario: ${missing.join(", ")}`)
   return {
     scenarios: Object.fromEntries(Object.entries(units).map(([name, slugs]) => [name, () => runPages(slugs)])),
-    cost: { gauntletSignIn: 38, gauntletCodes: 80, gauntletIdentity: 19, gauntletDom: 52, gauntletDom2: 50, gauntletFlows: 55, gauntletTraps: 60 },
+    cost: { gauntletSignIn: 38, gauntletCodes: 80, gauntletIdentity: 19, gauntletDom: 52, gauntletDom2: 50, gauntletFlows: 55, gauntletTraps: 95 },
   }
 }

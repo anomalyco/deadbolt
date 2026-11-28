@@ -32,6 +32,12 @@ const NOTICE_BOX = "[aria-live=polite], [id*=lert], [class*=lert]"
 const MAX_BOX_TEXT = 2 * MAX_TEXT
 const MAX_BOX_CHILDREN = 12
 const CONTROLS = "a, button, [role=button], [role=menuitem], input[type=submit], input[type=button]"
+/** What an account or profile menu's trigger says, by its label, title, text or its image's alt: a signed-in app's shell. */
+const ACCOUNT_MENU = /\b(account|profile|user) menu\b|\bavatar\b|^(my|your) (account|profile)$|^(account|profile)$|^(open|toggle|show) (the )?(user|account|profile)\b|^(signed|logged) in as\b|^(mein konto|mon compte|mi cuenta|profil|perfil)$/
+/** A page of a signed-in app, by its path. */
+const APP_PATH = /^\/(?:[\w-]+\/)?(dashboard|app|home|inbox|overview|projects|workspace|account|feed|console)(?:[/?#]|$)/i
+const SHELL_REGION = "header, nav, aside, [role=banner], [role=navigation], [role=menubar]"
+const MENU_TRIGGERS = "button, a, [role=button], [aria-haspopup]"
 
 const normalize = (text: string) => text.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim().toLowerCase()
 
@@ -48,8 +54,13 @@ const textOf = (el: Element) => normalize(((el as HTMLElement).innerText ?? el.t
  * What the page shows now. `kind` and `fields` are the content script's last
  * scan; `username` the one just submitted, if any. Never throws: anything
  * that goes wrong reads as "not seen".
+ *
+ * With `shell` (after a submit: a single-page app that signed in without a
+ * page load), a signed-in app's shell counts as Sign out (see shellShown),
+ * but only with no login form, password box, error, code step or challenge
+ * showing, and off a sign-in looking URL.
  */
-export function pageFacts(kind: SurfaceKind | null, fields: Field[], username?: string, provider = false): PageFacts {
+export function pageFacts(kind: SurfaceKind | null, fields: Field[], username?: string, provider = false, shell = true): PageFacts {
   const deadline = performance.now() + BUDGET_MS
   const late = () => performance.now() > deadline
   const loginForm = kind === "login" || kind === "signup" || kind === "change-password"
@@ -86,6 +97,7 @@ export function pageFacts(kind: SurfaceKind | null, fields: Field[], username?: 
   step("challenge", () => challengeShown(roots, late))
   if (username) step("account", () => accountShown(roots, username, late))
   step("signOut", () => signOutShown(roots, late))
+  if (shell && !facts.loginForm && !facts.error && !facts.mfa && !facts.challenge && !facts.loginish) step("signOut", () => !passwordShown(roots) && shellShown(roots, late))
   return facts
 }
 
@@ -178,6 +190,35 @@ function accountShown(roots: Array<Document | ShadowRoot>, username: string, lat
       const parent = node.parentElement
       if (parent && !parent.closest("script, style, noscript, template, input, textarea") && has(text) && isVisible(parent)) return true
     }
+  }
+  return false
+}
+
+/** A visible password box anywhere: a sign-in that's still asking. */
+const passwordShown = (roots: Array<Document | ShadowRoot>) => deepQueryAll("input[type=password]", roots).slice(0, MAX_ELEMENTS).some(isVisible)
+
+/**
+ * A signed-in app's shell, as a single-page app mounts it in place of its
+ * login form: an account or profile menu's trigger (an avatar button, "Account
+ * menu", "Signed in as …") in the page's header, navigation or sidebar, or
+ * any that opens a menu (aria-haspopup); or, on an app's own path
+ * (/dashboard, /app, /home…), a menu trigger in its header or navigation
+ * that's only a picture (an avatar with no label, never "Products ▾").
+ * Never a "Create account" or a "Sign in to your account": the label is the
+ * whole of it, or names a menu or an avatar.
+ */
+function shellShown(roots: Array<Document | ShadowRoot>, late: () => boolean): boolean {
+  const app = APP_PATH.test(location.pathname)
+  for (const el of deepQueryAll(MENU_TRIGGERS, roots).slice(0, MAX_ELEMENTS)) {
+    if (late()) return false
+    const menu = el.hasAttribute("aria-haspopup") || el.hasAttribute("aria-expanded")
+    const region = !!el.closest(SHELL_REGION)
+    if (!menu && !region) continue
+    const alt = Array.from(el.querySelectorAll("img[alt]"), (img) => img.getAttribute("alt") ?? "")
+    const labels = [el.getAttribute("aria-label"), el.getAttribute("title"), controlText(el), ...alt].map((t) => normalize((t ?? "").slice(0, MAX_TEXT))).filter(Boolean)
+    const named = labels.some((t) => t.length <= 60 && ACCOUNT_MENU.test(t))
+    const avatar = app && menu && region && !normalize(controlText(el)) && !!el.querySelector("img, svg")
+    if ((named || avatar) && inViewport(el)) return true
   }
   return false
 }

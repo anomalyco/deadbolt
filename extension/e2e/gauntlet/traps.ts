@@ -2,7 +2,9 @@
 // that have caught password managers out. Google's email-first step with its
 // hiddenPassword box, a React form with no action, two six-box code groups,
 // concealed inputs (the ACSAC 2024 concealment tricks), decoy fields that are
-// no sign-in at all, and a checkout whose fields all sit below the fold.
+// no sign-in at all, a checkout whose fields all sit below the fold, code
+// boxes that take a code only as a paste, a card form behind a strict mask,
+// and a single-page app that signs in without a page load.
 // Every account, code and answer here is made up.
 
 import type { Account, PageInfo } from "./site"
@@ -14,7 +16,14 @@ export const TRAP_PAGES: PageInfo[] = [
   { slug: "concealed-traps", group: "Traps", title: "Concealed inputs", blurb: "Opacity 0, clip-path, off-screen, 1 px, inert, covered." },
   { slug: "decoy-zoo", group: "Traps", title: "Decoy fields", blurb: "Search, promo code, newsletter and invite: no sign-in." },
   { slug: "below-fold-checkout", group: "Traps", title: "Checkout below the fold", blurb: "Shipping address and card under a tall summary." },
+  { slug: "paste-otp-boxes", group: "Traps", title: "Paste-only code boxes", blurb: "Six boxes that turn a written digit down and take the code only as a paste." },
+  { slug: "masked-card", group: "Traps", title: "Strictly masked card", blurb: "Card number and expiry masks that take a character at a time." },
+  { slug: "spa-shell-save", group: "Traps", title: "Single-page sign-in", blurb: "No page load: the form goes and an avatar menu shows. No Sign out link." },
 ]
+
+/** The one password the single-page sign-in takes, for an account the vault doesn't have. */
+export const SPA_USER = "newbie@acme.test"
+export const SPA_PASSWORD = "spa shell 42"
 
 type Handler = (req: Request, u: URL, rest: string, form: () => Promise<Record<string, string>>) => Response | Promise<Response>
 
@@ -41,6 +50,17 @@ const digitScript = (sel: string) => `for(const group of document.querySelectorA
 boxes.forEach((b,i)=>{b.addEventListener("input",()=>{b.value=b.value.replace(/\\D/g,"").slice(-1);if(b.value&&boxes[i+1])boxes[i+1].focus()})
 b.addEventListener("keydown",(e)=>{if(e.key==="Backspace"&&!b.value&&boxes[i-1])boxes[i-1].focus()})
 b.addEventListener("paste",(e)=>{const t=(e.clipboardData.getData("text")||"").replace(/\\D/g,"");if(!t)return;e.preventDefault();t.split("").slice(0,6).forEach((c,j)=>{if(boxes[j])boxes[j].value=c})})})}`
+
+/** One-digit boxes that keep only a digit typed by a person or a paste: a written one (an untrusted input event) is put back. */
+const pasteOnlyScript = (sel: string) => `for(const group of document.querySelectorAll(${JSON.stringify(sel)})){const boxes=[...group.querySelectorAll("input")];const state=boxes.map(()=>"")
+const take=(t)=>{t.replace(/\\D/g,"").split("").slice(0,6).forEach((c,j)=>{state[j]=c;boxes[j].value=c})}
+boxes.forEach((b,i)=>{b.addEventListener("input",(e)=>{if(!e.isTrusted){b.value=state[i];return}state[i]=b.value=b.value.replace(/\\D/g,"").slice(-1);if(b.value&&boxes[i+1])boxes[i+1].focus()})
+b.addEventListener("paste",(e)=>{e.preventDefault();take(e.clipboardData.getData("text")||"")})})}`
+
+/** A mask that takes a character at a time and formats, and turns a whole value written at once down. */
+const strictMaskScript = `const mask=(el,format)=>{let kept="";el.addEventListener("input",(e)=>{if(e.inputType==="insertReplacementText"||(e.data||"").length>1){el.value=kept;return}el.value=kept=format(el.value.replace(/\\D/g,""))})}
+mask(document.getElementById("cc-number"),(d)=>d.slice(0,16).replace(/(\\d{4})(?=\\d)/g,"$1 "))
+mask(document.getElementById("cc-exp"),(d)=>d.length>2?d.slice(0,2)+" / "+d.slice(2,4):d)`
 
 /** Names of the concealed inputs on the concealed-traps page, by id. */
 export const CONCEALED = ["t-opacity", "t-clip", "t-offscreen", "t-tiny", "t-inert", "t-covered"]
@@ -202,5 +222,60 @@ document.getElementById("f").addEventListener("submit",async(e)=>{e.preventDefau
         "below-fold-checkout",
       )
     },
+
+    // A code step whose six boxes keep only what a person types or pastes.
+    "paste-otp-boxes": async (req, _u, rest, form) => {
+      const first = (error?: string) =>
+        h("Sign in", `<h1>Sign in</h1><form method="post" action="${url("paste-otp-boxes")}" novalidate>${k.plainFields()}${k.errorLine(error)}<button type="submit" id="submit">Sign in</button></form>`, "paste-otp-boxes")
+      const step = (who: string, error?: string) =>
+        h(
+          "Verify it's you",
+          `<h1>Verify it's you</h1><p class="lede">Enter the 6-digit code from your authenticator app.</p>
+          <form method="post" action="${url("paste-otp-boxes", "/code")}" novalidate><input type="hidden" name="username" value="${esc(who)}"><input type="hidden" name="ticket" value="${k.ticket("paste-otp-boxes", who)}">
+            ${digits("p", "Authenticator code")}${k.errorLine(error)}<button type="submit" id="verify">Verify</button></form>`,
+          "paste-otp-boxes",
+          pasteOnlyScript(".digits"),
+        )
+      if (req.method !== "POST") return first()
+      const f = await form()
+      if (rest === "/code") {
+        if (f.ticket !== k.ticket("paste-otp-boxes", f.username)) return first("Your sign-in expired. Start again.")
+        const code = [1, 2, 3, 4, 5, 6].map((i) => f[`p${i}`] ?? "").join("")
+        return k.codeOk(k.find(f.username), code) ? h("Signed in", k.signedIn(f.username), "paste-otp-boxes") : step(f.username, "That code isn't right.")
+      }
+      const a = k.login(f.username, f.password)
+      return a ? step(a.username) : first("That email or password isn't right.")
+    },
+
+    "masked-card": async (req) => {
+      if (req.method === "POST") return k.savedProfile(req, "masked-card")
+      return h(
+        "Payment",
+        `<h1>Payment</h1><form method="post" action="${url("masked-card")}">
+          <label for="cc-name">Name on card</label><input id="cc-name" name="cc-name" autocomplete="cc-name">
+          <label for="cc-number">Card number</label><input id="cc-number" name="cc-number" autocomplete="cc-number" inputmode="numeric" placeholder="1234 1234 1234 1234">
+          <div class="row"><div><label for="cc-exp">Expiry</label><input id="cc-exp" name="cc-exp" autocomplete="cc-exp" inputmode="numeric" placeholder="MM / YY"></div>
+          <div><label for="cc-csc">CVC</label><input id="cc-csc" name="cc-csc" autocomplete="cc-csc" inputmode="numeric" maxlength="4"></div></div>
+          <button type="submit" id="submit">Pay $12.00</button></form>`,
+        "masked-card",
+        strictMaskScript,
+      )
+    },
+
+    // Signs in without a page load: a wrong password shows an alert and
+    // clears the box; the right one swaps the form for an app shell whose
+    // only sign of the account is an avatar menu.
+    "spa-shell-save": () =>
+      h(
+        "Sign in",
+        `<h1>Sign in</h1><form id="f" novalidate><label for="username">Email</label><input id="username" name="username" type="email" autocomplete="username">
+          <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password"><button type="submit" id="submit">Sign in</button></form>`,
+        "spa-shell-save",
+        `const f=document.getElementById("f")
+f.addEventListener("submit",(e)=>{e.preventDefault();const pw=document.getElementById("password")
+  if(pw.value!==${JSON.stringify(SPA_PASSWORD)}){let a=document.getElementById("error");if(!a){a=document.createElement("p");a.id="error";a.className="error";a.setAttribute("role","alert");f.append(a)}a.textContent="Incorrect password. Try again.";pw.value="";return}
+  history.pushState({},"",G.base+"/spa-shell-save/dashboard");document.title="Projects"
+  document.querySelector("main").innerHTML='<header style="display:flex;justify-content:flex-end"><button type="button" id="avatar" aria-label="Account menu" aria-haspopup="menu" style="width:36px;height:36px;margin:0;border-radius:50%;padding:0"><svg viewBox="0 0 10 10" width="20" height="20"><circle cx="5" cy="5" r="4" fill="currentColor"/></svg></button></header><h1>Projects</h1><p class="lede">No projects yet.</p>'})`,
+      ),
   }
 }

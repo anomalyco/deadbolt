@@ -344,6 +344,41 @@ describe("what the page shows after a sign-in", () => {
     const f = facts(`<form><label for="c">Authentication code</label><input id="c" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`, "alex", "/mfa")
     expect(f).toMatchObject({ mfa: true, loginForm: false })
   })
+
+  describe("a single-page app's signed-in shell", () => {
+    const signedIn = (html: string, path = "/dashboard") => facts(html, "alex@example.com", path).signOut
+    test("an account menu, a profile button or an avatar counts as Sign out", () => {
+      expect(signedIn(`<header><button aria-label="Account menu" aria-haspopup="menu"><img src="a.png" alt=""></button></header><h1>Projects</h1>`)).toBe(true)
+      expect(signedIn(`<nav><a href="/me" title="Profile">Me</a></nav>`)).toBe(true)
+      expect(signedIn(`<div><button aria-haspopup="true"><img src="a.png" alt="Your avatar"></button></div>`, "/somewhere")).toBe(true)
+      expect(signedIn(`<header><button aria-label="Signed in as Alex Mercer">AM</button></header>`, "/")).toBe(true)
+      // On an app's own path, a header menu trigger that's only a picture.
+      expect(signedIn(`<header><button aria-haspopup="menu"><svg></svg></button></header>`)).toBe(true)
+    })
+
+    test("signed-out pages' controls don't", () => {
+      expect(signedIn(`<header><a href="/signup">Create account</a><a href="/login">Sign in to your account</a></header>`, "/")).toBe(false)
+      expect(signedIn(`<nav><button aria-haspopup="menu">Products</button></nav>`, "/home")).toBe(false)
+      expect(signedIn(`<header><button aria-haspopup="menu"><svg></svg></button></header>`, "/pricing")).toBe(false)
+      expect(signedIn(`<main><button>Profile</button></main>`, "/")).toBe(false)
+      expect(signedIn(`<header><button aria-label="Account menu" hidden></button></header>`)).toBe(false)
+    })
+
+    test("never with an error, the login form, a password box, a code step, or on a sign-in URL", () => {
+      const shell = `<header><button aria-label="Account menu" aria-haspopup="menu"></button></header>`
+      expect(facts(`${shell}<div role="alert">Incorrect password</div>`, "alex@example.com", "/dashboard")).toMatchObject({ error: true, signOut: false })
+      const login = `<form><input name="username" autocomplete="username"><input type="password" autocomplete="current-password"><button>Sign in</button></form>`
+      expect(signedIn(shell + login)).toBe(false)
+      expect(signedIn(`${shell}<div><input type="password" name="pin"></div>`)).toBe(false)
+      expect(signedIn(`${shell}<form><label for="c">Authentication code</label><input id="c" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`)).toBe(false)
+      expect(signedIn(shell, "/login")).toBe(false)
+    })
+
+    test("only after a submit: the corner offer's probe reads an account menu as uncertain, not signed in", () => {
+      page(`<header><button aria-label="Account menu" aria-haspopup="menu"></button></header>`, "/dashboard", "")
+      expect(pageFacts(null, [], undefined, false, false).signOut).toBe(false)
+    })
+  })
 })
 
 describe("sign in with a provider", () => {
